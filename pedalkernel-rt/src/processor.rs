@@ -107,6 +107,9 @@ impl Stage {
                         return Some(ControlTarget::PotInStage(stage_idx));
                     }
                 }
+                if bkm.has_coupling_pot(comp_id) {
+                    return Some(ControlTarget::PotInStage(stage_idx));
+                }
                 None
             }
             Stage::StateSpace(_) => None,
@@ -2752,6 +2755,11 @@ impl PedalProcessor for CompiledPedal {
                 }
             } else if is_bkm {
                 prev_was_clipping = false;
+                let first_input_name = self
+                    .ports
+                    .iter()
+                    .find(|p| p.direction == crate::PortDirection::Input)
+                    .map(|p| p.name.clone());
                 let bkm_stage = if let Stage::BlockwiseKMethod(s) = &mut self.stages[stage_idx] {
                     s
                 } else {
@@ -2761,7 +2769,10 @@ impl PedalProcessor for CompiledPedal {
                 let n_vs = bkm_stage.vs_port_map.len();
                 let mut vs_signals = alloc::vec![0.0f64; n_vs];
                 for (i, port_idx) in bkm_stage.port_index_cache.iter().enumerate() {
-                    vs_signals[i] = if *port_idx < self.port_values.len() {
+                    let port_name = &bkm_stage.vs_port_map[i].0;
+                    vs_signals[i] = if first_input_name.as_ref() == Some(port_name) {
+                        signal
+                    } else if *port_idx < self.port_values.len() {
                         self.port_values[*port_idx]
                     } else {
                         0.0

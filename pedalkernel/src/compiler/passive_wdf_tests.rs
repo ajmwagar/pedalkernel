@@ -120,6 +120,33 @@ fn coupling_cap_passes_440hz() {
     assert!(gain > 0.5, "1µF cap should pass 440Hz: gain={gain:.3}");
 }
 
+#[test]
+fn tb303_output_coupling_cap_load_passes_440hz() {
+    // AcidAttack/TB303 output coupling: 100n into 100k load has fc ~= 15.9Hz.
+    // At 440Hz it should be close to unity, not -30dB.
+    let gain = measure_gain_metered(
+        r#"
+        pedal "test" { supply 9V
+            components {
+                C_out: cap(100n)
+                R_out: resistor(100k)
+            }
+            nets {
+                in -> C_out.a
+                C_out.b -> R_out.a, out
+                R_out.b -> gnd
+            }
+            controls {}
+        }"#,
+        "TB303 output coupling",
+    );
+    eprintln!("TB303 output coupling: gain={gain:.3}");
+    assert!(
+        gain > 0.5,
+        "100nF into 100k should pass 440Hz near unity: gain={gain:.3}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Layer 1b: single cap — deeper investigation
 // ═══════════════════════════════════════════════════════════════════════════

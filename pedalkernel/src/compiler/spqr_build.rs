@@ -368,6 +368,7 @@ pub fn compile_via_spqr_with_options(
                 &bias_node_voltages,
                 supply_voltage,
                 &pedal.ports,
+                options.force_serial_blockwise,
             ) {
                 for built in built_stages {
                     push_stage!(
@@ -863,6 +864,7 @@ pub fn compile_via_spqr_with_options(
                     &bias_node_voltages,
                     supply_voltage,
                     &pedal.ports,
+                    options.force_serial_blockwise,
                 ) {
                     for built in built_stages {
                         push_stage!(
@@ -1426,6 +1428,62 @@ pub(super) fn with_voltage_source_rp(passive_tree: DynNode, rp: f64) -> DynNode 
     DynNode::Series(Box::new(vs), Box::new(passive_tree))
 }
 
+fn build_grounded_series_reactive_load(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Option<WdfStage> {
+    if edge_indices.len() != 2 {
+        return None;
+    }
+
+    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+
+    let mut reactive_edge = None;
+    let mut load_edge = None;
+    for &eidx in edge_indices {
+        match graph.effective_edge_kind(eidx) {
+            super::component::EdgeKind::Reactive => reactive_edge = Some(eidx),
+            super::component::EdgeKind::Linear => {
+                let e = &graph.edges[eidx];
+                if is_gnd(e.node_a) || is_gnd(e.node_b) {
+                    load_edge = Some(eidx);
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    let reactive_edge = reactive_edge?;
+    let load_edge = load_edge?;
+    let load = &graph.edges[load_edge];
+    let load_node = if is_gnd(load.node_a) {
+        load.node_b
+    } else {
+        load.node_a
+    };
+    let reactive = &graph.edges[reactive_edge];
+    if reactive.node_a != load_node && reactive.node_b != load_node {
+        return None;
+    }
+
+    let reactive_comp = &graph.components[graph.edges[reactive_edge].comp_idx];
+    let load_comp = &graph.components[graph.edges[load_edge].comp_idx];
+    let reactive_leaf = reactive_comp
+        .kind
+        .make_leaf(&reactive_comp.id, sample_rate)?;
+    let load_leaf = load_comp.kind.make_leaf(&load_comp.id, sample_rate)?;
+
+    let passive_tree = DynNode::Series(Box::new(reactive_leaf), Box::new(load_leaf));
+    let mut wdf = WdfStage::new(
+        with_voltage_source(passive_tree),
+        RootKind::ShortCircuit,
+        Oversampler::new(OversamplingFactor::X1),
+    );
+    wdf.output_probe = Some(load_comp.id.clone());
+    Some(wdf)
+}
+
 /// Build a runnable `WdfStage` from an `SpqrStage`.
 ///
 /// - **PassiveWdf**: VS + DynNode tree + Passthrough root
@@ -1440,6 +1498,12 @@ pub(super) fn build_spqr_stage(
         SpqrStage::PassiveWdf {
             tree, edge_indices, ..
         } => {
+            if let Some(wdf) =
+                build_grounded_series_reactive_load(&edge_indices, graph, _sample_rate)
+            {
+                return Ok(BuiltStage::Wdf(wdf));
+            }
+
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);
             // Ground-terminated → ShortCircuit root. Floating → Passthrough.
@@ -1473,19 +1537,28 @@ pub(super) fn build_spqr_stage(
                     graph,
                     &vec![graph.in_node, graph.out_node],
                 );
-                // Prefer out_node as the output boundary (it's the circuit output).
-                // Fall back to any terminal that isn't in_node.
+                let is_gnd = |n: super::graph::NodeId| -> bool {
+                    n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
+                };
+                let terminal_has_ground_load = |terminal: super::graph::NodeId| -> bool {
+                    edge_indices.iter().any(|&eidx| {
+                        let e = &graph.edges[eidx];
+                        (e.node_a == terminal && is_gnd(e.node_b))
+                            || (e.node_b == terminal && is_gnd(e.node_a))
+                    })
+                };
+                // Prefer the local output/load boundary. This matters for
+                // coupling stages like C_out -> R_out -> gnd where the group
+                // input is not the global graph.in_node; picking the wrong
+                // terminal probes the coupling cap instead of the load.
                 let output_boundary = group_terminals
                     .iter()
-                    .find(|&&t| t == graph.out_node)
+                    .find(|&&t| terminal_has_ground_load(t))
+                    .or_else(|| group_terminals.iter().find(|&&t| t == graph.out_node))
                     .or_else(|| group_terminals.iter().find(|&&t| t != graph.in_node))
                     .or_else(|| group_terminals.first())
                     .copied()
                     .unwrap_or(graph.out_node);
-
-                let is_gnd = |n: super::graph::NodeId| -> bool {
-                    n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
-                };
                 // Find the edge at the output boundary that goes toward GND
                 for &eidx in &edge_indices {
                     let e = &graph.edges[eidx];

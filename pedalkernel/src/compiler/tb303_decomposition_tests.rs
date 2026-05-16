@@ -14,6 +14,104 @@ use crate::PedalProcessor;
 
 const SR: f64 = 48_000.0;
 
+fn settled_sine_rms<F>(freq: f64, amp: f64, mut process: F) -> f64
+where
+    F: FnMut(f64) -> f64,
+{
+    for i in 0..9600 {
+        let input = amp * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+        let _ = process(input);
+    }
+
+    let mut sum_sq = 0.0f64;
+    let mut count = 0usize;
+    for i in 0..9600 {
+        let input = amp * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+        let out = process(input);
+        sum_sq += out * out;
+        count += 1;
+    }
+
+    (sum_sq / count.max(1) as f64).sqrt()
+}
+
+const TWO_RUNG_DIODE_LADDER: &str = r#"
+pedal "Two Rung Diode Ladder" { supply 9V
+  ports {
+    audio_in: input(10k)
+    audio_out: output
+  }
+  components {
+    D1: diode(silicon)
+    D2: diode(silicon)
+    R_bias1: resistor(100k)
+    R_bias2: resistor(100k)
+    R_in: resistor(10k)
+    C1: cap(33n)
+    C2: cap(33n)
+  }
+  nets {
+    vcc -> R_bias1.a
+    R_bias1.b -> D1.a
+    audio_in -> R_in.a
+    R_in.b -> D1.a
+
+    D1.b -> C1.a
+    C1.b -> gnd
+    D1.b -> D2.a
+
+    vcc -> R_bias2.a
+    R_bias2.b -> D2.a
+    D2.b -> C2.a
+    C2.b -> gnd
+    D2.b -> audio_out
+  }
+  controls {}
+}
+"#;
+
+const TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK: &str = r#"
+pedal "Two Rung Diode Ladder Feedback" { supply 9V
+  ports {
+    audio_in: input(10k)
+    audio_out: output
+  }
+  components {
+    D1: diode(silicon)
+    D2: diode(silicon)
+    R_bias1: resistor(100k)
+    R_bias2: resistor(100k)
+    R_in: resistor(10k)
+    C1: cap(33n)
+    C2: cap(33n)
+    Resonance: pot(100k, b)
+    R_fb_limit: resistor(33k)
+  }
+  nets {
+    vcc -> R_bias1.a
+    R_bias1.b -> D1.a
+    audio_in -> R_in.a
+    R_in.b -> D1.a
+
+    D1.b -> C1.a
+    C1.b -> gnd
+    D1.b -> D2.a
+
+    vcc -> R_bias2.a
+    R_bias2.b -> D2.a
+    D2.b -> C2.a
+    C2.b -> gnd
+    D2.b -> audio_out
+    D2.b -> Resonance.a
+    Resonance.b -> R_fb_limit.a
+    R_fb_limit.b -> D1.a
+  }
+  controls {
+    Resonance.position -> "Resonance" [0.0, 0.95] = 0.0
+  }
+}
+"#;
+
 /// Try to load a .pedal file from the pro crate's acidattack-core directory.
 fn load_pro_pedal(filename: &str) -> Option<String> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -145,6 +243,271 @@ fn tb303_filter_has_4_blockwise_blocks() {
     } else {
         eprintln!("  WARNING: blockwise decomposition returned None — ladder not split");
     }
+}
+
+#[test]
+fn tb303_blockwise_blocks_are_in_signal_order() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    let feedback_group = groups
+        .iter()
+        .find(|group| group.has_feedback())
+        .expect("TB303 ladder feedback group should exist");
+    let plan = blockwise::analyze_blockwise(&feedback_group.all_edges(), &graph)
+        .expect("should decompose");
+    let block_names: Vec<&str> = plan
+        .blocks
+        .iter()
+        .map(|block| {
+            let edge = block.nl_edges[0];
+            graph.components[graph.edges[edge].comp_idx].id.as_str()
+        })
+        .collect();
+
+    assert_eq!(
+        block_names,
+        vec!["Q1", "Q2", "Q3", "Q4"],
+        "diode-connected BJT ladder blocks must follow base/collector -> emitter cascade order"
+    );
+}
+
+#[test]
+fn tb303_blockwise_rungs_keep_their_own_caps() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    let feedback_group = groups
+        .iter()
+        .find(|group| group.has_feedback())
+        .expect("TB303 ladder feedback group should exist");
+    let plan = blockwise::analyze_blockwise(&feedback_group.all_edges(), &graph)
+        .expect("should decompose");
+    let actual: Vec<(&str, Vec<&str>)> = plan
+        .blocks
+        .iter()
+        .map(|block| {
+            let nl_edge = block.nl_edges[0];
+            let nl_name = graph.components[graph.edges[nl_edge].comp_idx].id.as_str();
+            let caps = block
+                .reactive_edges
+                .iter()
+                .filter_map(|&eidx| {
+                    let id = graph.components[graph.edges[eidx].comp_idx].id.as_str();
+                    matches!(id, "C1" | "C2" | "C3" | "C4").then_some(id)
+                })
+                .collect::<Vec<_>>();
+            (nl_name, caps)
+        })
+        .collect();
+
+    eprintln!("  rung cap assignment: {actual:?}");
+    assert_eq!(
+        actual,
+        vec![
+            ("Q1", vec!["C1"]),
+            ("Q2", vec!["C2"]),
+            ("Q3", vec!["C3"]),
+            ("Q4", vec!["C4"]),
+        ],
+        "each signal-ordered BKM rung must own the shunt cap attached to its emitter"
+    );
+}
+
+#[test]
+fn tb303_blockwise_coupling_ports_are_diode_inputs() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    let plan = blockwise::analyze_blockwise(&all_edges, &graph).expect("should decompose");
+
+    let selected: Vec<_> = plan
+        .blocks
+        .iter()
+        .map(|block| {
+            blockwise::block_coupling_port_node(&block.nl_edges, &block.port_nodes, &graph)
+        })
+        .collect();
+
+    let expected: Vec<_> = ["Q1.base", "Q2.base", "Q3.base", "Q4.base"]
+        .iter()
+        .map(|name| Some(graph.node_names.get(*name).copied().expect("pin node")))
+        .collect();
+
+    eprintln!("  selected block ports: {selected:?}");
+    eprintln!("  expected diode inputs: {expected:?}");
+
+    assert_eq!(
+        selected, expected,
+        "BKM coupling ports must attach to each diode's driven base/collector node"
+    );
+}
+
+#[test]
+fn tb303_pedal_nodes_match_expected_ladder_wiring() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+
+    let node = |name: &str| graph.node_names.get(name).copied().expect(name);
+
+    assert_eq!(node("Q1.base"), node("Q1.collector"));
+    assert_eq!(node("Q2.base"), node("Q2.collector"));
+    assert_eq!(node("Q3.base"), node("Q3.collector"));
+    assert_eq!(node("Q4.base"), node("Q4.collector"));
+
+    assert_eq!(node("Q1.emitter"), node("Q2.base"));
+    assert_eq!(node("Q2.emitter"), node("Q3.base"));
+    assert_eq!(node("Q3.emitter"), node("Q4.base"));
+    assert_eq!(node("Q4.emitter"), node("C_out.a"));
+    assert_eq!(node("Q4.emitter"), node("Resonance.a"));
+
+    assert_ne!(node("Q1.base"), node("Q1.emitter"));
+    assert_ne!(node("Q4.base"), node("Q4.emitter"));
+}
+
+#[test]
+fn two_rung_diode_ladder_splits_into_ordered_blocks() {
+    let def = crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    let plan = blockwise::analyze_blockwise(&all_edges, &graph)
+        .expect("literal two-rung diode ladder should decompose");
+
+    let names: Vec<&str> = plan
+        .blocks
+        .iter()
+        .map(|block| {
+            let edge = block.nl_edges[0];
+            graph.components[graph.edges[edge].comp_idx].id.as_str()
+        })
+        .collect();
+
+    eprintln!("  two-rung diode ladder block order: {names:?}");
+    assert_eq!(names, vec!["D1", "D2"]);
+}
+
+#[test]
+fn two_rung_diode_ladder_bkm_direct_path_is_lowpass() {
+    let def = crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER).expect("parse failed");
+
+    let measure = |freq: f64| -> f64 {
+        let mut proc = super::compile_pedal(&def, SR).expect("compile failed");
+        let bkm = proc
+            .stages
+            .iter_mut()
+            .find_map(|s| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .expect("two-rung diode ladder should compile to BKM");
+
+        for _ in 0..4800 {
+            let _ = bkm.process(&[0.0, 0.0]);
+        }
+
+        let mut peak = 0.0f64;
+        for i in 0..4800 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            peak = peak.max(bkm.process(&[input, 0.0]).abs());
+        }
+        peak
+    };
+
+    let gain_100 = measure(100.0);
+    let gain_10k = measure(10_000.0);
+    let ratio_db = 20.0 * (gain_100 / gain_10k.max(1e-12)).log10();
+
+    eprintln!(
+        "  two-rung diode ladder BKM: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
+    );
+
+    assert!(
+        gain_100 > gain_10k,
+        "two-rung diode ladder BKM should be lowpass: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}"
+    );
+}
+
+#[test]
+fn two_rung_feedback_diode_ladder_compiles_to_bkm() {
+    let def =
+        crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK).expect("parse failed");
+    let proc = super::compile_pedal(&def, SR).expect("compile failed");
+
+    let bkm_count = proc
+        .stages
+        .iter()
+        .filter(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_)))
+        .count();
+
+    assert_eq!(
+        bkm_count, 1,
+        "feedback diode ladder should compile as one BKM stage"
+    );
+}
+
+#[test]
+fn two_rung_feedback_diode_ladder_bkm_direct_path_is_lowpass() {
+    let def =
+        crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK).expect("parse failed");
+
+    let measure = |freq: f64| -> f64 {
+        let mut proc = super::compile_pedal(&def, SR).expect("compile failed");
+        proc.set_control("Resonance", 0.0);
+
+        for _ in 0..4800 {
+            let _ = proc.process(0.0);
+        }
+
+        let mut peak = 0.0f64;
+        for i in 0..4800 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            peak = peak.max(proc.process(input).abs());
+        }
+        peak
+    };
+
+    let gain_100 = measure(100.0);
+    let gain_10k = measure(10_000.0);
+    let ratio_db = 20.0 * (gain_100 / gain_10k.max(1e-12)).log10();
+
+    eprintln!(
+        "  two-rung feedback diode ladder: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
+    );
+
+    assert!(
+        gain_100 > gain_10k * 1.1,
+        "two-rung feedback diode ladder should tilt lowpass: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -517,6 +880,552 @@ fn tb303_blockwise_k_method_produces_audio() {
     assert!(
         peak > 0.01,
         "TB303 K-method stage should produce audible output, got peak={peak:.6}"
+    );
+}
+
+#[test]
+fn tb303_bkm_direct_output_reaches_serial_output() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_bkm_direct_vs_serial",
+        "tb303_bkm_direct_vs_serial",
+        SR,
+        &super::compile::CompileOptions::default(),
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let mut proc_direct: super::compiled::CompiledPedal =
+        postcard::from_bytes(&blob).expect("deserialize failed");
+    let mut proc_coupled: super::compiled::CompiledPedal =
+        postcard::from_bytes(&blob).expect("deserialize failed");
+    let mut proc_serial: super::compiled::CompiledPedal =
+        postcard::from_bytes(&blob).expect("deserialize failed");
+
+    let bkm = proc_direct
+        .stages
+        .iter_mut()
+        .find_map(|s| {
+            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                Some(k)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to blockwise K-method");
+    let wdf = proc_coupled
+        .stages
+        .iter_mut()
+        .find_map(|s| {
+            if let pedalkernel_rt::processor::Stage::Wdf(ref mut w) = s {
+                Some(w)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should have output coupling WDF stage");
+
+    for _ in 0..2400 {
+        let direct = bkm.process(&[0.0, 0.0, 0.0, 0.0]);
+        let _ = wdf.process(direct);
+        let _ = proc_serial.process(0.0);
+    }
+
+    let mut bkm_peak = 0.0f64;
+    let mut coupled_peak = 0.0f64;
+    let mut serial_peak = 0.0f64;
+    for i in 0..4800 {
+        let input = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin();
+        let bkm_out = bkm.process(&[input, 0.0, 0.0, 0.0]);
+        bkm_peak = bkm_peak.max(bkm_out.abs());
+        coupled_peak = coupled_peak.max(wdf.process(bkm_out).abs());
+        serial_peak = serial_peak.max(proc_serial.process(input).abs());
+    }
+
+    eprintln!(
+        "  BKM direct peak={bkm_peak:.6}, direct C_out peak={coupled_peak:.6}, serial peak={serial_peak:.6}"
+    );
+    assert!(
+        bkm_peak > 0.01,
+        "BKM should produce signal before output coupling, got {bkm_peak:.6}"
+    );
+    assert!(
+        coupled_peak > bkm_peak * 0.1,
+        "Output coupling should preserve at least 10% of BKM signal: \
+         bkm={bkm_peak:.6}, coupled={coupled_peak:.6}"
+    );
+    assert!(
+        serial_peak > coupled_peak * 0.5,
+        "Serial output should preserve at least 10% of BKM signal through C_out: \
+         coupled={coupled_peak:.6}, serial={serial_peak:.6}"
+    );
+}
+
+#[test]
+fn tb303_bkm_direct_path_is_lowpass() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_bkm_direct_lowpass",
+        "tb303_bkm_direct_lowpass",
+        SR,
+        &super::compile::CompileOptions::default(),
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let measure = |freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        let bkm = proc
+            .stages
+            .iter_mut()
+            .find_map(|s| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .expect("TB303 should compile to blockwise K-method");
+
+        for _ in 0..4800 {
+            let _ = bkm.process(&[0.0, 0.0, 0.0, 0.0]);
+        }
+
+        settled_sine_rms(freq, 0.1, |input| bkm.process(&[input, 0.0, 0.0, 0.0]))
+    };
+
+    let gain_100 = measure(100.0);
+    let gain_10k = measure(10_000.0);
+    let ratio_db = 20.0 * (gain_100 / gain_10k.max(1e-12)).log10();
+
+    eprintln!(
+        "  BKM direct LPF: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
+    );
+
+    assert!(
+        gain_100 > gain_10k * 3.0,
+        "BKM core should have a settled lowpass slope before C_out: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}"
+    );
+}
+
+#[test]
+fn tb303_bkm_block_outputs_show_cascaded_lowpass_shape() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_bkm_block_shape",
+        "tb303_bkm_block_shape",
+        SR,
+        &super::compile::CompileOptions::default(),
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let measure_blocks = |freq: f64| -> Vec<f64> {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        let bkm = proc
+            .stages
+            .iter_mut()
+            .find_map(|s| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .expect("TB303 should compile to blockwise K-method");
+
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = bkm.debug_process_with_block_outputs(&[input, 0.0, 0.0, 0.0]);
+        }
+
+        let mut sum_sq = vec![0.0f64; bkm.blocks.len()];
+        let mut count = 0usize;
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let (_, blocks) = bkm.debug_process_with_block_outputs(&[input, 0.0, 0.0, 0.0]);
+            for (acc, value) in sum_sq.iter_mut().zip(blocks.iter()) {
+                *acc += value * value;
+            }
+            count += 1;
+        }
+
+        sum_sq
+            .into_iter()
+            .map(|v| (v / count.max(1) as f64).sqrt())
+            .collect()
+    };
+
+    let low = measure_blocks(100.0);
+    let high = measure_blocks(10_000.0);
+    eprintln!("  BKM block RMS 100Hz: {low:.6?}");
+    eprintln!("  BKM block RMS 10kHz: {high:.6?}");
+
+    assert_eq!(low.len(), 4);
+    assert_eq!(high.len(), 4);
+    assert!(
+        low[3] > high[3] * 3.0,
+        "final BKM rung should show cascaded lowpass shape: 100Hz={:.6}, 10kHz={:.6}",
+        low[3],
+        high[3]
+    );
+}
+
+#[test]
+fn tb303_bkm_k_tables_are_generated_per_rung_not_shared() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_bkm_ktable_ownership",
+        "tb303_bkm_ktable_ownership",
+        SR,
+        &super::compile::CompileOptions::default(),
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let mut proc: super::compiled::CompiledPedal =
+        postcard::from_bytes(&blob).expect("deserialize failed");
+    let bkm = proc
+        .stages
+        .iter_mut()
+        .find_map(|s| {
+            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                Some(k)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to blockwise K-method");
+
+    assert_eq!(bkm.blocks.len(), 4);
+
+    let table_ptrs: Vec<usize> = bkm
+        .blocks
+        .iter()
+        .map(|block| block.k_table.entries.as_ptr() as usize)
+        .collect();
+    let mut unique_ptrs = table_ptrs.clone();
+    unique_ptrs.sort_unstable();
+    unique_ptrs.dedup();
+
+    eprintln!("  BKM K-table entry pointers: {table_ptrs:?}");
+    assert_eq!(
+        unique_ptrs.len(),
+        table_ptrs.len(),
+        "each BKM rung should own its generated K-table storage; do not share table Vecs blindly"
+    );
+
+    let table_delta = |a: usize, b: usize| -> f64 {
+        let ta = &bkm.blocks[a].k_table;
+        let tb = &bkm.blocks[b].k_table;
+        assert_eq!(ta.dims, tb.dims);
+        assert_eq!(ta.steps, tb.steps);
+        assert_eq!(ta.entries.len(), tb.entries.len());
+        ta.entries
+            .iter()
+            .zip(tb.entries.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f64, f64::max)
+    };
+
+    let q1_q2_delta = table_delta(0, 1);
+    let q2_q3_delta = table_delta(1, 2);
+    let q3_q4_delta = table_delta(2, 3);
+    eprintln!(
+        "  BKM K-table max deltas: Q1/Q2={q1_q2_delta:.6}, Q2/Q3={q2_q3_delta:.6}, Q3/Q4={q3_q4_delta:.6}"
+    );
+
+    assert!(
+        q1_q2_delta > 1e-6,
+        "Q1 table should differ from downstream rung tables because its source impedance differs"
+    );
+    assert!(
+        q2_q3_delta < 1e-9 && q3_q4_delta < 1e-9,
+        "identical downstream rungs may have matching table contents, but still own separate tables"
+    );
+}
+
+#[test]
+fn tb303_serial_blockwise_without_bkm_is_lowpass_diagnostic() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut options = super::compile::CompileOptions::default();
+    options.force_serial_blockwise = true;
+
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, options.clone()).expect("compile failed");
+    let bkm_count = compiled
+        .stages
+        .iter()
+        .filter(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_)))
+        .count();
+    let wdf_count = compiled
+        .stages
+        .iter()
+        .filter(|stage| matches!(stage, pedalkernel_rt::processor::Stage::Wdf(_)))
+        .count();
+
+    eprintln!(
+        "  serial blockwise diagnostic: stages={}, wdf_count={wdf_count}, bkm_count={bkm_count}",
+        compiled.stages.len()
+    );
+    assert_eq!(
+        bkm_count, 0,
+        "force_serial_blockwise must not emit BKM stages"
+    );
+    assert!(
+        wdf_count >= 4,
+        "force_serial_blockwise should expose the ladder rungs as serial WDF/K-method stages"
+    );
+
+    let measure = |freq: f64| -> f64 {
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, options.clone()).expect("compile failed");
+        proc.set_control("Resonance", 0.0);
+
+        for _ in 0..4800 {
+            let _ = proc.process(0.0);
+        }
+
+        let mut peak = 0.0f64;
+        for i in 0..4800 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            peak = peak.max(proc.process(input).abs());
+        }
+        peak
+    };
+
+    let gain_100 = measure(100.0);
+    let gain_10k = measure(10_000.0);
+    let ratio_db = 20.0 * (gain_100 / gain_10k.max(1e-12)).log10();
+
+    eprintln!(
+        "  serial blockwise diagnostic: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
+    );
+    assert!(
+        gain_100 > gain_10k,
+        "serial blockwise rungs should be lowpass without BKM coupling: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}"
+    );
+}
+
+#[test]
+fn tb303_forced_serial_stage_outputs_show_reference_shape() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut options = super::compile::CompileOptions::default();
+    options.force_serial_blockwise = true;
+
+    let measure = |freq: f64| -> Vec<f64> {
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, options.clone()).expect("compile failed");
+        proc.set_control("Resonance", 0.0);
+
+        let mut sums = vec![0.0f64; proc.stages.len()];
+        let mut count = 0usize;
+
+        for i in 0..9600 {
+            let _ = proc.process(0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin());
+        }
+
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let mut x = input;
+            for (si, stage) in proc.stages.iter_mut().enumerate() {
+                x = match stage {
+                    pedalkernel_rt::processor::Stage::Wdf(wdf) => wdf.process(x),
+                    pedalkernel_rt::processor::Stage::MultiNl(mnl) => mnl.process(x),
+                    pedalkernel_rt::processor::Stage::Iir(iir) => iir.process(x),
+                    pedalkernel_rt::processor::Stage::StateSpace(ss) => ss.process(x),
+                    pedalkernel_rt::processor::Stage::BlackFeedback(bf) => bf.process(x),
+                    pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) => {
+                        bkm.process(&[x, 0.0, 0.0, 0.0])
+                    }
+                };
+                sums[si] += x * x;
+            }
+            count += 1;
+        }
+
+        sums.into_iter()
+            .map(|v| (v / count.max(1) as f64).sqrt())
+            .collect()
+    };
+
+    let low = measure(100.0);
+    let high = measure(10_000.0);
+    eprintln!("  forced serial stage RMS 100Hz: {low:.6?}");
+    eprintln!("  forced serial stage RMS 10kHz: {high:.6?}");
+
+    assert!(
+        low.last().copied().unwrap_or(0.0) > high.last().copied().unwrap_or(0.0) * 3.0,
+        "forced serial reference should be strongly lowpass"
+    );
+}
+
+#[test]
+fn tb303_forced_serial_wdf_rungs_stay_bounded_on_silence() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut options = super::compile::CompileOptions::default();
+    options.force_serial_blockwise = true;
+
+    let mut proc = super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
+
+    for sample in 0..4800 {
+        proc.process(0.0);
+
+        if sample % 480 == 479 {
+            for (si, stage) in proc.stages.iter().enumerate() {
+                let pedalkernel_rt::processor::Stage::Wdf(wdf) = stage else {
+                    continue;
+                };
+                let mut tree = wdf.tree.clone();
+                tree.set_voltage(0.0);
+                let b = tree.reflected();
+                eprintln!("  serial WDF sample={sample} stage={si} b_tree={b:.6}");
+                assert!(
+                    b.is_finite() && b.abs() < 10.0,
+                    "forced-serial WDF stage {si} should stay bounded on silence, b_tree={b:.6}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn two_rung_feedback_bkm_stays_bounded_on_silence() {
+    let def =
+        crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK).expect("parse failed");
+    let mut proc = super::compile_pedal(&def, SR).expect("compile failed");
+
+    for sample in 0..4800 {
+        proc.process(0.0);
+
+        if sample % 480 == 479 {
+            let bkm = proc
+                .stages
+                .iter()
+                .find_map(|s| {
+                    if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref k) = s {
+                        Some(k)
+                    } else {
+                        None
+                    }
+                })
+                .expect("two-rung feedback ladder should compile to BKM");
+
+            for (bi, block) in bkm.blocks.iter().enumerate() {
+                let mut tree = block.tree.clone();
+                tree.set_voltage(0.0);
+                let b = tree.reflected();
+                eprintln!(
+                    "  two-rung BKM sample={sample} block={bi} b_tree={b:.6}, dc_offset={:.6}",
+                    block.dc_offset
+                );
+                assert!(
+                    b.is_finite() && b.abs() < 10.0,
+                    "two-rung BKM block {bi} should stay bounded on silence, b_tree={b:.6}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tb303_output_coupling_probes_load_resistor() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let proc = super::spqr_build::compile_via_spqr(&def, SR).expect("compile failed");
+
+    let probes: Vec<Option<String>> = proc
+        .stages
+        .iter()
+        .filter_map(|stage| {
+            if let pedalkernel_rt::processor::Stage::Wdf(wdf) = stage {
+                Some(wdf.output_probe.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    eprintln!("  WDF output probes: {:?}", probes);
+    assert!(
+        probes.iter().any(|probe| probe.as_deref() == Some("R_out")),
+        "TB303 output coupling stage should probe R_out, got {:?}",
+        probes
+    );
+}
+
+#[test]
+fn tb303_resonance_recomputes_bkm_coupling_matrix() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut compiled = super::compile_pedal(&def, SR).expect("compile failed");
+
+    assert!(
+        compiled
+            .controls
+            .iter()
+            .any(|c| c.label == "Resonance" && c.component_id == "Resonance"),
+        "Resonance control must bind even though its pot lives in the BKM coupling network"
+    );
+
+    let bkm = compiled
+        .stages
+        .iter_mut()
+        .find_map(|s| {
+            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                Some(k)
+            } else {
+                None
+            }
+        })
+        .expect("BKM stage");
+
+    let before = bkm.coupling_s.clone();
+    assert!(
+        bkm.set_pot("Resonance", 0.7),
+        "BKM should accept coupling-network pot changes"
+    );
+    let delta = before
+        .iter()
+        .zip(bkm.coupling_s.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+
+    eprintln!("  Resonance coupling matrix max delta: {delta:.6}");
+    assert!(
+        delta > 1e-6,
+        "moving Resonance must recompute the BKM coupling scattering matrix"
     );
 }
 
@@ -1540,6 +2449,7 @@ fn tb303_cap_state_bounded_during_warmup() {
 
     let mut proc: super::compiled::CompiledPedal =
         postcard::from_bytes(&blob).expect("deserialize failed");
+    proc.set_control("Resonance", 0.0);
 
     // Process 4800 samples of SILENCE — no input
     // After each sample, check the BKM stage's block tree states
@@ -1557,17 +2467,23 @@ fn tb303_cap_state_bounded_during_warmup() {
             });
             if let Some(bkm) = bkm {
                 for (bi, block) in bkm.blocks.iter().enumerate() {
-                    // Get b_tree (the reflected wave from the tree)
+                    let probe_v = block
+                        .cascade_probe_id
+                        .as_deref()
+                        .and_then(|id| block.tree.leaf_voltage(id));
                     let mut tree_clone = block.tree.clone();
                     tree_clone.set_voltage(0.0);
                     let b = tree_clone.reflected();
+                    let reported = probe_v.unwrap_or(b);
                     if b.abs() > 10.0 {
-                        eprintln!("  WINDUP at sample {sample}: block {bi} b_tree={b:.4}");
+                        eprintln!(
+                            "  WINDUP at sample {sample}: block {bi} b_tree={b:.4}, probe_v={probe_v:?}"
+                        );
                     }
                     assert!(
-                        b.abs() < 100.0,
-                        "Cap wind-up: block {bi} b_tree={b:.4} at sample {sample} \
-                         (silent input). Cap state has diverged."
+                        reported.is_finite() && reported.abs() < 10.0,
+                        "Cap wind-up: block {bi} probe/b_tree={reported:.4} at sample {sample} \
+                         (silent input). Cap state has diverged. b_tree={b:.4}"
                     );
                 }
             }
@@ -1591,13 +2507,19 @@ fn tb303_cap_state_bounded_during_warmup() {
         let mut t = block.tree.clone();
         t.set_voltage(0.0);
         let b = t.reflected();
+        let probe_v = block
+            .cascade_probe_id
+            .as_deref()
+            .and_then(|id| block.tree.leaf_voltage(id));
+        let reported = probe_v.unwrap_or(b);
         eprintln!(
-            "  Final block {bi}: b_tree={b:.6}, dc_offset={:.6}",
+            "  Final block {bi}: b_tree={b:.6}, probe_v={probe_v:?}, dc_offset={:.6}",
             block.dc_offset
         );
         assert!(
-            b.abs() < 10.0,
-            "After 100ms silence, block {bi} b_tree={b:.6} should be small. Cap wound up."
+            reported.is_finite() && reported.abs() < 10.0,
+            "After 100ms silence, block {bi} probe/b_tree={reported:.6} should be small. \
+             Cap wound up. b_tree={b:.6}"
         );
     }
 }

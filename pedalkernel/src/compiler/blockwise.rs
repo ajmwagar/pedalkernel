@@ -73,6 +73,177 @@ struct NlBlock {
     comp_idx: usize,
 }
 
+fn component_pin_node(graph: &CircuitGraph, comp_id: &str, pin: &str) -> Option<NodeId> {
+    graph.node_names.get(&format!("{comp_id}.{pin}")).copied()
+}
+
+fn nl_block_direction_nodes(block: &NlBlock, graph: &CircuitGraph) -> Option<(NodeId, NodeId)> {
+    let comp = &graph.components[block.comp_idx];
+    match comp.kind.signal_terminals() {
+        super::component::SignalTerminals::Amplifier { input, output, .. } => {
+            let input_node = component_pin_node(graph, &comp.id, input)?;
+            let output_node = component_pin_node(graph, &comp.id, output)?;
+            let common_node = comp
+                .kind
+                .pin_config()
+                .valid_pins
+                .iter()
+                .find(|&&p| p != input && p != output)
+                .and_then(|&pin| component_pin_node(graph, &comp.id, pin));
+
+            // Diode-connected transistor ladders short the declared input/output
+            // pins and take the stage output from the common terminal. This makes
+            // each block directional as base/collector -> emitter.
+            if input_node == output_node {
+                let common_node = common_node?;
+                if block.nodes.contains(&input_node) && block.nodes.contains(&common_node) {
+                    return Some((input_node, common_node));
+                }
+            }
+
+            if block.nodes.contains(&input_node) && block.nodes.contains(&output_node) {
+                Some((input_node, output_node))
+            } else {
+                None
+            }
+        }
+        super::component::SignalTerminals::TwoPort { input, output } => {
+            let input_node = component_pin_node(graph, &comp.id, input)?;
+            let output_node = component_pin_node(graph, &comp.id, output)?;
+            if block.nodes.contains(&input_node) && block.nodes.contains(&output_node) {
+                Some((input_node, output_node))
+            } else {
+                None
+            }
+        }
+        super::component::SignalTerminals::Passive => None,
+    }
+}
+
+pub(super) fn block_coupling_port_node(
+    nl_edges: &[usize],
+    port_nodes: &[NodeId],
+    graph: &CircuitGraph,
+) -> Option<NodeId> {
+    let comp_idx = nl_edges.first().map(|&eidx| graph.edges[eidx].comp_idx)?;
+    let comp = &graph.components[comp_idx];
+    let (input, output) = match comp.kind.signal_terminals() {
+        super::component::SignalTerminals::Amplifier { input, output, .. }
+        | super::component::SignalTerminals::TwoPort { input, output } => (input, output),
+        super::component::SignalTerminals::Passive => return None,
+    };
+
+    let input_node = component_pin_node(graph, &comp.id, input)?;
+    let output_node = component_pin_node(graph, &comp.id, output)?;
+
+    // For diode-connected transistors, input and output pins are shorted.
+    // This is still the driven side of the one-port; the common pin
+    // (emitter/source/cathode) is the cascade output and must not be used as
+    // the coupling matrix port.
+    if input_node == output_node && port_nodes.contains(&input_node) {
+        return Some(input_node);
+    }
+
+    if port_nodes.contains(&input_node) {
+        Some(input_node)
+    } else {
+        None
+    }
+}
+
+fn block_cascade_output_node(
+    nl_edges: &[usize],
+    port_nodes: &[NodeId],
+    graph: &CircuitGraph,
+) -> Option<NodeId> {
+    let comp_idx = nl_edges.first().map(|&eidx| graph.edges[eidx].comp_idx)?;
+    let comp = &graph.components[comp_idx];
+    let (input, output, is_amplifier) = match comp.kind.signal_terminals() {
+        super::component::SignalTerminals::Amplifier { input, output, .. } => (input, output, true),
+        super::component::SignalTerminals::TwoPort { input, output } => (input, output, false),
+        super::component::SignalTerminals::Passive => return None,
+    };
+
+    let input_node = component_pin_node(graph, &comp.id, input)?;
+    let output_node = component_pin_node(graph, &comp.id, output)?;
+
+    if is_amplifier && input_node == output_node {
+        return comp
+            .kind
+            .pin_config()
+            .valid_pins
+            .iter()
+            .find(|&&p| p != input && p != output)
+            .and_then(|&pin| component_pin_node(graph, &comp.id, pin))
+            .filter(|node| port_nodes.contains(node));
+    }
+
+    if port_nodes.contains(&output_node) {
+        Some(output_node)
+    } else {
+        None
+    }
+}
+
+fn signal_order_indices(nl_blocks: &[NlBlock], graph: &CircuitGraph) -> Option<Vec<usize>> {
+    let dirs: Vec<Option<(NodeId, NodeId)>> = nl_blocks
+        .iter()
+        .map(|block| nl_block_direction_nodes(block, graph))
+        .collect();
+    if dirs.iter().any(Option::is_none) {
+        return None;
+    }
+    let dirs: Vec<(NodeId, NodeId)> = dirs.into_iter().map(Option::unwrap).collect();
+
+    let downstream_nodes: HashSet<NodeId> =
+        dirs.iter().map(|(_, downstream)| *downstream).collect();
+    let mut start_candidates: Vec<usize> = dirs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (upstream, _))| (!downstream_nodes.contains(upstream)).then_some(i))
+        .collect();
+
+    if start_candidates.is_empty() {
+        return None;
+    }
+
+    start_candidates.sort_by_key(|&i| {
+        let (upstream, _) = dirs[i];
+        let touches_input =
+            nl_blocks[i].nodes.contains(&graph.in_node) || upstream == graph.in_node;
+        (!touches_input, i)
+    });
+
+    let mut ordered = Vec::with_capacity(nl_blocks.len());
+    let mut used = HashSet::new();
+    let mut current = start_candidates[0];
+
+    loop {
+        ordered.push(current);
+        used.insert(current);
+
+        let (_, downstream) = dirs[current];
+        let mut next: Vec<usize> = dirs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (upstream, _))| {
+                (!used.contains(&i) && *upstream == downstream).then_some(i)
+            })
+            .collect();
+        if next.is_empty() {
+            break;
+        }
+        next.sort_unstable();
+        current = next[0];
+    }
+
+    if ordered.len() == nl_blocks.len() {
+        Some(ordered)
+    } else {
+        None
+    }
+}
+
 /// Recursively extract all NL Q-leaf edge indices from a subtree.
 /// Skips P-nodes that are all-NL-same-comp (those are found by
 /// find_nl_blocks pattern 1 and should not be broken up).
@@ -563,10 +734,8 @@ pub(super) fn analyze_blockwise(
     for (bi, nl_block) in nl_blocks.iter().enumerate() {
         // Find common terminal (emitter/source/cathode)
         let comp = &graph.components[nl_block.comp_idx];
-        let common_node =
-            if let super::component::SignalTerminals::Amplifier { input, output, .. } =
-                comp.kind.signal_terminals()
-            {
+        let common_node = match comp.kind.signal_terminals() {
+            super::component::SignalTerminals::Amplifier { input, output, .. } => {
                 let common_pin = comp
                     .kind
                     .pin_config()
@@ -577,9 +746,13 @@ pub(super) fn analyze_blockwise(
                     let key = format!("{}.{}", comp.id, pin);
                     graph.node_names.get(&key).copied()
                 })
-            } else {
-                None
-            };
+            }
+            super::component::SignalTerminals::TwoPort { output, .. } => {
+                let key = format!("{}.{}", comp.id, output);
+                graph.node_names.get(&key).copied()
+            }
+            super::component::SignalTerminals::Passive => None,
+        };
 
         let start_node = match common_node {
             Some(n) => n,
@@ -691,11 +864,24 @@ pub(super) fn analyze_blockwise(
         }
     }
 
+    let block_order: Vec<usize> =
+        signal_order_indices(&nl_blocks, graph).unwrap_or_else(|| (0..nl_blocks.len()).collect());
+
+    #[cfg(test)]
+    {
+        let order_names: Vec<&str> = block_order
+            .iter()
+            .map(|&i| graph.components[nl_blocks[i].comp_idx].id.as_str())
+            .collect();
+        eprintln!("  block signal order: {:?}", order_names);
+    }
+
     // Build the plan
     let mut blocks = Vec::new();
-    for (i, nl_block) in nl_blocks.into_iter().enumerate() {
+    for i in block_order {
+        let nl_block = &nl_blocks[i];
         blocks.push(Block {
-            nl_edges: nl_block.nl_edges,
+            nl_edges: nl_block.nl_edges.clone(),
             linear_edges: std::mem::take(&mut block_linear[i]),
             reactive_edges: std::mem::take(&mut block_reactive[i]),
             port_nodes: nl_block.nodes.clone(),
@@ -747,6 +933,7 @@ pub(super) fn try_build_blockwise(
     bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
     supply_voltage: f64,
     port_defs: &[crate::dsl::PortDef],
+    force_serial: bool,
 ) -> Option<Vec<BuiltStage>> {
     let plan = analyze_blockwise(edge_indices, graph)?;
 
@@ -785,6 +972,15 @@ pub(super) fn try_build_blockwise(
             eprintln!("  [blockwise] block {bi} stage {si}: building...");
             let mut built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate).ok()?;
             eprintln!("  [blockwise] block {bi} stage {si}: built");
+
+            if let BuiltStage::Wdf(ref mut wdf) = built {
+                if wdf.output_probe.is_none() {
+                    if let Some(&reactive_edge) = block.reactive_edges.first() {
+                        let comp = &graph.components[graph.edges[reactive_edge].comp_idx];
+                        wdf.output_probe = Some(comp.id.clone());
+                    }
+                }
+            }
 
             // Set BJT bias from circuit analysis
             if let BuiltStage::Wdf(ref mut wdf) = built {
@@ -872,15 +1068,24 @@ pub(super) fn try_build_blockwise(
                    gm={gm:.4}S, 1/gm={r_source_cascade:.1}Ω"
         );
 
+        let first_block_source_r = port_defs
+            .iter()
+            .find(|port| port.direction == pedalkernel_rt::PortDirection::Input)
+            .and_then(|port| port.impedance)
+            .unwrap_or(10_000.0);
+
         let mut k_blocks = Vec::new();
         for (bi, built) in all_stages.iter_mut().enumerate() {
             if let BuiltStage::Wdf(ref mut wdf) = built {
-                // Set VS Rp to 1/gm for ALL blocks. The source impedance
-                // (R_in, R_cv) is in the coupling scattering, not the block's VS.
-                // The VS represents the cascade connection, which has impedance
-                // ~1/gm of the previous diode. Without this, gamma ≈ 0.97 →
-                // the cap can't contribute to b_tree → no filtering.
-                wdf.tree.set_vs_port_resistance(r_source_cascade);
+                // Block 0 is driven through the declared input impedance.
+                // Downstream rungs are driven by the previous diode follower,
+                // whose small-signal output impedance is approximately 1/gm.
+                let block_source_r = if bi == 0 {
+                    first_block_source_r
+                } else {
+                    r_source_cascade
+                };
+                wdf.tree.set_vs_port_resistance(block_source_r);
 
                 // Generate K-table with correct port resistance
                 wdf.k_table = super::k_method::generate_k_table(wdf);
@@ -899,14 +1104,32 @@ pub(super) fn try_build_blockwise(
                     let mut dc_kt = k_table.clone();
                     dc_kt.precompute_scales();
                     let a0 = dc_kt.lookup_2d(b0, 0.0);
-                    let dc_offset = (a0 + b0) / 2.0;
+                    dc_tree.set_incident(a0);
+                    let dc_offset = wdf
+                        .output_probe
+                        .as_ref()
+                        .and_then(|probe| dc_tree.leaf_voltage(probe))
+                        .unwrap_or((a0 + b0) / 2.0);
 
                     #[cfg(test)]
                     eprintln!(
                         "  block {bi}: VS Rp={:.1}Ω, tree Rp={:.1}Ω",
-                        if bi == 0 { 10000.0 } else { r_source_cascade },
+                        block_source_r,
                         wdf.tree.port_resistance()
                     );
+                    let root_polarity = match &wdf.root {
+                        pedalkernel_rt::stage::RootKind::DiodePair(_)
+                        | pedalkernel_rt::stage::RootKind::SingleDiode(_)
+                        | pedalkernel_rt::stage::RootKind::ExplicitDiodePair(_)
+                        | pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_)
+                        | pedalkernel_rt::stage::RootKind::Zener(_) => -1.0,
+                        _ => 1.0,
+                    };
+                    let source_polarity = if wdf.negate_vs {
+                        -root_polarity
+                    } else {
+                        root_polarity
+                    };
                     // The cascade tap is at the passive subtree (cap voltage),
                     // not the root port (diode residual). This is determined
                     // by the circuit: the cascade node (Q.emitter) is where
@@ -919,9 +1142,19 @@ pub(super) fn try_build_blockwise(
                         vbe_bias,
                         dc_offset,
                         cascade_from_passive: true,
+                        cascade_probe_id: wdf.output_probe.clone(),
+                        source_polarity,
                     });
                 }
             }
+        }
+
+        if force_serial {
+            eprintln!(
+                "  [blockwise] force_serial: returning {} rung stages without BKM coupling",
+                all_stages.len()
+            );
+            return Some(all_stages);
         }
 
         let n_blocks = k_blocks.len();
@@ -976,6 +1209,12 @@ pub(super) fn try_build_blockwise(
 
         // Create MNA system and stamp coupling resistors
         let mut mna = pedalkernel_rt::tree::MnaSystem::new(n_mna, 0);
+        let output_feedback_node = plan
+            .blocks
+            .last()
+            .and_then(|block| block_cascade_output_node(&block.nl_edges, &block.port_nodes, graph));
+
+        let mut coupling_elements = Vec::new();
         for &eidx in &plan.coupling_edges {
             let e = &graph.edges[eidx];
             let comp = &graph.components[e.comp_idx];
@@ -991,6 +1230,27 @@ pub(super) fn try_build_blockwise(
                 node_to_mna.get(&e.node_b).copied()
             };
             mna.stamp_resistor(n1, n2, r);
+
+            let pot_meta = comp
+                .kind
+                .as_any()
+                .downcast_ref::<super::components::Potentiometer>()
+                .map(|p| (p.max_r, p.taper));
+            let invert_control = pot_meta.is_some()
+                && output_feedback_node
+                    .map(|node| e.node_a == node || e.node_b == node)
+                    .unwrap_or(false);
+            coupling_elements.push(pedalkernel_rt::stage::CouplingElement {
+                comp_id: comp.id.clone(),
+                node_a: n1,
+                node_b: n2,
+                resistance: r,
+                pot_max_resistance: pot_meta.map(|(max_r, _)| max_r),
+                taper: pot_meta
+                    .map(|(_, taper)| taper)
+                    .unwrap_or(pedalkernel_rt::pot_taper::PotTaper::B),
+                invert_control,
+            });
         }
 
         // GMIN regularization (prevent singular matrix)
@@ -1014,20 +1274,26 @@ pub(super) fn try_build_blockwise(
         // rather than the cascade junction.
         let mut used_ports: HashSet<NodeId> = HashSet::new();
         for (bi, block) in plan.blocks.iter().enumerate() {
-            let best_node = block
-                .port_nodes
-                .iter()
-                .filter(|pn| node_to_mna.contains_key(pn) && !used_ports.contains(pn))
-                .max_by_key(|&&pn| {
-                    plan.coupling_edges
-                        .iter()
-                        .filter(|&&eidx| {
-                            let e = &graph.edges[eidx];
-                            e.node_a == pn || e.node_b == pn
-                        })
-                        .count()
-                })
-                .copied();
+            let preferred_node =
+                block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph)
+                    .filter(|pn| node_to_mna.contains_key(pn) && !used_ports.contains(pn));
+
+            let best_node = preferred_node.or_else(|| {
+                block
+                    .port_nodes
+                    .iter()
+                    .filter(|pn| node_to_mna.contains_key(pn) && !used_ports.contains(pn))
+                    .max_by_key(|&&pn| {
+                        plan.coupling_edges
+                            .iter()
+                            .filter(|&&eidx| {
+                                let e = &graph.edges[eidx];
+                                e.node_a == pn || e.node_b == pn
+                            })
+                            .count()
+                    })
+                    .copied()
+            });
 
             if let Some(pn) = best_node {
                 let mna_idx = node_to_mna[&pn];
@@ -1054,6 +1320,39 @@ pub(super) fn try_build_blockwise(
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=None (no unique coupling node)");
             }
+        }
+
+        let mut feedback_port_map: Vec<(usize, usize)> = Vec::new();
+        for (bi, block) in plan.blocks.iter().enumerate() {
+            let Some(output_node) =
+                block_cascade_output_node(&block.nl_edges, &block.port_nodes, graph)
+            else {
+                continue;
+            };
+            if used_ports.contains(&output_node) {
+                continue;
+            }
+            if !plan.coupling_edges.iter().any(|&eidx| {
+                let e = &graph.edges[eidx];
+                e.node_a == output_node || e.node_b == output_node
+            }) {
+                continue;
+            }
+            let Some(&mna_idx) = node_to_mna.get(&output_node) else {
+                continue;
+            };
+            let scattering_idx = ports.len();
+            ports.push(pedalkernel_rt::tree::WdfPort {
+                node_pos: Some(mna_idx),
+                node_neg: None,
+                resistance: r_source_cascade,
+            });
+            feedback_port_map.push((bi, scattering_idx));
+            used_ports.insert(output_node);
+            #[cfg(test)]
+            eprintln!(
+                "    feedback port block {bi}: node={output_node} → mna_node=Some({mna_idx}), scattering_port={scattering_idx}"
+            );
         }
 
         // ── VS ports: one per input port that connects through a coupling edge ──
@@ -1197,10 +1496,14 @@ pub(super) fn try_build_blockwise(
             blocks: k_blocks,
             coupling_s: scattering,
             coupling_rp,
+            coupling_n_mna: n_mna,
+            coupling_ports: ports,
+            coupling_elements,
             n_ports,
             output_block,
             supply_voltage,
             vs_port_map,
+            feedback_port_map,
             compensation: 1.0,
             oversampler: pedalkernel_rt::oversampling::Oversampler::new(
                 pedalkernel_rt::oversampling::OversamplingFactor::X1,

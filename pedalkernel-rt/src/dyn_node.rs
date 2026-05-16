@@ -123,6 +123,19 @@ impl Clone for DynNode {
     }
 }
 
+fn projected_leaf_voltage(leaf: &LeafKind, incident: f64) -> f64 {
+    match leaf {
+        LeafKind::Resistor(_)
+        | LeafKind::Pot(_)
+        | LeafKind::Inductor(_)
+        | LeafKind::SwitchedResistor(_) => incident / 2.0,
+        LeafKind::Capacitor(cap) => (incident + cap.state) / 2.0,
+        LeafKind::LeakyCapacitor(cap) => incident * cap.leakage_decay,
+        LeafKind::VoltageSource(_) | LeafKind::Photocoupler(_) | LeafKind::JfetVr(_) => 0.0,
+        LeafKind::UnitDelay(_) => 0.0,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Constructors — backward-compatible factory methods
 // ═══════════════════════════════════════════════════════════════════════════
@@ -790,6 +803,73 @@ impl DynNode {
             }
         });
         best.get().map(|(v, _)| v)
+    }
+
+    /// Project the voltage at a named leaf for a root incident wave without
+    /// mutating leaf state. This is used by implicit solvers that need a
+    /// probe voltage during Newton iteration before the final down-sweep.
+    pub fn leaf_voltage_for_incident(&self, target_id: &str, a_root: f64) -> Option<f64> {
+        let best: Cell<Option<(f64, bool)>> = Cell::new(None);
+        self.visit_leaf_voltage_for_incident(target_id, a_root, &best);
+        best.get().map(|(v, _)| v)
+    }
+
+    fn visit_leaf_voltage_for_incident(
+        &self,
+        target_id: &str,
+        a: f64,
+        best: &Cell<Option<(f64, bool)>>,
+    ) {
+        match self {
+            Self::Leaf(leaf) => {
+                if leaf_matches_id(leaf, target_id) {
+                    let v = projected_leaf_voltage(leaf, a);
+                    let is_preferred = leaf.type_tag() == "pot" && !leaf.is_complement();
+                    match best.get() {
+                        None => best.set(Some((v, is_preferred))),
+                        Some((_, false)) if is_preferred => best.set(Some((v, true))),
+                        _ => {}
+                    }
+                }
+            }
+            Self::Binary {
+                kind,
+                left,
+                right,
+                gamma,
+                b1,
+                b2,
+                ..
+            } => match kind {
+                BinaryKind::Series => {
+                    let sum = *b1 + *b2 + a;
+                    let a1 = *b1 - *gamma * sum;
+                    let a2 = *b2 - (1.0 - *gamma) * sum;
+                    left.visit_leaf_voltage_for_incident(target_id, a1, best);
+                    right.visit_leaf_voltage_for_incident(target_id, a2, best);
+                }
+                BinaryKind::Parallel => {
+                    let diff = *b2 - *b1;
+                    let a1 = a + *gamma * diff;
+                    let a2 = a - (1.0 - *gamma) * diff;
+                    left.visit_leaf_voltage_for_incident(target_id, a1, best);
+                    right.visit_leaf_voltage_for_incident(target_id, a2, best);
+                }
+            },
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                ..
+            } => {
+                secondary.visit_leaf_voltage_for_incident(target_id, a / *turns_ratio, best);
+            }
+            Self::RType { adaptor, children } => {
+                let a_children = adaptor.scatter_down(a);
+                for (child, &a_i) in children.iter().zip(a_children.iter()) {
+                    child.visit_leaf_voltage_for_incident(target_id, a_i, best);
+                }
+            }
+        }
     }
 
     /// Return this leaf's component ID (only if this node is a leaf).
@@ -1553,6 +1633,30 @@ mod tests {
         let ptr = tree.resolve_port_vs_ptr("cv_cutoff").unwrap();
         let v = unsafe { *ptr };
         assert_eq!(v, 7.7, "ptr should read value set by tree walk");
+    }
+
+    #[test]
+    fn leaf_voltage_for_incident_matches_downsweep_without_mutating() {
+        let mut tree = make_simple_tree();
+        tree.set_voltage(1.0);
+        let _ = tree.reflected();
+
+        let before = tree.leaf_voltage("C1").unwrap();
+        let projected = tree.leaf_voltage_for_incident("C1", 0.25).unwrap();
+
+        let mut clone = tree.clone();
+        clone.set_incident(0.25);
+        let expected = clone.leaf_voltage("C1").unwrap();
+
+        assert!(
+            (projected - expected).abs() < 1e-12,
+            "projected voltage should match a real down-sweep: projected={projected}, expected={expected}"
+        );
+        assert_eq!(
+            tree.leaf_voltage("C1").unwrap(),
+            before,
+            "projection must not update original leaf state"
+        );
     }
 
     #[test]

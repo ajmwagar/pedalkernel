@@ -32,6 +32,11 @@ pub struct CompileOptions {
     /// Falls back to monolithic R-type adaptor. Use when blockwise
     /// produces incorrect pot bindings or signal routing.
     pub skip_blockwise: bool,
+    /// Diagnostic mode: build blockwise-decomposed nonlinear ladders as
+    /// serial WDF/K-method rung stages instead of packaging them into one
+    /// delay-free BlockwiseKMethod coupling stage. This intentionally breaks
+    /// delay-free feedback, so it is only useful for isolating rung behavior.
+    pub force_serial_blockwise: bool,
 }
 
 impl Default for CompileOptions {
@@ -43,6 +48,7 @@ impl Default for CompileOptions {
             collapse_nl: false,
             skip_k_tables: false,
             skip_blockwise: false,
+            force_serial_blockwise: false,
         }
     }
 }
@@ -122,6 +128,7 @@ pub fn compile_cache_key(source: &str, sample_rate: f64, options: &CompileOption
     options.skip_k_tables.hash(&mut hasher);
     options.collapse_nl.hash(&mut hasher);
     options.skip_blockwise.hash(&mut hasher);
+    options.force_serial_blockwise.hash(&mut hasher);
     (options.oversampling as u8).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }

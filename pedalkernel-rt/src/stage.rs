@@ -5599,6 +5599,30 @@ pub struct KMethodBlock {
     /// of Series adaptor = cap voltage). If false, from root port.
     /// Set by compiler from circuit graph topology.
     pub cascade_from_passive: bool,
+    /// Component ID to probe for cascade output, usually the rung shunt cap.
+    /// This is more robust than reconstructing voltage from adaptor internals.
+    pub cascade_probe_id: Option<alloc::string::String>,
+    /// Voltage-source polarity needed to drive this block's WDF tree.
+    ///
+    /// This mirrors `WdfStage::process()` root/topology sign handling. BKM
+    /// computes physical block drive voltages in the coupling/cascade domain,
+    /// then maps them into the WDF tree's voltage-source convention here.
+    pub source_polarity: f64,
+}
+
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CouplingElement {
+    pub comp_id: String,
+    pub node_a: Option<usize>,
+    pub node_b: Option<usize>,
+    pub resistance: f64,
+    pub pot_max_resistance: Option<f64>,
+    pub taper: crate::pot_taper::PotTaper,
+    /// Feedback amount controls are wired as series resistances in the
+    /// coupling graph, but the exposed control convention is "more = more
+    /// feedback." Invert position before converting to resistance.
+    pub invert_control: bool,
 }
 
 /// Blockwise K-method stage: N coupled NL blocks with linear coupling.
@@ -5623,6 +5647,13 @@ pub struct BlockwiseKMethodStage {
     pub coupling_s: Vec<f64>,
     /// Port resistances for each coupling port.
     pub coupling_rp: Vec<f64>,
+    /// MNA node count used to derive the coupling matrix.
+    pub coupling_n_mna: usize,
+    /// Ports used to derive the coupling scattering matrix.
+    pub coupling_ports: Vec<crate::tree::WdfPort>,
+    /// Linear elements stamped into the coupling MNA. Pot entries keep enough
+    /// metadata to recompute `coupling_s` when a coupling control moves.
+    pub coupling_elements: Vec<CouplingElement>,
     /// Number of coupling ports (blocks.len() + 1 for VS input).
     pub n_ports: usize,
     /// Which block index to tap for output.
@@ -5634,6 +5665,10 @@ pub struct BlockwiseKMethodStage {
     /// At runtime, port values are written to work_b[scattering_port_idx]
     /// before the coupling scatter. The scattering distributes them.
     pub vs_port_map: Vec<(String, usize)>,
+    /// Internal feedback drives: (block_index, scattering_port_index).
+    /// These inject the latest cascade output into coupling nodes such as the
+    /// TB-303 resonance path from the final emitter back to the first base.
+    pub feedback_port_map: Vec<(usize, usize)>,
     /// Passive attenuation compensation factor.
     pub compensation: f64,
     /// Oversampler for antialiasing.
@@ -5686,6 +5721,150 @@ impl BlockwiseKMethodStage {
     /// Convergence tolerance on wave variables.
     const TOL: f64 = 1e-6;
 
+    fn block_drive_voltage(block: &KMethodBlock, physical_voltage: f64) -> f64 {
+        block.source_polarity * physical_voltage
+    }
+
+    fn block_root_incident(block: &KMethodBlock, b_tree: f64) -> f64 {
+        if block.k_table.dims == 1 {
+            block.k_table.lookup_1d(b_tree)
+        } else {
+            block.k_table.lookup_2d(b_tree, 0.0)
+        }
+    }
+
+    fn solve_block_without_state_update(
+        block: &mut KMethodBlock,
+        physical_voltage: f64,
+    ) -> (f64, f64, f64) {
+        let drive_voltage = Self::block_drive_voltage(block, physical_voltage);
+        block.tree.set_voltage(drive_voltage);
+        let b_tree = block.tree.reflected();
+        let a_root = Self::block_root_incident(block, b_tree);
+        let raw_cascade = Self::block_output_voltage(block, a_root, b_tree);
+        (a_root, b_tree, raw_cascade - block.dc_offset)
+    }
+
+    fn solve_block_and_update_state(
+        block: &mut KMethodBlock,
+        physical_voltage: f64,
+    ) -> (f64, f64, f64) {
+        let (a_root, b_tree, cascade) =
+            Self::solve_block_without_state_update(block, physical_voltage);
+        block.tree.set_incident(a_root);
+        (a_root, b_tree, cascade)
+    }
+
+    fn write_vs_ports(&mut self, vs_signals: &[f64]) {
+        let n = self.n_ports;
+        for (i, &(ref name, vs_idx)) in self.vs_port_map.iter().enumerate() {
+            if vs_idx < n {
+                let v = if name.starts_with("_supply_") {
+                    self.supply_voltage
+                } else {
+                    vs_signals.get(i).copied().unwrap_or(0.0)
+                };
+                self.work_b[vs_idx] = 2.0 * v;
+            }
+        }
+    }
+
+    fn write_feedback_ports(&mut self, output: f64) {
+        let n = self.n_ports;
+        for &(block_idx, port_idx) in &self.feedback_port_map {
+            if port_idx < n {
+                let v = if block_idx == self.output_block {
+                    output
+                } else {
+                    self.b_warm.get(block_idx).copied().unwrap_or(0.0)
+                };
+                self.work_b[port_idx] = 2.0 * v;
+            }
+        }
+    }
+
+    fn scatter_coupling(&mut self) {
+        let n = self.n_ports;
+        for i in 0..n {
+            let mut sum = 0.0;
+            for j in 0..n {
+                sum += self.coupling_s[i * n + j] * self.work_b[j];
+            }
+            self.work_a[i] = sum;
+        }
+    }
+
+    fn run_block_cascade(
+        &mut self,
+        include_cascade: bool,
+        update_state: bool,
+        mut block_outputs: Option<&mut alloc::vec::Vec<f64>>,
+    ) -> f64 {
+        let mut cascade = 0.0;
+        for i in 0..self.blocks.len() {
+            let v_coupling = (self.work_a[i] + self.work_b[i]) / 2.0;
+            let v_block = if include_cascade && i > 0 {
+                v_coupling + cascade
+            } else {
+                v_coupling
+            };
+            let (a_root, _, next_cascade) = if update_state {
+                Self::solve_block_and_update_state(&mut self.blocks[i], v_block)
+            } else {
+                Self::solve_block_without_state_update(&mut self.blocks[i], v_block)
+            };
+            cascade = next_cascade;
+            self.work_b[i] = a_root;
+            if let Some(outputs) = block_outputs.as_deref_mut() {
+                outputs.push(cascade);
+            }
+        }
+        cascade
+    }
+
+    pub fn debug_process_with_block_outputs(
+        &mut self,
+        vs_signals: &[f64],
+    ) -> (f64, alloc::vec::Vec<f64>) {
+        if self.work_b.len() != self.n_ports {
+            self.init_buffers();
+        }
+
+        self.write_vs_ports(vs_signals);
+        self.scatter_coupling();
+
+        let mut outputs = alloc::vec::Vec::with_capacity(self.blocks.len());
+        let cascade = self.run_block_cascade(true, true, Some(&mut outputs));
+        (cascade, outputs)
+    }
+
+    fn block_output_voltage(block: &KMethodBlock, a_root: f64, b_tree: f64) -> f64 {
+        if let Some(ref probe_id) = block.cascade_probe_id {
+            if let Some(v) = block.tree.leaf_voltage_for_incident(probe_id, a_root) {
+                return v;
+            }
+        }
+
+        if block.cascade_from_passive {
+            if let DynNode::Binary {
+                kind: crate::dyn_node::BinaryKind::Series,
+                gamma,
+                b1,
+                b2,
+                ..
+            } = &block.tree
+            {
+                let sum = *b1 + *b2 + a_root;
+                let a_right = *b2 - (1.0 - *gamma) * sum;
+                (a_right + *b2) / 2.0
+            } else {
+                (a_root + b_tree) / 2.0
+            }
+        } else {
+            (a_root + b_tree) / 2.0
+        }
+    }
+
     /// Set a pot position in any block-local passive tree.
     ///
     /// Blockwise K-method stages are compiled from normal WDF subtrees, so pot
@@ -5710,7 +5889,55 @@ impl BlockwiseKMethodStage {
             }
         }
 
+        let mut coupling_found = false;
+        for element in &mut self.coupling_elements {
+            if element.comp_id == comp_id {
+                if let Some(max_r) = element.pot_max_resistance {
+                    let position = if element.invert_control {
+                        1.0 - value
+                    } else {
+                        value
+                    };
+                    let tapered = element.taper.apply(position.clamp(0.0, 1.0));
+                    element.resistance = (tapered * max_r).max(1.0);
+                    coupling_found = true;
+                }
+            }
+        }
+
+        if coupling_found {
+            self.recompute_coupling_scattering();
+            found = true;
+        }
+
         found
+    }
+
+    pub fn has_coupling_pot(&self, comp_id: &str) -> bool {
+        self.coupling_elements
+            .iter()
+            .any(|e| e.comp_id == comp_id && e.pot_max_resistance.is_some())
+    }
+
+    fn recompute_coupling_scattering(&mut self) {
+        if self.coupling_n_mna == 0 || self.coupling_ports.is_empty() {
+            return;
+        }
+
+        let mut mna = crate::tree::MnaSystem::new(self.coupling_n_mna, 0);
+        for element in &self.coupling_elements {
+            mna.stamp_resistor(element.node_a, element.node_b, element.resistance.max(1.0));
+        }
+        for i in 0..self.coupling_n_mna {
+            mna.stamp_resistor(Some(i), None, 1e9);
+        }
+
+        let scattering = mna.derive_scattering_matrix_general(&self.coupling_ports);
+        if scattering.len() == self.n_ports * self.n_ports
+            && scattering.iter().all(|v| v.is_finite())
+        {
+            self.coupling_s = scattering;
+        }
     }
 
     /// Solve the DC operating point by running zero-input samples until
@@ -5721,42 +5948,40 @@ impl BlockwiseKMethodStage {
         // Run 2000 samples of silence — enough for caps to reach DC equilibrium
         let zeros = vec![0.0; self.vs_port_map.len()];
         for _ in 0..2000 {
-            self.process(&zeros);
+            self.process_inner(&zeros, false);
         }
         // Record the converged DC state — use the same extraction method
         // as the cascade (cap voltage for cascade_from_passive, root port otherwise).
         // This ensures the DC offset matches what process() subtracts.
         //
         // Run one more sample at DC to get the final voltages.
-        self.process(&zeros);
+        self.process_inner(&zeros, false);
         let n_blocks = self.blocks.len();
         for i in 0..n_blocks {
             // Re-extract at the current converged state
             let b_tree = self.blocks[i].tree.reflected();
-            let a_root = if self.blocks[i].k_table.dims == 1 {
-                self.blocks[i].k_table.lookup_1d(b_tree)
-            } else {
-                self.blocks[i].k_table.lookup_2d(b_tree, 0.0)
-            };
+            let a_root = Self::block_root_incident(&self.blocks[i], b_tree);
             self.blocks[i].dc_offset = if self.blocks[i].cascade_from_passive {
-                if let DynNode::Binary {
-                    kind: crate::dyn_node::BinaryKind::Series,
-                    gamma,
-                    b1,
-                    b2,
-                    ..
-                } = &self.blocks[i].tree
-                {
-                    let sum = *b1 + *b2 + a_root;
-                    let a_right = *b2 - (1.0 - *gamma) * sum;
-                    (a_right + *b2) / 2.0
-                } else {
-                    (a_root + b_tree) / 2.0
-                }
+                Self::block_output_voltage(&self.blocks[i], a_root, b_tree)
             } else {
                 (a_root + b_tree) / 2.0
             };
         }
+
+        // Runtime BKM processing carries AC between rungs and subtracts each
+        // block's DC offset from the probed cascade voltage. Keep both the
+        // measured offsets and the converged reactive state: the cap state is
+        // part of the operating point, not scratch state.
+        for v in &mut self.work_a {
+            *v = 0.0;
+        }
+        for v in &mut self.work_b {
+            *v = 0.0;
+        }
+        for v in &mut self.b_warm {
+            *v = 0.0;
+        }
+
         #[cfg(feature = "std")]
         {
             for (i, block) in self.blocks.iter().enumerate() {
@@ -5802,103 +6027,43 @@ impl BlockwiseKMethodStage {
     /// in scattering order (matching `vs_port_map`). These are the input
     /// signals (audio, VCO, CV) that drive the coupling network.
     pub fn process(&mut self, vs_signals: &[f64]) -> f64 {
+        self.process_inner(vs_signals, true)
+    }
+
+    fn process_inner(&mut self, vs_signals: &[f64], include_cascade: bool) -> f64 {
         if self.work_b.len() != self.n_ports {
             self.init_buffers();
         }
-
-        let n_blocks = self.blocks.len();
-        let n = self.n_ports;
 
         // Write VS signals into the coupling scattering ports.
         // b = 2·V (WDF voltage source reflected wave).
         // External ports (audio, CV) come from vs_signals.
         // Supply ports (_supply_*) get the fixed supply voltage.
-        for (i, &(ref name, vs_idx)) in self.vs_port_map.iter().enumerate() {
-            if vs_idx < n {
-                let v = if name.starts_with("_supply_") {
-                    self.supply_voltage
-                } else {
-                    vs_signals.get(i).copied().unwrap_or(0.0)
-                };
-                self.work_b[vs_idx] = 2.0 * v;
-            }
-        }
+        self.write_vs_ports(vs_signals);
 
         let mut last_output = self.b_warm[0];
         let mut output = 0.0;
+
+        self.write_feedback_ports(last_output);
 
         for _iter in 0..Self::MAX_ITER {
             // 1. Coupling scatter: compute feedback + distribute VS signals.
             //    The coupling handles bias (R_bias), feedback (Resonance),
             //    and input injection (audio_in, vco_in, cv_cutoff).
-            for i in 0..n {
-                let mut sum = 0.0;
-                for j in 0..n {
-                    sum += self.coupling_s[i * n + j] * self.work_b[j];
-                }
-                self.work_a[i] = sum;
-            }
+            self.scatter_coupling();
 
             // 2. Serial cascade through the rungs.
             //    Each block's VS = previous rung's output + this block's
             //    coupling contribution (bias from supply, feedback, etc.).
             //    Block 0: VS from coupling only (input + feedback + bias).
             //    Blocks 1+: VS = previous output + coupling bias.
-            let mut cascade = 0.0;
+            output = self.run_block_cascade(include_cascade, false, None);
 
-            for i in 0..n_blocks {
-                // This block's voltage from the coupling scattering
-                let v_coupling = (self.work_a[i] + self.work_b[i]) / 2.0;
+            // 3. Feed current cascade output back into coupling ports for the
+            // next Newton iteration.
+            self.write_feedback_ports(output);
 
-                // Combine cascade (signal from previous rung) with coupling
-                // (bias from supply + any direct signal to this block)
-                let v_block = if i == 0 {
-                    v_coupling // block 0: all signal comes from coupling
-                } else {
-                    cascade + v_coupling // blocks 1+: cascade + bias
-                };
-
-                self.blocks[i].tree.set_voltage(v_block);
-
-                let b_tree = self.blocks[i].tree.reflected();
-                let a_root = if self.blocks[i].k_table.dims == 1 {
-                    self.blocks[i].k_table.lookup_1d(b_tree)
-                } else {
-                    self.blocks[i].k_table.lookup_2d(b_tree, 0.0)
-                };
-
-                // Cascade tap: cap voltage (lowpass filtered signal).
-                // Extract from passive subtree (right child of Series adaptor).
-                // Subtract DC offset to get AC component only — the cascade
-                // carries AC signal between rungs, not DC bias.
-                let raw_cascade = if self.blocks[i].cascade_from_passive {
-                    if let DynNode::Binary {
-                        kind: crate::dyn_node::BinaryKind::Series,
-                        gamma,
-                        b1,
-                        b2,
-                        ..
-                    } = &self.blocks[i].tree
-                    {
-                        let sum = *b1 + *b2 + a_root;
-                        let a_right = *b2 - (1.0 - *gamma) * sum;
-                        (a_right + *b2) / 2.0
-                    } else {
-                        (a_root + b_tree) / 2.0
-                    }
-                } else {
-                    (a_root + b_tree) / 2.0
-                };
-                cascade = raw_cascade - self.blocks[i].dc_offset;
-
-                // Store reflected wave for coupling scatter (feedback path)
-                self.work_b[i] = a_root;
-            }
-
-            // 3. Output from the last rung
-            output = cascade;
-
-            // 4. Convergence: Newton iterates until feedback stabilizes
+            // 4. Convergence: Newton iterates until feedback stabilizes.
             if (output - last_output).abs() < Self::TOL {
                 break;
             }
@@ -5906,24 +6071,7 @@ impl BlockwiseKMethodStage {
         }
 
         // Backward sweep: update cap states with converged cascade
-        let mut cascade = 0.0;
-        for i in 0..n_blocks {
-            let v_coupling = (self.work_a[i] + self.work_b[i]) / 2.0;
-            let v_block = if i == 0 {
-                v_coupling
-            } else {
-                cascade + v_coupling
-            };
-            self.blocks[i].tree.set_voltage(-v_block);
-            let b_tree = self.blocks[i].tree.reflected();
-            let a_root = if self.blocks[i].k_table.dims == 1 {
-                self.blocks[i].k_table.lookup_1d(b_tree)
-            } else {
-                self.blocks[i].k_table.lookup_2d(b_tree, 0.0)
-            };
-            self.blocks[i].tree.set_incident(a_root);
-            cascade = (a_root + b_tree) / 2.0;
-        }
+        let _ = self.run_block_cascade(include_cascade, true, None);
 
         // Save warm-start for next sample
         self.b_warm[0] = output;

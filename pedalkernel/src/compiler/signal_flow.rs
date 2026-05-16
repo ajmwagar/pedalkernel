@@ -617,9 +617,16 @@ fn claim_passive_edges(
     // shunt to ground are post-amplification components (tone caps,
     // coupling caps), NOT feedback network shunts. They should fall
     // through to passive grouping, not be claimed by the active group.
-    let active_output_nodes: HashSet<NodeId> = scc
+    let post_stage_output_nodes: HashSet<NodeId> = scc
         .iter()
-        .map(|&ei| active_elements[ei].output_node)
+        .filter_map(|&ei| {
+            let elem = &active_elements[ei];
+            let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+            match comp.kind.signal_terminals() {
+                SignalTerminals::Amplifier { .. } => Some(elem.output_node),
+                SignalTerminals::TwoPort { .. } | SignalTerminals::Passive => None,
+            }
+        })
         .collect();
     let voltage_source_output_nodes: HashSet<NodeId> = scc
         .iter()
@@ -667,7 +674,7 @@ fn claim_passive_edges(
         let rail_node = if a_rail { e.node_a } else { e.node_b };
         let rail_is_ground =
             rail_node == graph.gnd_node || graph.ac_ground_nodes.contains(&rail_node);
-        let at_output = active_output_nodes.contains(&non_rail_node) && rail_is_ground;
+        let at_output = post_stage_output_nodes.contains(&non_rail_node) && rail_is_ground;
 
         if !at_output
             && ((a_rail && group_nodes.contains(&e.node_b))
@@ -803,8 +810,10 @@ fn claim_passive_edges(
             if rails.contains(&other) {
                 // Ground/rail termination → ground shunt
                 let rail_is_gnd = other == graph.gnd_node || graph.ac_ground_nodes.contains(&other);
-                // Respect at_output exclusion for ground shunts at active outputs
-                if rail_is_gnd && active_output_nodes.contains(&node) {
+                // Respect at_output exclusion for post-stage ground shunts.
+                // Two-port nonlinear devices are not impedance boundaries:
+                // their output-node caps can be part of a ladder rung.
+                if rail_is_gnd && post_stage_output_nodes.contains(&node) {
                     continue;
                 }
                 ground_shunt_edges.push(eidx);

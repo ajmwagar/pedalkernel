@@ -2083,14 +2083,17 @@ fn contextual_edges_are_coupling() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Identical blocks must compile to identical WDF stages (shared K-table)
+// Identical blocks must compile to identical WDF stages.
+//
+// K-tables are generated per stage. Equal topology may produce equal table
+// contents, but the runtime should not rely on shared table storage.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn identical_blocks_produce_identical_port_resistance() {
     // When 4 identical blocks are compiled, all 4 WDF stages must have
     // the same port resistance. Different rp means different WDF trees,
-    // which means the dedup failed.
+    // which means the compiler did not build equivalent local blocks.
     let pedal = crate::dsl::parse_pedal_file(DIODE_CASCADE_WITH_CONTEXT).unwrap();
     let compiled = compile_cached(DIODE_CASCADE_WITH_CONTEXT, "dedup_test");
 
