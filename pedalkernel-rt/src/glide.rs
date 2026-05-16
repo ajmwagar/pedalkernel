@@ -86,6 +86,11 @@ impl Glide {
         self.current
     }
 
+    /// Returns true if glide is currently active (legato/slide mode).
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     pub fn reset(&mut self) {
         self.current = self.target;
         self.active = false;
