@@ -6,7 +6,7 @@
 //! Smoothing spreads parameter changes over ~32 samples to avoid zipper
 //! noise and CPU spikes from recomputation.
 
-use super::compiled::{CompiledPedal, ControlBinding, ControlTarget, Stage};
+use super::compiled::{CompiledPedal, ControlBinding, ControlTarget};
 use crate::dsl::{PedalDef, PotTaper};
 
 /// Bind control declarations to compiled stages.
@@ -95,111 +95,11 @@ fn find_pot_binding(
         .map(|p| (p.max_r, p.taper))
         .unwrap_or((100_000.0, PotTaper::B));
 
-    let aw_id = format!("{comp_id}__aw");
-    let wb_id = format!("{comp_id}__wb");
-
-    // Search all stages in the unified vec
+    // Search all stages in the unified vec. The stage owns the capability
+    // check so binding and runtime mutation cannot drift apart.
     for (idx, stage) in compiled.stages.iter().enumerate() {
-        match stage {
-            Stage::Wdf(wdf) => {
-                let in_wdf = wdf.has_pot(comp_id) || wdf.has_pot(&aw_id) || wdf.has_pot(&wb_id);
-                let is_feedback_pot = wdf.feedback_pot_id.as_deref() == Some(comp_id);
-                let is_feedback_ri_pot = wdf.feedback_ri_pot_id.as_deref() == Some(comp_id);
-
-                if in_wdf || is_feedback_pot || is_feedback_ri_pot {
-                    return Some(make_binding(
-                        ctrl,
-                        comp_id,
-                        &aw_id,
-                        &wb_id,
-                        max_r,
-                        taper,
-                        ControlTarget::PotInStage(idx),
-                    ));
-                }
-            }
-            Stage::MultiNl(mnl) => {
-                for (pi, child) in mnl.passive_children.iter().enumerate() {
-                    if child.get_pot_position(comp_id).is_some()
-                        || child.get_pot_position(&aw_id).is_some()
-                        || child.get_pot_position(&wb_id).is_some()
-                    {
-                        return Some(make_binding(
-                            ctrl,
-                            comp_id,
-                            &aw_id,
-                            &wb_id,
-                            max_r,
-                            taper,
-                            ControlTarget::PotInMultiNlStage(idx, pi),
-                        ));
-                    }
-                }
-                for child in &mnl.pot_children {
-                    if child.get_pot_position(comp_id).is_some()
-                        || child.get_pot_position(&aw_id).is_some()
-                        || child.get_pot_position(&wb_id).is_some()
-                    {
-                        return Some(make_binding(
-                            ctrl,
-                            comp_id,
-                            &aw_id,
-                            &wb_id,
-                            max_r,
-                            taper,
-                            ControlTarget::PotInMultiNlStage(idx, 0),
-                        ));
-                    }
-                }
-            }
-            Stage::Iir(iir) => {
-                if iir.has_pot(comp_id) {
-                    return Some(make_binding(
-                        ctrl,
-                        comp_id,
-                        &aw_id,
-                        &wb_id,
-                        max_r,
-                        taper,
-                        ControlTarget::PotInIirStage(idx),
-                    ));
-                }
-            }
-            Stage::BlackFeedback(bf) => {
-                if bf.has_pot(comp_id) {
-                    return Some(make_binding(
-                        ctrl,
-                        comp_id,
-                        &aw_id,
-                        &wb_id,
-                        max_r,
-                        taper,
-                        ControlTarget::PotInBlackFeedbackStage(idx),
-                    ));
-                }
-            }
-            Stage::StateSpace(_) => {
-                // TODO: StateSpaceStage G-matrix delta
-            }
-            Stage::BlockwiseKMethod(bkm) => {
-                // Search K-method block trees for pots
-                for (bi, block) in bkm.blocks.iter().enumerate() {
-                    if block.tree.get_pot_position(comp_id).is_some()
-                        || block.tree.get_pot_position(&aw_id).is_some()
-                        || block.tree.get_pot_position(&wb_id).is_some()
-                    {
-                        return Some(make_binding(
-                            ctrl,
-                            comp_id,
-                            &aw_id,
-                            &wb_id,
-                            max_r,
-                            taper,
-                            ControlTarget::PotInStage(idx),
-                        ));
-                    }
-                }
-            }
+        if let Some(target) = stage.control_target_for_pot(idx, comp_id) {
+            return Some(make_binding(ctrl, comp_id, max_r, taper, target));
         }
     }
 
@@ -209,8 +109,6 @@ fn find_pot_binding(
 fn make_binding(
     ctrl: &crate::dsl::ControlDef,
     comp_id: &str,
-    aw_id: &str,
-    wb_id: &str,
     max_r: f64,
     taper: PotTaper,
     target: ControlTarget,

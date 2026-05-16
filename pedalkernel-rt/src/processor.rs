@@ -49,6 +49,112 @@ impl core::fmt::Debug for Stage {
 }
 
 impl Stage {
+    /// Return the runtime target for a pot owned by this stage.
+    ///
+    /// This is the control-binding capability check. Keep stage-specific pot
+    /// discovery here so compiler-side binding cannot recognize a pot without
+    /// the matching runtime mutation path living next to it.
+    pub fn control_target_for_pot(&self, stage_idx: usize, comp_id: &str) -> Option<ControlTarget> {
+        let aw_id = format!("{comp_id}__aw");
+        let wb_id = format!("{comp_id}__wb");
+
+        match self {
+            Stage::Wdf(wdf) => {
+                let in_wdf = wdf.has_pot(comp_id) || wdf.has_pot(&aw_id) || wdf.has_pot(&wb_id);
+                let is_feedback_pot = wdf.feedback_pot_id.as_deref() == Some(comp_id);
+                let is_feedback_ri_pot = wdf.feedback_ri_pot_id.as_deref() == Some(comp_id);
+
+                if in_wdf || is_feedback_pot || is_feedback_ri_pot {
+                    Some(ControlTarget::PotInStage(stage_idx))
+                } else {
+                    None
+                }
+            }
+            Stage::MultiNl(mnl) => {
+                for (passive_child_idx, child) in mnl.passive_children.iter().enumerate() {
+                    if child.get_pot_position(comp_id).is_some()
+                        || child.get_pot_position(&aw_id).is_some()
+                        || child.get_pot_position(&wb_id).is_some()
+                    {
+                        return Some(ControlTarget::PotInMultiNlStage(
+                            stage_idx,
+                            passive_child_idx,
+                        ));
+                    }
+                }
+                for child in &mnl.pot_children {
+                    if child.get_pot_position(comp_id).is_some()
+                        || child.get_pot_position(&aw_id).is_some()
+                        || child.get_pot_position(&wb_id).is_some()
+                    {
+                        return Some(ControlTarget::PotInMultiNlStage(stage_idx, 0));
+                    }
+                }
+                None
+            }
+            Stage::Iir(iir) => iir
+                .has_pot(comp_id)
+                .then_some(ControlTarget::PotInIirStage(stage_idx)),
+            Stage::BlackFeedback(bf) => bf
+                .has_pot(comp_id)
+                .then_some(ControlTarget::PotInBlackFeedbackStage(stage_idx)),
+            Stage::BlockwiseKMethod(bkm) => {
+                for block in &bkm.blocks {
+                    if block.tree.get_pot_position(comp_id).is_some()
+                        || block.tree.get_pot_position(&aw_id).is_some()
+                        || block.tree.get_pot_position(&wb_id).is_some()
+                    {
+                        return Some(ControlTarget::PotInStage(stage_idx));
+                    }
+                }
+                None
+            }
+            Stage::StateSpace(_) => None,
+        }
+    }
+
+    /// Apply a normalized pot value to this stage if it owns `comp_id`.
+    ///
+    /// Returns true when the stage accepted the control. Each stage handles
+    /// its own recompute/update contract here.
+    pub fn set_control_pot(&mut self, comp_id: &str, value: f64) -> bool {
+        match self {
+            Stage::Wdf(wdf) => {
+                let changed = wdf.set_pot(comp_id, value);
+                if changed {
+                    wdf.flush_recompute();
+                }
+                changed
+            }
+            Stage::Iir(iir) => {
+                if iir.has_pot(comp_id) {
+                    iir.set_pot(comp_id, value);
+                    true
+                } else {
+                    false
+                }
+            }
+            Stage::MultiNl(mnl) => {
+                let changed = mnl.set_pot(comp_id, value);
+                if changed {
+                    mnl.flush_recompute();
+                }
+                changed
+            }
+            Stage::BlackFeedback(bf) => {
+                if bf.has_pot(comp_id) {
+                    bf.set_pot(comp_id, value);
+                    bf.update_ri_from_pot(comp_id, value);
+                    true
+                } else {
+                    false
+                }
+            }
+            Stage::BlockwiseKMethod(bkm) => bkm.set_pot(comp_id, value),
+            Stage::StateSpace(_) => false,
+        }
+    }
+
     /// Get a reference to the inner WdfStage, if this is a Wdf variant.
     pub fn as_wdf(&self) -> Option<&WdfStage> {
         if let Stage::Wdf(w) = self {
@@ -133,6 +239,99 @@ impl Stage {
 
 /// Legacy alias — being migrated to `Stage`.
 pub type StageRef = Stage;
+
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+    use alloc::string::ToString;
+
+    use super::{ControlTarget, Stage};
+    use crate::dyn_node::DynNode;
+    use crate::oversampling::{Oversampler, OversamplingFactor};
+    use crate::pot_taper::PotTaper;
+    use crate::stage::{BlackFeedbackStage, IirData, IirPotBinding, IirStage, RootKind, WdfStage};
+
+    #[test]
+    fn stage_owned_wdf_pot_discovery_and_mutation() {
+        let tree = DynNode::Series(
+            Box::new(DynNode::VoltageSource(0.0, 1.0)),
+            Box::new(DynNode::Pot(
+                "Tone".to_string(),
+                100_000.0,
+                0.5,
+                PotTaper::B,
+            )),
+        );
+        let wdf = WdfStage::new(
+            tree,
+            RootKind::ShortCircuit,
+            Oversampler::new(OversamplingFactor::X1),
+        );
+        let mut stage = Stage::Wdf(wdf);
+
+        let target = stage.control_target_for_pot(2, "Tone");
+        assert!(matches!(target, Some(ControlTarget::PotInStage(2))));
+        assert!(stage.control_target_for_pot(2, "Drive").is_none());
+
+        assert!(stage.set_control_pot("Tone", 0.8));
+        assert_eq!(
+            stage.as_wdf().unwrap().tree.get_pot_position("Tone"),
+            Some(0.8)
+        );
+        assert!(!stage.set_control_pot("Drive", 0.5));
+    }
+
+    #[test]
+    fn stage_owned_black_feedback_pot_discovery_and_mutation() {
+        let mut bf = BlackFeedbackStage::new_test(100_000.0, 10_000.0, true, 48_000.0);
+        bf.pot_comp_id = Some("Drive".to_string());
+        bf.pot_max_r = 100_000.0;
+        let mut stage = Stage::BlackFeedback(bf);
+
+        let target = stage.control_target_for_pot(3, "Drive");
+        assert!(matches!(
+            target,
+            Some(ControlTarget::PotInBlackFeedbackStage(3))
+        ));
+        assert!(stage.control_target_for_pot(3, "Tone").is_none());
+
+        assert!(stage.set_control_pot("Drive", 1.0));
+        let high_gain = stage.as_black_feedback().unwrap().gain().abs();
+
+        assert!(stage.set_control_pot("Drive", 0.1));
+        let low_gain = stage.as_black_feedback().unwrap().gain().abs();
+
+        assert!(high_gain > low_gain * 3.0);
+        assert!(!stage.set_control_pot("Tone", 0.5));
+    }
+
+    #[test]
+    fn stage_owned_iir_pot_discovery_and_mutation() {
+        let iir = IirData::new(
+            alloc::vec![1.0, 0.0, 0.0],
+            alloc::vec![1.0, 0.0, 0.0],
+            48_000.0,
+        );
+        let mut iir_stage = IirStage::new(iir);
+        iir_stage.pot_bindings.push(IirPotBinding {
+            comp_id: "Gain".to_string(),
+            max_r: 100_000.0,
+            fixed_series_r: 0.0,
+            ri: 10_000.0,
+            position: 0.0,
+        });
+        let mut stage = Stage::Iir(iir_stage);
+
+        let target = stage.control_target_for_pot(1, "Gain");
+        assert!(matches!(target, Some(ControlTarget::PotInIirStage(1))));
+        assert!(stage.control_target_for_pot(1, "Tone").is_none());
+
+        assert!(stage.set_control_pot("Gain", 0.8));
+        assert_eq!(stage.as_iir().unwrap().pot_bindings[0].position, 0.8);
+        assert!((stage.as_iir().unwrap().iir.b_coeffs[0] + 8.0).abs() < 1e-9);
+        assert!(!stage.set_control_pot("Tone", 0.5));
+    }
+}
 
 #[cfg(feature = "debug-trace")]
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -1439,27 +1638,7 @@ impl CompiledPedal {
                         // `value` is already tapered+ranged from above.
                         let comp_id = self.controls[i].component_id.clone();
                         for stage in &mut self.stages {
-                            match stage {
-                                Stage::Wdf(wdf) => {
-                                    wdf.set_pot(&comp_id, value);
-                                    wdf.flush_recompute();
-                                }
-                                Stage::Iir(iir) => {
-                                    iir.set_pot(&comp_id, value);
-                                }
-                                Stage::MultiNl(mnl) => {
-                                    mnl.set_pot(&comp_id, value);
-                                    mnl.flush_recompute();
-                                }
-                                Stage::BlackFeedback(bf) => {
-                                    bf.set_pot(&comp_id, value);
-                                    bf.update_ri_from_pot(&comp_id, value);
-                                }
-                                Stage::BlockwiseKMethod(bkm) => {
-                                    bkm.set_pot(&comp_id, value);
-                                }
-                                _ => {}
-                            }
+                            stage.set_control_pot(&comp_id, value);
                         }
                         if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
                             self.bbd_wet_mix = value;
@@ -1584,27 +1763,9 @@ impl CompiledPedal {
             });
         if let Some(mirrors) = mirror_info {
             let inv = 1.0 - value;
-            for (id, id_aw, id_wb) in &mirrors {
+            for (id, _, _) in &mirrors {
                 for stage in &mut self.stages {
-                    match stage {
-                        Stage::Wdf(wdf) => {
-                            wdf.set_pot(id, inv);
-                            wdf.set_pot(id_aw, inv);
-                            wdf.set_pot(id_wb, 1.0 - inv);
-                        }
-                        Stage::Iir(iir) => {
-                            iir.set_pot(id, inv);
-                        }
-                        Stage::MultiNl(mnl) => {
-                            mnl.set_pot(id, inv);
-                        }
-                        Stage::BlockwiseKMethod(bkm) => {
-                            bkm.set_pot(id, inv);
-                            bkm.set_pot(id_aw, inv);
-                            bkm.set_pot(id_wb, 1.0 - inv);
-                        }
-                        _ => {}
-                    }
+                    stage.set_control_pot(id, inv);
                 }
             }
         }
@@ -1634,27 +1795,7 @@ impl CompiledPedal {
                 // Update all stages — each stage ignores pots it doesn't own.
                 // Complement halves automatically use 1-value via the complement flag.
                 for stage in &mut self.stages {
-                    match stage {
-                        Stage::Wdf(wdf) => {
-                            wdf.set_pot(&comp_id, value);
-                            wdf.flush_recompute();
-                        }
-                        Stage::Iir(iir) => {
-                            iir.set_pot(&comp_id, value);
-                        }
-                        Stage::MultiNl(mnl) => {
-                            mnl.set_pot(&comp_id, value);
-                            mnl.flush_recompute();
-                        }
-                        Stage::BlackFeedback(bf) => {
-                            bf.set_pot(&comp_id, value);
-                            bf.update_ri_from_pot(&comp_id, value);
-                        }
-                        Stage::BlockwiseKMethod(bkm) => {
-                            bkm.set_pot(&comp_id, value);
-                        }
-                        _ => {}
-                    }
+                    stage.set_control_pot(&comp_id, value);
                 }
 
                 // Update wiper dividers
