@@ -2566,9 +2566,11 @@ impl PedalProcessor for CompiledPedal {
                 let stage_output = if stage_output.is_finite() {
                     stage_output
                 } else {
-                    static NAN_COUNT: core::sync::atomic::AtomicU64 =
-                        core::sync::atomic::AtomicU64::new(0);
-                    let n = NAN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    static NAN_COUNT: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let _n = NAN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "std")]
+                    let n = _n;
                     #[cfg(feature = "std")]
                     if n < 10 || n % 48000 == 0 {
                         std::eprintln!(
@@ -2645,9 +2647,11 @@ impl PedalProcessor for CompiledPedal {
                 let mnl_output = if mnl_output.is_finite() {
                     mnl_output
                 } else {
-                    static NAN_COUNT: core::sync::atomic::AtomicU64 =
-                        core::sync::atomic::AtomicU64::new(0);
-                    let n = NAN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    static NAN_COUNT: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let _n = NAN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "std")]
+                    let n = _n;
                     #[cfg(feature = "std")]
                     if n < 10 || n % 48000 == 0 {
                         let devices: String = if let Some(ref dg) = mnl.device_groups {
