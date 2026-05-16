@@ -40,6 +40,85 @@ fn measure_peak(compiled: &mut CompiledPedal, amp: f64) -> f64 {
     peak
 }
 
+fn measure_peak_and_rms(compiled: &mut CompiledPedal, amp: f64) -> (f64, f64) {
+    for s in 0..4000 {
+        compiled.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+    }
+    let mut peak = 0.0f64;
+    let mut sum_sq = 0.0f64;
+    let n = 2048;
+    for s in 0..n {
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin());
+        peak = peak.max(out.abs());
+        sum_sq += out * out;
+    }
+    (peak, (sum_sq / n as f64).sqrt())
+}
+
+#[cfg(debug_assertions)]
+fn stage_label(stage: &super::compiled::Stage) -> &str {
+    match stage {
+        super::compiled::Stage::Wdf(w) => w.debug_label.as_str(),
+        super::compiled::Stage::MultiNl(m) => m.debug_label.as_str(),
+        super::compiled::Stage::Iir(s) => s.debug_label.as_str(),
+        super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
+        super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
+        super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+    }
+}
+
+#[cfg(debug_assertions)]
+fn metered_goldenrod(gain: f64, output: f64, treble: f64, amp: f64) -> CompiledPedal {
+    let mut compiled = load_goldenrod();
+    compiled.set_control("Gain", gain);
+    compiled.set_control("Output", output);
+    compiled.set_control("Treble", treble);
+    compiled.enable_metering(128);
+    for s in 0..8000 {
+        compiled.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
+    }
+    compiled
+}
+
+#[cfg(debug_assertions)]
+fn stage_level(compiled: &CompiledPedal, label: &str) -> f64 {
+    let metrics = compiled.read_metrics();
+    compiled
+        .stages
+        .iter()
+        .enumerate()
+        .find_map(|(idx, stage)| {
+            (stage_label(stage).contains(label)).then(|| metrics.stage_levels[idx] as f64)
+        })
+        .unwrap_or_else(|| panic!("missing Goldenrod stage containing {label:?}"))
+}
+
+#[cfg(debug_assertions)]
+fn control_target_label(compiled: &CompiledPedal, component_id: &str) -> String {
+    let ctrl = compiled
+        .controls
+        .iter()
+        .find(|ctrl| ctrl.component_id == component_id)
+        .unwrap_or_else(|| panic!("missing Goldenrod control binding for {component_id:?}"));
+
+    let stage_idx = match ctrl.target {
+        super::compiled::ControlTarget::PotInStage(idx)
+        | super::compiled::ControlTarget::PotInIirStage(idx)
+        | super::compiled::ControlTarget::PotInBlackFeedbackStage(idx) => idx,
+        _ => panic!("{component_id:?} should bind to a pot-owning audio stage"),
+    };
+    stage_label(&compiled.stages[stage_idx]).to_string()
+}
+
+fn debug_value(compiled: &CompiledPedal, label: &str) -> f64 {
+    compiled
+        .control_debug_info()
+        .into_iter()
+        .find_map(|(name, _target, value)| name.contains(label).then_some(value))
+        .unwrap_or_else(|| panic!("missing Goldenrod debug entry containing {label:?}"))
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. Stage dump — what does the pipeline build?
 // ═══════════════════════════════════════════════════════════════════════════
@@ -387,14 +466,7 @@ fn goldenrod_gain_100_not_dead() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 5. Gain pot increases harmonics (THD) — THE KEY BUG TEST
-//
-// Root cause: Gain_A (ground-leg pot in U2 non-inverting gain stage) is in
-// a separate flow group from U2. It doesn't modulate U2's gain at all.
-// Only Gain_B (feedforward clean blend) responds to the Gain knob.
-// Result: high gain = less clean blend = quieter + fewer harmonics (inverted).
-//
-// Expected: high gain = more drive = more clipping = MORE harmonics.
+// 5. Goldenrod gain is a path crossfade, not a plain THD knob
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Measure THD by comparing fundamental power to harmonic power.
@@ -445,7 +517,48 @@ fn measure_thd(compiled: &mut CompiledPedal, amp: f64) -> f64 {
 }
 
 #[test]
-fn goldenrod_gain_increases_harmonics() {
+fn goldenrod_gain_moves_clean_and_dirty_paths() {
+    #[cfg(debug_assertions)]
+    {
+        let low_gain = metered_goldenrod(0.1, 0.7, 0.5, 0.01);
+        let high_gain = metered_goldenrod(0.9, 0.7, 0.5, 0.01);
+
+        let gain_a_stage = control_target_label(&low_gain, "Gain_A");
+        let gain_b_primary_stage = control_target_label(&low_gain, "Gain_B");
+        let gain_b_r_low = debug_value(&low_gain, "] Gain_B");
+        let gain_b_r_high = debug_value(&high_gain, "] Gain_B");
+        let dirty_low = stage_level(&low_gain, "U2");
+        let dirty_high = stage_level(&high_gain, "U2");
+        let sum_low = stage_level(&low_gain, "U3");
+        let sum_high = stage_level(&high_gain, "U3");
+
+        eprintln!(
+            "Goldenrod gain targets: Gain_A -> {gain_a_stage}, Gain_B primary -> {gain_b_primary_stage}; \
+             Gain_B R {gain_b_r_low:.1} -> {gain_b_r_high:.1}; \
+             dirty U2 {dirty_low:.4} -> {dirty_high:.4}, sum U3 {sum_low:.4} -> {sum_high:.4}"
+        );
+
+        assert!(
+            gain_a_stage.contains("U2"),
+            "Gain_A should target the U2 dirty gain stage, got {gain_a_stage:?}"
+        );
+        assert!(
+            (gain_b_r_high / gain_b_r_low.max(1e-9) - 1.0).abs() > 0.20,
+            "Gain_B pot resistance should move as Gain rises: low={gain_b_r_low:.1}, high={gain_b_r_high:.1}"
+        );
+        assert!(
+            dirty_low > 0.01 && dirty_high > 0.01,
+            "U2 dirty path should stay alive at both ends: low={dirty_low:.4}, high={dirty_high:.4}"
+        );
+        assert!(
+            (sum_high / sum_low.max(1e-9) - 1.0).abs() > 0.05,
+            "U3 summing stage should see the crossfade move: low={sum_low:.4}, high={sum_high:.4}"
+        );
+    }
+}
+
+#[test]
+fn goldenrod_gain_changes_output_without_thd_assumption() {
     let mut low_gain = load_goldenrod();
     low_gain.set_control("Gain", 0.1);
     let thd_low = measure_thd(&mut low_gain, 0.1);
@@ -458,19 +571,19 @@ fn goldenrod_gain_increases_harmonics() {
     eprintln!("THD at Gain=0.9: {thd_high:.1}%");
     eprintln!("Ratio (high/low): {:.2}x", thd_high / thd_low.max(0.001));
 
-    // The Klon blends clean feedforward with dirty path. At high gain,
-    // clean is removed and dirty clips harder, but the summing amp
-    // compresses the result. THD difference may be small.
-    // The key test is that both settings produce output (not dead).
-    let peak_low = measure_peak(&mut load_goldenrod(), 0.1);
-    let peak_high = measure_peak(
-        &mut {
-            let mut c = load_goldenrod();
-            c.set_control("Gain", 0.9);
-            c
-        },
-        0.1,
+    let mut low_gain = load_goldenrod();
+    low_gain.set_control("Gain", 0.1);
+    let (peak_low, rms_low) = measure_peak_and_rms(&mut low_gain, 0.1);
+
+    let mut high_gain = load_goldenrod();
+    high_gain.set_control("Gain", 0.9);
+    let (peak_high, rms_high) = measure_peak_and_rms(&mut high_gain, 0.1);
+
+    eprintln!(
+        "Output Gain=0.1 peak={peak_low:.4} rms={rms_low:.4}; \
+         Gain=0.9 peak={peak_high:.4} rms={rms_high:.4}"
     );
+
     assert!(
         peak_high > 0.01,
         "High gain should produce output: {peak_high:.4}"
@@ -478,6 +591,10 @@ fn goldenrod_gain_increases_harmonics() {
     assert!(
         peak_low > 0.0001,
         "Low gain should produce output: {peak_low:.4}"
+    );
+    assert!(
+        (rms_high / rms_low.max(1e-9) - 1.0).abs() > 0.05,
+        "Gain crossfade should change final level even when THD is compressed: low={rms_low:.4}, high={rms_high:.4}"
     );
 }
 

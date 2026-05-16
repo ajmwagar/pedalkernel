@@ -1189,6 +1189,15 @@ pub struct WdfStage {
     /// Input resistance (Ri) for gain computation. Read from pendant tree
     /// port resistance or input-touching resistor at compile time.
     pub feedback_ri: f64,
+    /// Pot in the op-amp ground/input leg whose resistance controls Ri.
+    ///
+    /// Some compiler splits consume this pot into scalar gain setup instead of
+    /// keeping it as a WDF leaf in the same stage. These fields preserve the
+    /// runtime mapping so the control can still update op-amp gain.
+    pub feedback_ri_pot_id: Option<String>,
+    pub feedback_ri_fixed_r: f64,
+    pub feedback_ri_pot_max_r: f64,
+    pub feedback_ri_pot_taper: crate::pot_taper::PotTaper,
     /// When set, extract output voltage at this component (pot leaf) in the
     /// WDF tree instead of at the root junction. After the down-sweep,
     /// V_out = a_leaf / 2 (for a resistive leaf where b=0).
@@ -1323,6 +1332,10 @@ impl WdfStage {
             feedback_pot_id: None,
             feedback_series_r: 0.0,
             feedback_ri: f64::INFINITY,
+            feedback_ri_pot_id: None,
+            feedback_ri_fixed_r: 0.0,
+            feedback_ri_pot_max_r: 0.0,
+            feedback_ri_pot_taper: crate::pot_taper::PotTaper::B,
             output_probe: None,
             feedback_opamp: None,
             k_table: None,
@@ -2440,6 +2453,65 @@ impl WdfStage {
         }
     }
 
+    pub fn update_feedback_ri_from_pot(&mut self, comp_id: &str, position: f64) -> bool {
+        if self.feedback_ri_pot_id.as_deref() != Some(comp_id) {
+            return false;
+        }
+
+        let tapered = self.feedback_ri_pot_taper.apply(position);
+        let pot_r = (tapered * self.feedback_ri_pot_max_r).max(1.0);
+        let ri = self.feedback_ri_fixed_r + pot_r;
+        if ri > 0.0 && ri.is_finite() {
+            let previous_ri = self.feedback_ri;
+            self.feedback_ri = ri;
+            let rf = if let Some(ref pot_id) = self.feedback_pot_id {
+                let rf = self
+                    .tree
+                    .get_pot_resistance(pot_id)
+                    .or_else(|| {
+                        self.zf_child
+                            .as_ref()
+                            .and_then(|c| c.get_pot_resistance(pot_id))
+                    })
+                    .or_else(|| {
+                        self.zg_child
+                            .as_ref()
+                            .and_then(|c| c.get_pot_resistance(pot_id))
+                    })
+                    .or_else(|| {
+                        self.opamp_children
+                            .iter()
+                            .find_map(|c| c.get_pot_resistance(pot_id))
+                    })
+                    .map(|r| r + self.feedback_series_r)
+                    .unwrap_or(self.feedback_series_r);
+                rf
+            } else if previous_ri > 0.0 && previous_ri.is_finite() {
+                match &self.root {
+                    RootKind::OpAmp(oa) => oa.gain().abs() * previous_ri,
+                    _ => self
+                        .feedback_opamp
+                        .as_ref()
+                        .map(|oa| oa.gain().abs() * previous_ri)
+                        .unwrap_or(0.0),
+                }
+            } else {
+                0.0
+            };
+            if rf > 0.0 {
+                let gain = rf / ri;
+                if let RootKind::OpAmp(ref mut oa) = self.root {
+                    oa.set_gain(gain);
+                }
+                if let Some(ref mut oa) = self.feedback_opamp {
+                    oa.set_gain(gain);
+                }
+            }
+        }
+
+        true
+    }
+
     /// Set a pot position in this stage, checking tree + all opamp children.
     ///
     /// Uses accumulator pattern (not early return) so split pots (__aw/__wb)
@@ -2527,6 +2599,9 @@ impl WdfStage {
         if found {
             self.recompute_all();
             self.notify_pot_changed();
+        }
+        if self.update_feedback_ri_from_pot(comp_id, value) {
+            found = true;
         }
         found
     }
@@ -5610,6 +5685,33 @@ impl BlockwiseKMethodStage {
     const MAX_ITER: usize = 8;
     /// Convergence tolerance on wave variables.
     const TOL: f64 = 1e-6;
+
+    /// Set a pot position in any block-local passive tree.
+    ///
+    /// Blockwise K-method stages are compiled from normal WDF subtrees, so pot
+    /// updates use the same dirty-path recompute as WDF stages. Split pot
+    /// halves are intentionally handled here because BKM controls bind through
+    /// the generic PotInStage target.
+    pub fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
+        let aw_id = alloc::format!("{comp_id}__aw");
+        let wb_id = alloc::format!("{comp_id}__wb");
+        let mut found = false;
+
+        for block in &mut self.blocks {
+            let mut block_found = false;
+            block_found |= block.tree.set_pot_dirty(comp_id, value);
+            block_found |= block.tree.set_pot_dirty(&aw_id, value);
+            block_found |= block.tree.set_pot_dirty(&wb_id, 1.0 - value);
+
+            if block_found {
+                block.tree.recompute_incremental();
+                block.rp = block.tree.port_resistance();
+                found = true;
+            }
+        }
+
+        found
+    }
 
     /// Solve the DC operating point by running zero-input samples until
     /// cap states converge. This is the equivalent of SPICE `.op` analysis.

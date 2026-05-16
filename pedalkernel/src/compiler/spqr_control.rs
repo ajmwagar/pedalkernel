@@ -104,8 +104,9 @@ fn find_pot_binding(
             Stage::Wdf(wdf) => {
                 let in_wdf = wdf.has_pot(comp_id) || wdf.has_pot(&aw_id) || wdf.has_pot(&wb_id);
                 let is_feedback_pot = wdf.feedback_pot_id.as_deref() == Some(comp_id);
+                let is_feedback_ri_pot = wdf.feedback_ri_pot_id.as_deref() == Some(comp_id);
 
-                if in_wdf || is_feedback_pot {
+                if in_wdf || is_feedback_pot || is_feedback_ri_pot {
                     return Some(make_binding(
                         ctrl,
                         comp_id,

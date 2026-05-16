@@ -1455,6 +1455,9 @@ impl CompiledPedal {
                                     bf.set_pot(&comp_id, value);
                                     bf.update_ri_from_pot(&comp_id, value);
                                 }
+                                Stage::BlockwiseKMethod(bkm) => {
+                                    bkm.set_pot(&comp_id, value);
+                                }
                                 _ => {}
                             }
                         }
@@ -1595,6 +1598,11 @@ impl CompiledPedal {
                         Stage::MultiNl(mnl) => {
                             mnl.set_pot(id, inv);
                         }
+                        Stage::BlockwiseKMethod(bkm) => {
+                            bkm.set_pot(id, inv);
+                            bkm.set_pot(id_aw, inv);
+                            bkm.set_pot(id_wb, 1.0 - inv);
+                        }
                         _ => {}
                     }
                 }
@@ -1641,6 +1649,9 @@ impl CompiledPedal {
                         Stage::BlackFeedback(bf) => {
                             bf.set_pot(&comp_id, value);
                             bf.update_ri_from_pot(&comp_id, value);
+                        }
+                        Stage::BlockwiseKMethod(bkm) => {
+                            bkm.set_pot(&comp_id, value);
                         }
                         _ => {}
                     }
@@ -3138,6 +3149,21 @@ impl PedalProcessor for CompiledPedal {
                                         let pos = leaf.pot_position().unwrap_or(0.0);
                                         let r = leaf.port_resistance();
                                         out.push((format!("[m{}] {}", si, id), pos, r));
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                Stage::BlockwiseKMethod(bkm) => {
+                    for (bi, block) in bkm.blocks.iter().enumerate() {
+                        block.tree.for_each_leaf(&mut |leaf| {
+                            if leaf.type_tag() == "pot" {
+                                if let Some(id) = leaf.comp_id() {
+                                    if seen.insert(format!("b{}:{}:{}", si, bi, id)) {
+                                        let pos = leaf.pot_position().unwrap_or(0.0);
+                                        let r = leaf.port_resistance();
+                                        out.push((format!("[b{}.{}] {}", si, bi, id), pos, r));
                                     }
                                 }
                             }

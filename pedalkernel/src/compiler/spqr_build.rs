@@ -432,6 +432,7 @@ pub fn compile_via_spqr_with_options(
                             let mut ri_fixed = 0.0f64;
                             let mut ri_pot_id: Option<String> = None;
                             let mut ri_pot_max_r = 0.0f64;
+                            let mut ri_pot_taper = crate::dsl::PotTaper::B;
                             let mut ri_pot_initial_r = 0.0f64;
                             let mut visited = std::collections::HashSet::new();
                             let mut frontier = vec![neg];
@@ -455,6 +456,10 @@ pub fn compile_via_spqr_with_options(
                                         if let Some(max_r) = comp.kind.resistance() {
                                             ri_pot_id = Some(comp.id.clone());
                                             ri_pot_max_r = max_r;
+                                            ri_pot_taper = comp
+                                                .kind
+                                                .pot_taper()
+                                                .unwrap_or(crate::dsl::PotTaper::B);
                                             ri_pot_initial_r = max_r * 0.5; // default position
                                             ri_fixed += ri_pot_initial_r; // add initial pot R to total
                                             visited.insert(other);
@@ -497,6 +502,12 @@ pub fn compile_via_spqr_with_options(
                                 if rf > 0.0 {
                                     opamp.set_gain(rf / ri);
                                     wdf.feedback_ri = ri;
+                                    if let Some(pot_id) = ri_pot_id {
+                                        wdf.feedback_ri_pot_id = Some(pot_id);
+                                        wdf.feedback_ri_fixed_r = ri_fixed - ri_pot_max_r * 0.5;
+                                        wdf.feedback_ri_pot_max_r = ri_pot_max_r;
+                                        wdf.feedback_ri_pot_taper = ri_pot_taper;
+                                    }
                                 }
                             }
                         }
@@ -787,8 +798,8 @@ pub fn compile_via_spqr_with_options(
                         .filter(|g| g.has_feedback())
                         .flat_map(|g| g.all_edges())
                         .flat_map(|eidx| {
-                                let e = &graph.edges[eidx];
-                                [e.node_a, e.node_b].into_iter()
+                            let e = &graph.edges[eidx];
+                            [e.node_a, e.node_b].into_iter()
                         })
                         .collect();
                 let main_outputs: std::collections::HashSet<super::graph::NodeId> = graph
