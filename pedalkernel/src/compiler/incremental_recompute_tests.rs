@@ -52,7 +52,7 @@ fn wdf_voltage_source_is_not_dynamic() {
     let vs = WdfVoltageSource {
         voltage: 0.0,
         rp: 1.0,
-        is_cathode_bias: false,
+        is_cathode_bias: false, port_name: None,
     };
     assert!(!vs.is_dynamic(), "WdfVoltageSource should NOT be dynamic");
 }

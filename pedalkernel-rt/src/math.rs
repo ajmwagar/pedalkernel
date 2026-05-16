@@ -6,103 +6,197 @@
 #[cfg(feature = "std")]
 mod inner {
     #[inline(always)]
-    pub fn sin(x: f64) -> f64 { x.sin() }
+    pub fn sin(x: f64) -> f64 {
+        x.sin()
+    }
     #[inline(always)]
-    pub fn cos(x: f64) -> f64 { x.cos() }
+    pub fn cos(x: f64) -> f64 {
+        x.cos()
+    }
     #[inline(always)]
-    pub fn exp(x: f64) -> f64 { x.exp() }
+    pub fn exp(x: f64) -> f64 {
+        x.exp()
+    }
     #[inline(always)]
-    pub fn ln(x: f64) -> f64 { x.ln() }
+    pub fn ln(x: f64) -> f64 {
+        x.ln()
+    }
     #[inline(always)]
-    pub fn log10(x: f64) -> f64 { x.log10() }
+    pub fn log10(x: f64) -> f64 {
+        x.log10()
+    }
     #[inline(always)]
-    pub fn sqrt(x: f64) -> f64 { x.sqrt() }
+    pub fn sqrt(x: f64) -> f64 {
+        x.sqrt()
+    }
     #[inline(always)]
-    pub fn powf(x: f64, y: f64) -> f64 { x.powf(y) }
+    pub fn powf(x: f64, y: f64) -> f64 {
+        x.powf(y)
+    }
     #[inline(always)]
-    pub fn tan(x: f64) -> f64 { x.tan() }
+    pub fn tan(x: f64) -> f64 {
+        x.tan()
+    }
     #[inline(always)]
-    pub fn tanh(x: f64) -> f64 { x.tanh() }
+    pub fn tanh(x: f64) -> f64 {
+        x.tanh()
+    }
     #[inline(always)]
-    pub fn abs(x: f64) -> f64 { x.abs() }
+    pub fn abs(x: f64) -> f64 {
+        x.abs()
+    }
     #[inline(always)]
-    pub fn atan2(y: f64, x: f64) -> f64 { y.atan2(x) }
+    pub fn atan2(y: f64, x: f64) -> f64 {
+        y.atan2(x)
+    }
     #[inline(always)]
-    pub fn floor(x: f64) -> f64 { x.floor() }
+    pub fn floor(x: f64) -> f64 {
+        x.floor()
+    }
     #[inline(always)]
-    pub fn ceil(x: f64) -> f64 { x.ceil() }
+    pub fn ceil(x: f64) -> f64 {
+        x.ceil()
+    }
     #[inline(always)]
-    pub fn round(x: f64) -> f64 { x.round() }
+    pub fn round(x: f64) -> f64 {
+        x.round()
+    }
     #[inline(always)]
-    pub fn atan(x: f64) -> f64 { x.atan() }
+    pub fn atan(x: f64) -> f64 {
+        x.atan()
+    }
     #[inline(always)]
-    pub fn log2(x: f64) -> f64 { x.log2() }
+    pub fn log2(x: f64) -> f64 {
+        x.log2()
+    }
     #[inline(always)]
-    pub fn sinh(x: f64) -> f64 { x.sinh() }
+    pub fn sinh(x: f64) -> f64 {
+        x.sinh()
+    }
     #[inline(always)]
-    pub fn cosh(x: f64) -> f64 { x.cosh() }
+    pub fn cosh(x: f64) -> f64 {
+        x.cosh()
+    }
     #[inline(always)]
-    pub fn asin(x: f64) -> f64 { x.asin() }
+    pub fn asin(x: f64) -> f64 {
+        x.asin()
+    }
     #[inline(always)]
-    pub fn cbrt(x: f64) -> f64 { x.cbrt() }
+    pub fn cbrt(x: f64) -> f64 {
+        x.cbrt()
+    }
     #[inline(always)]
-    pub fn copysign(x: f64, y: f64) -> f64 { x.copysign(y) }
+    pub fn copysign(x: f64, y: f64) -> f64 {
+        x.copysign(y)
+    }
     #[inline(always)]
-    pub fn fma(x: f64, y: f64, z: f64) -> f64 { x.mul_add(y, z) }
+    pub fn fma(x: f64, y: f64, z: f64) -> f64 {
+        x.mul_add(y, z)
+    }
     #[inline(always)]
-    pub fn rem_euclid(x: f64, y: f64) -> f64 { x.rem_euclid(y) }
+    pub fn rem_euclid(x: f64, y: f64) -> f64 {
+        x.rem_euclid(y)
+    }
 }
 
 #[cfg(not(feature = "std"))]
 mod inner {
     #[inline(always)]
-    pub fn sin(x: f64) -> f64 { libm::sin(x) }
+    pub fn sin(x: f64) -> f64 {
+        libm::sin(x)
+    }
     #[inline(always)]
-    pub fn cos(x: f64) -> f64 { libm::cos(x) }
+    pub fn cos(x: f64) -> f64 {
+        libm::cos(x)
+    }
     #[inline(always)]
-    pub fn exp(x: f64) -> f64 { libm::exp(x) }
+    pub fn exp(x: f64) -> f64 {
+        libm::exp(x)
+    }
     #[inline(always)]
-    pub fn ln(x: f64) -> f64 { libm::log(x) }
+    pub fn ln(x: f64) -> f64 {
+        libm::log(x)
+    }
     #[inline(always)]
-    pub fn log10(x: f64) -> f64 { libm::log10(x) }
+    pub fn log10(x: f64) -> f64 {
+        libm::log10(x)
+    }
     #[inline(always)]
-    pub fn sqrt(x: f64) -> f64 { libm::sqrt(x) }
+    pub fn sqrt(x: f64) -> f64 {
+        libm::sqrt(x)
+    }
     #[inline(always)]
-    pub fn powf(x: f64, y: f64) -> f64 { libm::pow(x, y) }
+    pub fn powf(x: f64, y: f64) -> f64 {
+        libm::pow(x, y)
+    }
     #[inline(always)]
-    pub fn tan(x: f64) -> f64 { libm::tan(x) }
+    pub fn tan(x: f64) -> f64 {
+        libm::tan(x)
+    }
     #[inline(always)]
-    pub fn tanh(x: f64) -> f64 { libm::tanh(x) }
+    pub fn tanh(x: f64) -> f64 {
+        libm::tanh(x)
+    }
     #[inline(always)]
-    pub fn abs(x: f64) -> f64 { libm::fabs(x) }
+    pub fn abs(x: f64) -> f64 {
+        libm::fabs(x)
+    }
     #[inline(always)]
-    pub fn atan2(y: f64, x: f64) -> f64 { libm::atan2(y, x) }
+    pub fn atan2(y: f64, x: f64) -> f64 {
+        libm::atan2(y, x)
+    }
     #[inline(always)]
-    pub fn floor(x: f64) -> f64 { libm::floor(x) }
+    pub fn floor(x: f64) -> f64 {
+        libm::floor(x)
+    }
     #[inline(always)]
-    pub fn ceil(x: f64) -> f64 { libm::ceil(x) }
+    pub fn ceil(x: f64) -> f64 {
+        libm::ceil(x)
+    }
     #[inline(always)]
-    pub fn round(x: f64) -> f64 { libm::round(x) }
+    pub fn round(x: f64) -> f64 {
+        libm::round(x)
+    }
     #[inline(always)]
-    pub fn atan(x: f64) -> f64 { libm::atan(x) }
+    pub fn atan(x: f64) -> f64 {
+        libm::atan(x)
+    }
     #[inline(always)]
-    pub fn log2(x: f64) -> f64 { libm::log2(x) }
+    pub fn log2(x: f64) -> f64 {
+        libm::log2(x)
+    }
     #[inline(always)]
-    pub fn sinh(x: f64) -> f64 { libm::sinh(x) }
+    pub fn sinh(x: f64) -> f64 {
+        libm::sinh(x)
+    }
     #[inline(always)]
-    pub fn cosh(x: f64) -> f64 { libm::cosh(x) }
+    pub fn cosh(x: f64) -> f64 {
+        libm::cosh(x)
+    }
     #[inline(always)]
-    pub fn asin(x: f64) -> f64 { libm::asin(x) }
+    pub fn asin(x: f64) -> f64 {
+        libm::asin(x)
+    }
     #[inline(always)]
-    pub fn cbrt(x: f64) -> f64 { libm::cbrt(x) }
+    pub fn cbrt(x: f64) -> f64 {
+        libm::cbrt(x)
+    }
     #[inline(always)]
-    pub fn copysign(x: f64, y: f64) -> f64 { libm::copysign(x, y) }
+    pub fn copysign(x: f64, y: f64) -> f64 {
+        libm::copysign(x, y)
+    }
     #[inline(always)]
-    pub fn fma(x: f64, y: f64, z: f64) -> f64 { libm::fma(x, y, z) }
+    pub fn fma(x: f64, y: f64, z: f64) -> f64 {
+        libm::fma(x, y, z)
+    }
     #[inline(always)]
     pub fn rem_euclid(x: f64, y: f64) -> f64 {
         let r = libm::fmod(x, y);
-        if r < 0.0 { r + libm::fabs(y) } else { r }
+        if r < 0.0 {
+            r + libm::fabs(y)
+        } else {
+            r
+        }
     }
 }
 

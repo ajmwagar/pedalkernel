@@ -63,7 +63,10 @@ impl TriodeModel {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriodeRoot {
     pub model: TriodeModel,
-    /// Current grid-cathode voltage (external control parameter).
+    /// DC grid-cathode bias voltage, set at compile time from circuit analysis.
+    /// The runtime input signal modulates around this operating point.
+    vgk_bias: f64,
+    /// Current grid-cathode voltage (bias + AC signal).
     vgk: f64,
     /// Maximum plate voltage (determined by supply rail B+).
     /// Triode plate can swing from 0V (saturated) to B+ (cutoff).
@@ -80,7 +83,8 @@ impl TriodeRoot {
     pub fn new(model: TriodeModel) -> Self {
         Self {
             model,
-            vgk: 0.0,
+            vgk_bias: -2.0, // Default: typical 12AX7 bias
+            vgk: -2.0,
             v_max: 500.0,
             max_iter: super::solver::NR_MAX_ITER,
             parallel_count: 1,
@@ -92,7 +96,8 @@ impl TriodeRoot {
     pub fn new_with_v_max(model: TriodeModel, v_max: f64) -> Self {
         Self {
             model,
-            vgk: 0.0,
+            vgk_bias: -2.0,
+            vgk: -2.0,
             v_max: v_max.max(1.0),
             max_iter: super::solver::NR_MAX_ITER,
             parallel_count: 1,
@@ -128,6 +133,17 @@ impl TriodeRoot {
 
     pub fn parallel_count(&self) -> usize {
         self.parallel_count
+    }
+
+    /// Set the DC bias operating point from circuit analysis.
+    pub fn set_bias(&mut self, vgk_bias: f64) {
+        self.vgk_bias = vgk_bias;
+        self.vgk = vgk_bias;
+    }
+
+    /// Get the DC bias operating point.
+    pub fn vgk_bias(&self) -> f64 {
+        self.vgk_bias
     }
 
     /// Set the grid-cathode voltage (external control from bias, signal, LFO).
@@ -228,7 +244,8 @@ impl TriodeRoot {
 
         // d(base^Ex / KG1)/dVpk = Ex * base^(Ex-1) * dbase_dvpk / KG1
         // Scale by parallel_count to match plate_current() scaling.
-        (ex * crate::math::powf(base, ex - 1.0) * dbase_dvpk / self.model.kg1) * self.parallel_count as f64
+        (ex * crate::math::powf(base, ex - 1.0) * dbase_dvpk / self.model.kg1)
+            * self.parallel_count as f64
     }
 }
 

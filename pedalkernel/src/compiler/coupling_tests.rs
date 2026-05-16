@@ -67,7 +67,10 @@ fn v1_808_kick_compiles_and_oscillates() {
 
     eprintln!("v1 kick: peak={peak:.4}, freq={freq:.1}Hz");
     assert!(peak > 0.01, "v1 kick should produce output: peak={peak}");
-    assert!(freq > 90.0 && freq < 180.0, "v1 kick ~130Hz: got {freq:.1}Hz");
+    assert!(
+        freq > 90.0 && freq < 180.0,
+        "v1 kick ~130Hz: got {freq:.1}Hz"
+    );
 }
 
 #[test]
@@ -123,7 +126,9 @@ fn v2_808_kick_bjt_compiles_and_produces_output() {
     let mut any_bad = false;
     for _ in 0..48000 {
         let out = proc.process(0.0);
-        if !out.is_finite() { any_bad = true; }
+        if !out.is_finite() {
+            any_bad = true;
+        }
         peak = peak.max(out.abs());
     }
 

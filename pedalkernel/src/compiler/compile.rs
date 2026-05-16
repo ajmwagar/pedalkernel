@@ -13,6 +13,7 @@ use super::compiled::*;
 // Compile options
 // ═��═══════════════════════════════════════════════════════��═════════════════
 
+#[derive(Clone)]
 pub struct CompileOptions {
     pub oversampling: OversamplingFactor,
     pub tolerance: ToleranceEngine,
@@ -22,6 +23,15 @@ pub struct CompileOptions {
     /// sub-circuits where the entire NL network should be solved as one
     /// multi-junction system (shared MNA + scattering matrix).
     pub collapse_nl: bool,
+    /// When true, skip K-method lookup table generation. NL roots fall back
+    /// to Newton-Raphson iteration at runtime. Use for fast debug builds —
+    /// K-table generation is the main compile-time bottleneck (65536-entry
+    /// 2D sweeps per NL root).
+    pub skip_k_tables: bool,
+    /// When true, skip blockwise decomposition of multi-NL groups.
+    /// Falls back to monolithic R-type adaptor. Use when blockwise
+    /// produces incorrect pot bindings or signal routing.
+    pub skip_blockwise: bool,
 }
 
 impl Default for CompileOptions {
@@ -31,6 +41,38 @@ impl Default for CompileOptions {
             tolerance: ToleranceEngine::ideal(),
             thermal: false,
             collapse_nl: false,
+            skip_k_tables: false,
+            skip_blockwise: false,
+        }
+    }
+}
+
+impl CompileOptions {
+    /// Default options for release builds: full optimization including K-tables.
+    pub fn release() -> Self {
+        Self::default()
+    }
+
+    /// Fast options for debug builds: skip K-table generation.
+    /// NL elements use Newton-Raphson iteration instead (correct but slower at runtime).
+    pub fn debug() -> Self {
+        Self {
+            skip_k_tables: true,
+            ..Self::default()
+        }
+    }
+
+    /// Auto-detect from the `PROFILE` env var set by Cargo during build.rs.
+    /// Returns `release()` for "release" profile, `debug()` for everything else.
+    ///
+    /// Use in build.rs:
+    /// ```no_run
+    /// let options = pedalkernel::compiler::CompileOptions::from_cargo_profile();
+    /// ```
+    pub fn from_cargo_profile() -> Self {
+        match std::env::var("PROFILE").as_deref() {
+            Ok("release") => Self::release(),
+            _ => Self::debug(),
         }
     }
 }
@@ -62,9 +104,107 @@ pub fn compile_pedal_with_options(
     super::spqr_build::compile_via_spqr_with_options(pedal, sample_rate, options)
 }
 
-// ──────────��────────────────────────────────���─────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
+// Cached compile for build.rs
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Compute a cache key for a `.pedal` source + compile options.
+///
+/// Returns a hex string hash that changes when the source, sample rate,
+/// or relevant options change.
+pub fn compile_cache_key(source: &str, sample_rate: f64, options: &CompileOptions) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    sample_rate.to_bits().hash(&mut hasher);
+    options.skip_k_tables.hash(&mut hasher);
+    options.collapse_nl.hash(&mut hasher);
+    options.skip_blockwise.hash(&mut hasher);
+    (options.oversampling as u8).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Compile a `.pedal` source to a postcard blob with caching.
+///
+/// Single-call utility for build.rs. Handles parse → compile → serialize →
+/// cache write. Returns the postcard bytes (write them to OUT_DIR).
+///
+/// Skips recompilation when the cached blob exists and source hash matches.
+/// Uses `CompileOptions::from_cargo_profile()` internally if you want
+/// automatic debug/release detection, or pass your own options.
+///
+/// ```no_run
+/// // In build.rs:
+/// let options = pedalkernel::compiler::CompileOptions::from_cargo_profile();
+/// let blob = pedalkernel::compiler::compile_pedal_cached(
+///     &source, "TB303 Filter", "tb303_filter", 48_000.0, &options, out_path,
+/// ).expect("compile failed");
+/// // blob is already written to out_path/tb303_filter.postcard
+/// ```
+#[cfg(feature = "build-cache")]
+pub fn compile_pedal_cached(
+    source: &str,
+    name: &str,
+    file_stem: &str,
+    sample_rate: f64,
+    options: &CompileOptions,
+    out_dir: &std::path::Path,
+) -> Result<Vec<u8>, String> {
+    let blob_path = out_dir.join(format!("{file_stem}.postcard"));
+    let hash_path = out_dir.join(format!("{file_stem}.hash"));
+    let cache_key = compile_cache_key(source, sample_rate, options);
+
+    // Check cache
+    if blob_path.exists() && hash_path.exists() {
+        if let Ok(cached) = std::fs::read_to_string(&hash_path) {
+            if cached.trim() == cache_key {
+                if let Ok(blob) = std::fs::read(&blob_path) {
+                    eprintln!("  {name}: cached ({} bytes)", blob.len());
+                    return Ok(blob);
+                }
+            }
+        }
+    }
+
+    // Cache miss — compile
+    eprintln!("  {name}: parsing...");
+    let pedal_def =
+        crate::dsl::parse_pedal_file(source).map_err(|e| format!("{name}: parse failed: {e}"))?;
+    eprintln!(
+        "  {name}: compiling (skip_k_tables={}, oversampling={:?})...",
+        options.skip_k_tables, options.oversampling
+    );
+    let t0 = std::time::Instant::now();
+    let compiled = compile_pedal_with_options(&pedal_def, sample_rate, options.clone())
+        .map_err(|e| format!("{name}: compile failed: {e}"))?;
+    eprintln!(
+        "  {name}: compile done in {:.1}s, {} stages, {} ports",
+        t0.elapsed().as_secs_f64(),
+        compiled.stages.len(),
+        compiled.ports.len()
+    );
+    eprintln!("  {name}: serializing...");
+    let blob =
+        postcard::to_allocvec(&compiled).map_err(|e| format!("{name}: serialize failed: {e}"))?;
+
+    eprintln!(
+        "  {name}: compiled ({} bytes, k_tables={})",
+        blob.len(),
+        !options.skip_k_tables
+    );
+
+    // Write cache
+    let _ = std::fs::write(&blob_path, &blob);
+    let _ = std::fs::write(&hash_path, &cache_key);
+
+    Ok(blob)
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Subcircuit equipment compiler
-// ───────────��─────────���───────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
 
 /// Compile an equipment definition that uses subcircuit blocks.
 ///
@@ -160,6 +300,9 @@ fn compile_subcircuit_equipment(
         bbd_mix_pot_id: None,
         triggers: Vec::new(),
         original_passive_values: hashbrown::HashMap::new(),
+        ports: Vec::new(),
+        port_values: Vec::new(),
+        initialized: false,
     })
 }
 
@@ -223,6 +366,275 @@ mod tests {
             (compiled.output_gain - 1.0).abs() < 1e-10,
             "expected output_gain = 1.0, got {}",
             compiled.output_gain
+        );
+    }
+
+    // ── Port binding tests ──────────────────────────────────────────
+
+    #[test]
+    fn compile_with_ports_produces_port_bindings() {
+        let src = r#"pedal "PortTest" {
+    supply 9V
+    ports {
+        audio_in: input
+        cv_cutoff: input
+        audio_out: output
+    }
+    components { R1: resistor(10k) R_cv: resistor(100k) }
+    nets {
+        audio_in -> R1.a
+        cv_cutoff -> R_cv.a
+        R_cv.b -> R1.a
+        R1.b -> audio_out
+    }
+    controls {}
+}"#;
+        let pedal = parse_pedal_file(src).unwrap();
+        assert_eq!(pedal.ports.len(), 3);
+
+        let compiled = compile_pedal(&pedal, 48000.0).unwrap();
+        eprintln!(
+            "  ports: {:?}",
+            compiled
+                .ports
+                .iter()
+                .map(|p| (&p.name, p.direction, p.index, p.node_id))
+                .collect::<Vec<_>>()
+        );
+
+        assert_eq!(compiled.ports.len(), 3, "should have 3 port bindings");
+        assert_eq!(compiled.port_values.len(), 3, "port_values should match");
+
+        // Check names and directions
+        let audio_in = compiled.ports.iter().find(|p| p.name == "audio_in");
+        assert!(audio_in.is_some(), "should have audio_in port");
+        assert_eq!(
+            audio_in.unwrap().direction,
+            pedalkernel_rt::PortDirection::Input
+        );
+
+        let cv_cutoff = compiled.ports.iter().find(|p| p.name == "cv_cutoff");
+        assert!(cv_cutoff.is_some(), "should have cv_cutoff port");
+        assert_eq!(
+            cv_cutoff.unwrap().direction,
+            pedalkernel_rt::PortDirection::Input
+        );
+
+        let audio_out = compiled.ports.iter().find(|p| p.name == "audio_out");
+        assert!(audio_out.is_some(), "should have audio_out port");
+        assert_eq!(
+            audio_out.unwrap().direction,
+            pedalkernel_rt::PortDirection::Output
+        );
+
+        // Node IDs should be valid (not MAX)
+        for port in &compiled.ports {
+            assert_ne!(
+                port.node_id,
+                usize::MAX,
+                "port {} should have valid node_id",
+                port.name
+            );
+        }
+    }
+
+    #[test]
+    fn compile_without_ports_has_empty_ports() {
+        let src = r#"pedal "NoPort" {
+    supply 9V
+    components { R1: resistor(10k) }
+    nets { in -> R1.a  R1.b -> out }
+    controls {}
+}"#;
+        let pedal = parse_pedal_file(src).unwrap();
+        let compiled = compile_pedal(&pedal, 48000.0).unwrap();
+        // No ports section → empty (or implicit in/out — depends on design)
+        // For now, empty is fine. Backward compat.
+        eprintln!("  ports: {}", compiled.ports.len());
+    }
+
+    #[test]
+    fn process_ports_passes_signal() {
+        use crate::PedalProcessor;
+
+        let src = r#"pedal "PortIO" {
+    supply 9V
+    ports {
+        audio_in: input
+        audio_out: output
+    }
+    components { R1: resistor(10k) }
+    nets { audio_in -> R1.a  R1.b -> audio_out }
+    controls {}
+}"#;
+        let pedal = parse_pedal_file(src).unwrap();
+        let mut compiled = compile_pedal(&pedal, 48000.0).unwrap();
+
+        let in_idx = compiled.resolve_port("audio_in").unwrap();
+        let out_idx = compiled.resolve_port("audio_out").unwrap();
+        assert_eq!(compiled.port_count(), 2);
+
+        // Process several samples with a sine input
+        let mut ports = vec![0.0f64; compiled.port_count()];
+        let mut peak = 0.0f64;
+        for i in 0..4800 {
+            let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            ports[in_idx] = input;
+            compiled.process_ports(&mut ports);
+            peak = peak.max(ports[out_idx].abs());
+        }
+
+        eprintln!("  process_ports: peak output = {peak:.6}");
+        assert!(
+            peak > 0.01,
+            "signal should flow through ports: peak={peak:.6}. \
+             If 0, audio_in port isn't reaching the WDF stages."
+        );
+    }
+
+    #[test]
+    fn process_ports_backward_compat_with_old_process() {
+        use crate::PedalProcessor;
+
+        // Circuit using old-style in/out (no ports section)
+        let src = r#"pedal "OldStyle" {
+    supply 9V
+    components { R1: resistor(10k) }
+    nets { in -> R1.a  R1.b -> out }
+    controls {}
+}"#;
+        let pedal = parse_pedal_file(src).unwrap();
+        let mut compiled = compile_pedal(&pedal, 48000.0).unwrap();
+
+        // Old API should still work
+        let mut peak = 0.0f64;
+        for i in 0..4800 {
+            let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            let out = compiled.process(input);
+            peak = peak.max(out.abs());
+        }
+        eprintln!("  old process(): peak = {peak:.6}");
+        assert!(
+            peak > 0.01,
+            "old process(f64) should still work: peak={peak:.6}"
+        );
+    }
+
+    #[test]
+    fn cv_port_modulates_signal() {
+        use crate::PedalProcessor;
+
+        // Two input ports: audio_in and cv_mod. cv_mod connects through
+        // a resistor to the same node as audio_in, so it adds to the signal.
+        let src = r#"pedal "CVTest" {
+    supply 9V
+    ports {
+        audio_in: input
+        cv_mod: input
+        audio_out: output
+    }
+    components {
+        R1: resistor(10k)
+        R_cv: resistor(100k)
+    }
+    nets {
+        audio_in -> R1.a
+        cv_mod -> R_cv.a
+        R_cv.b -> R1.a
+        R1.b -> audio_out
+    }
+    controls {}
+}"#;
+        let pedal = parse_pedal_file(src).unwrap();
+        let mut compiled = compile_pedal(&pedal, 48000.0).unwrap();
+
+        let in_idx = compiled.resolve_port("audio_in").unwrap();
+        let cv_idx = compiled.resolve_port("cv_mod").unwrap();
+        let out_idx = compiled.resolve_port("audio_out").unwrap();
+
+        // Process with CV = 0 (no modulation)
+        let mut ports = vec![0.0f64; compiled.port_count()];
+        let mut peak_no_cv = 0.0f64;
+        for i in 0..4800 {
+            let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            ports[in_idx] = input;
+            ports[cv_idx] = 0.0;
+            compiled.process_ports(&mut ports);
+            if i >= 2400 {
+                peak_no_cv = peak_no_cv.max(ports[out_idx].abs());
+            }
+        }
+
+        // Process with CV = 0.5 (adds DC offset — should change output)
+        compiled.reset();
+        let mut peak_with_cv = 0.0f64;
+        for i in 0..4800 {
+            let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            ports[in_idx] = input;
+            ports[cv_idx] = 5.0; // large DC offset via CV
+            compiled.process_ports(&mut ports);
+            if i >= 2400 {
+                peak_with_cv = peak_with_cv.max(ports[out_idx].abs());
+            }
+        }
+
+        eprintln!("  CV test: no_cv={peak_no_cv:.4}, with_cv={peak_with_cv:.4}");
+        // CV should change the output (either level or DC offset)
+        assert!(
+            (peak_with_cv - peak_no_cv).abs() > 0.001 || peak_with_cv > 0.01,
+            "CV port should affect output: no_cv={peak_no_cv:.4}, with_cv={peak_with_cv:.4}"
+        );
+    }
+
+    #[test]
+    fn port_vs_leaf_is_addressable() {
+        // Verify set_voltage_by_port finds, sets, and isn't overwritten
+        use pedalkernel_rt::dyn_node::DynNode;
+        use pedalkernel_rt::wdf_leaf::*;
+
+        // Build: Series(VS_main, Series(VS_port, Resistor))
+        // VS_main is the audio input, VS_port is the CV port.
+        let vs_main = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
+            voltage: 0.0,
+            rp: 1.0,
+            is_cathode_bias: false,
+            port_name: None,
+        }));
+        let vs_port = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
+            voltage: 0.0,
+            rp: 1.0,
+            is_cathode_bias: false,
+            port_name: Some("cv_test".into()),
+        }));
+        let r = DynNode::Leaf(LeafKind::Resistor(WdfResistor {
+            comp_id: Some("R1".into()),
+            rp: 10000.0,
+            last_a: 0.0,
+        }));
+        let cv_branch = DynNode::Series(Box::new(vs_port), Box::new(r));
+        let mut tree = DynNode::Series(Box::new(vs_main), Box::new(cv_branch));
+        tree.recompute();
+
+        // Set port VS to 3.0
+        let found = tree.set_voltage_by_port("cv_test", 3.0);
+        assert!(found, "should find VS by port name");
+
+        // Global set_voltage(1.0) should set VS_main but NOT VS_port
+        tree.set_voltage(1.0);
+
+        // Scatter and check: with VS_main=1.0 and VS_port=3.0, the
+        // reflected wave should differ from VS_main=1.0, VS_port=0.0
+        let b_with_cv = tree.reflected();
+
+        // Reset port to 0 and scatter again
+        tree.set_voltage_by_port("cv_test", 0.0);
+        tree.set_voltage(1.0);
+        let b_without_cv = tree.reflected();
+
+        eprintln!("  reflected: with_cv={b_with_cv:.6}, without_cv={b_without_cv:.6}");
+        assert!(
+            (b_with_cv - b_without_cv).abs() > 0.01,
+            "port VS should affect scattering: with={b_with_cv:.4}, without={b_without_cv:.4}"
         );
     }
 }

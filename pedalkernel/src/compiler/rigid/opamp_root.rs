@@ -4,8 +4,8 @@
 //! and creates OpAmpRoot with bias-derived rail limits.
 
 use super::super::component::EdgeKind;
-use super::super::signal_flow::FlowGroup;
 use super::super::graph::{CircuitGraph, NodeId};
+use super::super::signal_flow::FlowGroup;
 use crate::elements::{OpAmpModel, OpAmpRoot};
 
 /// Shared op-amp extraction from classified FlowGroup.
@@ -56,9 +56,13 @@ pub(in crate::compiler) fn extract_opamp_config(
         }
         // Check if any reactive neighbor of this node connects to GND
         graph.edges.iter().any(|e2| {
-            let other = if e2.node_a == node { e2.node_b }
-                else if e2.node_b == node { e2.node_a }
-                else { return false };
+            let other = if e2.node_a == node {
+                e2.node_b
+            } else if e2.node_b == node {
+                e2.node_a
+            } else {
+                return false;
+            };
             let c2 = &graph.components[e2.comp_idx];
             (c2.kind.capacitance().is_some() || c2.kind.inductance().is_some())
                 && (other == graph.gnd_node || graph.ac_ground_nodes.contains(&other))
@@ -85,7 +89,9 @@ pub(in crate::compiler) fn extract_opamp_config(
     // feedback set or active set. These are the input coupling path,
     // regardless of which FlowGroup they belong to.
     let vcvs_comp_idx = graph.edges[*vcvs_edge_idx].comp_idx;
-    let neg_node = graph.nullor_pins.iter()
+    let neg_node = graph
+        .nullor_pins
+        .iter()
         .find(|p| p.comp_idx == vcvs_comp_idx)
         .map(|p| p.neg_node);
 
@@ -97,19 +103,30 @@ pub(in crate::compiler) fn extract_opamp_config(
             group.feedback_edges.iter().copied().collect();
         let active_set: std::collections::HashSet<usize> =
             group.active_edges.iter().copied().collect();
-        let ri_sum: f64 = graph.edges.iter().enumerate()
+        let ri_sum: f64 = graph
+            .edges
+            .iter()
+            .enumerate()
             .filter_map(|(eidx, e)| {
                 if feedback_set.contains(&eidx) || active_set.contains(&eidx) {
                     return None;
                 }
                 let touches_neg = e.node_a == neg || e.node_b == neg;
-                if !touches_neg { return None; }
+                if !touches_neg {
+                    return None;
+                }
                 let comp = &graph.components[e.comp_idx];
-                if comp.kind.is_pot() { return None; }
+                if comp.kind.is_pot() {
+                    return None;
+                }
                 comp.kind.resistance()
             })
             .sum();
-        if ri_sum > 0.0 { ri_sum } else { f64::INFINITY }
+        if ri_sum > 0.0 {
+            ri_sum
+        } else {
+            f64::INFINITY
+        }
     } else {
         f64::INFINITY
     };
@@ -122,7 +139,13 @@ pub(in crate::compiler) fn extract_opamp_config(
         1.0 + rf / ri
     };
 
-    Ok(OpAmpConfig { model, rf, ri, gain, inverting })
+    Ok(OpAmpConfig {
+        model,
+        rf,
+        ri,
+        gain,
+        inverting,
+    })
 }
 
 /// Create an OpAmpRoot from config, with sample rate and supply voltage set.

@@ -17,7 +17,8 @@ fn pot_halves_in_same_stage() {
     // Pot halves (aw + wb) should end up in the same stage, not split apart.
     // The wiper is a real circuit node — two edges is correct in the graph.
     // But the SPQR pipeline must keep them together for the divider to work.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -30,7 +31,8 @@ fn pot_halves_in_same_stage() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -38,12 +40,13 @@ fn pot_halves_in_same_stage() {
     // Both pot edges should be in the same stage (same comp_idx).
     // With native ports, the pot is "Volume" (not __aw/__wb).
     let pot_stage = compiled.stages.iter().position(|s| {
-        if let super::compiled::Stage::Wdf(w) = s { w.tree.get_pot_position("Volume").is_some() } else { false }
+        if let super::compiled::Stage::Wdf(w) = s {
+            w.tree.get_pot_position("Volume").is_some()
+        } else {
+            false
+        }
     });
-    assert!(
-        pot_stage.is_some(),
-        "Should find Volume pot in a stage"
-    );
+    assert!(pot_stage.is_some(), "Should find Volume pot in a stage");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -53,7 +56,8 @@ fn pot_halves_in_same_stage() {
 #[test]
 fn pot_creates_voltage_divider_stage() {
     // A standalone volume pot should compile into a stage that attenuates.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -66,7 +70,8 @@ fn pot_creates_voltage_divider_stage() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [1.0, 0.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -94,7 +99,8 @@ fn pot_creates_voltage_divider_stage() {
 
 #[test]
 fn pot_set_control_changes_level() {
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -107,7 +113,8 @@ fn pot_set_control_changes_level() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -115,12 +122,16 @@ fn pot_set_control_changes_level() {
 
     // Full volume
     compiled.set_control("Volume", 1.0);
-    for _ in 0..50 { compiled.process(1.0); }
+    for _ in 0..50 {
+        compiled.process(1.0);
+    }
     let full = compiled.process(1.0).abs();
 
     // Zero volume
     compiled.set_control("Volume", 0.0);
-    for _ in 0..50 { compiled.process(1.0); }
+    for _ in 0..50 {
+        compiled.process(1.0);
+    }
     let zero = compiled.process(1.0).abs();
 
     eprintln!("Pot control: full={full:.4}, zero={zero:.4}");
@@ -133,7 +144,8 @@ fn pot_set_control_changes_level() {
 #[test]
 fn pot_in_feedback_changes_gain() {
     // Drive pot in op-amp feedback: changing position changes gain.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -151,7 +163,8 @@ fn pot_in_feedback_changes_gain() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -159,12 +172,16 @@ fn pot_in_feedback_changes_gain() {
 
     // Low gain
     compiled.set_control("Drive", 0.0);
-    for _ in 0..50 { compiled.process(0.01); }
+    for _ in 0..50 {
+        compiled.process(0.01);
+    }
     let low_gain_out = compiled.process(0.01).abs();
 
     // High gain
     compiled.set_control("Drive", 1.0);
-    for _ in 0..50 { compiled.process(0.01); }
+    for _ in 0..50 {
+        compiled.process(0.01);
+    }
     let high_gain_out = compiled.process(0.01).abs();
 
     eprintln!("Drive: low={low_gain_out:.4}, high={high_gain_out:.4}");
@@ -182,7 +199,8 @@ fn pot_in_feedback_inverted_range() {
     // Same circuit as pot_in_feedback_changes_gain, but range [1.0, 0.0].
     // User "Drive" at 1.0 (CW) → pot position 0.0 → Rf = R_min → LOW gain.
     // User "Drive" at 0.0 (CCW) → pot position 1.0 → Rf = R_min + 100k → HIGH gain.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -200,7 +218,8 @@ fn pot_in_feedback_inverted_range() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [1.0, 0.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -208,12 +227,16 @@ fn pot_in_feedback_inverted_range() {
 
     // User CW (value=1.0) → range maps to position 0.0 → low Rf → LOW gain
     compiled.set_control("Drive", 1.0);
-    for _ in 0..50 { compiled.process(0.01); }
+    for _ in 0..50 {
+        compiled.process(0.01);
+    }
     let cw_out = compiled.process(0.01).abs();
 
     // User CCW (value=0.0) → range maps to position 1.0 → high Rf → HIGH gain
     compiled.set_control("Drive", 0.0);
-    for _ in 0..50 { compiled.process(0.01); }
+    for _ in 0..50 {
+        compiled.process(0.01);
+    }
     let ccw_out = compiled.process(0.01).abs();
 
     eprintln!("Inverted range: CW(low gain)={cw_out:.4}, CCW(high gain)={ccw_out:.4}");
@@ -230,7 +253,8 @@ fn pot_in_feedback_inverted_range() {
 fn pot_volume_inverted_range() {
     // Volume pot: wiper → output. [1.0, 0.0] = "turn right for less volume"
     // (uncommon but valid — some designers prefer reverse-log feel).
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(4.7k)
@@ -243,7 +267,8 @@ fn pot_volume_inverted_range() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [1.0, 0.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -251,12 +276,16 @@ fn pot_volume_inverted_range() {
 
     // User CW (value=1.0) → range maps to position 0.0 → wiper at ground → quiet
     compiled.set_control("Volume", 1.0);
-    for _ in 0..50 { compiled.process(0.5); }
+    for _ in 0..50 {
+        compiled.process(0.5);
+    }
     let cw_out = compiled.process(0.5).abs();
 
     // User CCW (value=0.0) → range maps to position 1.0 → wiper at input → loud
     compiled.set_control("Volume", 0.0);
-    for _ in 0..50 { compiled.process(0.5); }
+    for _ in 0..50 {
+        compiled.process(0.5);
+    }
     let ccw_out = compiled.process(0.5).abs();
 
     eprintln!("Inverted volume: CW(quiet)={cw_out:.4}, CCW(loud)={ccw_out:.4}");
@@ -272,27 +301,41 @@ fn pot_volume_inverted_range() {
 
 #[test]
 fn mna_pot_stamps_split_resistance() {
-    use crate::tree::MnaSystem;
     use super::component::{Component, StampContext};
     use super::components::Potentiometer;
     use crate::dsl::PotTaper;
+    use crate::tree::MnaSystem;
 
-    let pot = Potentiometer { max_r: 100_000.0, taper: PotTaper::B };
+    let pot = Potentiometer {
+        max_r: 100_000.0,
+        taper: PotTaper::B,
+    };
     let mut mna = MnaSystem::new(3, 0); // nodes: a(0), w(1), b(2)
 
     let pin_fn = |pin: &str| -> Option<usize> {
-        match pin { "a" => Some(0), "w" | "wiper" => Some(1), "b" => Some(2), _ => None }
+        match pin {
+            "a" => Some(0),
+            "w" | "wiper" => Some(1),
+            "b" => Some(2),
+            _ => None,
+        }
     };
     let mut ctx = StampContext {
-        pin_to_mna: &pin_fn, vsrc_base: 0, internal_node_base: 0,
-        sample_rate: 48000.0, cap_stamps: None,
+        pin_to_mna: &pin_fn,
+        vsrc_base: 0,
+        internal_node_base: 0,
+        sample_rate: 48000.0,
+        cap_stamps: None,
     };
     pot.stamp_mna_multi("Vol", &mut ctx, &mut mna);
 
     // Position 0.5, linear: R_aw=50k, R_wb=50k → G=2e-5 each
     let g_half = 1.0 / 50_000.0;
     assert!((mna.g_matrix[0] - g_half).abs() < 1e-8, "G[a,a]");
-    assert!((mna.g_matrix[4] - 2.0 * g_half).abs() < 1e-8, "G[w,w] = aw+wb");
+    assert!(
+        (mna.g_matrix[4] - 2.0 * g_half).abs() < 1e-8,
+        "G[w,w] = aw+wb"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -331,12 +374,15 @@ fn mna_dc_gain_asymmetric() {
 
 #[test]
 fn iir_builder_pot_dc_gain() {
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(10k)  Volume: pot(100k, b) }
             nets { in -> R1.a  R1.b -> Volume.a  Volume.w -> out  Volume.b -> gnd }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
 
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);
     let active_set: std::collections::HashSet<usize> =
@@ -348,15 +394,18 @@ fn iir_builder_pot_dc_gain() {
     let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     for group in &groups {
         let edges = group.all_edges();
-        if edges.len() < 2 { continue; }
-        let names: Vec<_> = edges.iter()
+        if edges.len() < 2 {
+            continue;
+        }
+        let names: Vec<_> = edges
+            .iter()
             .map(|&e| graph.components[graph.edges[e].comp_idx].id.clone())
             .collect();
         eprintln!("Group ({} edges): {names:?}", edges.len());
 
         // Build MNA manually to check dc_gain with correct output node
-        use crate::tree::MnaSystem;
         use super::component::StampContext;
+        use crate::tree::MnaSystem;
         // Collect nodes
         let mut nodes: Vec<super::graph::NodeId> = Vec::new();
         for &eidx in &edges {
@@ -368,7 +417,11 @@ fn iir_builder_pot_dc_gain() {
             }
         }
         let n2m = |n: super::graph::NodeId| -> Option<usize> {
-            if n == graph.gnd_node { None } else { nodes.iter().position(|&x| x == n) }
+            if n == graph.gnd_node {
+                None
+            } else {
+                nodes.iter().position(|&x| x == n)
+            }
         };
         let mut mna = MnaSystem::new(nodes.len(), 1);
         // Stamp pot via stamp_mna_multi
@@ -380,8 +433,11 @@ fn iir_builder_pot_dc_gain() {
                     graph.node_names.get(&key).and_then(|&n| n2m(n))
                 };
                 let mut ctx = StampContext {
-                    pin_to_mna: &pin_fn, vsrc_base: 0, internal_node_base: 0,
-                    sample_rate: 48000.0, cap_stamps: None,
+                    pin_to_mna: &pin_fn,
+                    vsrc_base: 0,
+                    internal_node_base: 0,
+                    sample_rate: 48000.0,
+                    cap_stamps: None,
                 };
                 comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
                 break; // Only stamp once
@@ -396,7 +452,10 @@ fn iir_builder_pot_dc_gain() {
         // Output at out_node (wiper)
         let out_mna = n2m(graph.out_node);
         let gain = mna.dc_gain(0, out_mna);
-        eprintln!("  Manual MNA: nodes={:?} vs={vs_mna:?} out={out_mna:?} dc_gain={gain:.4}", nodes);
+        eprintln!(
+            "  Manual MNA: nodes={:?} vs={vs_mna:?} out={out_mna:?} dc_gain={gain:.4}",
+            nodes
+        );
         assert!(
             gain.abs() > 0.01 && gain.abs() < 1.0,
             "DC gain should attenuate, got {gain:.4}"
@@ -423,9 +482,18 @@ fn wdf_voltage_divider_scatter_math() {
         voltage: 0.0,
         rp: 1.0,
         is_cathode_bias: false,
+        port_name: None,
     }));
-    let leaf_aw = DynNode::Leaf(LeafKind::Resistor(WdfResistor { rp: r_aw, comp_id: Some("aw".to_string()), last_a: 0.0 }));
-    let leaf_wb = DynNode::Leaf(LeafKind::Resistor(WdfResistor { rp: r_wb, comp_id: Some("wb".to_string()), last_a: 0.0 }));
+    let leaf_aw = DynNode::Leaf(LeafKind::Resistor(WdfResistor {
+        rp: r_aw,
+        comp_id: Some("aw".to_string()),
+        last_a: 0.0,
+    }));
+    let leaf_wb = DynNode::Leaf(LeafKind::Resistor(WdfResistor {
+        rp: r_wb,
+        comp_id: Some("wb".to_string()),
+        last_a: 0.0,
+    }));
 
     // Series(R_aw, R_wb) — the divider chain
     let divider = DynNode::Series(Box::new(leaf_aw), Box::new(leaf_wb));
@@ -435,7 +503,10 @@ fn wdf_voltage_divider_scatter_math() {
     let rp = tree.port_resistance();
     eprintln!("Tree port resistance: {rp:.1}");
     // Expected: VS(1) + R_aw(50k) + R_wb(50k) = 100001
-    assert!((rp - 100001.0).abs() < 10.0, "rp should be ~100001, got {rp:.1}");
+    assert!(
+        (rp - 100001.0).abs() < 10.0,
+        "rp should be ~100001, got {rp:.1}"
+    );
 
     // Set VS voltage and scatter
     tree.set_voltage(1.0);
@@ -484,8 +555,13 @@ fn wdf_simple_resistor_divider() {
         voltage: 0.0,
         rp: 1.0,
         is_cathode_bias: false,
+        port_name: None,
     }));
-    let r = DynNode::Leaf(LeafKind::Resistor(WdfResistor { rp: 10_000.0, comp_id: Some("R".to_string()), last_a: 0.0 }));
+    let r = DynNode::Leaf(LeafKind::Resistor(WdfResistor {
+        rp: 10_000.0,
+        comp_id: Some("R".to_string()),
+        last_a: 0.0,
+    }));
     let mut tree = DynNode::Series(Box::new(vs), Box::new(r));
 
     tree.set_voltage(1.0);
@@ -511,7 +587,8 @@ fn wdf_simple_resistor_divider() {
 fn no_synthetic_aw_wb_components() {
     // After compilation, no __aw/__wb synthetic component names should leak
     // into stage trees or control bindings.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -524,7 +601,8 @@ fn no_synthetic_aw_wb_components() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -534,7 +612,8 @@ fn no_synthetic_aw_wb_components() {
     for ctrl in &compiled.controls {
         assert!(
             !ctrl.component_id.contains("__aw") && !ctrl.component_id.contains("__wb"),
-            "Binding should use base ID, got '{}'", ctrl.component_id
+            "Binding should use base ID, got '{}'",
+            ctrl.component_id
         );
     }
 }

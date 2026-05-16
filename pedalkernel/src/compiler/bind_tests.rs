@@ -9,7 +9,8 @@ use crate::PedalProcessor;
 
 #[test]
 fn bind_pot_produces_binding() {
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -27,7 +28,8 @@ fn bind_pot_produces_binding() {
             controls {
                 Drive.position -> "Gain" [0.0, 1.0] = 0.5
             }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -42,7 +44,8 @@ fn bind_pot_produces_binding() {
 
 #[test]
 fn bind_volume_pot_changes_output() {
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(4.7k)
@@ -59,7 +62,8 @@ fn bind_volume_pot_changes_output() {
             controls {
                 Volume.position -> "Volume" [1.0, 0.0] = 0.5
             }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -93,12 +97,14 @@ fn bind_volume_pot_changes_output() {
 
 #[test]
 fn bind_empty_controls_produces_nothing() {
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(10k) }
             nets { in -> R1.a  R1.b -> out }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -109,7 +115,8 @@ fn bind_empty_controls_produces_nothing() {
 
 #[test]
 fn debug_volume_stages() {
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(4.7k)
@@ -124,7 +131,9 @@ fn debug_volume_stages() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [1.0, 0.0] = 0.5 }
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
 
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
     eprintln!("WDF Stages: {}", compiled.stages.len());
@@ -133,6 +142,13 @@ fn debug_volume_stages() {
             eprintln!("  wdf {i}: rp={:.1}", w.tree.port_resistance());
         }
     }
-    eprintln!("IIR Stages: {}", compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count());
+    eprintln!(
+        "IIR Stages: {}",
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::Iir(_)))
+            .count()
+    );
     eprintln!("Stage order: {:?}", compiled.stages);
 }

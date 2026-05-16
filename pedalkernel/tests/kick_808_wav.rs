@@ -10,11 +10,11 @@ const SAMPLE_RATE: f64 = 48000.0;
 struct Voice {
     name: &'static str,
     note: &'static str,
-    r: &'static str,      // R1=R2 value
-    c: &'static str,      // C1=C2 value
-    r_fb: &'static str,   // Feedback resistor (sets Q/decay)
+    r: &'static str,    // R1=R2 value
+    c: &'static str,    // C1=C2 value
+    r_fb: &'static str, // Feedback resistor (sets Q/decay)
     target_hz: f64,
-    freq_tolerance: f64,  // ratio tolerance (0.2 = ±20%)
+    freq_tolerance: f64, // ratio tolerance (0.2 = ±20%)
 }
 
 // Each voice has R_fb tuned for the right decay at its R value.
@@ -22,15 +22,87 @@ struct Voice {
 // Toms: Q≈15-20 (sustained ring). Congas: Q≈8-10 (snappy, shorter).
 // Rimshot: Q≈5 (very short). Claves: Q≈20 (clean ring).
 const VOICES: &[Voice] = &[
-    Voice { name: "Bass Drum",  note: "C3",  r: "150k", c: "8.2n", r_fb: "470k", target_hz: 130.0, freq_tolerance: 0.10 },
-    Voice { name: "Low Tom",    note: "E3",  r: "120k", c: "8.2n", r_fb: "390k", target_hz: 162.0, freq_tolerance: 0.10 },
-    Voice { name: "Mid Tom",    note: "A3",  r: "150k", c: "4.7n", r_fb: "470k", target_hz: 226.0, freq_tolerance: 0.10 },
-    Voice { name: "High Tom",   note: "D4",  r: "120k", c: "4.7n", r_fb: "390k", target_hz: 282.0, freq_tolerance: 0.10 },
-    Voice { name: "Low Conga",  note: "F3",  r: "120k", c: "8.2n", r_fb: "380k", target_hz: 162.0, freq_tolerance: 0.10 },
-    Voice { name: "Mid Conga",  note: "A3",  r: "150k", c: "4.7n", r_fb: "470k", target_hz: 226.0, freq_tolerance: 0.10 },
-    Voice { name: "High Conga", note: "D4",  r: "120k", c: "4.7n", r_fb: "380k", target_hz: 282.0, freq_tolerance: 0.10 },
-    Voice { name: "Rimshot",    note: "A4",  r: "82k",  c: "4.7n", r_fb: "270k", target_hz: 413.0, freq_tolerance: 0.15 },
-    Voice { name: "Claves",     note: "D#7", r: "150k", c: "470p", r_fb: "470k", target_hz: 2258.0, freq_tolerance: 0.10 },
+    Voice {
+        name: "Bass Drum",
+        note: "C3",
+        r: "150k",
+        c: "8.2n",
+        r_fb: "470k",
+        target_hz: 130.0,
+        freq_tolerance: 0.10,
+    },
+    Voice {
+        name: "Low Tom",
+        note: "E3",
+        r: "120k",
+        c: "8.2n",
+        r_fb: "390k",
+        target_hz: 162.0,
+        freq_tolerance: 0.10,
+    },
+    Voice {
+        name: "Mid Tom",
+        note: "A3",
+        r: "150k",
+        c: "4.7n",
+        r_fb: "470k",
+        target_hz: 226.0,
+        freq_tolerance: 0.10,
+    },
+    Voice {
+        name: "High Tom",
+        note: "D4",
+        r: "120k",
+        c: "4.7n",
+        r_fb: "390k",
+        target_hz: 282.0,
+        freq_tolerance: 0.10,
+    },
+    Voice {
+        name: "Low Conga",
+        note: "F3",
+        r: "120k",
+        c: "8.2n",
+        r_fb: "380k",
+        target_hz: 162.0,
+        freq_tolerance: 0.10,
+    },
+    Voice {
+        name: "Mid Conga",
+        note: "A3",
+        r: "150k",
+        c: "4.7n",
+        r_fb: "470k",
+        target_hz: 226.0,
+        freq_tolerance: 0.10,
+    },
+    Voice {
+        name: "High Conga",
+        note: "D4",
+        r: "120k",
+        c: "4.7n",
+        r_fb: "380k",
+        target_hz: 282.0,
+        freq_tolerance: 0.10,
+    },
+    Voice {
+        name: "Rimshot",
+        note: "A4",
+        r: "82k",
+        c: "4.7n",
+        r_fb: "270k",
+        target_hz: 413.0,
+        freq_tolerance: 0.15,
+    },
+    Voice {
+        name: "Claves",
+        note: "D#7",
+        r: "150k",
+        c: "470p",
+        r_fb: "470k",
+        target_hz: 2258.0,
+        freq_tolerance: 0.10,
+    },
 ];
 
 /// Generate a .pedal source string for a bridged-T voice.
@@ -131,8 +203,10 @@ fn all_808_voices_produce_correct_frequency() {
     let wav_dir = std::env::temp_dir().join("808_voices");
     std::fs::create_dir_all(&wav_dir).ok();
 
-    println!("\n{:>14} {:>5} {:>8} {:>8} {:>6} {}",
-        "Voice", "Note", "Target", "Actual", "Peak", "Status");
+    println!(
+        "\n{:>14} {:>5} {:>8} {:>8} {:>6} {}",
+        "Voice", "Note", "Target", "Actual", "Peak", "Status"
+    );
     println!("{}", "-".repeat(60));
 
     let mut all_pass = true;
@@ -140,7 +214,11 @@ fn all_808_voices_produce_correct_frequency() {
 
     for voice in VOICES {
         let (freq, peak, output) = test_voice(voice);
-        let ratio = if voice.target_hz > 0.0 { freq / voice.target_hz } else { 0.0 };
+        let ratio = if voice.target_hz > 0.0 {
+            freq / voice.target_hz
+        } else {
+            0.0
+        };
         let freq_ok = (ratio - 1.0).abs() < voice.freq_tolerance;
         let peak_ok = peak > 0.0001;
         let pass = freq_ok && peak_ok;
@@ -152,8 +230,10 @@ fn all_808_voices_produce_correct_frequency() {
         );
 
         // Write individual WAV
-        let wav_path = wav_dir.join(format!("808_{}.wav",
-            voice.name.to_lowercase().replace(' ', "_")));
+        let wav_path = wav_dir.join(format!(
+            "808_{}.wav",
+            voice.name.to_lowercase().replace(' ', "_")
+        ));
         write_wav(&wav_path, &output, peak);
 
         all_outputs.push((voice.name, output, peak));
@@ -252,7 +332,10 @@ fn measure_response(output: &[f64], sample_rate: f64) -> (f64, f64, f64) {
     for i in 0..output.len() {
         if i > 10 && output[i].abs() < threshold {
             // Check it stays below threshold
-            let still_below = output[i..].iter().take(100).all(|s| s.abs() < threshold * 2.0);
+            let still_below = output[i..]
+                .iter()
+                .take(100)
+                .all(|s| s.abs() < threshold * 2.0);
             if still_below {
                 decay_ms = i as f64 / sample_rate * 1000.0;
                 break;
@@ -273,7 +356,8 @@ fn decay_pot_changes_ring_time() {
     let mut results: Vec<(f64, f64, f64, f64)> = Vec::new(); // (pot_pos, freq, peak, decay_ms)
 
     for &pot_pos in &[0.95, 0.8, 0.6, 0.4, 0.2] {
-        let mut proc = pedalkernel::compiler::compile_pedal(&pedal_def, SAMPLE_RATE).expect("compile");
+        let mut proc =
+            pedalkernel::compiler::compile_pedal(&pedal_def, SAMPLE_RATE).expect("compile");
 
         // Set decay pot position
         proc.set_control("Decay", pot_pos);
@@ -294,10 +378,16 @@ fn decay_pot_changes_ring_time() {
         results.push((pot_pos, freq, peak, decay_ms));
     }
 
-    println!("\n{:>8} {:>8} {:>8} {:>10}", "Decay", "Freq", "Peak", "Decay(ms)");
+    println!(
+        "\n{:>8} {:>8} {:>8} {:>10}",
+        "Decay", "Freq", "Peak", "Decay(ms)"
+    );
     println!("{}", "-".repeat(40));
     for &(pos, freq, peak, decay) in &results {
-        println!("{:>8.2} {:>7.0}Hz {:>8.3} {:>9.1}ms", pos, freq, peak, decay);
+        println!(
+            "{:>8.2} {:>7.0}Hz {:>8.3} {:>9.1}ms",
+            pos, freq, peak, decay
+        );
     }
 
     // Verify: frequency should stay roughly constant across decay settings
@@ -319,7 +409,8 @@ fn decay_pot_changes_ring_time() {
         assert!(
             decays[0] > decays[decays.len() - 1] * 0.5,
             "Higher decay pot should give longer ring: pos=0.95→{:.1}ms, pos=0.2→{:.1}ms",
-            decays[0], decays[decays.len() - 1]
+            decays[0],
+            decays[decays.len() - 1]
         );
     }
 }
@@ -334,7 +425,8 @@ fn tuning_pot_sweeps_frequency() {
     let mut results: Vec<(f64, f64, f64)> = Vec::new(); // (pot_pos, freq, peak)
 
     for &pot_pos in &[0.1, 0.3, 0.5, 0.7, 0.9] {
-        let mut proc = pedalkernel::compiler::compile_pedal(&pedal_def, SAMPLE_RATE).expect("compile");
+        let mut proc =
+            pedalkernel::compiler::compile_pedal(&pedal_def, SAMPLE_RATE).expect("compile");
 
         // Set tuning pot — adds series resistance, should lower f0
         proc.set_control("Tuning", pot_pos);

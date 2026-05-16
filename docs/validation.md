@@ -1,3 +1,10 @@
+---
+title: "Validation"
+description: "How we verify WDF output against ngspice ground truth."
+section: "Internals"
+weight: 100
+---
+
 # PedalKernel SPICE Validation Harness
 
 Dockerized validation framework for the PedalKernel WDF compiler. Runs deterministic ngspice simulations as ground truth and compares against WDF compiler output across multiple test layers.
@@ -60,6 +67,7 @@ cat results/validation_report_*.json | python3 -m json.tool
 |-------|------|-----------|---------|
 | **0** | Primitive elements (R, C, L, adaptors) | Analytical | Adaptor math, discretization |
 | **1** | Linear circuits (RC, RLC, tone stacks) | Analytical BLT / SPICE .AC | Topology decomposition, R-type scattering |
+| **2** | Reactive element stress | Analytical / SPICE .TRAN | Integration stability under HF content |
 | **3** | Nonlinear circuits (diode clipper, triode stages) | ngspice .TRAN | Nonlinear model, solver convergence |
 | **4** | Fairchild behavioral (gain curves, timing, M/S) | ngspice + manual specs | System integration, feedback loops |
 | **5** | Stress (DC stability, rate invariance, energy) | Physics constraints | Edge cases, numerical stability |
@@ -115,4 +123,4 @@ wdf_output/
 
 ## CI Integration
 
-The included GitHub Actions workflow (`.github/workflows/validate.yml`) runs automatically on any PR that touches compiler code. It posts a pass/fail summary as a PR comment.
+The validation harness is exercised by the main CI workflow at `.github/workflows/ci.yml` on every PR that touches the compiler. The benchmark job within that workflow also runs `cargo bench --bench wdf_bench` and uploads the results as an artifact, so performance regressions surface alongside correctness regressions.

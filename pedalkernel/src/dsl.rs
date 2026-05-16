@@ -164,6 +164,29 @@ pub struct PedalDef {
     /// Subcircuit definitions. When non-empty, the top-level `components` and
     /// `nets` become the routing layer connecting subcircuits.
     pub subcircuits: Vec<SubcircuitDef>,
+    /// Named voltage port declarations (audio I/O, CV, gates, envelope taps).
+    /// Ports are voltage nodes in the circuit, drivable at audio rate.
+    /// When empty, implicit `in`/`out` ports are created by the compiler.
+    pub ports: Vec<PortDef>,
+}
+
+/// Named port declaration from the .pedal DSL.
+///
+/// ```text
+/// ports {
+///     audio_in: input
+///     cv_cutoff: input
+///     audio_out: output
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortDef {
+    pub name: String,
+    pub direction: pedalkernel_rt::PortDirection,
+    /// Optional source/load impedance in Ohms.
+    /// When set, the WDF VoltageSource gets this Rp instead of the default 1Ω.
+    /// Syntax: `audio_in: input(10k)` → impedance = Some(10_000.0)
+    pub impedance: Option<f64>,
 }
 
 /// A subcircuit block within a pedal/equipment definition.
@@ -2192,6 +2215,47 @@ fn control_or_skip(input: &str) -> IResult<&str, Option<ControlDef>> {
     Ok((remaining, None))
 }
 
+// ---------------------------------------------------------------------------
+// Ports section parser
+// ---------------------------------------------------------------------------
+
+/// Parse a single port definition: `name: input` or `name: output`
+fn port_def(input: &str) -> IResult<&str, PortDef> {
+    let (input, _) = ws_comments(input)?;
+    let (input, name) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, dir_str) = alt((tag("input"), tag("output")))(input)?;
+    let direction = match dir_str {
+        "input" => pedalkernel_rt::PortDirection::Input,
+        "output" => pedalkernel_rt::PortDirection::Output,
+        _ => unreachable!(),
+    };
+    // Optional impedance: input(10k) or output(600)
+    let (input, impedance) = opt(delimited(char('('), eng_value, char(')')))(input)?;
+    Ok((
+        input,
+        PortDef {
+            name: name.to_string(),
+            direction,
+            impedance,
+        },
+    ))
+}
+
+/// Parse the `ports { ... }` section.
+fn ports_section(input: &str) -> IResult<&str, Vec<PortDef>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("ports")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+    let (input, ports) = many0(port_def)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, ports))
+}
+
 fn controls_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("controls")(input)?;
@@ -2741,6 +2805,10 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     // Parse optional subcircuit blocks (zero or more, before components)
     let (input, subcircuits) = many0(subcircuit_block)(input)?;
 
+    // Parse optional ports section (before components — ports declare
+    // named voltage nodes that can be referenced in nets)
+    let (input, ports) = opt(ports_section)(input)?;
+
     // When subcircuits are present, the top-level components/nets become
     // an optional routing layer. When absent, keep existing required behavior.
     let (input, (components, mirrors)) = if subcircuits.is_empty() {
@@ -2780,6 +2848,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         mirrors,
         calibrate: calibrate.is_some(),
         subcircuits,
+        ports: ports.unwrap_or_default(),
     };
     resolve_subcircuit_pins(&mut pedal);
     Ok((input, pedal))
@@ -5291,5 +5360,131 @@ pedal "Simple" {
         let def = parse_pedal_file(src).unwrap();
         assert!(def.subcircuits.is_empty());
         assert_eq!(def.components.len(), 1);
+    }
+
+    // ── Ports parser ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_ports_section() {
+        let src = r#"pedal "test" {
+    supply 9V
+    ports {
+        audio_in: input
+        cv_cutoff: input
+        audio_out: output
+        env_out: output
+    }
+    components { R1: resistor(10k) }
+    nets { audio_in -> R1.a  R1.b -> audio_out }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.ports.len(), 4, "should have 4 ports");
+        assert_eq!(def.ports[0].name, "audio_in");
+        assert_eq!(def.ports[0].direction, pedalkernel_rt::PortDirection::Input);
+        assert_eq!(def.ports[1].name, "cv_cutoff");
+        assert_eq!(def.ports[1].direction, pedalkernel_rt::PortDirection::Input);
+        assert_eq!(def.ports[2].name, "audio_out");
+        assert_eq!(
+            def.ports[2].direction,
+            pedalkernel_rt::PortDirection::Output
+        );
+        assert_eq!(def.ports[3].name, "env_out");
+        assert_eq!(
+            def.ports[3].direction,
+            pedalkernel_rt::PortDirection::Output
+        );
+    }
+
+    #[test]
+    fn parse_no_ports_section() {
+        let src = r#"pedal "test" {
+    supply 9V
+    components { R1: resistor(10k) }
+    nets { in -> R1.a  R1.b -> out }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert!(
+            def.ports.is_empty(),
+            "should have no ports when section omitted"
+        );
+    }
+
+    #[test]
+    fn ports_used_in_nets() {
+        // Port names should be usable in nets as reserved nodes
+        let src = r#"pedal "test" {
+    supply 9V
+    ports {
+        audio_in: input
+        cv_cutoff: input
+        audio_out: output
+    }
+    components {
+        R1: resistor(10k)
+        R_cv: resistor(100k)
+    }
+    nets {
+        audio_in -> R1.a
+        cv_cutoff -> R_cv.a
+        R_cv.b -> R1.a
+        R1.b -> audio_out
+    }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.ports.len(), 3);
+        // Port names should appear in nets as reserved pins
+        let has_audio_in = def.nets.iter().any(|n| {
+            matches!(&n.from, Pin::Reserved(s) if s == "audio_in")
+                || n.to
+                    .iter()
+                    .any(|p| matches!(p, Pin::Reserved(s) if s == "audio_in"))
+        });
+        assert!(has_audio_in, "audio_in should be in nets as reserved pin");
+    }
+
+    // ── Port impedance syntax ───────────────────────────────────────────
+
+    #[test]
+    fn parse_port_with_impedance() {
+        let src = r#"pedal "test" {
+    supply 9V
+    ports {
+        audio_in: input(10k)
+        cv_cutoff: input(47k)
+        audio_out: output(600)
+    }
+    components { R1: resistor(10k) }
+    nets { audio_in -> R1.a  R1.b -> audio_out }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.ports.len(), 3);
+        assert_eq!(def.ports[0].name, "audio_in");
+        assert_eq!(def.ports[0].impedance, Some(10_000.0));
+        assert_eq!(def.ports[1].name, "cv_cutoff");
+        assert_eq!(def.ports[1].impedance, Some(47_000.0));
+        assert_eq!(def.ports[2].name, "audio_out");
+        assert_eq!(def.ports[2].impedance, Some(600.0));
+    }
+
+    #[test]
+    fn parse_port_without_impedance_backward_compat() {
+        let src = r#"pedal "test" {
+    supply 9V
+    ports {
+        audio_in: input
+        audio_out: output
+    }
+    components { R1: resistor(10k) }
+    nets { audio_in -> R1.a  R1.b -> audio_out }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.ports.len(), 2);
+        assert_eq!(def.ports[0].impedance, None);
+        assert_eq!(def.ports[1].impedance, None);
     }
 }

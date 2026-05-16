@@ -18,9 +18,8 @@ fn measure_peak(compiled: &mut impl PedalProcessor, amp: f64) -> f64 {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
     peak
@@ -61,7 +60,10 @@ fn standalone_pot_binding_works() {
     let ratio = peak_high / peak_low.max(0.0001);
     eprintln!("Standalone pot: low={peak_low:.4}V high={peak_high:.4}V ratio={ratio:.2}");
     // The pot changes output — ratio may be <1 (inverted) or >1. Either way, it's NOT 1.0.
-    assert!((ratio - 1.0).abs() > 0.3, "Standalone pot should change output: ratio={ratio:.2}");
+    assert!(
+        (ratio - 1.0).abs() > 0.3,
+        "Standalone pot should change output: ratio={ratio:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -103,7 +105,10 @@ fn pot_in_passive_group_binding_works() {
 
     let ratio = peak_high / peak_low.max(0.0001);
     eprintln!("Pot in passive group: low={peak_low:.4}V high={peak_high:.4}V ratio={ratio:.2}");
-    assert!(ratio > 1.5, "Pot in passive group should change output: ratio={ratio:.2}");
+    assert!(
+        ratio > 1.5,
+        "Pot in passive group should change output: ratio={ratio:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -145,7 +150,10 @@ fn pot_after_gain_stage_binding_works() {
     // Check if binding exists
     let compiled = compile_via_spqr(&pedal, SR).expect("compile");
     let level_binding = compiled.controls.iter().find(|c| c.label == "Level");
-    eprintln!("Level binding: {:?}", level_binding.map(|b| (&b.label, &b.component_id)));
+    eprintln!(
+        "Level binding: {:?}",
+        level_binding.map(|b| (&b.label, &b.component_id))
+    );
     assert!(level_binding.is_some(), "Level pot should be bound");
 
     let mut low = compile_via_spqr(&pedal, SR).expect("compile");
@@ -158,7 +166,10 @@ fn pot_after_gain_stage_binding_works() {
 
     let ratio = peak_high / peak_low.max(0.0001);
     eprintln!("Level after gain: low={peak_low:.4}V high={peak_high:.4}V ratio={ratio:.2}");
-    assert!((ratio - 1.0).abs() > 0.3, "Level pot after gain should change output: ratio={ratio:.2}");
+    assert!(
+        (ratio - 1.0).abs() > 0.3,
+        "Level pot after gain should change output: ratio={ratio:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -181,16 +192,21 @@ fn screamer_level_pot_is_bound() {
     }
 
     let level_binding = compiled.controls.iter().find(|c| c.label == "Level");
-    assert!(level_binding.is_some(),
+    assert!(
+        level_binding.is_some(),
         "Screamer Level pot must be bound. Controls: {:?}",
-        compiled.controls.iter().map(|c| &c.label).collect::<Vec<_>>());
+        compiled
+            .controls
+            .iter()
+            .map(|c| &c.label)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
 // ═══════════════════════════════════════════════════════════════════════════
 // 6. Pot sweep monotonicity — output should increase with position
 // ═══════════════════════════════════════════════════════════════════════════
-
 #[test]
 fn pot_sweep_monotonic() {
     // Sweep a pot from 0.1 to 0.9 in steps. Output should increase monotonically.
@@ -230,15 +246,23 @@ fn pot_sweep_monotonic() {
 
     // Check monotonicity: each step should increase
     for i in 1..peaks.len() {
-        assert!(peaks[i].1 > peaks[i-1].1 * 0.9,
+        assert!(
+            peaks[i].1 > peaks[i - 1].1 * 0.9,
             "Pot sweep should be monotonic: pos={:.1}→{:.4}V < pos={:.1}→{:.4}V",
-            peaks[i].0, peaks[i].1, peaks[i-1].0, peaks[i-1].1);
+            peaks[i].0,
+            peaks[i].1,
+            peaks[i - 1].0,
+            peaks[i - 1].1
+        );
     }
 
     // Check range: high position should be > 3x low position
     let ratio = peaks.last().unwrap().1 / peaks.first().unwrap().1.max(0.0001);
     eprintln!("  Range ratio: {ratio:.2}x");
-    assert!(ratio > 3.0, "Pot should have >3x range from 0.1 to 0.9: ratio={ratio:.2}");
+    assert!(
+        ratio > 3.0,
+        "Pot should have >3x range from 0.1 to 0.9: ratio={ratio:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -267,8 +291,10 @@ fn screamer_level_0_quiet_1_loud() {
     let ratio = peak_loud / peak_quiet.max(0.0001);
     eprintln!("  Ratio: {ratio:.2}x");
 
-    assert!(peak_loud > peak_quiet * 2.0,
-        "Level 0.9 should be louder than 0.1: ratio={ratio:.2}x");
+    assert!(
+        peak_loud > peak_quiet * 2.0,
+        "Level 0.9 should be louder than 0.1: ratio={ratio:.2}x"
+    );
 }
 
 #[test]
@@ -293,8 +319,10 @@ fn sd1_level_0_quiet_1_loud() {
     let ratio = peak_loud / peak_quiet.max(0.0001);
     eprintln!("  Ratio: {ratio:.2}x");
 
-    assert!(peak_loud > peak_quiet * 2.0,
-        "Level 0.9 should be louder than 0.1: ratio={ratio:.2}x");
+    assert!(
+        peak_loud > peak_quiet * 2.0,
+        "Level 0.9 should be louder than 0.1: ratio={ratio:.2}x"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -363,7 +391,10 @@ fn screamer_level_pot_changes_output() {
 
     let ratio = peak_high / peak_low.max(0.0001);
     eprintln!("Screamer Level: low={peak_low:.4}V high={peak_high:.4}V ratio={ratio:.2}");
-    assert!((ratio - 1.0).abs() > 0.3, "Screamer Level should change output: ratio={ratio:.2}");
+    assert!(
+        (ratio - 1.0).abs() > 0.3,
+        "Screamer Level should change output: ratio={ratio:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -388,10 +419,22 @@ fn screamer_level_pot_leaf_in_tree() {
                 let has_pot = w.tree.get_pot_position("Level").is_some()
                     || w.tree.get_pot_position("Level__aw").is_some()
                     || w.tree.get_pot_position("Level__wb").is_some();
-                eprintln!("Tone stage [{}]: Level pot in tree? {has_pot}", w.debug_label);
-                eprintln!("  get_pot_position('Level'): {:?}", w.tree.get_pot_position("Level"));
-                eprintln!("  get_pot_position('Level__aw'): {:?}", w.tree.get_pot_position("Level__aw"));
-                eprintln!("  get_pot_position('Level__wb'): {:?}", w.tree.get_pot_position("Level__wb"));
+                eprintln!(
+                    "Tone stage [{}]: Level pot in tree? {has_pot}",
+                    w.debug_label
+                );
+                eprintln!(
+                    "  get_pot_position('Level'): {:?}",
+                    w.tree.get_pot_position("Level")
+                );
+                eprintln!(
+                    "  get_pot_position('Level__aw'): {:?}",
+                    w.tree.get_pot_position("Level__aw")
+                );
+                eprintln!(
+                    "  get_pot_position('Level__wb'): {:?}",
+                    w.tree.get_pot_position("Level__wb")
+                );
                 assert!(has_pot, "Level pot leaf must exist in the WDF tree");
             }
         }

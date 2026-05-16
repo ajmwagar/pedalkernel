@@ -12,13 +12,13 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
 
+use crate::elements::{JfetVariableResistor, Photocoupler};
+use crate::pot_taper::PotTaper;
+use crate::tree::RTypeAdaptor;
 use crate::wdf_leaf::{
     leaf_matches_id, LeafKind, WdfCapacitor, WdfInductor, WdfJfetVr, WdfLeaf, WdfLeakyCapacitor,
     WdfPhotocoupler, WdfPot, WdfResistor, WdfSwitchedResistor, WdfUnitDelay, WdfVoltageSource,
 };
-use crate::pot_taper::PotTaper;
-use crate::elements::{JfetVariableResistor, Photocoupler};
-use crate::tree::RTypeAdaptor;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Dynamic WDF tree node
@@ -182,6 +182,7 @@ impl DynNode {
             voltage,
             rp,
             is_cathode_bias: false,
+            port_name: None,
         }))
     }
 
@@ -190,6 +191,7 @@ impl DynNode {
             voltage,
             rp,
             is_cathode_bias: true,
+            port_name: None,
         }))
     }
 
@@ -487,10 +489,188 @@ impl DynNode {
         }
     }
 
-    /// Set the voltage source value (searches recursively).
-    /// CathodeBiasSource leaves return false from set_voltage, maintaining fixed DC.
+    /// Set the main voltage source value.
+    ///
+    /// Fast path: the VS is always the left child of the root Binary (Series)
+    /// node, placed there by `with_voltage_source()`. We access it directly
+    /// instead of walking the entire tree via `for_each_leaf_mut`.
+    ///
+    /// Falls back to full tree walk if the fast path doesn't find a VS.
     pub fn set_voltage(&mut self, v: f64) {
+        // Fast path: root is Binary(Series), left child is Leaf(VoltageSource)
+        if let DynNode::Binary { ref mut left, .. } = self {
+            if let DynNode::Leaf(ref mut leaf) = **left {
+                if leaf.set_voltage(v) {
+                    return;
+                }
+            }
+        }
+        // Fallback: walk the tree (handles unusual topologies)
         self.for_each_leaf_mut(&mut |leaf| leaf.set_voltage(v));
+    }
+
+    /// Set the VS leaf's port resistance (source impedance) and recompute
+    /// all cached gamma/rp values up the tree.
+    ///
+    /// Used by blockwise K-method: the Thevenin impedance at each block's
+    /// coupling port determines the VS source impedance. This affects the
+    /// Series adaptor's gamma and thus the filter's frequency response.
+    ///
+    /// After calling this, the tree's port_resistance() will change,
+    /// so K-tables must be regenerated.
+    pub fn set_vs_port_resistance(&mut self, rp: f64) {
+        // Fast path: root is Binary(Series), left child is Leaf(VoltageSource).
+        // This is the standard WDF tree topology from with_voltage_source().
+        if let DynNode::Binary { ref mut left, .. } = self {
+            if let DynNode::Leaf(LeafKind::VoltageSource(ref mut vs)) = **left {
+                vs.rp = rp;
+            }
+        }
+        // Recompute all cached gamma/rp values in the tree
+        self.recompute();
+    }
+
+    /// Set a specific port's voltage source by port name.
+    /// Returns true if found. Used for CV input ports.
+    /// Bypasses the set_voltage guard (which blocks port-named VS from
+    /// being overwritten by the global set_voltage call).
+    ///
+    /// NOTE: Prefer `resolve_port_vs_ptr` + direct pointer write for hot paths.
+    /// This method walks the tree recursively with string comparison.
+    pub fn set_voltage_by_port(&mut self, port_name: &str, v: f64) -> bool {
+        match self {
+            DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
+                if vs.port_name.as_deref() == Some(port_name) {
+                    vs.voltage = v; // Direct set, bypasses trait guard
+                    true
+                } else {
+                    false
+                }
+            }
+            DynNode::Leaf(_) => false,
+            DynNode::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            } => left.set_voltage_by_port(port_name, v) || right.set_voltage_by_port(port_name, v),
+            _ => false,
+        }
+    }
+
+    /// Resolve the main (non-port) VS leaf's `voltage` field pointer.
+    ///
+    /// Walks the tree once to find the first `WdfVoltageSource` without a
+    /// `port_name` and that is not a cathode bias source. Returns a raw
+    /// pointer to its `voltage: f64` field. The pointer is stable because
+    /// all non-root DynNode children are heap-allocated via `Box`.
+    ///
+    /// # Safety
+    /// The returned pointer is valid as long as the tree is not dropped or
+    /// structurally modified (which never happens after construction).
+    pub fn resolve_main_vs_ptr(&mut self) -> Option<*mut f64> {
+        match self {
+            DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
+                if vs.port_name.is_none() && !vs.is_cathode_bias {
+                    Some(&mut vs.voltage as *mut f64)
+                } else {
+                    None
+                }
+            }
+            DynNode::Leaf(_) => None,
+            DynNode::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            } => left
+                .resolve_main_vs_ptr()
+                .or_else(|| right.resolve_main_vs_ptr()),
+            DynNode::Transformer {
+                ref mut secondary, ..
+            } => secondary.resolve_main_vs_ptr(),
+            DynNode::RType {
+                ref mut children, ..
+            } => {
+                for c in children.iter_mut() {
+                    if let Some(p) = c.resolve_main_vs_ptr() {
+                        return Some(p);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Resolve a named port VS leaf's `voltage` field pointer.
+    ///
+    /// Walks the tree once to find the `WdfVoltageSource` with matching
+    /// `port_name`. Returns a raw pointer to its `voltage: f64` field.
+    ///
+    /// # Safety
+    /// Same as `resolve_main_vs_ptr` — valid as long as tree is not dropped.
+    pub fn resolve_port_vs_ptr(&mut self, port_name: &str) -> Option<*mut f64> {
+        match self {
+            DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
+                if vs.port_name.as_deref() == Some(port_name) {
+                    Some(&mut vs.voltage as *mut f64)
+                } else {
+                    None
+                }
+            }
+            DynNode::Leaf(_) => None,
+            DynNode::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            } => left
+                .resolve_port_vs_ptr(port_name)
+                .or_else(|| right.resolve_port_vs_ptr(port_name)),
+            DynNode::Transformer {
+                ref mut secondary, ..
+            } => secondary.resolve_port_vs_ptr(port_name),
+            DynNode::RType {
+                ref mut children, ..
+            } => {
+                for c in children.iter_mut() {
+                    if let Some(p) = c.resolve_port_vs_ptr(port_name) {
+                        return Some(p);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Wrap a specific leaf (found by comp_id) with a named VS in series.
+    /// The VS represents a voltage port driving current through the leaf.
+    /// Returns true if the leaf was found and wrapped.
+    pub fn wrap_leaf_with_vs(&mut self, target_comp_id: &str, port_name: &str) -> bool {
+        match self {
+            DynNode::Leaf(ref leaf) => {
+                if leaf.comp_id() == Some(target_comp_id) {
+                    // Found the target leaf — wrap self with Series(VS, self)
+                    let port_vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
+                        voltage: 0.0,
+                        rp: 1.0,
+                        is_cathode_bias: false,
+                        port_name: Some(alloc::string::String::from(port_name)),
+                    }));
+                    let old = core::mem::replace(self, DynNode::VoltageSource(0.0, 1.0));
+                    *self = DynNode::Series(Box::new(port_vs), Box::new(old));
+                    true
+                } else {
+                    false
+                }
+            }
+            DynNode::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            } => {
+                left.wrap_leaf_with_vs(target_comp_id, port_name)
+                    || right.wrap_leaf_with_vs(target_comp_id, port_name)
+            }
+            _ => false, // Transformer, RType — not expected for port injection
+        }
     }
 
     /// Update a pot's position. Returns true if found.
@@ -586,7 +766,9 @@ impl DynNode {
             }
             Self::Transformer { secondary, .. } => secondary.visit_leaves(f),
             Self::RType { children, .. } => {
-                for c in children { c.visit_leaves(f); }
+                for c in children {
+                    c.visit_leaves(f);
+                }
             }
         }
     }
@@ -749,10 +931,7 @@ impl DynNode {
         match self {
             Self::Leaf(leaf) => leaf.set_control(target_id, pos),
             Self::Binary {
-                left,
-                right,
-                dirty,
-                ..
+                left, right, dirty, ..
             } => {
                 let a = left.set_pot_dirty(target_id, pos);
                 let b = right.set_pot_dirty(target_id, pos);
@@ -790,9 +969,7 @@ impl DynNode {
             } => {
                 // All static — nothing ever changes.
             }
-            Self::Binary {
-                dirty: false, ..
-            } => {
+            Self::Binary { dirty: false, .. } => {
                 // Children haven't changed since last recompute.
             }
             Self::Binary {
@@ -827,9 +1004,7 @@ impl DynNode {
             } => {
                 // All static.
             }
-            Self::Transformer {
-                dirty: false, ..
-            } => {
+            Self::Transformer { dirty: false, .. } => {
                 // Children haven't changed.
             }
             Self::Transformer {
@@ -1033,8 +1208,11 @@ impl DynNode {
             Self::Leaf(leaf) => {
                 let tag = leaf.type_tag();
                 // Any passive leaf can be the output: resistor, pot, cap, inductor
-                if tag == "resistor" || tag == "pot" || tag == "capacitor"
-                    || tag == "leaky_capacitor" || tag == "inductor"
+                if tag == "resistor"
+                    || tag == "pot"
+                    || tag == "capacitor"
+                    || tag == "leaky_capacitor"
+                    || tag == "inductor"
                 {
                     Some(a_parent / 2.0)
                 } else {
@@ -1095,7 +1273,8 @@ impl DynNode {
                     // Recurse into children for complex parallel trees
                     let a2 = *b2 - (1.0 - *gamma) * sum;
                     let a1 = *b1 - *gamma * sum;
-                    right.extract_load_voltage(a2)
+                    right
+                        .extract_load_voltage(a2)
                         .or_else(|| left.extract_load_voltage(a1))
                 }
             }
@@ -1239,5 +1418,181 @@ impl DynNode {
                 1 + children.iter().map(|c| c.node_count()).sum::<usize>()
             }
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::String;
+
+    /// Build a typical WDF tree: Series(VS, Parallel(R, C))
+    fn make_simple_tree() -> DynNode {
+        let vs = DynNode::VoltageSource(0.0, 1.0);
+        let r = DynNode::Resistor(Some(String::from("R1")), 1000.0);
+        let c = DynNode::Capacitor(Some(String::from("C1")), 1e-6, 3316.0);
+        let rc = DynNode::Parallel(Box::new(r), Box::new(c));
+        let mut tree = DynNode::Series(Box::new(vs), Box::new(rc));
+        tree.recompute();
+        tree
+    }
+
+    /// Build a tree with a port VS: Series(VS_main, Series(VS_port, R))
+    fn make_port_tree() -> DynNode {
+        let vs_main = DynNode::VoltageSource(0.0, 1.0);
+        let r = DynNode::Resistor(Some(String::from("R_cv")), 47000.0);
+        // Wrap R_cv with a port VS
+        let port_vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
+            voltage: 0.0,
+            rp: 1.0,
+            is_cathode_bias: false,
+            port_name: Some(String::from("cv_cutoff")),
+        }));
+        let inner = DynNode::Series(Box::new(port_vs), Box::new(r));
+        let mut tree = DynNode::Series(Box::new(vs_main), Box::new(inner));
+        tree.recompute();
+        tree
+    }
+
+    #[test]
+    fn resolve_main_vs_ptr_simple() {
+        let mut tree = make_simple_tree();
+        let ptr = tree.resolve_main_vs_ptr();
+        assert!(ptr.is_some(), "should find main VS");
+
+        // Write via pointer, verify via set_voltage
+        let ptr = ptr.unwrap();
+        unsafe {
+            *ptr = 3.14;
+        }
+
+        // Verify the VS reflects the new voltage
+        let b = tree.reflected();
+        // reflected() on a VS returns 2*voltage, so with 3.14 the tree
+        // should propagate a non-zero reflected wave
+        assert!(
+            b.abs() > 0.01,
+            "reflected wave should be non-zero after ptr write, got {b}"
+        );
+    }
+
+    #[test]
+    fn resolve_main_vs_ptr_not_port() {
+        let mut tree = make_port_tree();
+        let ptr = tree.resolve_main_vs_ptr();
+        assert!(ptr.is_some(), "should find main (non-port) VS");
+
+        // The main VS is the one WITHOUT port_name
+        unsafe {
+            *ptr.unwrap() = 1.0;
+        }
+
+        // Verify port VS was NOT modified
+        let port_ptr = tree.resolve_port_vs_ptr("cv_cutoff");
+        assert!(port_ptr.is_some());
+        let port_v = unsafe { *port_ptr.unwrap() };
+        assert_eq!(port_v, 0.0, "port VS should be untouched");
+    }
+
+    #[test]
+    fn resolve_port_vs_ptr_found() {
+        let mut tree = make_port_tree();
+        let ptr = tree.resolve_port_vs_ptr("cv_cutoff");
+        assert!(ptr.is_some(), "should find port VS 'cv_cutoff'");
+
+        // Write and read back
+        unsafe {
+            *ptr.unwrap() = 2.5;
+        }
+        let readback = unsafe { *ptr.unwrap() };
+        assert_eq!(readback, 2.5);
+    }
+
+    #[test]
+    fn resolve_port_vs_ptr_not_found() {
+        let mut tree = make_port_tree();
+        let ptr = tree.resolve_port_vs_ptr("nonexistent_port");
+        assert!(ptr.is_none(), "should not find nonexistent port");
+    }
+
+    #[test]
+    fn resolve_port_vs_ptr_independent_of_main() {
+        let mut tree = make_port_tree();
+        let main_ptr = tree.resolve_main_vs_ptr().unwrap();
+        let port_ptr = tree.resolve_port_vs_ptr("cv_cutoff").unwrap();
+
+        // They should point to different locations
+        assert_ne!(
+            main_ptr, port_ptr,
+            "main and port VS should be different pointers"
+        );
+
+        // Write to both independently
+        unsafe {
+            *main_ptr = 1.0;
+            *port_ptr = 5.0;
+        }
+        let main_v = unsafe { *main_ptr };
+        let port_v = unsafe { *port_ptr };
+        assert_eq!(main_v, 1.0);
+        assert_eq!(port_v, 5.0);
+    }
+
+    #[test]
+    fn set_voltage_by_port_matches_ptr() {
+        let mut tree = make_port_tree();
+
+        // Set via tree walk
+        tree.set_voltage_by_port("cv_cutoff", 7.7);
+
+        // Read via cached pointer
+        let ptr = tree.resolve_port_vs_ptr("cv_cutoff").unwrap();
+        let v = unsafe { *ptr };
+        assert_eq!(v, 7.7, "ptr should read value set by tree walk");
+    }
+
+    #[test]
+    fn ptr_write_visible_via_tree_walk() {
+        let mut tree = make_port_tree();
+        let ptr = tree.resolve_port_vs_ptr("cv_cutoff").unwrap();
+
+        // Write via pointer
+        unsafe {
+            *ptr = 3.3;
+        }
+
+        // Verify set_voltage_by_port (tree walk) overwrites what ptr sees
+        tree.set_voltage_by_port("cv_cutoff", 99.0);
+        let v = unsafe { *ptr };
+        assert_eq!(v, 99.0, "tree walk write should be visible via ptr");
+
+        // And ptr write should be visible via another tree walk
+        unsafe {
+            *ptr = 42.0;
+        }
+        // set_voltage_by_port with same name should find the updated value
+        // (it overwrites, but the point is the memory is shared)
+        tree.set_voltage_by_port("cv_cutoff", 0.0);
+        let v2 = unsafe { *ptr };
+        assert_eq!(v2, 0.0);
+    }
+
+    #[test]
+    fn cathode_bias_excluded_from_main() {
+        // Cathode bias VS should NOT be returned by resolve_main_vs_ptr
+        let cb = DynNode::CathodeBiasSource(10.0, 100.0);
+        let r = DynNode::Resistor(Some(String::from("R1")), 1000.0);
+        let mut tree = DynNode::Series(Box::new(cb), Box::new(r));
+        tree.recompute();
+
+        let ptr = tree.resolve_main_vs_ptr();
+        assert!(
+            ptr.is_none(),
+            "cathode bias should not be returned as main VS"
+        );
     }
 }

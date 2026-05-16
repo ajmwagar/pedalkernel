@@ -1,7 +1,12 @@
 //! Compiled pedal processor: the runtime audio processing chain.
 
 extern crate alloc;
-use alloc::{format, string::{String, ToString}, vec::Vec, sync::Arc};
+use alloc::{
+    format,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
 
 use crate::elements::*;
 use crate::loading::{ImpedanceModel, InterstageLoading};
@@ -27,6 +32,7 @@ pub enum Stage {
     Iir(IirStage),
     StateSpace(StateSpaceStage),
     BlackFeedback(crate::stage::BlackFeedbackStage),
+    BlockwiseKMethod(crate::stage::BlockwiseKMethodStage),
 }
 
 impl core::fmt::Debug for Stage {
@@ -37,6 +43,7 @@ impl core::fmt::Debug for Stage {
             Stage::Iir(_) => write!(f, "Stage::Iir(..)"),
             Stage::StateSpace(_) => write!(f, "Stage::StateSpace(..)"),
             Stage::BlackFeedback(_) => write!(f, "Stage::BlackFeedback(..)"),
+            Stage::BlockwiseKMethod(_) => write!(f, "Stage::BlockwiseKMethod(..)"),
         }
     }
 }
@@ -44,43 +51,83 @@ impl core::fmt::Debug for Stage {
 impl Stage {
     /// Get a reference to the inner WdfStage, if this is a Wdf variant.
     pub fn as_wdf(&self) -> Option<&WdfStage> {
-        if let Stage::Wdf(w) = self { Some(w) } else { None }
+        if let Stage::Wdf(w) = self {
+            Some(w)
+        } else {
+            None
+        }
     }
     /// Get a mutable reference to the inner WdfStage, if this is a Wdf variant.
     pub fn as_wdf_mut(&mut self) -> Option<&mut WdfStage> {
-        if let Stage::Wdf(w) = self { Some(w) } else { None }
+        if let Stage::Wdf(w) = self {
+            Some(w)
+        } else {
+            None
+        }
     }
     /// Get a reference to the inner MultiNlStage, if this is a MultiNl variant.
     pub fn as_multi_nl(&self) -> Option<&MultiNlStage> {
-        if let Stage::MultiNl(m) = self { Some(m) } else { None }
+        if let Stage::MultiNl(m) = self {
+            Some(m)
+        } else {
+            None
+        }
     }
     /// Get a mutable reference to the inner MultiNlStage, if this is a MultiNl variant.
     pub fn as_multi_nl_mut(&mut self) -> Option<&mut MultiNlStage> {
-        if let Stage::MultiNl(m) = self { Some(m) } else { None }
+        if let Stage::MultiNl(m) = self {
+            Some(m)
+        } else {
+            None
+        }
     }
     /// Get a reference to the inner IirStage, if this is an Iir variant.
     pub fn as_iir(&self) -> Option<&IirStage> {
-        if let Stage::Iir(i) = self { Some(i) } else { None }
+        if let Stage::Iir(i) = self {
+            Some(i)
+        } else {
+            None
+        }
     }
     /// Get a mutable reference to the inner IirStage.
     pub fn as_iir_mut(&mut self) -> Option<&mut IirStage> {
-        if let Stage::Iir(i) = self { Some(i) } else { None }
+        if let Stage::Iir(i) = self {
+            Some(i)
+        } else {
+            None
+        }
     }
     /// Get a reference to the inner StateSpaceStage.
     pub fn as_state_space(&self) -> Option<&StateSpaceStage> {
-        if let Stage::StateSpace(s) = self { Some(s) } else { None }
+        if let Stage::StateSpace(s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
     /// Get a mutable reference to the inner StateSpaceStage.
     pub fn as_state_space_mut(&mut self) -> Option<&mut StateSpaceStage> {
-        if let Stage::StateSpace(s) = self { Some(s) } else { None }
+        if let Stage::StateSpace(s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
     /// Get a reference to the inner BlackFeedbackStage.
     pub fn as_black_feedback(&self) -> Option<&crate::stage::BlackFeedbackStage> {
-        if let Stage::BlackFeedback(b) = self { Some(b) } else { None }
+        if let Stage::BlackFeedback(b) = self {
+            Some(b)
+        } else {
+            None
+        }
     }
     /// Get a mutable reference to the inner BlackFeedbackStage.
     pub fn as_black_feedback_mut(&mut self) -> Option<&mut crate::stage::BlackFeedbackStage> {
-        if let Stage::BlackFeedback(b) = self { Some(b) } else { None }
+        if let Stage::BlackFeedback(b) = self {
+            Some(b)
+        } else {
+            None
+        }
     }
 }
 
@@ -110,6 +157,30 @@ pub struct MirrorPot {
     pub id: String,
     pub id_aw: String,
     pub id_wb: String,
+}
+
+/// Named voltage port binding: maps a port name to a circuit node for
+/// audio-rate signal injection/extraction. No impedance recompute.
+///
+/// Input ports inject voltage at a circuit node via `node_signals`.
+/// Output ports extract voltage from a circuit node after processing.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PortBinding {
+    /// Port name (e.g., "audio_in", "cv_cutoff", "env_out").
+    pub name: alloc::string::String,
+    /// Input or Output.
+    pub direction: crate::PortDirection,
+    /// Dense index into `port_values` array.
+    pub index: usize,
+    /// Circuit graph node ID for injection/extraction.
+    pub node_id: usize,
+    /// Default value when no external signal is connected (volts).
+    pub default_value: f64,
+    /// Stage index that contains this port's VS leaf.
+    /// Set at compile time so runtime skips stages that don't have this port.
+    /// usize::MAX = not yet resolved (inject into all stages as fallback).
+    pub stage_idx: usize,
 }
 
 /// Control binding: maps a knob label to a parameter in the processing chain.
@@ -695,6 +766,18 @@ pub struct CompiledPedal {
     /// Reconstructed on the M7 target if needed.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub original_passive_values: HashMap<String, (&'static str, f64)>,
+
+    /// Named voltage port bindings (audio I/O, CV, gates, envelope outputs).
+    /// Ports inject/extract voltage at circuit nodes at audio rate without
+    /// impedance recompute. Declared in the .pedal `ports {}` section.
+    pub ports: Vec<PortBinding>,
+    /// Dense port value buffer — indexed by PortBinding::index.
+    /// Input ports: written by external code via set_port() before process().
+    /// Output ports: written by process(), read via get_port() after.
+    pub port_values: Vec<f64>,
+    /// Auto-init flag: cache_all_vs_pointers runs once on first process() call.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub initialized: bool,
 }
 
 /// Gain-like control labels.
@@ -806,15 +889,13 @@ impl CompiledPedal {
         // Propagate v_max to all stages (WDF roots + multi-NL devices).
         for stage in &mut self.stages {
             match stage {
-                Stage::Wdf(wdf) => {
-                    match &mut wdf.root {
-                        RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
-                        RootKind::Triode(t) => t.set_v_max(tube_v_max),
-                        RootKind::VariMu(t) => t.set_v_max(tube_v_max),
-                        RootKind::Pentode(p) => p.set_v_max(tube_v_max),
-                        _ => {}
-                    }
-                }
+                Stage::Wdf(wdf) => match &mut wdf.root {
+                    RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
+                    RootKind::Triode(t) => t.set_v_max(tube_v_max),
+                    RootKind::VariMu(t) => t.set_v_max(tube_v_max),
+                    RootKind::Pentode(p) => p.set_v_max(tube_v_max),
+                    _ => {}
+                },
                 Stage::MultiNl(mnl) => {
                     for device in &mut mnl.nl_devices {
                         match device {
@@ -868,6 +949,57 @@ impl CompiledPedal {
         }
     }
 
+    /// Resolve and cache runtime-only state for all stages.
+    ///
+    /// Must be called once after construction (or deserialization) and before
+    /// the first `process()` call. This:
+    /// - Caches raw pointers to VS leaves (eliminates per-sample tree walking)
+    /// - Precomputes K-table inverse scales (eliminates per-sample division)
+    /// - Precomputes StateSpace v_rail (eliminates per-sample division)
+    pub fn cache_all_vs_pointers(&mut self) {
+        for stage_idx in 0..self.stages.len() {
+            match &mut self.stages[stage_idx] {
+                Stage::Wdf(ref mut wdf) => {
+                    // Cache VS pointers
+                    let port_names: alloc::vec::Vec<alloc::string::String> = self
+                        .ports
+                        .iter()
+                        .filter(|p| {
+                            p.direction == crate::PortDirection::Input && p.stage_idx == stage_idx
+                        })
+                        .map(|p| p.name.clone())
+                        .collect();
+                    let name_refs: alloc::vec::Vec<&str> =
+                        port_names.iter().map(|s| s.as_str()).collect();
+                    wdf.cache_vs_pointers(&name_refs);
+                    // Precompute K-table inverse scales
+                    if let Some(ref mut kt) = wdf.k_table {
+                        kt.precompute_scales();
+                    }
+                }
+                Stage::StateSpace(ref mut ss) => {
+                    ss.recompute_v_rail();
+                }
+                Stage::BlockwiseKMethod(ref mut bkm) => {
+                    // Resolve port name → port_values index (once, not per-sample)
+                    bkm.port_index_cache = bkm
+                        .vs_port_map
+                        .iter()
+                        .map(|(name, _)| {
+                            self.ports
+                                .iter()
+                                .find(|p| &p.name == name)
+                                .map(|p| p.index)
+                                .unwrap_or(usize::MAX)
+                        })
+                        .collect();
+                    bkm.solve_dc_operating_point();
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Get the tolerance seed for this pedal unit (for diagnostics/UI).
     pub fn tolerance_seed(&self) -> u64 {
         self.tolerance_seed
@@ -881,7 +1013,11 @@ impl CompiledPedal {
     /// Get the number of WDF stages and op-amp stages.
     /// Returns (stage_count, opamp_count).
     pub fn wdf_element_counts(&self) -> (u32, u32) {
-        let wdf_count = self.stages.iter().filter(|s| matches!(s, Stage::Wdf(_))).count() as u32;
+        let wdf_count = self
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::Wdf(_)))
+            .count() as u32;
         let stage_count = wdf_count + self.push_pull_stages.len() as u32;
         (stage_count, self.opamp_stages.len() as u32)
     }
@@ -938,7 +1074,13 @@ impl CompiledPedal {
     pub fn input_impedance(&self) -> f64 {
         self.stages
             .iter()
-            .find_map(|s| if let Stage::Wdf(wdf) = s { Some(wdf.tree.port_resistance()) } else { None })
+            .find_map(|s| {
+                if let Stage::Wdf(wdf) = s {
+                    Some(wdf.tree.port_resistance())
+                } else {
+                    None
+                }
+            })
             .unwrap_or(1_000_000.0) // High-Z default (doesn't load source)
     }
 
@@ -951,7 +1093,13 @@ impl CompiledPedal {
         self.stages
             .iter()
             .rev()
-            .find_map(|s| if let Stage::Wdf(wdf) = s { Some(wdf.tree.port_resistance()) } else { None })
+            .find_map(|s| {
+                if let Stage::Wdf(wdf) = s {
+                    Some(wdf.tree.port_resistance())
+                } else {
+                    None
+                }
+            })
             .unwrap_or(1_000.0) // Low-Z default (can drive loads)
     }
 
@@ -1218,6 +1366,52 @@ impl CompiledPedal {
     }
 
     /// Set a control by its label (e.g., "Drive", "Level", "Rate").
+    /// Resolve a control label to its binding indices. Call once at init,
+    /// then use [`set_control_indexed`] at audio rate to skip string matching.
+    ///
+    /// Returns a vec of control indices that match the label (there may be
+    /// multiple bindings for the same label, e.g., ganged pots).
+    pub fn resolve_control(&self, label: &str) -> Vec<usize> {
+        self.controls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.label.eq_ignore_ascii_case(label))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Set a control by pre-resolved index. No string matching — O(1).
+    ///
+    /// Use [`resolve_control`] at init to get the index, then call this
+    /// at audio rate for envelope-modulated parameters.
+    pub fn set_control_indexed(&mut self, control_idx: usize, value: f64) {
+        if control_idx >= self.controls.len() {
+            return;
+        }
+        let value = value.clamp(0.0, 1.0);
+        let (r0, r1) = self.controls[control_idx].range;
+        let value = (r0 + value * (r1 - r0)).clamp(0.0, 1.0);
+        match &self.controls[control_idx].target {
+            ControlTarget::PotInStage(_)
+            | ControlTarget::PotInIirStage(_)
+            | ControlTarget::PotInMultiNlStage(_, _)
+            | ControlTarget::PotInBlackFeedbackStage(_) => {
+                if let Some(smoother) = self
+                    .pot_smoothers
+                    .iter_mut()
+                    .find(|s| s.control_idx == control_idx)
+                {
+                    smoother.set_target(value);
+                }
+            }
+            _ => {
+                // For non-pot targets, fall back to the full set_control path
+                let label = self.controls[control_idx].label.clone();
+                self.set_control(&label, value);
+            }
+        }
+    }
+
     pub fn set_control(&mut self, label: &str, value: f64) {
         let value = value.clamp(0.0, 1.0);
         let mut found = false;
@@ -1232,7 +1426,10 @@ impl CompiledPedal {
             let (r0, r1) = self.controls[i].range;
             let value = (r0 + value * (r1 - r0)).clamp(0.0, 1.0);
             match &self.controls[i].target {
-                ControlTarget::PotInStage(_) | ControlTarget::PotInIirStage(_) | ControlTarget::PotInMultiNlStage(_, _) | ControlTarget::PotInBlackFeedbackStage(_) => {
+                ControlTarget::PotInStage(_)
+                | ControlTarget::PotInIirStage(_)
+                | ControlTarget::PotInMultiNlStage(_, _)
+                | ControlTarget::PotInBlackFeedbackStage(_) => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
                     {
@@ -1256,6 +1453,7 @@ impl CompiledPedal {
                                 }
                                 Stage::BlackFeedback(bf) => {
                                     bf.set_pot(&comp_id, value);
+                                    bf.update_ri_from_pot(&comp_id, value);
                                 }
                                 _ => {}
                             }
@@ -1499,7 +1697,10 @@ impl CompiledPedal {
     }
     /// Number of multi-NL stages (for debug reporting).
     pub fn debug_multi_nl_count(&self) -> usize {
-        self.stages.iter().filter(|s| matches!(s, Stage::MultiNl(_))).count()
+        self.stages
+            .iter()
+            .filter(|s| matches!(s, Stage::MultiNl(_)))
+            .count()
     }
 
     /// Shows gain structure, all WDF stages with their trees, and control bindings.
@@ -1544,6 +1745,13 @@ impl CompiledPedal {
                 }
                 Stage::BlackFeedback(_) => {
                     s.push_str(&format!("\n[Stage {} (BlackFeedback)]\n", i));
+                }
+                Stage::BlockwiseKMethod(k) => {
+                    s.push_str(&format!(
+                        "\n[Stage {} (BlockwiseKMethod)] {}\n",
+                        i,
+                        k.debug_label()
+                    ));
                 }
             }
         }
@@ -1708,6 +1916,26 @@ impl CompiledPedal {
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: f64) -> f64 {
+        // Auto-init on first call.
+        if !self.initialized {
+            self.cache_all_vs_pointers();
+            self.initialized = true;
+        }
+
+        // Write input to the first input port value. This ensures BKM stages
+        // (which read from port_values) see the serial chain signal.
+        // process_ports() writes all port values before calling process(),
+        // so this only matters for the process(input) path.
+        if let Some(first_in) = self
+            .ports
+            .iter()
+            .find(|p| p.direction == crate::PortDirection::Input)
+        {
+            if first_in.index < self.port_values.len() {
+                self.port_values[first_in.index] = input;
+            }
+        }
+
         // Subcircuit routing mode: process inter-subcircuit signal graph.
         // When subcircuits are present, the normal WDF stage pipeline is bypassed.
         if !self.subcircuit_processors.is_empty() {
@@ -1735,6 +1963,18 @@ impl PedalProcessor for CompiledPedal {
         } else {
             input
         };
+
+        // Inject input port voltages into node_signals.
+        // Input ports are voltage sources at circuit nodes — set by external
+        // code via set_port() before this process() call. Audio rate, no
+        // impedance recompute. Stages with matching injection_node_id will
+        // read these values during their processing.
+        for port in &self.ports {
+            if port.direction == crate::PortDirection::Input && port.node_id != usize::MAX {
+                self.node_signals
+                    .push((port.node_id, self.port_values[port.index]));
+            }
+        }
 
         // Advance pot smoothers — smoothly interpolate pot values toward targets.
         // This eliminates zipper noise and clicks when knobs are turned.
@@ -1970,14 +2210,12 @@ impl PedalProcessor for CompiledPedal {
             }
             for stage in &mut self.stages {
                 match stage {
-                    Stage::Wdf(wdf) => {
-                        match &mut wdf.root {
-                            RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
-                            RootKind::Triode(t) => t.set_v_max(tube_v_max),
-                            RootKind::Pentode(p) => p.set_v_max(tube_v_max),
-                            _ => {}
-                        }
-                    }
+                    Stage::Wdf(wdf) => match &mut wdf.root {
+                        RootKind::OpAmp(op) => op.set_v_max(opamp_v_max),
+                        RootKind::Triode(t) => t.set_v_max(tube_v_max),
+                        RootKind::Pentode(p) => p.set_v_max(tube_v_max),
+                        _ => {}
+                    },
                     Stage::MultiNl(mnl) => {
                         mnl.update_supply_voltage(sagged_voltage);
                     }
@@ -2056,12 +2294,15 @@ impl PedalProcessor for CompiledPedal {
         // Node routing: trigger impulses were already pushed to node_signals above.
 
         for stage_idx in 0..self.stages.len() {
+            let signal_before_stage = signal;
+
             // Determine variant type to dispatch correctly.
             let is_wdf = matches!(&self.stages[stage_idx], Stage::Wdf(_));
             let is_mnl = matches!(&self.stages[stage_idx], Stage::MultiNl(_));
             let is_iir = matches!(&self.stages[stage_idx], Stage::Iir(_));
             let is_ss = matches!(&self.stages[stage_idx], Stage::StateSpace(_));
             let is_bf = matches!(&self.stages[stage_idx], Stage::BlackFeedback(_));
+            let is_bkm = matches!(&self.stages[stage_idx], Stage::BlockwiseKMethod(_));
 
             // Check bypass_serial: static bias networks process for metering
             // but don't overwrite the serial audio signal.
@@ -2071,192 +2312,192 @@ impl PedalProcessor for CompiledPedal {
                 Stage::Iir(i) => i.bypass_serial,
                 Stage::StateSpace(s) => s.bypass_serial,
                 Stage::BlackFeedback(b) => b.bypass_serial,
+                Stage::BlockwiseKMethod(k) => k.bypass_serial,
             };
 
             if bypass_serial {
                 // Process for metering but don't touch `signal`
                 match &mut self.stages[stage_idx] {
-                    Stage::Wdf(w) => { let _ = w.process(0.0); }
-                    Stage::MultiNl(m) => { let _ = m.process(0.0); }
-                    Stage::Iir(i) => { let _ = i.process(0.0); }
-                    Stage::StateSpace(s) => { let _ = s.process(0.0); }
-                    Stage::BlackFeedback(b) => { let _ = b.process(0.0); }
+                    Stage::Wdf(w) => {
+                        let _ = w.process(0.0);
+                    }
+                    Stage::MultiNl(m) => {
+                        let _ = m.process(0.0);
+                    }
+                    Stage::Iir(i) => {
+                        let _ = i.process(0.0);
+                    }
+                    Stage::StateSpace(s) => {
+                        let _ = s.process(0.0);
+                    }
+                    Stage::BlackFeedback(b) => {
+                        let _ = b.process(0.0);
+                    }
+                    Stage::BlockwiseKMethod(k) => {
+                        let _ = k.process(&[]);
+                    }
                 }
                 continue;
             }
 
             if is_wdf {
-                    let stage = if let Stage::Wdf(w) = &mut self.stages[stage_idx] { w } else { unreachable!() };
+                let stage = if let Stage::Wdf(w) = &mut self.stages[stage_idx] {
+                    w
+                } else {
+                    unreachable!()
+                };
 
-                    // Node-based routing for per-voice trigger stages:
-                    // Only trigger voice stages read exclusively from node_signals.
-                    // Regular stages (triodes, BJTs, etc.) use serial chain even
-                    // if they have injection_node_id set for other purposes.
-                    let stage_input = if stage.is_trigger_voice {
-                        let inj_node = stage.injection_node_id;
-                        let impulse: f64 = self
-                            .node_signals
-                            .iter()
-                            .rev()
-                            .filter(|(nid, _)| *nid == inj_node)
-                            .map(|(_, v)| *v)
-                            .sum();
-                        // Activate voice on first trigger impulse.
-                        if impulse != 0.0 {
-                            stage.voice_active = true;
-                        }
-                        // Skip processing entirely until first trigger fires.
-                        // This prevents unfired voices from contributing VCC
-                        // bias to the output sum.
-                        if !stage.voice_active {
-                            wdf_stage_counter += 1;
-                            continue;
-                        }
-                        impulse
-                    } else if stage.is_feedforward {
-                        // Feedforward stages read from upstream node_signals.
-                        // Fall back to serial `signal` if no upstream stage
-                        // wrote to this node (e.g. unity follower buffers).
-                        let inj_node = stage.injection_node_id;
-                        self.node_signals
-                            .iter()
-                            .rev()
-                            .find(|(nid, _)| *nid == inj_node)
-                            .map(|(_, v)| *v)
-                            .unwrap_or(signal)
-                    } else {
-                        // Re-amplify only after the *previous* stage clipped.
-                        if prev_was_clipping {
-                            signal *= self.pre_gain;
-                        }
-                        signal
-                    };
-                    prev_was_clipping = !stage.is_feedforward && stage.root.is_clipping_stage();
-
-                    if stage.has_paired_opamp() {
-                        stage.set_paired_opamp_vp(stage_input);
+                // Inject named port voltages into this stage's WDF tree.
+                // Only ports whose stage_idx matches this stage are applied.
+                // Uses cached VS pointers for zero-cost writes (no tree walk).
+                for port in &self.ports {
+                    if port.direction == crate::PortDirection::Input && port.stage_idx == stage_idx
+                    {
+                        stage.set_port_voltage(&port.name, self.port_values[port.index]);
                     }
+                }
 
-                    #[cfg(feature = "debug-trace")]
-                    let pre_stage = stage_input;
-                    let stage_output = stage.process(stage_input);
-
-                    // Guard against NaN from NR solver divergence.
-                    let stage_output = if stage_output.is_finite() {
-                        stage_output
-                    } else {
-                        static NAN_COUNT: core::sync::atomic::AtomicU64 =
-                            core::sync::atomic::AtomicU64::new(0);
-                        let n = NAN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        #[cfg(feature = "std")]
-                        if n < 10 || n % 48000 == 0 {
-                            std::eprintln!(
-                                "NaN/Inf in WDF stage {} ({}): input={:.6e} output={:.6e}",
-                                wdf_stage_counter,
-                                stage.root_comp_id,
-                                stage_input,
-                                stage_output,
-                            );
-                        }
-                        0.0
-                    };
-
-                    // Write output to stage's output node for junction summing
-                    // (only for trigger voice stages).
-                    if stage.is_feedforward {
-                        // Feedforward: additive blend into serial chain
-                        signal += stage_output;
-                    } else if stage.is_trigger_voice && stage.output_node_id != usize::MAX {
-                        if let Some(entry) = self
-                            .node_signals
-                            .iter_mut()
-                            .find(|(nid, _)| *nid == stage.output_node_id)
-                        {
-                            entry.1 += stage_output;
-                        } else {
-                            self.node_signals.push((stage.output_node_id, stage_output));
-                        }
-                        // Use accumulated value at output node as the serial chain signal.
-                        signal = self
-                            .node_signals
-                            .iter()
-                            .rev()
-                            .find(|(nid, _)| *nid == stage.output_node_id)
-                            .map(|(_, v)| *v)
-                            .unwrap_or(stage_output);
-                    } else {
-                        signal = stage_output;
-                        // Write to node_signals for downstream feedforward stages
-                        if stage.output_node_id != usize::MAX {
-                            self.node_signals.push((stage.output_node_id, stage_output));
-                        }
+                // Node-based routing for per-voice trigger stages:
+                // Only trigger voice stages read exclusively from node_signals.
+                // Regular stages (triodes, BJTs, etc.) use serial chain even
+                // if they have injection_node_id set for other purposes.
+                let stage_input = if stage.is_trigger_voice {
+                    let inj_node = stage.injection_node_id;
+                    let impulse: f64 = self
+                        .node_signals
+                        .iter()
+                        .rev()
+                        .filter(|(nid, _)| *nid == inj_node)
+                        .map(|(_, v)| *v)
+                        .sum();
+                    // Activate voice on first trigger impulse.
+                    if impulse != 0.0 {
+                        stage.voice_active = true;
                     }
+                    // Skip processing entirely until first trigger fires.
+                    // This prevents unfired voices from contributing VCC
+                    // bias to the output sum.
+                    if !stage.voice_active {
+                        wdf_stage_counter += 1;
+                        continue;
+                    }
+                    impulse
+                } else if stage.is_feedforward {
+                    // Feedforward stages read from upstream node_signals.
+                    // Fall back to serial `signal` if no upstream stage
+                    // wrote to this node (e.g. unity follower buffers).
+                    let inj_node = stage.injection_node_id;
+                    self.node_signals
+                        .iter()
+                        .rev()
+                        .find(|(nid, _)| *nid == inj_node)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(signal)
+                } else {
+                    // Re-amplify only after the *previous* stage clipped.
+                    if prev_was_clipping {
+                        signal *= self.pre_gain;
+                    }
+                    signal
+                };
+                prev_was_clipping = !stage.is_feedforward && stage.root.is_clipping_stage();
 
+                if stage.has_paired_opamp() {
+                    stage.set_paired_opamp_vp(stage_input);
+                }
 
-                    #[cfg(feature = "debug-trace")]
-                    if trace_on {
+                #[cfg(feature = "debug-trace")]
+                let pre_stage = stage_input;
+                let stage_output = stage.process(stage_input);
+
+                // Guard against NaN from NR solver divergence.
+                let stage_output = if stage_output.is_finite() {
+                    stage_output
+                } else {
+                    static NAN_COUNT: core::sync::atomic::AtomicU64 =
+                        core::sync::atomic::AtomicU64::new(0);
+                    let n = NAN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "std")]
+                    if n < 10 || n % 48000 == 0 {
                         std::eprintln!(
+                            "NaN/Inf in WDF stage {} ({}): input={:.6e} output={:.6e}",
+                            wdf_stage_counter,
+                            stage.root_comp_id,
+                            stage_input,
+                            stage_output,
+                        );
+                    }
+                    0.0
+                };
+
+                // Write output to stage's output node for junction summing
+                // (only for trigger voice stages).
+                if stage.is_feedforward {
+                    // Feedforward: additive blend into serial chain
+                    signal += stage_output;
+                } else if stage.is_trigger_voice && stage.output_node_id != usize::MAX {
+                    if let Some(entry) = self
+                        .node_signals
+                        .iter_mut()
+                        .find(|(nid, _)| *nid == stage.output_node_id)
+                    {
+                        entry.1 += stage_output;
+                    } else {
+                        self.node_signals.push((stage.output_node_id, stage_output));
+                    }
+                    // Use accumulated value at output node as the serial chain signal.
+                    signal = self
+                        .node_signals
+                        .iter()
+                        .rev()
+                        .find(|(nid, _)| *nid == stage.output_node_id)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(stage_output);
+                } else {
+                    signal = stage_output;
+                    // Write to node_signals for downstream feedforward stages
+                    if stage.output_node_id != usize::MAX {
+                        self.node_signals.push((stage.output_node_id, stage_output));
+                    }
+                }
+
+                #[cfg(feature = "debug-trace")]
+                if trace_on {
+                    std::eprintln!(
                             "  [WDF {wdf_stage_counter}] in={pre_stage:.6e} out={stage_output:.6e} rp={:.1}",
                             stage.tree.port_resistance()
                         );
-                    }
-                    if stage_idx < crate::metering::MAX_STAGES {
-                        stage_levels[stage_idx] = stage_output;
-                    }
+                }
+                if stage_idx < crate::metering::MAX_STAGES {
+                    stage_levels[stage_idx] = stage_output;
+                }
 
-                    // TODO: DebugStats not yet in rt crate
-                    // #[cfg(debug_assertions)]
-                    // if let Some(ref stats) = self.debug_stats {
-                    //     stats.record_stage_level(wdf_stage_counter, stage_output);
-                    // }
-                    wdf_stage_counter += 1;
+                // TODO: DebugStats not yet in rt crate
+                // #[cfg(debug_assertions)]
+                // if let Some(ref stats) = self.debug_stats {
+                //     stats.record_stage_level(wdf_stage_counter, stage_output);
+                // }
+                wdf_stage_counter += 1;
             } else if is_mnl {
-                    prev_was_clipping = false;
-                    let mnl = if let Stage::MultiNl(m) = &mut self.stages[stage_idx] { m } else { unreachable!() };
-                    let mnl_input = signal;
+                prev_was_clipping = false;
+                let mnl = if let Stage::MultiNl(m) = &mut self.stages[stage_idx] {
+                    m
+                } else {
+                    unreachable!()
+                };
+                let mnl_input = signal;
 
-                    #[cfg(feature = "debug-trace")]
-                    let pre = mnl_input;
-                    let mnl_output = mnl.process(mnl_input);
-                    let mnl_output = if mnl_output.is_finite() {
-                        mnl_output
-                    } else {
-                        static NAN_COUNT: core::sync::atomic::AtomicU64 =
-                            core::sync::atomic::AtomicU64::new(0);
-                        let n = NAN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        #[cfg(feature = "std")]
-                        if n < 10 || n % 48000 == 0 {
-                            let devices: String = if let Some(ref dg) = mnl.device_groups {
-                                dg.groups
-                                    .iter()
-                                    .map(|g| g.debug_name())
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            } else {
-                                mnl.nl_devices
-                                    .iter()
-                                    .map(|d| d.debug_name())
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            };
-                            std::eprintln!(
-                                "NaN/Inf in MultiNL stage {} [{}]: input={:.6e} output={:.6e} v_prev={:.4?}",
-                                stage_idx, devices, mnl_input, mnl_output, &mnl.v_prev,
-                            );
-                        }
-                        0.0
-                    };
-
-                    let out_node = mnl.output_node_id;
-                    self.node_signals.push((out_node, mnl_output));
-                    signal = mnl_output;
-                    if stage_idx < crate::metering::MAX_STAGES {
-                        stage_levels[stage_idx] = mnl_output;
-                    }
-
-                    #[cfg(feature = "debug-trace")]
-                    if trace_on {
-                        let mnl = if let Stage::MultiNl(m) = &self.stages[stage_idx] { m } else { unreachable!() };
+                #[cfg(feature = "debug-trace")]
+                let pre = mnl_input;
+                let mnl_output = mnl.process(mnl_input);
+                let mnl_output = if mnl_output.is_finite() {
+                    mnl_output
+                } else {
+                    static NAN_COUNT: core::sync::atomic::AtomicU64 =
+                        core::sync::atomic::AtomicU64::new(0);
+                    let n = NAN_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    #[cfg(feature = "std")]
+                    if n < 10 || n % 48000 == 0 {
                         let devices: String = if let Some(ref dg) = mnl.device_groups {
                             dg.groups
                                 .iter()
@@ -2271,57 +2512,134 @@ impl PedalProcessor for CompiledPedal {
                                 .join(",")
                         };
                         std::eprintln!(
+                                "NaN/Inf in MultiNL stage {} [{}]: input={:.6e} output={:.6e} v_prev={:.4?}",
+                                stage_idx, devices, mnl_input, mnl_output, &mnl.v_prev,
+                            );
+                    }
+                    0.0
+                };
+
+                let out_node = mnl.output_node_id;
+                self.node_signals.push((out_node, mnl_output));
+                signal = mnl_output;
+                if stage_idx < crate::metering::MAX_STAGES {
+                    stage_levels[stage_idx] = mnl_output;
+                }
+
+                #[cfg(feature = "debug-trace")]
+                if trace_on {
+                    let mnl = if let Stage::MultiNl(m) = &self.stages[stage_idx] {
+                        m
+                    } else {
+                        unreachable!()
+                    };
+                    let devices: String = if let Some(ref dg) = mnl.device_groups {
+                        dg.groups
+                            .iter()
+                            .map(|g| g.debug_name())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    } else {
+                        mnl.nl_devices
+                            .iter()
+                            .map(|d| d.debug_name())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    std::eprintln!(
                             "  [MNL {stage_idx}] [{devices}] in={pre:.6e} out={signal:.6e} n_nl={} out_port={} xfmr={:.2} inj={} out={}",
                             mnl.n_nl, mnl.output_port, mnl.transformer_gain,
                             mnl.injection_node_id, mnl.output_node_id,
                         );
-                        std::eprintln!(
-                            "    s_nl_adapted={:.6?} v_prev={:.4?}",
-                            &mnl.scattering.s_nl_adapted, &mnl.v_prev,
-                        );
-                    }
+                    std::eprintln!(
+                        "    s_nl_adapted={:.6?} v_prev={:.4?}",
+                        &mnl.scattering.s_nl_adapted,
+                        &mnl.v_prev,
+                    );
+                }
             } else if is_iir {
-                    prev_was_clipping = false;
-                    let iir_stage = if let Stage::Iir(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
-                    signal = iir_stage.process(signal);
-                    if stage_idx < crate::metering::MAX_STAGES {
-                        stage_levels[stage_idx] = signal;
-                    }
+                prev_was_clipping = false;
+                let iir_stage = if let Stage::Iir(s) = &mut self.stages[stage_idx] {
+                    s
+                } else {
+                    unreachable!()
+                };
+                signal = iir_stage.process(signal);
+                if stage_idx < crate::metering::MAX_STAGES {
+                    stage_levels[stage_idx] = signal;
+                }
             } else if is_ss {
-                    prev_was_clipping = false;
-                    let ss_stage = if let Stage::StateSpace(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
-                    signal = ss_stage.process(signal);
-                    if stage_idx < crate::metering::MAX_STAGES {
-                        stage_levels[stage_idx] = signal;
-                    }
+                prev_was_clipping = false;
+                let ss_stage = if let Stage::StateSpace(s) = &mut self.stages[stage_idx] {
+                    s
+                } else {
+                    unreachable!()
+                };
+                signal = ss_stage.process(signal);
+                if stage_idx < crate::metering::MAX_STAGES {
+                    stage_levels[stage_idx] = signal;
+                }
             } else if is_bf {
-                    prev_was_clipping = false;
-                    let bf_stage = if let Stage::BlackFeedback(s) = &mut self.stages[stage_idx] { s } else { unreachable!() };
-                    signal = bf_stage.process(signal);
-                    // Write to node_signals for downstream feedforward stages
-                    if bf_stage.output_node_id != usize::MAX {
-                        self.node_signals.push((bf_stage.output_node_id, signal));
-                    }
-                    if stage_idx < crate::metering::MAX_STAGES {
-                        stage_levels[stage_idx] = signal;
-                    }
-            }
-
-            // Apply wiper dividers after the stage that contains them.
-            // signal *= pot_position (after taper) — voltage division at
-            // the wiper point between pot halves in different tree branches.
-            for wd in &self.wiper_dividers {
-                if wd.after_stage_idx == stage_idx {
-                    signal *= wd.position;
+                prev_was_clipping = false;
+                let bf_stage = if let Stage::BlackFeedback(s) = &mut self.stages[stage_idx] {
+                    s
+                } else {
+                    unreachable!()
+                };
+                signal = bf_stage.process(signal);
+                // Write to node_signals for downstream feedforward stages
+                if bf_stage.output_node_id != usize::MAX {
+                    self.node_signals.push((bf_stage.output_node_id, signal));
+                }
+                if stage_idx < crate::metering::MAX_STAGES {
+                    stage_levels[stage_idx] = signal;
+                }
+            } else if is_bkm {
+                prev_was_clipping = false;
+                let bkm_stage = if let Stage::BlockwiseKMethod(s) = &mut self.stages[stage_idx] {
+                    s
+                } else {
+                    unreachable!()
+                };
+                // Build VS signals from port values.
+                let n_vs = bkm_stage.vs_port_map.len();
+                let mut vs_signals = alloc::vec![0.0f64; n_vs];
+                for (i, port_idx) in bkm_stage.port_index_cache.iter().enumerate() {
+                    vs_signals[i] = if *port_idx < self.port_values.len() {
+                        self.port_values[*port_idx]
+                    } else {
+                        0.0
+                    };
+                }
+                signal = bkm_stage.process(&vs_signals);
+                if stage_idx < crate::metering::MAX_STAGES {
+                    stage_levels[stage_idx] = signal;
                 }
             }
 
+            // Apply output wiper dividers after the stage that contains them.
+            // These stages are passive sink networks whose WDF probe can report
+            // the wrong pot side. Use the incoming serial signal and explicit
+            // wiper position as the output divider.
+            for wd in &self.wiper_dividers {
+                if wd.after_stage_idx == stage_idx {
+                    signal = signal_before_stage * wd.position;
+                }
+            }
         }
 
         #[cfg(feature = "debug-trace")]
         if trace_on {
-            let wdf_count = self.stages.iter().filter(|s| matches!(s, Stage::Wdf(_))).count();
-            let mnl_count = self.stages.iter().filter(|s| matches!(s, Stage::MultiNl(_))).count();
+            let wdf_count = self
+                .stages
+                .iter()
+                .filter(|s| matches!(s, Stage::Wdf(_)))
+                .count();
+            let mnl_count = self
+                .stages
+                .iter()
+                .filter(|s| matches!(s, Stage::MultiNl(_)))
+                .count();
             std::eprintln!(
                 "  [PRE-PP] signal={signal:.6e} n_pp={} n_sc={} stages={}(wdf={}, mnl={})",
                 self.push_pull_stages.len(),
@@ -2340,7 +2658,10 @@ impl PedalProcessor for CompiledPedal {
                 let pre_pp = signal;
                 std::eprintln!(
                     "[LATE n={}] input={:.6e} pre_pp={:.6e} signal_so_far={:.6e}",
-                    n, input, pre_pp, signal
+                    n,
+                    input,
+                    pre_pp,
+                    signal
                 );
             }
         }
@@ -2615,6 +2936,21 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
+        // Extract output port values from the processed signal.
+        for port in &self.ports {
+            if port.direction == crate::PortDirection::Output {
+                // Primary audio output uses the serial chain result.
+                // Other outputs read from node_signals (e.g., envelope taps).
+                self.port_values[port.index] = self
+                    .node_signals
+                    .iter()
+                    .rev()
+                    .find(|(nid, _)| *nid == port.node_id)
+                    .map(|(_, v)| *v)
+                    .unwrap_or(output);
+            }
+        }
+
         output
     }
 
@@ -2731,13 +3067,17 @@ impl PedalProcessor for CompiledPedal {
         for (si, stage) in self.stages.iter().enumerate() {
             let type_name = match stage {
                 Stage::Wdf(w) => {
-                    if w.feedback_opamp.is_some() { "WDF+OpAmp" }
-                    else { "WDF" }
+                    if w.feedback_opamp.is_some() {
+                        "WDF+OpAmp"
+                    } else {
+                        "WDF"
+                    }
                 }
                 Stage::MultiNl(_) => "MultiNL",
                 Stage::Iir(_) => "IIR",
                 Stage::StateSpace(_) => "StateSpace",
                 Stage::BlackFeedback(_) => "BlackFB",
+                Stage::BlockwiseKMethod(_) => "BKM",
             };
             out.push((format!("{{S{si}}} {type_name}"), 0.0, 0.0));
         }
@@ -2809,6 +3149,52 @@ impl PedalProcessor for CompiledPedal {
         }
 
         out
+    }
+
+    fn resolve_port(&self, name: &str) -> Option<usize> {
+        self.ports
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+            .map(|p| p.index)
+    }
+
+    fn port_count(&self) -> usize {
+        self.ports.len()
+    }
+
+    fn process_ports(&mut self, ports: &mut [f64]) {
+        // Copy input port values from caller's slice
+        for port in &self.ports {
+            if port.direction == crate::PortDirection::Input && port.index < ports.len() {
+                self.port_values[port.index] = ports[port.index];
+            }
+        }
+
+        // Run the main process with input from the first input port (backward compat)
+        let input = self
+            .ports
+            .iter()
+            .find(|p| p.direction == crate::PortDirection::Input)
+            .map(|p| ports.get(p.index).copied().unwrap_or(0.0))
+            .unwrap_or(0.0);
+        let output = self.process(input);
+
+        // Copy output port values to caller's slice
+        for port in &self.ports {
+            if port.direction == crate::PortDirection::Output && port.index < ports.len() {
+                ports[port.index] = self.port_values[port.index];
+            }
+        }
+        // Also write the serial chain output to the first output port
+        if let Some(out_port) = self
+            .ports
+            .iter()
+            .find(|p| p.direction == crate::PortDirection::Output)
+        {
+            if out_port.index < ports.len() {
+                ports[out_port.index] = output;
+            }
+        }
     }
 }
 

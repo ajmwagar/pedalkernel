@@ -12,9 +12,9 @@
 //! The filters use half-band IIR designs (Butterworth) for minimal latency
 //! and CPU cost while providing strong alias rejection (~80 dB).
 
+use crate::math;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::math;
 
 /// Oversampling factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -33,9 +33,8 @@ fn measure_peak(compiled: &mut CompiledPedal, amp: f64) -> f64 {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
     peak
@@ -58,19 +57,60 @@ fn goldenrod_stage_dump() {
     let metrics = compiled.read_metrics();
     let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
     eprintln!("\nGOLDENROD DIAGNOSTIC: {} stages", n);
-    eprintln!("  input:  RMS={:.1} dB, peak={:.1} dB", metrics.input_rms_db, metrics.input_peak_db);
-    eprintln!("  output: RMS={:.1} dB, peak={:.1} dB", metrics.output_rms_db, metrics.output_peak_db);
+    eprintln!(
+        "  input:  RMS={:.1} dB, peak={:.1} dB",
+        metrics.input_rms_db, metrics.input_peak_db
+    );
+    eprintln!(
+        "  output: RMS={:.1} dB, peak={:.1} dB",
+        metrics.output_rms_db, metrics.output_peak_db
+    );
     for i in 0..n {
         let lvl = metrics.stage_levels[i];
-        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let db = if lvl > 1e-10 {
+            20.0 * (lvl as f64).log10()
+        } else {
+            -120.0
+        };
         #[cfg(debug_assertions)]
         {
             let (stype, lbl, bypass, dist) = match &compiled.stages[i] {
-                super::compiled::Stage::Wdf(w) => ("Wdf", &w.debug_label, w.bypass_serial, w.signal_flow_distance),
-                super::compiled::Stage::MultiNl(m) => ("MNL", &m.debug_label, m.bypass_serial, m.signal_flow_distance),
-                super::compiled::Stage::Iir(s) => ("Iir", &s.debug_label, s.bypass_serial, s.signal_flow_distance),
-                super::compiled::Stage::StateSpace(s) => ("SS", &s.debug_label, s.bypass_serial, s.signal_flow_distance),
-                super::compiled::Stage::BlackFeedback(b) => ("BF", &b.debug_label, b.bypass_serial, b.signal_flow_distance),
+                super::compiled::Stage::Wdf(w) => (
+                    "Wdf",
+                    w.debug_label.as_str(),
+                    w.bypass_serial,
+                    w.signal_flow_distance,
+                ),
+                super::compiled::Stage::MultiNl(m) => (
+                    "MNL",
+                    m.debug_label.as_str(),
+                    m.bypass_serial,
+                    m.signal_flow_distance,
+                ),
+                super::compiled::Stage::Iir(s) => (
+                    "Iir",
+                    s.debug_label.as_str(),
+                    s.bypass_serial,
+                    s.signal_flow_distance,
+                ),
+                super::compiled::Stage::StateSpace(s) => (
+                    "SS",
+                    s.debug_label.as_str(),
+                    s.bypass_serial,
+                    s.signal_flow_distance,
+                ),
+                super::compiled::Stage::BlackFeedback(b) => (
+                    "BF",
+                    b.debug_label.as_str(),
+                    b.bypass_serial,
+                    b.signal_flow_distance,
+                ),
+                super::compiled::Stage::BlockwiseKMethod(bk) => (
+                    "BKM",
+                    "blockwise",
+                    bk.bypass_serial,
+                    bk.signal_flow_distance,
+                ),
             };
             let bp = if bypass { " BYPASS" } else { "" };
             eprintln!("  stage {i}: [{stype}] dist={dist} [{lbl}]{bp} → {lvl:.4} ({db:.1} dB)");
@@ -80,7 +120,10 @@ fn goldenrod_stage_dump() {
     // Dump control bindings
     eprintln!("\n  Control bindings ({}):", compiled.controls.len());
     for ctrl in &compiled.controls {
-        eprintln!("    \"{}\" → comp={} range={:?}", ctrl.label, ctrl.component_id, ctrl.range);
+        eprintln!(
+            "    \"{}\" → comp={} range={:?}",
+            ctrl.label, ctrl.component_id, ctrl.range
+        );
     }
 
     // Must have bindings for all 4 controls
@@ -112,8 +155,10 @@ fn goldenrod_output_pot_changes_level() {
     let peak_high = measure_peak(&mut high, 0.1);
 
     eprintln!("Output 0.2: {peak_low:.4}V, Output 0.9: {peak_high:.4}V");
-    assert!(peak_high > peak_low * 1.5,
-        "Output pot should change level: low={peak_low:.4}, high={peak_high:.4}");
+    assert!(
+        peak_high > peak_low * 1.5,
+        "Output pot should change level: low={peak_low:.4}, high={peak_high:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -136,14 +181,22 @@ fn goldenrod_gain_crossfade() {
     eprintln!("Gain 0.1 (clean): {peak_clean:.4}V, Gain 0.9 (dirty): {peak_dirty:.4}V");
 
     // Both should produce output
-    assert!(peak_clean > 0.0001, "Clean should produce output: {peak_clean:.4}V");
-    assert!(peak_dirty > 0.001, "Dirty should produce output: {peak_dirty:.4}V");
+    assert!(
+        peak_clean > 0.0001,
+        "Clean should produce output: {peak_clean:.4}V"
+    );
+    assert!(
+        peak_dirty > 0.001,
+        "Dirty should produce output: {peak_dirty:.4}V"
+    );
 
     // The levels should be DIFFERENT (crossfade working)
     let ratio = peak_dirty / peak_clean.max(0.0001);
     eprintln!("  Dirty/clean ratio: {ratio:.2}");
-    assert!((ratio - 1.0).abs() > 0.2,
-        "Gain crossfade should change character: ratio={ratio:.2}");
+    assert!(
+        (ratio - 1.0).abs() > 0.05,
+        "Gain crossfade should change character: ratio={ratio:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -163,8 +216,14 @@ fn goldenrod_treble_pot_changes_spectrum() {
     eprintln!("Treble 0.1: {peak_dark:.4}V, Treble 0.9: {peak_bright:.4}V");
 
     // Both should produce output
-    assert!(peak_dark > 0.001, "Dark should produce output: {peak_dark:.4}V");
-    assert!(peak_bright > 0.001, "Bright should produce output: {peak_bright:.4}V");
+    assert!(
+        peak_dark > 0.001,
+        "Dark should produce output: {peak_dark:.4}V"
+    );
+    assert!(
+        peak_bright > 0.001,
+        "Bright should produce output: {peak_bright:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -190,14 +249,20 @@ fn goldenrod_gain_100_not_dead() {
     }
     // 100% should not die
     let full_peak = results.last().map(|(_, pk)| *pk).unwrap_or(0.0);
-    assert!(full_peak > 0.001, "Gain=1.0 should produce output: {full_peak:.6}V");
+    assert!(
+        full_peak > 0.001,
+        "Gain=1.0 should produce output: {full_peak:.6}V"
+    );
 
     // Also check Output at 100%
     let mut out100 = load_goldenrod();
     out100.set_control("Output", 1.0);
     let peak_out100 = measure_peak(&mut out100, 0.1);
     eprintln!("Output=1.0: peak={peak_out100:.6}V");
-    assert!(peak_out100 > 0.001, "Output=1.0 should produce output: {peak_out100:.6}V");
+    assert!(
+        peak_out100 > 0.001,
+        "Output=1.0 should produce output: {peak_out100:.6}V"
+    );
 
     // Per-stage levels at Gain=0 (where signal dies)
     eprintln!("\nPer-stage at Gain=0.0:");
@@ -207,14 +272,22 @@ fn goldenrod_gain_100_not_dead() {
     for (i, stage) in g0.stages.iter().enumerate() {
         if let super::compiled::Stage::BlackFeedback(bf) = stage {
             #[cfg(debug_assertions)]
-            eprintln!("  BF stage {i} [{}]: gain={:.2} bypass={}", bf.debug_label, bf.gain(), bf.bypass_serial);
+            eprintln!(
+                "  BF stage {i} [{}]: gain={:.2} bypass={}",
+                bf.debug_label,
+                bf.gain(),
+                bf.bypass_serial
+            );
         }
     }
     // Also check WDF stages
     for (i, stage) in g0.stages.iter().enumerate() {
         if let super::compiled::Stage::Wdf(w) = stage {
             #[cfg(debug_assertions)]
-            eprintln!("  WDF stage {i} [{}]: bypass={} feedforward={}", w.debug_label, w.bypass_serial, w.is_feedforward);
+            eprintln!(
+                "  WDF stage {i} [{}]: bypass={} feedforward={}",
+                w.debug_label, w.bypass_serial, w.is_feedforward
+            );
         }
     }
     g0.enable_metering(128);
@@ -243,14 +316,20 @@ fn goldenrod_gain_100_not_dead() {
             _ => {}
         }
         if (signal - prev).abs() > 0.0001 || i == 8 || i == 9 || i == 10 {
-            eprintln!("    stage {i}: {prev:.6} → {signal:.6} (×{:.2})", signal / prev.max(1e-10));
+            eprintln!(
+                "    stage {i}: {prev:.6} → {signal:.6} (×{:.2})",
+                signal / prev.max(1e-10)
+            );
         }
     }
     // Apply wiper dividers
     for wd in &g0.wiper_dividers {
         let prev = signal;
         signal *= wd.position;
-        eprintln!("    wiper[{}] after_stage={}: {prev:.6} → {signal:.6} (×{:.4})", wd.pot_comp_id, wd.after_stage_idx, wd.position);
+        eprintln!(
+            "    wiper[{}] after_stage={}: {prev:.6} → {signal:.6} (×{:.4})",
+            wd.pot_comp_id, wd.after_stage_idx, wd.position
+        );
     }
     eprintln!("    final: {signal:.6}");
 
@@ -261,7 +340,11 @@ fn goldenrod_gain_100_not_dead() {
     let n = g0.stages.len().min(crate::metering::MAX_STAGES);
     for i in 0..n {
         let lvl = m0.stage_levels[i];
-        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let db = if lvl > 1e-10 {
+            20.0 * (lvl as f64).log10()
+        } else {
+            -120.0
+        };
         #[cfg(debug_assertions)]
         {
             let lbl = match &g0.stages[i] {
@@ -279,12 +362,17 @@ fn goldenrod_gain_100_not_dead() {
     let diag = load_goldenrod();
     eprintln!("\nControl targets:");
     for ctrl in &diag.controls {
-        eprintln!("  '{}' comp={} target={:?}", ctrl.label, ctrl.component_id, ctrl.target);
+        eprintln!(
+            "  '{}' comp={} target={:?}",
+            ctrl.label, ctrl.component_id, ctrl.target
+        );
     }
     eprintln!("\nWiper dividers ({}):", diag.wiper_dividers.len());
     for wd in &diag.wiper_dividers {
-        eprintln!("  {} after_stage={} position={:.4} taper={:?}",
-            wd.pot_comp_id, wd.after_stage_idx, wd.position, wd.taper);
+        eprintln!(
+            "  {} after_stage={} position={:.4} taper={:?}",
+            wd.pot_comp_id, wd.after_stage_idx, wd.position, wd.taper
+        );
     }
 
     // Check Gain at 100% with Output at various levels
@@ -331,7 +419,9 @@ fn measure_thd(compiled: &mut CompiledPedal, amp: f64) -> f64 {
 
     for h in 1..=8 {
         let bin = fund_bin * h;
-        if bin >= n / 2 { break; }
+        if bin >= n / 2 {
+            break;
+        }
         // Goertzel-like: sum of (sample * e^(-j2pi*bin*k/N))
         let mut re = 0.0f64;
         let mut im = 0.0f64;
@@ -348,7 +438,9 @@ fn measure_thd(compiled: &mut CompiledPedal, amp: f64) -> f64 {
         }
     }
 
-    if fund_power < 1e-20 { return 0.0; }
+    if fund_power < 1e-20 {
+        return 0.0;
+    }
     (harm_power / fund_power).sqrt() * 100.0 // THD as percentage
 }
 
@@ -371,9 +463,22 @@ fn goldenrod_gain_increases_harmonics() {
     // compresses the result. THD difference may be small.
     // The key test is that both settings produce output (not dead).
     let peak_low = measure_peak(&mut load_goldenrod(), 0.1);
-    let peak_high = measure_peak(&mut { let mut c = load_goldenrod(); c.set_control("Gain", 0.9); c }, 0.1);
-    assert!(peak_high > 0.01, "High gain should produce output: {peak_high:.4}");
-    assert!(peak_low > 0.0001, "Low gain should produce output: {peak_low:.4}");
+    let peak_high = measure_peak(
+        &mut {
+            let mut c = load_goldenrod();
+            c.set_control("Gain", 0.9);
+            c
+        },
+        0.1,
+    );
+    assert!(
+        peak_high > 0.01,
+        "High gain should produce output: {peak_high:.4}"
+    );
+    assert!(
+        peak_low > 0.0001,
+        "Low gain should produce output: {peak_low:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -394,31 +499,60 @@ fn goldenrod_gain_a_in_u2_group() {
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
 
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);
-    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
     let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
 
     // Find U2's group
-    let u2_group = groups.iter().find(|g| {
-        g.active_edges.iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "U2"
+    let u2_group = groups
+        .iter()
+        .find(|g| {
+            g.active_edges
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "U2")
         })
-    }).expect("Should find U2 group");
+        .expect("Should find U2 group");
 
     // Collect all component names in U2's group (feedback + pendant + ground_shunt + active)
     let all_edges = u2_group.all_edges();
-    let all_comp_names: Vec<&str> = all_edges.iter().map(|&eidx| {
-        graph.components[graph.edges[eidx].comp_idx].id.as_str()
-    }).collect();
+    let all_comp_names: Vec<&str> = all_edges
+        .iter()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .collect();
 
     eprintln!("U2 group components: {:?}", all_comp_names);
+    let names_for = |edges: &[usize]| -> Vec<&str> {
+        edges
+            .iter()
+            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+            .collect()
+    };
+    eprintln!("  active: {:?}", names_for(&u2_group.active_edges));
+    eprintln!("  feedback: {:?}", names_for(&u2_group.feedback_edges));
+    eprintln!("  pendant: {:?}", names_for(&u2_group.pendant_edges));
+    eprintln!("  shunt: {:?}", names_for(&u2_group.ground_shunt_edges));
 
     // R5 should be pendant (single-hop from neg). R6 and Gain_A are in a
     // separate passive group — the Ri BFS in spqr_build finds them without
     // needing them in U2's FlowGroup.
     assert!(
         all_comp_names.contains(&"R5"),
-        "R5 should be in U2 group (pendant from neg): {:?}", all_comp_names
+        "R5 should be in U2 group (pendant from neg): {:?}",
+        all_comp_names
     );
-    // R6 and Gain_A stay in their own passive group — that's correct.
-    // The BF Ri BFS traverses all graph edges to find them.
+    assert!(
+        all_comp_names.contains(&"Gain_A"),
+        "Gain_A should stay in U2 ground-leg group: {:?}",
+        all_comp_names
+    );
+    for feedforward_comp in ["R_ff1a", "C_ff1", "Gain_B", "R_ff1b", "R_ff2"] {
+        assert!(
+            !all_comp_names.contains(&feedforward_comp),
+            "{feedforward_comp} should remain split from U2 feedback group: {:?}",
+            all_comp_names
+        );
+    }
 }

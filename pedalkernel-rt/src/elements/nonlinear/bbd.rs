@@ -2,9 +2,9 @@
 //!
 //! Models MN3007, MN3207, MN3005 with companding, clock feedthrough, and leakage.
 
+use super::delay::{DelayLine, Interpolation};
 use alloc::vec;
 use alloc::vec::Vec;
-use super::delay::{DelayLine, Interpolation};
 
 // ---------------------------------------------------------------------------
 // BBD (Bucket-Brigade Device) Delay Line

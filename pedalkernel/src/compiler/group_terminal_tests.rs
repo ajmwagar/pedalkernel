@@ -27,11 +27,14 @@ fn parse_and_get_terminals(source: &str, target_comp: &str) -> (Vec<usize>, Vec<
     let terminals = vec![graph.in_node, graph.out_node];
 
     // Find the group containing target_comp
-    let group = groups.iter().find(|g| {
-        g.all_edges().iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == target_comp
+    let group = groups
+        .iter()
+        .find(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == target_comp)
         })
-    }).expect(&format!("group containing {target_comp} not found"));
+        .expect(&format!("group containing {target_comp} not found"));
 
     let group_edges = group.all_edges();
     let group_terminals = compute_group_terminals(&group_edges, &graph, &terminals);
@@ -45,7 +48,8 @@ fn parse_and_get_terminals(source: &str, target_comp: &str) -> (Vec<usize>, Vec<
 
 #[test]
 fn simple_passive_has_two_terminals() {
-    let (edges, terminals) = parse_and_get_terminals(r#"
+    let (edges, terminals) = parse_and_get_terminals(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -65,10 +69,21 @@ fn simple_passive_has_two_terminals() {
                 R_out.b -> out
             }
             controls {}
-        }"#, "C_out");
+        }"#,
+        "C_out",
+    );
 
-    eprintln!("Simple passive: {} edges, {} terminals: {:?}", edges.len(), terminals.len(), terminals);
-    assert!(terminals.len() <= 2, "Simple passive group should have ≤2 terminals, got {}", terminals.len());
+    eprintln!(
+        "Simple passive: {} edges, {} terminals: {:?}",
+        edges.len(),
+        terminals.len(),
+        terminals
+    );
+    assert!(
+        terminals.len() <= 2,
+        "Simple passive group should have ≤2 terminals, got {}",
+        terminals.len()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -78,7 +93,8 @@ fn simple_passive_has_two_terminals() {
 #[test]
 fn bias_node_not_counted_as_terminal() {
     // R2 connects to VB+ (bias). VB+ should NOT be a terminal.
-    let (edges, terminals) = parse_and_get_terminals(r#"
+    let (edges, terminals) = parse_and_get_terminals(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_bias1: resistor(27k)
@@ -103,13 +119,24 @@ fn bias_node_not_counted_as_terminal() {
                 U1.out -> out
             }
             controls {}
-        }"#, "R1");
+        }"#,
+        "R1",
+    );
 
-    eprintln!("With bias: {} edges, {} terminals: {:?}", edges.len(), terminals.len(), terminals);
+    eprintln!(
+        "With bias: {} edges, {} terminals: {:?}",
+        edges.len(),
+        terminals.len(),
+        terminals
+    );
     // The group containing R1,C1,R2 should have ≤3 terminals.
     // R2 connects to VB+ (bias node) — that should NOT be a terminal.
-    assert!(terminals.len() <= 3,
-        "Bias connection should not add terminal: {} terminals from {} edges", terminals.len(), edges.len());
+    assert!(
+        terminals.len() <= 3,
+        "Bias connection should not add terminal: {} terminals from {} edges",
+        terminals.len(),
+        edges.len()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -122,7 +149,8 @@ fn goldenrod_feedforward_has_few_terminals() {
     // U1.out → R_ff → C_ff → summing_node
     // U1.out → Pot.a, Pot.w → R_ff2 → summing_node
     // R_bias connects to VB+ (bias, should not be terminal)
-    let (edges, terminals) = parse_and_get_terminals(r#"
+    let (edges, terminals) = parse_and_get_terminals(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_bias1: resistor(27k)
@@ -162,16 +190,27 @@ fn goldenrod_feedforward_has_few_terminals() {
             controls {
                 Blend.position -> "Blend" [0.0, 1.0] = 0.5
             }
-        }"#, "Blend");
+        }"#,
+        "Blend",
+    );
 
-    eprintln!("Feedforward: {} edges, {} terminals: {:?}", edges.len(), terminals.len(), terminals);
+    eprintln!(
+        "Feedforward: {} edges, {} terminals: {:?}",
+        edges.len(),
+        terminals.len(),
+        terminals
+    );
     // The feedforward group should have ≤3 terminals:
     // - U1.out (signal input)
     // - U2.neg (signal output / summing point)
     // - GND (pot ground, handled separately)
     // NOT: VB+ (bias), in_node (global input)
-    assert!(terminals.len() <= 4,
-        "Feedforward group has too many terminals: {} from {} edges", terminals.len(), edges.len());
+    assert!(
+        terminals.len() <= 4,
+        "Feedforward group has too many terminals: {} from {} edges",
+        terminals.len(),
+        edges.len()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -183,7 +222,8 @@ fn static_bias_junction_not_terminal() {
     // A passive group has an edge connecting to a node that's also in a
     // static bias group (VB+). That node should not be a terminal because
     // the bias group is just a DC reference — it doesn't carry signal.
-    let (edges, terminals) = parse_and_get_terminals(r#"
+    let (edges, terminals) = parse_and_get_terminals(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_v1: resistor(10k)
@@ -210,14 +250,24 @@ fn static_bias_junction_not_terminal() {
                 U1.out -> out
             }
             controls {}
-        }"#, "C_in");
+        }"#,
+        "C_in",
+    );
 
-    eprintln!("Bias junction: {} edges, {} terminals: {:?}", edges.len(), terminals.len(), terminals);
+    eprintln!(
+        "Bias junction: {} edges, {} terminals: {:?}",
+        edges.len(),
+        terminals.len(),
+        terminals
+    );
     // C_in group connects to VB+ via R_bias. VB+ is a bias junction.
     // Should have ≤3 terminals (in_node, U1.neg, maybe GND for R_bias path)
     // NOT: VB+ as a terminal
-    assert!(terminals.len() <= 3,
-        "Bias junction should not be terminal: {} terminals", terminals.len());
+    assert!(
+        terminals.len() <= 3,
+        "Bias junction should not be terminal: {} terminals",
+        terminals.len()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -239,18 +289,23 @@ fn ac_ground_node_excluded_from_terminals() {
     let groups = find_flow_groups(&all_edges, &graph);
     let global_terminals = vec![graph.in_node, graph.out_node];
 
-    let gain_b_group = groups.iter().find(|g| {
-        g.all_edges().iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+    let gain_b_group = groups
+        .iter()
+        .find(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Gain_B")
         })
-    }).expect("Gain_B group");
+        .expect("Gain_B group");
 
     let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
 
     // Node 76 is in ac_ground_nodes — it must NOT be a terminal
     for &t in &terminals {
-        assert!(!graph.ac_ground_nodes.contains(&t),
-            "ac_ground node {t:?} should not be a terminal. Terminals: {terminals:?}");
+        assert!(
+            !graph.ac_ground_nodes.contains(&t),
+            "ac_ground node {t:?} should not be a terminal. Terminals: {terminals:?}"
+        );
     }
 }
 
@@ -274,19 +329,24 @@ fn global_in_node_not_terminal_for_mid_chain_group() {
     let groups = find_flow_groups(&all_edges, &graph);
     let global_terminals = vec![graph.in_node, graph.out_node];
 
-    let gain_b_group = groups.iter().find(|g| {
-        g.all_edges().iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+    let gain_b_group = groups
+        .iter()
+        .find(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Gain_B")
         })
-    }).expect("Gain_B group");
+        .expect("Gain_B group");
 
     let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
 
     // in_node should NOT be a terminal for the Gain_B feedforward group.
     // R1 connects in_node to an internal junction — in_node is the global
     // input, not this group's signal boundary.
-    assert!(!terminals.contains(&graph.in_node),
-        "in_node should not be terminal for mid-chain group. Terminals: {terminals:?}");
+    assert!(
+        !terminals.contains(&graph.in_node),
+        "in_node should not be terminal for mid-chain group. Terminals: {terminals:?}"
+    );
 }
 
 #[test]
@@ -305,17 +365,23 @@ fn goldenrod_gain_b_has_two_terminals() {
     let groups = find_flow_groups(&all_edges, &graph);
     let global_terminals = vec![graph.in_node, graph.out_node];
 
-    let gain_b_group = groups.iter().find(|g| {
-        g.all_edges().iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+    let gain_b_group = groups
+        .iter()
+        .find(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Gain_B")
         })
-    }).expect("Gain_B group");
+        .expect("Gain_B group");
 
     let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
 
     eprintln!("Gain_B terminals: {terminals:?} (expected 2)");
-    assert!(terminals.len() <= 2,
-        "Gain_B should have ≤2 terminals, got {}: {terminals:?}", terminals.len());
+    assert!(
+        terminals.len() <= 2,
+        "Gain_B should have ≤2 terminals, got {}: {terminals:?}",
+        terminals.len()
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -338,11 +404,14 @@ fn goldenrod_gain_b_produces_stages() {
     let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     let global_terminals = vec![graph.in_node, graph.out_node];
 
-    let gain_b_group = groups.iter().find(|g| {
-        g.all_edges().iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+    let gain_b_group = groups
+        .iter()
+        .find(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Gain_B")
         })
-    }).expect("Gain_B group");
+        .expect("Gain_B group");
 
     let group_edges = gain_b_group.all_edges();
     let terminals = compute_group_terminals(&group_edges, &graph, &global_terminals);
@@ -356,10 +425,15 @@ fn goldenrod_gain_b_produces_stages() {
     }
 
     eprintln!("  nodes in group: {:?}", {
-        let mut nodes: Vec<_> = group_edges.iter().flat_map(|&eidx| {
-            let e = &graph.edges[eidx];
-            vec![e.node_a, e.node_b]
-        }).collect::<std::collections::HashSet<_>>().into_iter().collect();
+        let mut nodes: Vec<_> = group_edges
+            .iter()
+            .flat_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                vec![e.node_a, e.node_b]
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
         nodes.sort();
         nodes
     });
@@ -367,29 +441,40 @@ fn goldenrod_gain_b_produces_stages() {
     eprintln!("  terminals ({}):", terminals.len());
     for &t in &terminals {
         // Why is this a terminal? Check what external edges connect here.
-        let external_edges: Vec<String> = graph.edges.iter().enumerate()
-            .filter(|(eidx, e)| {
-                !group_edges.contains(eidx)
-                    && (e.node_a == t || e.node_b == t)
-            })
+        let external_edges: Vec<String> = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(eidx, e)| !group_edges.contains(eidx) && (e.node_a == t || e.node_b == t))
             .map(|(_, e)| {
                 let comp = &graph.components[e.comp_idx];
                 let other = if e.node_a == t { e.node_b } else { e.node_a };
-                let other_name = if other == graph.gnd_node { "GND".to_string() }
-                    else if other == graph.vcc_node { "VCC".to_string() }
-                    else if graph.supply_nodes.contains(&other) { format!("SUPPLY({:?})", other) }
-                    else if graph.ac_ground_nodes.contains(&other) { format!("AC_GND({:?})", other) }
-                    else { format!("{:?}", other) };
+                let other_name = if other == graph.gnd_node {
+                    "GND".to_string()
+                } else if other == graph.vcc_node {
+                    "VCC".to_string()
+                } else if graph.supply_nodes.contains(&other) {
+                    format!("SUPPLY({:?})", other)
+                } else if graph.ac_ground_nodes.contains(&other) {
+                    format!("AC_GND({:?})", other)
+                } else {
+                    format!("{:?}", other)
+                };
                 format!("{}→{}", comp.id, other_name)
             })
             .collect();
         let is_global = global_terminals.contains(&t);
         let tag = if is_global { " [GLOBAL]" } else { "" };
-        eprintln!("    node {:?}{tag}: external edges: {:?}", t, external_edges);
+        eprintln!(
+            "    node {:?}{tag}: external edges: {:?}",
+            t, external_edges
+        );
     }
 
-    eprintln!("  special nodes: in={:?} out={:?} gnd={:?} vcc={:?}",
-        graph.in_node, graph.out_node, graph.gnd_node, graph.vcc_node);
+    eprintln!(
+        "  special nodes: in={:?} out={:?} gnd={:?} vcc={:?}",
+        graph.in_node, graph.out_node, graph.gnd_node, graph.vcc_node
+    );
     eprintln!("  supply_nodes: {:?}", graph.supply_nodes);
     eprintln!("  ac_ground_nodes: {:?}", graph.ac_ground_nodes);
 
@@ -397,15 +482,19 @@ fn goldenrod_gain_b_produces_stages() {
     {
         let has_gain_b = compiled.stages.iter().any(|s| {
             let lbl = match s {
-                super::compiled::Stage::Wdf(w) => &w.debug_label,
-                super::compiled::Stage::MultiNl(m) => &m.debug_label,
-                super::compiled::Stage::Iir(i) => &i.debug_label,
-                super::compiled::Stage::StateSpace(s) => &s.debug_label,
-                super::compiled::Stage::BlackFeedback(b) => &b.debug_label,
+                super::compiled::Stage::Wdf(w) => w.debug_label.as_str(),
+                super::compiled::Stage::MultiNl(m) => m.debug_label.as_str(),
+                super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
+                super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
+                super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
+                super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
             };
             lbl.contains("Gain_B")
         });
-        assert!(has_gain_b, "Goldenrod Gain_B must produce a stage after terminal fix");
+        assert!(
+            has_gain_b,
+            "Goldenrod Gain_B must produce a stage after terminal fix"
+        );
     }
 }
 
@@ -430,18 +519,24 @@ fn converging_outputs_count_as_one_terminal() {
     let groups = find_flow_groups(&all_edges, &graph);
     let global_terminals = vec![graph.in_node, graph.out_node];
 
-    let gain_b_group = groups.iter().find(|g| {
-        g.all_edges().iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "Gain_B"
+    let gain_b_group = groups
+        .iter()
+        .find(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Gain_B")
         })
-    }).expect("Gain_B group");
+        .expect("Gain_B group");
 
     let terminals = compute_group_terminals(&gain_b_group.all_edges(), &graph, &global_terminals);
 
     eprintln!("Gain_B terminals after merge: {terminals:?}");
-    assert!(terminals.len() <= 2,
+    assert!(
+        terminals.len() <= 2,
         "Converging outputs should merge: got {} terminals {:?}, expected ≤2",
-        terminals.len(), terminals);
+        terminals.len(),
+        terminals
+    );
 }
 
 #[test]
@@ -449,7 +544,8 @@ fn two_outputs_to_same_destination_merge() {
     // Simplified: two paths from junction to the same downstream node.
     // R_a → junction_a and R_b → junction_b, both connect to U2.neg.
     // junction_a and junction_b should merge into one terminal.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -477,7 +573,9 @@ fn two_outputs_to_same_destination_merge() {
                 U2.out -> out
             }
             controls {}
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
 
     let graph = CircuitGraph::from_pedal(&pedal);
     let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
@@ -485,19 +583,24 @@ fn two_outputs_to_same_destination_merge() {
     let global_terminals = vec![graph.in_node, graph.out_node];
 
     // Find the group containing R_a (the feedforward passive group)
-    let ff_group = groups.iter().find(|g| {
-        g.all_edges().iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "R_a"
+    let ff_group = groups
+        .iter()
+        .find(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_a")
         })
-    }).expect("feedforward group");
+        .expect("feedforward group");
 
     let terminals = compute_group_terminals(&ff_group.all_edges(), &graph, &global_terminals);
 
     eprintln!("Two-output terminals: {terminals:?}");
     // R_a path output (C_a.b) and R_b path output (R_b.b) both go to U2.neg.
     // They should merge → 2 terminals total (U1.out input + merged output).
-    assert!(terminals.len() <= 2,
+    assert!(
+        terminals.len() <= 2,
         "Two outputs to same destination should merge: got {} terminals {:?}",
-        terminals.len(), terminals);
+        terminals.len(),
+        terminals
+    );
 }
-

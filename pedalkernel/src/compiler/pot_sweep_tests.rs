@@ -16,10 +16,8 @@ fn load_legend(name: &str) -> crate::dsl::PedalDef {
         env!("CARGO_MANIFEST_DIR"),
         name
     );
-    let source = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Can't read {path}"));
-    crate::dsl::parse_pedal_file(&source)
-        .unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
+    let source = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Can't read {path}"));
+    crate::dsl::parse_pedal_file(&source).unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
 }
 
 /// Measure peak output at a given control setting.
@@ -39,13 +37,32 @@ fn measure_peak(pedal: &crate::dsl::PedalDef, control: &str, value: f64) -> f64 
     peak
 }
 
+/// VST path applies an input impedance model before processing. Exercise that
+/// integration because it can change boundary loading without changing bindings.
+fn measure_peak_with_source_z(pedal: &crate::dsl::PedalDef, control: &str, value: f64) -> f64 {
+    let mut compiled = compile_via_spqr(pedal, 48000.0).expect("compile");
+    compiled.set_source_impedance(7_000.0, 500e-12);
+    compiled.set_control(control, value);
+    for _ in 0..2000 {
+        compiled.process(0.0);
+    }
+    let mut peak = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 440.0 * s as f64 / 48000.0).sin();
+        peak = peak.max(compiled.process(input).abs());
+    }
+    peak
+}
+
 /// Measure spectral balance: ratio of high-frequency energy to low-frequency energy.
 /// Returns (peak_lo, peak_hi) at 200Hz and 5kHz.
 fn measure_spectrum(pedal: &crate::dsl::PedalDef, control: &str, value: f64) -> (f64, f64) {
     // 200Hz
     let mut lo = compile_via_spqr(pedal, 48000.0).expect("compile");
     lo.set_control(control, value);
-    for _ in 0..2000 { lo.process(0.0); }
+    for _ in 0..2000 {
+        lo.process(0.0);
+    }
     let mut peak_lo = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 200.0 * s as f64 / 48000.0).sin();
@@ -55,7 +72,9 @@ fn measure_spectrum(pedal: &crate::dsl::PedalDef, control: &str, value: f64) -> 
     // 5kHz
     let mut hi = compile_via_spqr(pedal, 48000.0).expect("compile");
     hi.set_control(control, value);
-    for _ in 0..2000 { hi.process(0.0); }
+    for _ in 0..2000 {
+        hi.process(0.0);
+    }
     let mut peak_hi = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 5000.0 * s as f64 / 48000.0).sin();
@@ -82,10 +101,43 @@ fn assert_gain_changes(pedal: &crate::dsl::PedalDef, pedal_name: &str, control: 
     // The two settings should differ (pot actually does something)
     let max_val = low.max(high);
     let min_val = low.min(high);
-    let ratio = if min_val > 1e-10 { max_val / min_val } else if max_val > 0.001 { 100.0 } else { 1.0 };
+    let ratio = if min_val > 1e-10 {
+        max_val / min_val
+    } else if max_val > 0.001 {
+        100.0
+    } else {
+        1.0
+    };
     assert!(
         ratio > 1.5 || (low - high).abs() > 0.001,
         "{pedal_name}/{control}: pot sweep has no effect (low={low:.4}, high={high:.4}, ratio={ratio:.1}x)"
+    );
+}
+
+fn assert_vst_gain_changes(pedal: &crate::dsl::PedalDef, pedal_name: &str, control: &str) {
+    let low = measure_peak_with_source_z(pedal, control, 0.0);
+    let high = measure_peak_with_source_z(pedal, control, 1.0);
+
+    eprintln!("{pedal_name}/{control} with source Z: low={low:.4}, high={high:.4}");
+
+    let has_output = low > 0.001 || high > 0.001;
+    assert!(
+        has_output,
+        "{pedal_name}/{control} with source Z: neither setting produces output (low={low:.6}, high={high:.6})"
+    );
+
+    let max_val = low.max(high);
+    let min_val = low.min(high);
+    let ratio = if min_val > 1e-10 {
+        max_val / min_val
+    } else if max_val > 0.001 {
+        100.0
+    } else {
+        1.0
+    };
+    assert!(
+        ratio > 1.5 || (low - high).abs() > 0.001,
+        "{pedal_name}/{control} with source Z: pot sweep has no effect (low={low:.4}, high={high:.4}, ratio={ratio:.1}x)"
     );
 }
 
@@ -136,6 +188,13 @@ fn ratking_v1a_filter_changes_spectrum() {
 fn ratking_v1a_volume_changes_gain() {
     let pedal = load_legend("ratking_non_invert_v1a");
     assert_gain_changes(&pedal, "ratking_v1a", "Volume");
+}
+
+#[test]
+fn ratking_v1a_vst_distortion_and_volume_survive_source_impedance() {
+    let pedal = load_legend("ratking_non_invert_v1a");
+    assert_vst_gain_changes(&pedal, "ratking_v1a", "Distortion");
+    assert_vst_gain_changes(&pedal, "ratking_v1a", "Volume");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -279,6 +338,13 @@ fn goldenrod_treble_changes_spectrum() {
 fn goldenrod_output_changes_gain() {
     let pedal = load_legend("goldenrod");
     assert_gain_changes(&pedal, "goldenrod", "Output");
+}
+
+#[test]
+fn goldenrod_vst_gain_and_output_survive_source_impedance() {
+    let pedal = load_legend("goldenrod");
+    assert_vst_gain_changes(&pedal, "goldenrod", "Gain");
+    assert_vst_gain_changes(&pedal, "goldenrod", "Output");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

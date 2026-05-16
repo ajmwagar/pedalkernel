@@ -86,7 +86,9 @@ impl PentodeModel {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PentodeRoot {
     pub model: PentodeModel,
-    /// Current control grid voltage (g1-cathode). Set externally.
+    /// DC control grid bias voltage, set from circuit analysis.
+    vg1k_bias: f64,
+    /// Current control grid voltage (bias + AC signal).
     vg1k: f64,
     /// Current screen grid voltage (g2-cathode). Typically fixed at operating point.
     vg2k: f64,
@@ -102,21 +104,21 @@ impl PentodeRoot {
         let vg2k = model.vg2_default;
         Self {
             model,
-            vg1k: 0.0,
+            vg1k_bias: -8.0, // Default: typical power pentode
+            vg1k: -8.0,
             vg2k,
-            v_max: 500.0, // Default to high-voltage tube amp (will be set by supply)
+            v_max: 500.0,
             max_iter: super::solver::NR_MAX_ITER,
         }
     }
 
     /// Create a pentode root with a specific supply voltage (B+).
-    ///
-    /// Use this when the supply voltage is known at construction time.
     pub fn new_with_v_max(model: PentodeModel, v_max: f64) -> Self {
         let vg2k = model.vg2_default;
         Self {
             model,
-            vg1k: 0.0,
+            vg1k_bias: -8.0,
+            vg1k: -8.0,
             vg2k,
             v_max: v_max.max(1.0),
             max_iter: super::solver::NR_MAX_ITER,
@@ -136,6 +138,17 @@ impl PentodeRoot {
     #[inline]
     pub fn v_max(&self) -> f64 {
         self.v_max
+    }
+
+    /// Set the DC bias operating point from circuit analysis.
+    pub fn set_bias(&mut self, vg1k_bias: f64) {
+        self.vg1k_bias = vg1k_bias;
+        self.vg1k = vg1k_bias;
+    }
+
+    /// Get the DC bias operating point.
+    pub fn vg1k_bias(&self) -> f64 {
+        self.vg1k_bias
     }
 
     /// Set the control grid voltage (g1-cathode). External modulation.
@@ -415,7 +428,8 @@ impl PentodeThreePort {
             exp_e1 / (1.0 + exp_e1)
         };
 
-        let dip_dvg1k = (m.ex * crate::math::powf(base, m.ex - 1.0) * sigmoid_e1 / m.kg1) * plate_factor.max(0.0);
+        let dip_dvg1k = (m.ex * crate::math::powf(base, m.ex - 1.0) * sigmoid_e1 / m.kg1)
+            * plate_factor.max(0.0);
 
         (ip, dip_dvpk, dip_dvg1k)
     }

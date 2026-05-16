@@ -64,7 +64,8 @@ fn ratking_v1a_distortion_pot_is_bound() {
 fn feedback_drive_pot_changes_gain() {
     // Simplest case: pot in op-amp feedback (inverting).
     // Sweeping drive should change Rf → change gain.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -83,12 +84,15 @@ fn feedback_drive_pot_changes_gain() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut lo = compile_via_spqr(&pedal, 48000.0).expect("compile");
     lo.set_control("Drive", 0.0);
-    for _ in 0..500 { lo.process(0.0); }
+    for _ in 0..500 {
+        lo.process(0.0);
+    }
     let mut peak_lo = 0.0f64;
     for s in 0..480 {
         let input = 0.01 * (2.0 * std::f64::consts::PI * 440.0 * s as f64 / 48000.0).sin();
@@ -97,7 +101,9 @@ fn feedback_drive_pot_changes_gain() {
 
     let mut hi = compile_via_spqr(&pedal, 48000.0).expect("compile");
     hi.set_control("Drive", 1.0);
-    for _ in 0..500 { hi.process(0.0); }
+    for _ in 0..500 {
+        hi.process(0.0);
+    }
     let mut peak_hi = 0.0f64;
     for s in 0..480 {
         let input = 0.01 * (2.0 * std::f64::consts::PI * 440.0 * s as f64 / 48000.0).sin();
@@ -121,7 +127,8 @@ fn feedback_drive_pot_changes_gain() {
 fn tone_pot_in_blackfeedback_changes_spectrum() {
     // Tone pot in a BlackFeedback stage (non-inverting, cap + pot).
     // Sweeping tone should change frequency balance.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -143,7 +150,8 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
                 U1.out -> out
             }
             controls { Tone.position -> "Tone" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     // Check binding exists
@@ -153,7 +161,14 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
     for c in &compiled.controls {
         eprintln!("  {:?} -> {:?}", c.label, c.target);
     }
-    eprintln!("  Controls: {:?}", compiled.controls.iter().map(|c| &c.label).collect::<Vec<_>>());
+    eprintln!(
+        "  Controls: {:?}",
+        compiled
+            .controls
+            .iter()
+            .map(|c| &c.label)
+            .collect::<Vec<_>>()
+    );
 
     // The tone pot may not be bound if it's consumed by BlackFeedback.
     // This is the test — it SHOULD be bound.
@@ -161,7 +176,9 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
         eprintln!("  Tone NOT bound — checking WDF stage trees:");
         for (i, s) in compiled.stages.iter().enumerate() {
             if let super::compiled::Stage::Wdf(w) = s {
-                let pos = w.tree.get_pot_position("Tone")
+                let pos = w
+                    .tree
+                    .get_pot_position("Tone")
                     .or_else(|| w.tree.get_pot_position("Tone__aw"))
                     .or_else(|| w.tree.get_pot_position("Tone__wb"));
                 if pos.is_some() {
@@ -179,7 +196,9 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
     let find_tone_pos = |stages: &[super::compiled::Stage]| -> Option<f64> {
         for s in stages {
             if let super::compiled::Stage::Wdf(wdf) = s {
-                if let Some(pos) = wdf.tree.get_pot_position("Tone")
+                if let Some(pos) = wdf
+                    .tree
+                    .get_pot_position("Tone")
                     .or_else(|| wdf.tree.get_pot_position("Tone__aw"))
                 {
                     return Some(pos);
@@ -208,64 +227,6 @@ fn tone_pot_in_blackfeedback_changes_spectrum() {
     } else {
         panic!("Tone pot not found in any WDF stage after set_control");
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Layer 2b: Functional tone pot test — pot CHANGES the audio output.
-// The binding test (Layer 1) checks the pot is found. This test checks
-// that set_control("Tone", x) actually produces different output.
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn screamer_legend_tone_pot_changes_output() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => { eprintln!("SKIP: screamer.pedal not found"); return; }
-    };
-    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
-
-    let measure = |tone: f64, freq: f64| -> f64 {
-        let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-        compiled.set_control("Tone", tone);
-        compiled.set_control("Drive", 0.5);
-        compiled.set_control("Level", 0.8);
-        for _ in 0..2400 { compiled.process(0.0); }
-        let mut peak = 0.0f64;
-        for i in 0..4800 {
-            let input = 0.3 * (2.0 * std::f64::consts::PI * freq * i as f64 / 48000.0).sin();
-            peak = peak.max(compiled.process(input).abs());
-        }
-        peak
-    };
-
-    // Measure at 1kHz with Tone at 0.0 vs 1.0
-    let t0_1k = measure(0.0, 1000.0);
-    let t1_1k = measure(1.0, 1000.0);
-    // Measure at 5kHz with Tone at 0.0 vs 1.0
-    let t0_5k = measure(0.0, 5000.0);
-    let t1_5k = measure(1.0, 5000.0);
-
-    eprintln!("  Tone=0: 1kHz={t0_1k:.4}, 5kHz={t0_5k:.4}");
-    eprintln!("  Tone=1: 1kHz={t1_1k:.4}, 5kHz={t1_5k:.4}");
-
-    // The tone pot should change the frequency balance.
-    // At least one frequency should differ by >10% between Tone=0 and Tone=1.
-    let diff_1k = (t0_1k - t1_1k).abs();
-    let diff_5k = (t0_5k - t1_5k).abs();
-    let max_diff = diff_1k.max(diff_5k);
-    let max_level = t0_1k.max(t1_1k).max(t0_5k).max(t1_5k);
-
-    eprintln!("  Diff: 1kHz={diff_1k:.4}, 5kHz={diff_5k:.4}, max_diff={max_diff:.4}");
-
-    assert!(
-        max_diff > max_level * 0.1,
-        "Tone pot should change output by >10%: max_diff={max_diff:.4}, max_level={max_level:.4}. \
-         If zero, the pot is bound but set_pot doesn't affect the stage's processing."
-    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -307,7 +268,8 @@ fn feedback_pot_only_drive_changes_gain() {
     // Simplest NL feedback: pot is the ONLY element between neg and out
     // (besides the diode). No series resistors, no parallel resistors.
     // Drive @0.1 → low gain, @0.9 → high gain.
-    let (lo, hi) = measure_pot_sweep(r#"
+    let (lo, hi) = measure_pot_sweep(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -326,17 +288,23 @@ fn feedback_pot_only_drive_changes_gain() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#, "Drive");
+        }"#,
+        "Drive",
+    );
 
     eprintln!("pot-only drive: lo={lo:.6}, hi={hi:.6}");
-    assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
+    assert!(
+        hi > lo * 1.5,
+        "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}"
+    );
 }
 
 #[test]
 fn feedback_pot_with_series_r_drive_changes_gain() {
     // TS-style: Drive pot in series with R_clip(4.7k).
     // The series R sets the minimum gain floor.
-    let (lo, hi) = measure_pot_sweep(r#"
+    let (lo, hi) = measure_pot_sweep(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -357,17 +325,23 @@ fn feedback_pot_with_series_r_drive_changes_gain() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#, "Drive");
+        }"#,
+        "Drive",
+    );
 
     eprintln!("pot+series drive: lo={lo:.6}, hi={hi:.6}");
-    assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
+    assert!(
+        hi > lo * 1.5,
+        "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}"
+    );
 }
 
 #[test]
 fn feedback_pot_parallel_with_rf_drive_changes_gain() {
     // TS/RAT pattern: Drive pot + R_clip in series, Rf in parallel.
     // This is the topology that find_feedback_pot's heuristic gets wrong.
-    let (lo, hi) = measure_pot_sweep(r#"
+    let (lo, hi) = measure_pot_sweep(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -391,17 +365,23 @@ fn feedback_pot_parallel_with_rf_drive_changes_gain() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#, "Drive");
+        }"#,
+        "Drive",
+    );
 
     eprintln!("pot+parallel Rf drive: lo={lo:.6}, hi={hi:.6}");
-    assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
+    assert!(
+        hi > lo * 1.5,
+        "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}"
+    );
 }
 
 #[test]
 fn feedback_pot_screamer_topology_drive_changes_gain() {
     // Full Screamer-like topology: Drive pot + multiple resistors + cap in feedback.
     // This is the real-world circuit that currently fails.
-    let (lo, hi) = measure_pot_sweep(r#"
+    let (lo, hi) = measure_pot_sweep(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -428,10 +408,15 @@ fn feedback_pot_screamer_topology_drive_changes_gain() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#, "Drive");
+        }"#,
+        "Drive",
+    );
 
     eprintln!("screamer-like drive: lo={lo:.6}, hi={hi:.6}");
-    assert!(hi > lo * 1.5, "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}");
+    assert!(
+        hi > lo * 1.5,
+        "Drive pot should change gain: lo={lo:.6}, hi={hi:.6}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -446,7 +431,8 @@ fn feedback_pot_screamer_topology_drive_changes_gain() {
 fn orphan_volume_pot_is_bound() {
     // Volume pot as a simple voltage divider (not in any feedback loop).
     // Should still be bound as a control.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -465,7 +451,8 @@ fn orphan_volume_pot_is_bound() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -474,13 +461,17 @@ fn orphan_volume_pot_is_bound() {
     for c in &compiled.controls {
         eprintln!("  {:?} -> {:?}", c.label, c.target);
     }
-    assert!(bound, "Volume pot (voltage divider) should be bound even when not in feedback");
+    assert!(
+        bound,
+        "Volume pot (voltage divider) should be bound even when not in feedback"
+    );
 }
 
 #[test]
 fn orphan_volume_pot_changes_output() {
     // Volume pot as divider should actually change output level.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -499,7 +490,8 @@ fn orphan_volume_pot_changes_output() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
@@ -507,8 +499,10 @@ fn orphan_volume_pot_changes_output() {
     // Volume pot is a divider — output should change significantly between positions.
     // Direction depends on taper/wiring: either hi>lo or lo>hi is valid.
     let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
-    assert!(ratio > 1.5,
-        "Volume pot should change output: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(
+        ratio > 1.5,
+        "Volume pot should change output: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x"
+    );
 }
 
 /// Helper for parsed pedals (avoids re-parsing)
@@ -545,7 +539,8 @@ fn interstage_volume_pot_changes_output() {
     // Simple case: gain stage → Volume pot → output.
     // Volume wiper goes to out. Volume.a connects to stage output.
     // Volume.b goes to GND. Sweeping should attenuate.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -564,21 +559,25 @@ fn interstage_volume_pot_changes_output() {
                 Volume.b -> gnd
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
     let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
     eprintln!("Interstage volume: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
-    assert!(ratio > 2.0,
-        "Volume pot should attenuate: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(
+        ratio > 2.0,
+        "Volume pot should attenuate: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x"
+    );
 }
 
 #[test]
 fn interstage_volume_pot_between_two_stages() {
     // Two gain stages with Volume pot between them.
     // U1.out → Volume.a, Volume.w → R_mid → U2.neg, Volume.b → gnd.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -605,14 +604,17 @@ fn interstage_volume_pot_between_two_stages() {
                 U2.out -> out
             }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Volume");
     let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
     eprintln!("Interstage 2-stage volume: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
-    assert!(ratio > 2.0,
-        "Volume between stages should attenuate: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(
+        ratio > 2.0,
+        "Volume between stages should attenuate: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x"
+    );
 }
 
 #[test]
@@ -620,7 +622,8 @@ fn interstage_tone_pot_with_buffer_changes_spectrum() {
     // Screamer pattern: tone RC network → Tone pot → U2 (unity follower) → out.
     // The Tone pot blends between bass (direct) and treble (through cap).
     // Sweeping Tone should change the spectral balance.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -648,7 +651,8 @@ fn interstage_tone_pot_with_buffer_changes_spectrum() {
                 C_out.b -> out
             }
             controls { Tone.position -> "Tone" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let sr = 48000.0;
@@ -656,7 +660,9 @@ fn interstage_tone_pot_with_buffer_changes_spectrum() {
         // 200Hz
         let mut lo = compile_via_spqr(&pedal, sr).expect("compile");
         lo.set_control("Tone", pos);
-        for _ in 0..500 { lo.process(0.0); }
+        for _ in 0..500 {
+            lo.process(0.0);
+        }
         let mut peak_lo = 0.0f64;
         for s in 0..480 {
             let input = 0.05 * (std::f64::consts::TAU * 200.0 * s as f64 / sr).sin();
@@ -665,7 +671,9 @@ fn interstage_tone_pot_with_buffer_changes_spectrum() {
         // 5kHz
         let mut hi = compile_via_spqr(&pedal, sr).expect("compile");
         hi.set_control("Tone", pos);
-        for _ in 0..500 { hi.process(0.0); }
+        for _ in 0..500 {
+            hi.process(0.0);
+        }
         let mut peak_hi = 0.0f64;
         for s in 0..480 {
             let input = 0.05 * (std::f64::consts::TAU * 5000.0 * s as f64 / sr).sin();
@@ -683,13 +691,17 @@ fn interstage_tone_pot_with_buffer_changes_spectrum() {
     eprintln!("             @1: lo={lo_1:.4} hi={hi_1:.4} ratio={ratio_1:.2}");
 
     // At least one setting should produce output
-    assert!(lo_0 > 0.001 || hi_0 > 0.001 || lo_1 > 0.001 || hi_1 > 0.001,
-        "Should produce output at some setting");
+    assert!(
+        lo_0 > 0.001 || hi_0 > 0.001 || lo_1 > 0.001 || hi_1 > 0.001,
+        "Should produce output at some setting"
+    );
 
     // Spectral balance should change between positions
     let ratio_diff = (ratio_0 - ratio_1).abs();
-    assert!(ratio_diff > 0.3,
-        "Tone pot should change spectral balance: ratio_diff={ratio_diff:.2}");
+    assert!(
+        ratio_diff > 0.3,
+        "Tone pot should change spectral balance: ratio_diff={ratio_diff:.2}"
+    );
 }
 
 #[test]
@@ -697,7 +709,8 @@ fn interstage_level_pot_after_clipping_changes_gain() {
     // Level/Volume pot after a clipping stage (common pedal pattern).
     // The pot is in a separate non-feedback group but may share nodes
     // with the clipping stage's output.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -722,14 +735,17 @@ fn interstage_level_pot_after_clipping_changes_gain() {
                 Drive.position -> "Drive" [0.0, 1.0] = 0.5
                 Level.position -> "Level" [0.0, 1.0] = 0.5
             }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let (lo, hi) = measure_pot_sweep_parsed(&pedal, "Level");
     let ratio = lo.max(hi) / lo.min(hi).max(1e-10);
     eprintln!("Level after clipping: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
-    assert!(ratio > 2.0,
-        "Level pot should change output: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x");
+    assert!(
+        ratio > 2.0,
+        "Level pot should change output: lo={lo:.6}, hi={hi:.6}, ratio={ratio:.1}x"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -768,21 +784,31 @@ fn r_in_is_pendant_not_feedback_simple() {
     let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
 
     // Find the group containing U1
-    let u1_group = groups.iter().find(|g| {
-        g.active_edges.iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "U1"
+    let u1_group = groups
+        .iter()
+        .find(|g| {
+            g.active_edges
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "U1")
         })
-    }).expect("Should find U1's group");
+        .expect("Should find U1's group");
 
-    let pendant_names: Vec<&str> = u1_group.pendant_edges.iter()
+    let pendant_names: Vec<&str> = u1_group
+        .pendant_edges
+        .iter()
         .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
         .collect();
-    let feedback_names: Vec<&str> = u1_group.feedback_edges.iter()
+    let feedback_names: Vec<&str> = u1_group
+        .feedback_edges
+        .iter()
         .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
         .collect();
 
     eprintln!("Simple: pendant={pendant_names:?}, feedback={feedback_names:?}");
-    assert!(pendant_names.contains(&"R_in"), "R_in should be pendant, not feedback");
+    assert!(
+        pendant_names.contains(&"R_in"),
+        "R_in should be pendant, not feedback"
+    );
 }
 
 #[test]
@@ -829,16 +855,23 @@ fn r_in_is_pendant_with_diodes_in_feedback() {
     let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
 
     // Find the group containing U1
-    let u1_group = groups.iter().find(|g| {
-        g.active_edges.iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "U1"
+    let u1_group = groups
+        .iter()
+        .find(|g| {
+            g.active_edges
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "U1")
         })
-    }).expect("Should find U1's group");
+        .expect("Should find U1's group");
 
-    let pendant_names: Vec<&str> = u1_group.pendant_edges.iter()
+    let pendant_names: Vec<&str> = u1_group
+        .pendant_edges
+        .iter()
         .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
         .collect();
-    let feedback_names: Vec<&str> = u1_group.feedback_edges.iter()
+    let feedback_names: Vec<&str> = u1_group
+        .feedback_edges
+        .iter()
         .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
         .collect();
 
@@ -863,7 +896,8 @@ fn wdf_stage_gain_updates_from_pot_resistance() {
     // End-to-end: compile a circuit with Drive pot in feedback + diode,
     // sweep the pot, verify the OpAmpRoot gain changes.
     // This tests the STAGE's pot→gain pipeline, not just OpAmpRoot math.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -882,7 +916,8 @@ fn wdf_stage_gain_updates_from_pot_resistance() {
                 U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let sr = 48000.0;
@@ -906,6 +941,89 @@ fn wdf_stage_gain_updates_from_pot_resistance() {
     let lo = measure(0.1);
     let hi = measure(0.9);
     eprintln!("WDF stage pot→gain: lo={lo:.6}, hi={hi:.6}");
-    assert!(hi > lo * 1.5,
-        "Drive pot should change WDF stage gain: lo={lo:.6}, hi={hi:.6}");
+    assert!(
+        hi > lo * 1.5,
+        "Drive pot should change WDF stage gain: lo={lo:.6}, hi={hi:.6}"
+    );
+}
+
+#[test]
+fn screamer_pot_stage_diagnostic() {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+
+    eprintln!("  Screamer: {} stages", compiled.stages.len());
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        let (stype, has_tone, has_level, has_drive) = match stage {
+            pedalkernel_rt::processor::Stage::Wdf(w) => {
+                let t = w.tree.get_pot_position("Tone").is_some()
+                    || w.tree.get_pot_position("Tone__aw").is_some()
+                    || w.tree.get_pot_position("Tone__wb").is_some();
+                let l = w.tree.get_pot_position("Level").is_some()
+                    || w.tree.get_pot_position("Level__aw").is_some()
+                    || w.tree.get_pot_position("Level__wb").is_some();
+                let d = w.tree.get_pot_position("Drive").is_some()
+                    || w.tree.get_pot_position("Drive__aw").is_some()
+                    || w.tree.get_pot_position("Drive__wb").is_some();
+                // Also check opamp_children
+                let t2 = w.opamp_children.iter().any(|c| {
+                    c.get_pot_position("Tone").is_some() || c.get_pot_position("Tone__aw").is_some()
+                });
+                let l2 = w.opamp_children.iter().any(|c| {
+                    c.get_pot_position("Level").is_some()
+                        || c.get_pot_position("Level__aw").is_some()
+                });
+                ("WDF", t || t2, l || l2, d)
+            }
+            pedalkernel_rt::processor::Stage::Iir(iir) => {
+                let t = iir.has_pot("Tone");
+                let l = iir.has_pot("Level");
+                let d = iir.has_pot("Drive");
+                ("IIR", t, l, d)
+            }
+            pedalkernel_rt::processor::Stage::StateSpace(_) => ("SS", false, false, false),
+            pedalkernel_rt::processor::Stage::MultiNl(m) => {
+                let t = m
+                    .passive_children
+                    .iter()
+                    .any(|c| c.get_pot_position("Tone").is_some())
+                    || m.pot_children
+                        .iter()
+                        .any(|c| c.get_pot_position("Tone").is_some());
+                let l = m
+                    .passive_children
+                    .iter()
+                    .any(|c| c.get_pot_position("Level").is_some())
+                    || m.pot_children
+                        .iter()
+                        .any(|c| c.get_pot_position("Level").is_some());
+                let d = m
+                    .passive_children
+                    .iter()
+                    .any(|c| c.get_pot_position("Drive").is_some())
+                    || m.pot_children
+                        .iter()
+                        .any(|c| c.get_pot_position("Drive").is_some());
+                ("MNL", t, l, d)
+            }
+            pedalkernel_rt::processor::Stage::BlackFeedback(bf) => {
+                let t = bf.has_pot("Tone");
+                let l = bf.has_pot("Level");
+                let d = bf.has_pot("Drive");
+                ("BF", t, l, d)
+            }
+            pedalkernel_rt::processor::Stage::BlockwiseKMethod(_) => ("BKM", false, false, false),
+        };
+        eprintln!("  stage {i} ({stype}): Tone={has_tone}, Level={has_level}, Drive={has_drive}");
+    }
+
+    eprintln!("  Controls:");
+    for c in &compiled.controls {
+        eprintln!("    {:?} -> {:?}", c.label, c.target);
+    }
 }

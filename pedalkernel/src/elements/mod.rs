@@ -5,8 +5,8 @@
 //! (no_std compatible); this module adds model-DB-dependent lookup functions
 //! via `crate::model_lookup`.
 
-pub use pedalkernel_rt::elements::*;
 pub use pedalkernel_rt::elements::nonlinear;
+pub use pedalkernel_rt::elements::*;
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -12,9 +12,9 @@
 //!
 //! Zero allocation on the hot path — all buffers are pre-sized.
 
+use crate::elements::*;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::elements::*;
 
 // ---------------------------------------------------------------------------
 // Two-port series adaptor
@@ -227,7 +227,10 @@ impl RTypeAdaptor {
             "Scattering matrix must be {n}×{n}"
         );
 
-        let sqrt_r: Vec<f64> = port_resistances.iter().map(|r| crate::math::sqrt(*r)).collect();
+        let sqrt_r: Vec<f64> = port_resistances
+            .iter()
+            .map(|r| crate::math::sqrt(*r))
+            .collect();
         let inv_sqrt_r: Vec<f64> = sqrt_r.iter().map(|sr| 1.0 / sr).collect();
 
         // Compute power-normalized scattering: S̅[i][j] = S[i][j] * √(R_j / R_i)
@@ -1339,11 +1342,15 @@ impl MnaSystem {
         for &(pos, neg, cap) in cap_stamps {
             if let Some(p) = pos {
                 c_cap[p * n_nodes + p] += cap;
-                if let Some(n) = neg { c_cap[p * n_nodes + n] -= cap; }
+                if let Some(n) = neg {
+                    c_cap[p * n_nodes + n] -= cap;
+                }
             }
             if let Some(n) = neg {
                 c_cap[n * n_nodes + n] += cap;
-                if let Some(p) = pos { c_cap[n * n_nodes + p] -= cap; }
+                if let Some(p) = pos {
+                    c_cap[n * n_nodes + p] -= cap;
+                }
             }
         }
 
@@ -1352,8 +1359,10 @@ impl MnaSystem {
         let mut n_matrix = vec![0.0; n_aug * n_aug];
         for i in 0..n_nodes {
             for j in 0..n_nodes {
-                m_matrix[i * n_aug + j] = self.g_matrix[i * n_nodes + j] + two_fs * c_cap[i * n_nodes + j];
-                n_matrix[i * n_aug + j] = two_fs * c_cap[i * n_nodes + j] - self.g_matrix[i * n_nodes + j];
+                m_matrix[i * n_aug + j] =
+                    self.g_matrix[i * n_nodes + j] + two_fs * c_cap[i * n_nodes + j];
+                n_matrix[i * n_aug + j] =
+                    two_fs * c_cap[i * n_nodes + j] - self.g_matrix[i * n_nodes + j];
             }
         }
         for i in 0..n_nodes {
@@ -1379,7 +1388,9 @@ impl MnaSystem {
         for i in 0..n_aug {
             for j in 0..n_aug {
                 let mut s = 0.0;
-                for k in 0..n_aug { s += m_inv[i * n_aug + k] * n_matrix[k * n_aug + j]; }
+                for k in 0..n_aug {
+                    s += m_inv[i * n_aug + k] * n_matrix[k * n_aug + j];
+                }
                 a_d[i * n_aug + j] = s;
             }
         }
@@ -1390,17 +1401,23 @@ impl MnaSystem {
         for _ in 0..100 {
             let mut w = vec![0.0; n_aug];
             for i in 0..n_aug {
-                for j in 0..n_aug { w[i] += a_d[i * n_aug + j] * v[j]; }
+                for j in 0..n_aug {
+                    w[i] += a_d[i * n_aug + j] * v[j];
+                }
             }
             let norm: f64 = crate::math::sqrt(w.iter().map(|x| x * x).sum::<f64>());
             if norm > 1e-15 {
-                for x in &mut w { *x /= norm; }
+                for x in &mut w {
+                    *x /= norm;
+                }
             }
             v = w;
         }
         let mut av = vec![0.0; n_aug];
         for i in 0..n_aug {
-            for j in 0..n_aug { av[i] += a_d[i * n_aug + j] * v[j]; }
+            for j in 0..n_aug {
+                av[i] += a_d[i * n_aug + j] * v[j];
+            }
         }
         let lambda_max: f64 = av.iter().zip(&v).map(|(a, b)| a * b).sum::<f64>()
             / v.iter().map(|x| x * x).sum::<f64>();
@@ -1423,11 +1440,18 @@ impl MnaSystem {
             };
 
             // Gain: ratio of feedback R to smallest series R at a cap node
-            let r_in = cap_stamps.iter()
-                .filter_map(|&(pos, _, _)| pos.map(|p| {
-                    let g = self.g_matrix[p * n_nodes + p];
-                    if g > 1e-15 { 1.0 / g } else { f64::MAX }
-                }))
+            let r_in = cap_stamps
+                .iter()
+                .filter_map(|&(pos, _, _)| {
+                    pos.map(|p| {
+                        let g = self.g_matrix[p * n_nodes + p];
+                        if g > 1e-15 {
+                            1.0 / g
+                        } else {
+                            f64::MAX
+                        }
+                    })
+                })
                 .fold(f64::MAX, f64::min);
             let gain = if r_in < f64::MAX { rf / r_in } else { 1.0 };
 
@@ -1444,10 +1468,7 @@ impl MnaSystem {
             let a1 = -2.0 * cos_w0;
             let a2 = 1.0 - alpha;
 
-            Some((
-                vec![b0 / a0, b1 / a0, b2 / a0],
-                vec![1.0, a1 / a0, a2 / a0],
-            ))
+            Some((vec![b0 / a0, b1 / a0, b2 / a0], vec![1.0, a1 / a0, a2 / a0]))
         } else {
             // ── Stable path: derive IIR from transfer function ──
             // H(z) = c · (zI - A_d)⁻¹ · b_d + d
@@ -1586,20 +1607,16 @@ impl MnaSystem {
         // This avoids the singular G_aa from D[vs_idx,vs_idx] = 0.
         //
         // Find which node the input VS drives (the one with B[node, vs_idx] = 1).
-        // Only eliminate VS node if it has NO capacitor (truly algebraic).
-        // If the VS node has a cap, it's a dynamic state — keep it.
-        let vs_node = (0..n_nodes).find(|&i| {
-            self.b_matrix[i * n_vs + vs_idx].abs() > 0.5
-                && c_cap[i * n_nodes + i].abs() < 1e-30 // no cap on this node
-        });
+        // Always eliminate: the VS forces V(node) = u, so the cap on this
+        // node doesn't create a free state — the voltage is determined by
+        // the source. The cap coupling is captured in b_c_kept below.
+        let vs_node = (0..n_nodes).find(|&i| self.b_matrix[i * n_vs + vs_idx].abs() > 0.5);
 
         // Build reduced G and C matrices with the VS node eliminated.
         // For each remaining node i, the equation becomes:
         //   G'[i,j] = G[i,j] (for j != vs_node)
         //   B'[i] += G[i, vs_node]  (the VS node column becomes input coupling)
-        let kept_nodes: Vec<usize> = (0..n_nodes)
-            .filter(|&i| Some(i) != vs_node)
-            .collect();
+        let kept_nodes: Vec<usize> = (0..n_nodes).filter(|&i| Some(i) != vs_node).collect();
         let n_kept = kept_nodes.len();
 
         // Build reduced G (n_kept × n_kept)
@@ -1618,11 +1635,18 @@ impl MnaSystem {
             }
         }
 
-        // Build input coupling vector: b_kept[i] = G[i, vs_node]
+        // Build input coupling vectors from both G and C columns of the
+        // eliminated VS node. In continuous time: (G + sC)*X = 0. When
+        // X[vn] = U, node i gets current G[i,vn]*U + sC[i,vn]*U.
+        // The G column (b_kept) is frequency-independent.
+        // The C column (b_c_kept) creates the s-dependent (z-1) term
+        // needed for HPF zeros.
         let mut b_kept = vec![0.0; n_kept];
+        let mut b_c_kept = vec![0.0; n_kept];
         if let Some(vn) = vs_node {
             for (ri, &r) in kept_nodes.iter().enumerate() {
                 b_kept[ri] = self.g_matrix[r * n_nodes + vn];
+                b_c_kept[ri] = c_cap[r * n_nodes + vn];
             }
         }
 
@@ -1663,6 +1687,7 @@ impl MnaSystem {
                     let c_vs_node = self.c_matrix[v * n_nodes + vn];
                     // This goes into the b vector for the vs row
                     b_kept.resize(n_aug_kept, 0.0);
+                    b_c_kept.resize(n_aug_kept, 0.0);
                     b_kept[n_kept + vi] += c_vs_node;
                 }
             }
@@ -1673,6 +1698,7 @@ impl MnaSystem {
                 }
             }
             b_kept.resize(n_aug_kept, 0.0);
+            b_c_kept.resize(n_aug_kept, 0.0);
 
             // ── Step 2: Schur complement on the augmented kept system ────
             // Cap indices in the kept system
@@ -1687,17 +1713,18 @@ impl MnaSystem {
                     .collect();
                 let n_a = alg_indices.len();
 
-                let extract = |mat: &[f64], dim: usize, rows: &[usize], cols: &[usize]| -> Vec<f64> {
-                    let nr = rows.len();
-                    let nc = cols.len();
-                    let mut block = vec![0.0; nr * nc];
-                    for (ri, &r) in rows.iter().enumerate() {
-                        for (ci, &c) in cols.iter().enumerate() {
-                            block[ri * nc + ci] = mat[r * dim + c];
+                let extract =
+                    |mat: &[f64], dim: usize, rows: &[usize], cols: &[usize]| -> Vec<f64> {
+                        let nr = rows.len();
+                        let nc = cols.len();
+                        let mut block = vec![0.0; nr * nc];
+                        for (ri, &r) in rows.iter().enumerate() {
+                            for (ci, &c) in cols.iter().enumerate() {
+                                block[ri * nc + ci] = mat[r * dim + c];
+                            }
                         }
-                    }
-                    block
-                };
+                        block
+                    };
 
                 let g_cc = extract(&g_aug, n_aug_kept, &cap_indices, &cap_indices);
                 let g_ca = extract(&g_aug, n_aug_kept, &cap_indices, &alg_indices);
@@ -1711,7 +1738,9 @@ impl MnaSystem {
                 for i in 0..n_a {
                     for j in 0..n_c {
                         let mut s = 0.0;
-                        for k in 0..n_a { s += g_aa_inv[i * n_a + k] * g_ac[k * n_c + j]; }
+                        for k in 0..n_a {
+                            s += g_aa_inv[i * n_a + k] * g_ac[k * n_c + j];
+                        }
                         gaa_inv_gac[i * n_c + j] = s;
                     }
                 }
@@ -1719,7 +1748,9 @@ impl MnaSystem {
                 for i in 0..n_c {
                     for j in 0..n_c {
                         let mut s = 0.0;
-                        for k in 0..n_a { s += g_ca[i * n_a + k] * gaa_inv_gac[k * n_c + j]; }
+                        for k in 0..n_a {
+                            s += g_ca[i * n_a + k] * gaa_inv_gac[k * n_c + j];
+                        }
                         g_red[i * n_c + j] -= s;
                     }
                 }
@@ -1735,21 +1766,45 @@ impl MnaSystem {
                     }
                 }
 
-                // B_red = b_c - G_ca · G_aa⁻¹ · b_a
-                let b_c: Vec<f64> = cap_indices.iter().map(|&i| b_kept[i]).collect();
-                let b_a: Vec<f64> = alg_indices.iter().map(|&i| b_kept[i]).collect();
+                // Schur-reduce BOTH input coupling vectors (G and C columns).
+                // B_G_red = b_G_c - G_ca · G_aa⁻¹ · b_G_a
+                let b_g_c: Vec<f64> = cap_indices.iter().map(|&i| b_kept[i]).collect();
+                let b_g_a: Vec<f64> = alg_indices.iter().map(|&i| b_kept[i]).collect();
                 let mut gaa_inv_ba = vec![0.0; n_a];
                 for i in 0..n_a {
-                    for k in 0..n_a { gaa_inv_ba[i] += g_aa_inv[i * n_a + k] * b_a[k]; }
+                    for k in 0..n_a {
+                        gaa_inv_ba[i] += g_aa_inv[i * n_a + k] * b_g_a[k];
+                    }
                 }
-                let mut b_red = b_c.clone();
+                let mut b_g_red = b_g_c.clone();
                 for i in 0..n_c {
                     let mut s = 0.0;
-                    for k in 0..n_a { s += g_ca[i * n_a + k] * gaa_inv_ba[k]; }
-                    b_red[i] -= s;
+                    for k in 0..n_a {
+                        s += g_ca[i * n_a + k] * gaa_inv_ba[k];
+                    }
+                    b_g_red[i] -= s;
                 }
 
-                // Bilinear transform
+                // B_C_red = b_C_c - G_ca · G_aa⁻¹ · b_C_a
+                // (same G_ca/G_aa⁻¹ — algebraic nodes are eliminated via G)
+                let b_cc_c: Vec<f64> = cap_indices.iter().map(|&i| b_c_kept[i]).collect();
+                let b_cc_a: Vec<f64> = alg_indices.iter().map(|&i| b_c_kept[i]).collect();
+                let mut gaa_inv_bca = vec![0.0; n_a];
+                for i in 0..n_a {
+                    for k in 0..n_a {
+                        gaa_inv_bca[i] += g_aa_inv[i * n_a + k] * b_cc_a[k];
+                    }
+                }
+                let mut b_c_red = b_cc_c.clone();
+                for i in 0..n_c {
+                    let mut s = 0.0;
+                    for k in 0..n_a {
+                        s += g_ca[i * n_a + k] * gaa_inv_bca[k];
+                    }
+                    b_c_red[i] -= s;
+                }
+
+                // Bilinear transform: M = G_red + 2fs·C_red, N = 2fs·C_red - G_red
                 let mut m_red = vec![0.0; n_c * n_c];
                 let mut n_red = vec![0.0; n_c * n_c];
                 for i in 0..n_c {
@@ -1761,22 +1816,45 @@ impl MnaSystem {
                 let m_inv = invert_matrix_equilibrated(&m_red, n_c);
 
                 let mut a_d = vec![0.0; n_c * n_c];
-                for i in 0..n_c { for j in 0..n_c { for k in 0..n_c {
-                    a_d[i * n_c + j] += m_inv[i * n_c + k] * n_red[k * n_c + j];
-                }}}
+                for i in 0..n_c {
+                    for j in 0..n_c {
+                        for k in 0..n_c {
+                            a_d[i * n_c + j] += m_inv[i * n_c + k] * n_red[k * n_c + j];
+                        }
+                    }
+                }
 
-                // b_d = M⁻¹ · b_red, with a factor of 2 ONLY when circuit
-                // nodes were eliminated (not just vsource rows). Eliminating
-                // circuit nodes via Schur complement introduces a 1/(1-A_d)
-                // = 2G_red/M factor that halves the DC gain. The 2× corrects
-                // this. When only vsource rows are eliminated (no circuit
-                // nodes lost), no correction is needed.
+                // Bilinear input coupling: two vectors for u[n+1] and u[n].
+                //
+                // From the continuous-time substitution X[vn] = U into the
+                // bilinear discretized system M·x[n+1] = N·x[n]:
+                //   b_M = G[i,vn] + 2fs·C[i,vn]  (couples to U[n+1])
+                //   b_N = G[i,vn] - 2fs·C[i,vn]  (couples to U[n])
+                //
+                // DC check: b_M + b_N = 2·G[i,vn] → correct (proportional to G only).
+                // HPF check: b_M - b_N = 4fs·C[i,vn] → creates (z-1) zero for cap inputs.
                 let circuit_nodes_eliminated = alg_indices.iter().any(|&i| i < n_kept);
                 let b_scale = if circuit_nodes_eliminated { 2.0 } else { 1.0 };
-                let mut b_d = vec![0.0; n_c];
-                for i in 0..n_c { for k in 0..n_c {
-                    b_d[i] += b_scale * m_inv[i * n_c + k] * b_red[k];
-                }}
+
+                // Compute b_plus = M⁻¹·b_M_red and b_minus = M⁻¹·b_N_red
+                let mut b_plus = vec![0.0; n_c];
+                let mut b_minus = vec![0.0; n_c];
+                for i in 0..n_c {
+                    for k in 0..n_c {
+                        let bm = b_g_red[k] + two_fs * b_c_red[k];
+                        let bn = b_g_red[k] - two_fs * b_c_red[k];
+                        b_plus[i] += b_scale * m_inv[i * n_c + k] * bm;
+                        b_minus[i] += b_scale * m_inv[i * n_c + k] * bn;
+                    }
+                }
+
+                // For backward compatibility, b_d = b_plus (used by caller
+                // for single-vector biquad extraction). The caller will be
+                // updated to use b_minus too via the new return value.
+                // For now, pack b_minus into the return by extending b_d.
+                let mut b_d = b_plus.clone();
+                // Append b_minus so caller can extract it: b_d[0..n_c] = b_plus, b_d[n_c..2*n_c] = b_minus
+                b_d.extend_from_slice(&b_minus);
 
                 // Output extraction: c_d and d_d
                 // Map output node to kept index, then to cap/alg index
@@ -1794,14 +1872,20 @@ impl MnaSystem {
                 let mut c_d = c_c_out.clone();
                 for j in 0..n_c {
                     let mut s = 0.0;
-                    for k in 0..n_a { s += c_a_out[k] * gaa_inv_gac[k * n_c + j]; }
+                    for k in 0..n_a {
+                        s += c_a_out[k] * gaa_inv_gac[k * n_c + j];
+                    }
                     c_d[j] -= s;
                 }
 
                 // d_d = c_a · G_aa⁻¹ · b_a + (1 if output==vs_node)
                 let mut d_d = 0.0;
-                for k in 0..n_a { d_d += c_a_out[k] * gaa_inv_ba[k]; }
-                if out_is_vs_node { d_d += 1.0; }
+                for k in 0..n_a {
+                    d_d += c_a_out[k] * gaa_inv_ba[k];
+                }
+                if out_is_vs_node {
+                    d_d += 1.0;
+                }
 
                 return (a_d, b_d, c_d, n_c, d_d);
             } else if n_c == n_aug_kept {
@@ -1818,13 +1902,26 @@ impl MnaSystem {
                 }
                 let m_inv = invert_matrix_equilibrated(&m_k, n_c);
                 let mut a_d = vec![0.0; n_c * n_c];
-                for i in 0..n_c { for j in 0..n_c { for k in 0..n_c {
-                    a_d[i * n_c + j] += m_inv[i * n_c + k] * n_k[k * n_c + j];
-                }}}
-                let mut b_d = vec![0.0; n_c];
-                for i in 0..n_c { for k in 0..n_c {
-                    b_d[i] += 2.0 * m_inv[i * n_c + k] * b_kept[k];
-                }}
+                for i in 0..n_c {
+                    for j in 0..n_c {
+                        for k in 0..n_c {
+                            a_d[i * n_c + j] += m_inv[i * n_c + k] * n_k[k * n_c + j];
+                        }
+                    }
+                }
+                // Two-vector input coupling (same as Schur path)
+                let mut b_plus = vec![0.0; n_c];
+                let mut b_minus = vec![0.0; n_c];
+                for i in 0..n_c {
+                    for k in 0..n_c {
+                        let bm = b_kept[k] + two_fs * b_c_kept[k];
+                        let bn = b_kept[k] - two_fs * b_c_kept[k];
+                        b_plus[i] += 2.0 * m_inv[i * n_c + k] * bm;
+                        b_minus[i] += 2.0 * m_inv[i * n_c + k] * bn;
+                    }
+                }
+                let mut b_d = b_plus.clone();
+                b_d.extend_from_slice(&b_minus);
                 // Output extraction
                 let mut c_d = vec![0.0; n_c];
                 if let Some(op) = output_pos {
@@ -1846,9 +1943,7 @@ impl MnaSystem {
 
         if n_c > 0 && n_c < n_aug {
             // Algebraic indices: non-cap nodes + all vsource rows
-            let alg_indices: Vec<usize> = (0..n_aug)
-                .filter(|i| !cap_indices.contains(i))
-                .collect();
+            let alg_indices: Vec<usize> = (0..n_aug).filter(|i| !cap_indices.contains(i)).collect();
             let n_a = alg_indices.len();
 
             // Build the full augmented G matrix [G, B; C, D]
@@ -1942,12 +2037,34 @@ impl MnaSystem {
 
             // B_reduced: input column from VS (B_c - G_ca · G_aa⁻¹ · B_a)
             // B_a = augmented column at vs_row for algebraic indices
-            let b_c_aug: Vec<f64> = cap_indices.iter().map(|&i| {
-                if i < n_nodes { 0.0 } else { if i - n_nodes == vs_idx { 1.0 } else { 0.0 } }
-            }).collect();
-            let b_a_aug: Vec<f64> = alg_indices.iter().map(|&i| {
-                if i < n_nodes { 0.0 } else { if i - n_nodes == vs_idx { 1.0 } else { 0.0 } }
-            }).collect();
+            let b_c_aug: Vec<f64> = cap_indices
+                .iter()
+                .map(|&i| {
+                    if i < n_nodes {
+                        0.0
+                    } else {
+                        if i - n_nodes == vs_idx {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                })
+                .collect();
+            let b_a_aug: Vec<f64> = alg_indices
+                .iter()
+                .map(|&i| {
+                    if i < n_nodes {
+                        0.0
+                    } else {
+                        if i - n_nodes == vs_idx {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
+                })
+                .collect();
 
             // G_aa⁻¹ · b_a
             let mut gaa_inv_ba = vec![0.0; n_a];
@@ -3004,7 +3121,10 @@ mod tests {
 
         // Measure gain from last quarter (after transient settles)
         let start = n_samples * 3 / 4;
-        let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let out_peak = output[start..]
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
         let in_peak = 1.0; // sine amplitude
 
         // Gain should be approximately |-Rf/Ri| = 10
@@ -3027,7 +3147,7 @@ mod tests {
         mna.stamp_voltage_source(Some(0), None, 0);
         mna.stamp_resistor(Some(0), Some(1), 100.0); // small input R
         mna.stamp_resistor(Some(2), None, 10_000.0); // load
-        // Unity buffer: pos=1, neg=2, out=2
+                                                     // Unity buffer: pos=1, neg=2, out=2
         mna.stamp_vcvs(Some(1), Some(2), Some(2), None, 200_000.0, 75.0, 1);
 
         // Cap at output node (makes it a state)
@@ -3044,7 +3164,10 @@ mod tests {
         let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
         let start = n_samples * 3 / 4;
-        let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let out_peak = output[start..]
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
         let gain = out_peak / 1.0;
         eprintln!("Unity buffer state-space: gain = {gain:.4} (expected ~1.0)");
         assert!(
@@ -3080,7 +3203,10 @@ mod tests {
         let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
         let start = n_samples * 3 / 4;
-        let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let out_peak = output[start..]
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0_f64, f64::max);
         let gain = out_peak / 0.1;
         eprintln!("Non-inverting amp state-space: gain = {gain:.2} (expected ~5.0)");
         assert!(
@@ -3096,9 +3222,9 @@ mod tests {
         let fs = 48000.0;
         let r = 10_000.0;
         let c = 100e-9; // 100nF
-        // f_0dB = 1/(2πRC) = 159 Hz
-        // Nodes: 0=VS, 1=neg, 2=output
-        // R: VS(0)→neg(1), C_fb: neg(1)↔out(2)
+                        // f_0dB = 1/(2πRC) = 159 Hz
+                        // Nodes: 0=VS, 1=neg, 2=output
+                        // R: VS(0)→neg(1), C_fb: neg(1)↔out(2)
         let mut mna = MnaSystem::new(3, 2);
         mna.stamp_voltage_source(Some(0), None, 0);
         mna.stamp_resistor(Some(0), Some(1), r); // R: input to neg
@@ -3107,7 +3233,7 @@ mod tests {
         // Feedback cap between neg(1) and out(2) — this IS the integrating element.
         // No coupling cap needed — R provides the input path, VS node has no cap.
         let cap_stamps = vec![
-            (Some(1), Some(2), c),       // feedback cap (integrator)
+            (Some(1), Some(2), c), // feedback cap (integrator)
         ];
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
@@ -3121,7 +3247,10 @@ mod tests {
             }
             let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
             let start = n_samples * 3 / 4;
-            let out_peak = output[start..].iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+            let out_peak = output[start..]
+                .iter()
+                .map(|v| v.abs())
+                .fold(0.0_f64, f64::max);
             out_peak / 0.01
         };
 
@@ -3768,8 +3897,10 @@ mod tests {
         );
 
         // Pole should be real, positive, < 1 (stable)
-        assert!(actual_pole > 0.0 && actual_pole < 1.0,
-            "RC pole should be stable (0 < z < 1), got {actual_pole}");
+        assert!(
+            actual_pole > 0.0 && actual_pole < 1.0,
+            "RC pole should be stable (0 < z < 1), got {actual_pole}"
+        );
     }
 
     /// Two-cap network with resistive coupling: creates complex eigenvalues.
@@ -3857,18 +3988,17 @@ mod tests {
         mna.stamp_voltage_source(Some(4), None, 1);
 
         // Caps: C1 (neg→gnd), C2 (junction→gnd)
-        let cap_stamps = vec![
-            (Some(3), None, c1),
-            (Some(0), None, c2),
-        ];
+        let cap_stamps = vec![(Some(3), None, c1), (Some(0), None, c2)];
 
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
 
         eprintln!("n_states = {n_states}");
         // With CMIN on all nodes: 5 circuit nodes as states (vsources eliminated)
-        assert!(n_states >= 2 && n_states <= 5,
-            "Should have 2-5 states, got {n_states}");
+        assert!(
+            n_states >= 2 && n_states <= 5,
+            "Should have 2-5 states, got {n_states}"
+        );
 
         // Print A matrix
         for i in 0..n_states {

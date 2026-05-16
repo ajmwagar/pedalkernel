@@ -258,8 +258,18 @@ fn opamp_wdf_adaptor_pot_changes_gain() {
     let input = sine_at(440.0, 0.005, 0.2, SAMPLE_RATE);
     let skip = 4800;
 
-    let output_low = compile_and_process(INVERTING_POT_GAIN_SRC, &input, SAMPLE_RATE, &[("Gain", 0.1)]);
-    let output_high = compile_and_process(INVERTING_POT_GAIN_SRC, &input, SAMPLE_RATE, &[("Gain", 0.9)]);
+    let output_low = compile_and_process(
+        INVERTING_POT_GAIN_SRC,
+        &input,
+        SAMPLE_RATE,
+        &[("Gain", 0.1)],
+    );
+    let output_high = compile_and_process(
+        INVERTING_POT_GAIN_SRC,
+        &input,
+        SAMPLE_RATE,
+        &[("Gain", 0.9)],
+    );
 
     let rms_low = rms_tail(&output_low, skip);
     let rms_high = rms_tail(&output_high, skip);
@@ -354,12 +364,17 @@ fn feedback_opamp_stage_exists_on_ratking() {
     let proc = compile_pedal_from_src(RATKING_SRC, SAMPLE_RATE);
 
     let has_feedback_opamp = wdf_stages(&proc).any(|w| w.feedback_opamp.is_some());
-    let has_black_feedback = proc.stages.iter().any(|s| matches!(s, Stage::BlackFeedback(_)));
+    let has_black_feedback = proc
+        .stages
+        .iter()
+        .any(|s| matches!(s, Stage::BlackFeedback(_)));
 
     eprintln!(
         "[feedback_opamp_exists] stages={}, wdf_feedback_opamp_count={}, black_feedback={}",
         proc.stages.len(),
-        wdf_stages(&proc).filter(|w| w.feedback_opamp.is_some()).count(),
+        wdf_stages(&proc)
+            .filter(|w| w.feedback_opamp.is_some())
+            .count(),
         has_black_feedback,
     );
     for (i, s) in proc.stages.iter().enumerate() {
@@ -398,7 +413,10 @@ fn screamer_compiles_with_opamp_gain_stage() {
 
     let has_opamp_root = wdf_stages(&proc).any(|w| matches!(&w.root, RootKind::OpAmp(_)));
     let has_feedback_opamp = wdf_stages(&proc).any(|w| w.feedback_opamp.is_some());
-    let has_black_feedback = proc.stages.iter().any(|s| matches!(s, Stage::BlackFeedback(_)));
+    let has_black_feedback = proc
+        .stages
+        .iter()
+        .any(|s| matches!(s, Stage::BlackFeedback(_)));
 
     eprintln!(
         "[screamer_routing] stages={}, opamp_root={}, feedback_opamp={}, black_feedback={}",
@@ -484,8 +502,14 @@ fn feedback_opamp_notify_pot_changed_updates_gain() {
             eprintln!("  -> Gain did NOT change (FeedbackConfig may not be wired for this path)");
         }
 
-        assert!(initial_gain > 0.1, "Initial gain should be positive: {initial_gain}");
-        assert!(final_gain > 0.1, "Final gain should be positive: {final_gain}");
+        assert!(
+            initial_gain > 0.1,
+            "Initial gain should be positive: {initial_gain}"
+        );
+        assert!(
+            final_gain > 0.1,
+            "Final gain should be positive: {final_gain}"
+        );
     } else if let Some(idx) = bf_idx {
         // BlackFeedback path
         let initial_gain = proc.stages[idx].as_black_feedback().unwrap().gain();
@@ -508,8 +532,14 @@ fn feedback_opamp_notify_pot_changed_updates_gain() {
         }
 
         // BlackFeedback returns negative gain for inverting topologies
-        assert!(initial_gain.abs() > 0.1, "Initial gain magnitude should be > 0.1: {initial_gain}");
-        assert!(final_gain.abs() > 0.1, "Final gain magnitude should be > 0.1: {final_gain}");
+        assert!(
+            initial_gain.abs() > 0.1,
+            "Initial gain magnitude should be > 0.1: {initial_gain}"
+        );
+        assert!(
+            final_gain.abs() > 0.1,
+            "Final gain magnitude should be > 0.1: {final_gain}"
+        );
     } else {
         panic!("RATKING should have a feedback_opamp or BlackFeedback stage");
     }
@@ -560,18 +590,23 @@ fn mna_opamp_adaptor_path_discovery() {
     let ratking_proc = compile_pedal_from_src(RATKING_SRC, SAMPLE_RATE);
     assert!(
         wdf_stages(&ratking_proc).any(|w| w.feedback_opamp.is_some())
-            || ratking_proc.stages.iter().any(|s| matches!(s, Stage::BlackFeedback(_))),
+            || ratking_proc
+                .stages
+                .iter()
+                .any(|s| matches!(s, Stage::BlackFeedback(_))),
         "RATKING should use feedback_opamp or BlackFeedback path"
     );
 
     // Verify inverting amp uses OpAmp root (current behavior)
     let inv_proc = compile_pedal_from_src(INVERTING_AMP_SRC, SAMPLE_RATE);
     assert!(
-        wdf_stages(&inv_proc).any(|w|
-            matches!(&w.root, RootKind::OpAmp(_))
+        wdf_stages(&inv_proc).any(|w| matches!(&w.root, RootKind::OpAmp(_))
             || w.opamp_adaptor.is_some()
-            || w.opamp_wdf_adaptor.is_some()
-        ) || inv_proc.stages.iter().any(|s| matches!(s, Stage::BlackFeedback(_))),
+            || w.opamp_wdf_adaptor.is_some())
+            || inv_proc
+                .stages
+                .iter()
+                .any(|s| matches!(s, Stage::BlackFeedback(_))),
         "Inverting amp should use an opamp path"
     );
 }
@@ -627,9 +662,7 @@ fn mna_opamp_adaptor_pot_sweep_changes_output() {
     let rms_low = rms_tail(&output_low, skip);
     let rms_high = rms_tail(&output_high, skip);
 
-    eprintln!(
-        "[mna_pot_sweep] rms_low={rms_low:.6} (Dist=0.1), rms_high={rms_high:.6} (Dist=0.9)"
-    );
+    eprintln!("[mna_pot_sweep] rms_low={rms_low:.6} (Dist=0.1), rms_high={rms_high:.6} (Dist=0.9)");
 
     // Verify the output differs when the pot changes
     let ratio = if rms_low > 1e-10 {
@@ -700,7 +733,7 @@ fn opamp_root_feedback_config_inverting_rf_pot() {
     // Configure: pot is in Rf leg, Ri = 10k, fixed_series_r = 1k, no parallel R.
     opamp.set_feedback_config(FeedbackConfig {
         pot_comp_id: "Drive".to_string(),
-        other_leg_r: 10_000.0, // Ri
+        other_leg_r: 10_000.0,   // Ri
         fixed_series_r: 1_000.0, // series R with pot
         parallel_r: None,
         pot_is_feedback: true,
@@ -762,7 +795,7 @@ fn opamp_root_feedback_config_ri_pot() {
 
     opamp.set_feedback_config(FeedbackConfig {
         pot_comp_id: "InputGain".to_string(),
-        other_leg_r: 100_000.0, // Rf
+        other_leg_r: 100_000.0,  // Rf
         fixed_series_r: 1_000.0, // fixed R in series with pot
         parallel_r: None,
         pot_is_feedback: false, // pot is in Ri leg
@@ -790,8 +823,8 @@ fn opamp_root_feedback_config_parallel_r() {
     // Rf = parallel(200k, 100k + pot) where pot = 100k
     opamp.set_feedback_config(FeedbackConfig {
         pot_comp_id: "Drive".to_string(),
-        other_leg_r: 10_000.0, // Ri
-        fixed_series_r: 100_000.0, // series R
+        other_leg_r: 10_000.0,       // Ri
+        fixed_series_r: 100_000.0,   // series R
         parallel_r: Some(200_000.0), // parallel R
         pot_is_feedback: true,
         is_inverting: true,
@@ -804,9 +837,7 @@ fn opamp_root_feedback_config_parallel_r() {
     let rf_parallel = (200_000.0 * eff_r) / (200_000.0 + eff_r);
     let expected = rf_parallel / 10_000.0;
     let actual = opamp.gain();
-    eprintln!(
-        "[feedback_parallel] pot_r=100k → gain={actual:.4} (expected {expected:.4})"
-    );
+    eprintln!("[feedback_parallel] pot_r=100k → gain={actual:.4} (expected {expected:.4})");
     assert!(
         (actual - expected).abs() < 0.1,
         "Parallel Rf gain should be ~{expected:.2}, got {actual:.4}"
@@ -937,7 +968,10 @@ fn document_opamp_path_routing() {
         let has_opamp_adaptor = wdf_stages(&proc).any(|w| w.opamp_adaptor.is_some());
         let has_opamp_wdf_adaptor = wdf_stages(&proc).any(|w| w.opamp_wdf_adaptor.is_some());
         let has_feedback_opamp = wdf_stages(&proc).any(|w| w.feedback_opamp.is_some());
-        let has_black_feedback = proc.stages.iter().any(|s| matches!(s, Stage::BlackFeedback(_)));
+        let has_black_feedback = proc
+            .stages
+            .iter()
+            .any(|s| matches!(s, Stage::BlackFeedback(_)));
         eprintln!(
             "[route_inverting] opamp_root={has_opamp_root} opamp_adaptor={has_opamp_adaptor} \
              opamp_wdf_adaptor={has_opamp_wdf_adaptor} feedback_opamp={has_feedback_opamp} \
@@ -1005,9 +1039,7 @@ fn opamp_root_model_gbw_affects_bandwidth() {
     let lm308_coeff = lm308.gbw_coeff();
     let tl072_coeff = tl072.gbw_coeff();
 
-    eprintln!(
-        "[gbw_models] LM308 gbw_coeff={lm308_coeff:.6}, TL072 gbw_coeff={tl072_coeff:.6}"
-    );
+    eprintln!("[gbw_models] LM308 gbw_coeff={lm308_coeff:.6}, TL072 gbw_coeff={tl072_coeff:.6}");
 
     // TL072 should have a higher coefficient (less filtering) due to higher GBW
     assert!(

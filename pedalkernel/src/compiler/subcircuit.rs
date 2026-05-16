@@ -56,6 +56,7 @@ pub fn resolve_subcircuits(pedal: &PedalDef) -> Result<Vec<ResolvedSubcircuit>, 
             subcircuits: Vec::new(),
             mirrors: sc.mirrors.clone(),
             calibrate: false,
+            ports: Vec::new(),
         };
 
         resolved.push(ResolvedSubcircuit {

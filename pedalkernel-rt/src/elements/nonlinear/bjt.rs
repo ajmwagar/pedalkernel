@@ -4,7 +4,7 @@
 //! the multi-port Newton-Raphson grouped solver. The legacy single-port
 //! Ebers-Moll roots (`BjtNpnRoot`, `BjtPnpRoot`, `BjtModel`) have been removed.
 
-use super::solver::NlDeviceGroupIv;
+use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv, LEAKAGE_CONDUCTANCE};
 
 // ---------------------------------------------------------------------------
 // Gummel-Poon BJT Model
@@ -414,7 +414,8 @@ impl GummelPoonModel {
             } else {
                 // Linear extrapolation for forward bias
                 let cje_fc = self.cje / crate::math::powf(1.0 - fc, self.mje);
-                let dcje = self.cje * self.mje / (self.vje * crate::math::powf(1.0 - fc, self.mje + 1.0));
+                let dcje =
+                    self.cje * self.mje / (self.vje * crate::math::powf(1.0 - fc, self.mje + 1.0));
                 cje_fc + dcje * (vbe - fc * self.vje)
             }
         } else {
@@ -447,7 +448,8 @@ impl GummelPoonModel {
                 self.cjc / crate::math::powf(1.0 - vbc / self.vjc, self.mjc)
             } else {
                 let cjc_fc = self.cjc / crate::math::powf(1.0 - fc, self.mjc);
-                let dcjc = self.cjc * self.mjc / (self.vjc * crate::math::powf(1.0 - fc, self.mjc + 1.0));
+                let dcjc =
+                    self.cjc * self.mjc / (self.vjc * crate::math::powf(1.0 - fc, self.mjc + 1.0));
                 cjc_fc + dcjc * (vbc - fc * self.vjc)
             }
         } else {
@@ -1176,6 +1178,310 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
             0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent
             _ => (-self.v_max, self.v_max),     // Vce: full swing
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BjtRoot: single-port WDF root for common-emitter BJT stages
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// BJT as a single-port WDF root (like TriodeRoot for tubes).
+///
+/// Vbe is set externally as a control parameter (from the base signal).
+/// The collector-emitter path is the WDF port. This enables:
+/// - Standard WDF tree processing for BJT stages
+/// - K-method table generation (2D: b_tree × Vbe)
+/// - Blockwise decomposition of BJT cascades (303 ladder)
+///
+/// Uses the Gummel-Poon model for the I-V characteristic.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BjtRoot {
+    pub model: GummelPoonModel,
+    pub is_pnp: bool,
+    /// DC base-emitter bias voltage, set at compile time from circuit analysis.
+    /// The runtime input signal modulates around this operating point.
+    vbe_bias: f64,
+    /// Current base-emitter voltage (bias + AC signal).
+    vbe: f64,
+    /// Maximum collector-emitter voltage (from supply rail).
+    v_max: f64,
+    /// Previous sample's Vce for NR warm-starting.
+    prev_v: f64,
+}
+
+impl BjtRoot {
+    pub fn new(model: GummelPoonModel, is_pnp: bool) -> Self {
+        Self {
+            model,
+            is_pnp,
+            vbe_bias: 0.0,
+            vbe: 0.0,
+            v_max: 50.0,
+            prev_v: 0.0,
+        }
+    }
+
+    pub fn new_with_v_max(model: GummelPoonModel, is_pnp: bool, v_max: f64) -> Self {
+        Self {
+            model,
+            is_pnp,
+            vbe_bias: 0.0,
+            vbe: 0.0,
+            v_max: v_max.max(1.0),
+            prev_v: 0.0,
+        }
+    }
+
+    /// Set the DC bias operating point from circuit analysis.
+    /// Called at compile time, not per-sample.
+    pub fn set_bias(&mut self, vbe_bias: f64) {
+        self.vbe_bias = vbe_bias;
+        self.vbe = vbe_bias; // Initialize runtime Vbe to bias point
+    }
+
+    /// Get the DC bias operating point.
+    pub fn vbe_bias(&self) -> f64 {
+        self.vbe_bias
+    }
+
+    /// Set the base-emitter voltage (external control from input signal).
+    #[inline]
+    pub fn set_vbe(&mut self, vbe: f64) {
+        self.vbe = vbe;
+    }
+
+    /// Get current Vbe.
+    #[inline]
+    pub fn vbe(&self) -> f64 {
+        self.vbe
+    }
+
+    pub fn set_v_max(&mut self, v_max: f64) {
+        self.v_max = v_max.max(1.0);
+    }
+
+    /// Collector current Ic as a function of Vce, with Vbe held constant.
+    /// This is the I-V characteristic seen at the WDF port.
+    #[inline]
+    pub fn collector_current(&self, vce: f64) -> f64 {
+        let sign = if self.is_pnp { -1.0 } else { 1.0 };
+        let vbe = sign * self.vbe;
+        let vce = sign * vce;
+        let vbc = (vbe - vce).min(0.4); // Clamp Vbc
+        let (ic, _ib) = self.model.currents(vbe, vbc);
+        sign * ic
+    }
+
+    /// Derivative dIc/dVce for Newton-Raphson.
+    #[inline]
+    pub fn collector_current_derivative(&self, vce: f64) -> f64 {
+        // Numerical derivative (simple, robust)
+        let h = 1e-6;
+        let ic_plus = self.collector_current(vce + h);
+        let ic_minus = self.collector_current(vce - h);
+        let d = (ic_plus - ic_minus) / (2.0 * h);
+        // When Vbc is clamped, both samples may land in the flat region,
+        // giving d ≈ 0. Return a small conductance so NR has a valid gradient.
+        if d.abs() < 1e-12 {
+            LEAKAGE_CONDUCTANCE
+        } else {
+            d
+        }
+    }
+
+    /// WDF NR solve: incident wave → reflected wave.
+    pub fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let v_max = self.v_max;
+        let cold = a * 0.5;
+        let v0 = if self.prev_v != 0.0
+            && (self.prev_v - cold).abs() < v_max
+            && self.prev_v.abs() < v_max
+        {
+            self.prev_v
+        } else {
+            cold
+        };
+        let root = self.clone();
+        let b = newton_raphson_solve(
+            a,
+            rp,
+            v0,
+            super::solver::NR_MAX_ITER,
+            1e-6,
+            Some((-v_max, v_max)),
+            None,
+            |v| {
+                (
+                    root.collector_current(v),
+                    root.collector_current_derivative(v),
+                )
+            },
+        );
+        self.prev_v = (a + b) * 0.5;
+        b
+    }
+}
+
+impl NlDeviceIv for BjtRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (
+            self.collector_current(v),
+            self.collector_current_derivative(v),
+        )
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-self.v_max, self.v_max)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DiffPairRoot: ladder filter stage macromodel
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Diff-pair macromodel for ladder filter stages (Moog/303/Korg).
+///
+/// Models one stage of a transistor ladder as a differential pair with
+/// tanh transfer characteristic:
+///
+///   I_out = α · I_tail · tanh(V_in / (2 · n · V_t))
+///
+/// where:
+/// - `α = β/(β+1)` from SPICE BF parameter (collector current fraction)
+/// - `I_tail` = tail current, modulated by cutoff CV (this IS the cutoff control)
+/// - `n` = forward ideality factor (SPICE NF, usually ~1.0)
+/// - `V_t` = thermal voltage (kT/q ≈ 25.85mV at 25°C)
+///
+/// The cap in the WDF tree is loaded by 1/gm = 2·n·Vt / (α·I_tail),
+/// giving cutoff frequency f_c = α·I_tail / (4π·n·Vt·C).
+///
+/// K-table: 2D lookup on (b_tree, I_tail). The I_tail axis maps to the
+/// cutoff control CV. Monotonic, bounded, memoryless — ideal for K-method.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DiffPairRoot {
+    /// α = BF / (BF + 1), collector current fraction.
+    pub alpha: f64,
+    /// n · Vt: scaled thermal voltage (NF * kT/q).
+    pub n_vt: f64,
+    /// Current tail current (modulated by cutoff CV).
+    pub i_tail: f64,
+    /// DC bias tail current (quiescent operating point).
+    pub i_tail_bias: f64,
+    /// Max tail current (sets cutoff range).
+    pub i_tail_max: f64,
+    /// Previous sample's voltage for NR warm-start.
+    pub prev_v: f64,
+}
+
+impl DiffPairRoot {
+    /// Create from SPICE Gummel-Poon parameters.
+    pub fn from_gummel_poon(model: &GummelPoonModel, i_tail_bias: f64) -> Self {
+        let alpha = model.bf / (model.bf + 1.0);
+        let n_vt = model.nf * model.vt;
+        Self {
+            alpha,
+            n_vt,
+            i_tail: i_tail_bias,
+            i_tail_bias,
+            i_tail_max: i_tail_bias * 10.0, // 10× range for cutoff sweep
+            prev_v: 0.0,
+        }
+    }
+
+    /// Create with explicit parameters.
+    pub fn new(alpha: f64, n_vt: f64, i_tail: f64) -> Self {
+        Self {
+            alpha,
+            n_vt,
+            i_tail,
+            i_tail_bias: i_tail,
+            i_tail_max: i_tail * 10.0,
+            prev_v: 0.0,
+        }
+    }
+
+    /// Set the tail current (cutoff control, audio rate).
+    #[inline]
+    pub fn set_i_tail(&mut self, i_tail: f64) {
+        self.i_tail = i_tail.max(1e-9); // prevent division by zero
+    }
+
+    /// Get the DC bias tail current.
+    pub fn i_tail_bias(&self) -> f64 {
+        self.i_tail_bias
+    }
+
+    /// Transconductance gm = α · I_tail / (2 · n · Vt).
+    #[inline]
+    pub fn gm(&self) -> f64 {
+        self.alpha * self.i_tail / (2.0 * self.n_vt)
+    }
+
+    /// Output current of the diff pair at voltage V.
+    /// I = α · I_tail · tanh(V / (2 · n · Vt))
+    #[inline]
+    pub fn current(&self, v: f64) -> f64 {
+        let x = (v / (2.0 * self.n_vt)).clamp(-20.0, 20.0);
+        self.alpha * self.i_tail * crate::math::tanh(x)
+    }
+
+    /// Derivative dI/dV = α · I_tail / (2 · n · Vt) · sech²(V / (2·n·Vt))
+    #[inline]
+    pub fn current_derivative(&self, v: f64) -> f64 {
+        let x = (v / (2.0 * self.n_vt)).clamp(-20.0, 20.0);
+        let sech2 = {
+            let t = crate::math::tanh(x);
+            1.0 - t * t
+        };
+        self.alpha * self.i_tail / (2.0 * self.n_vt) * sech2
+    }
+
+    /// WDF NR solve: incident wave → reflected wave.
+    pub fn process(&mut self, a: f64, rp: f64) -> f64 {
+        let v0 = if self.prev_v != 0.0 {
+            self.prev_v
+        } else {
+            a * 0.5
+        };
+        let root = self.clone();
+        let b = newton_raphson_solve(
+            a,
+            rp,
+            v0,
+            super::solver::NR_MAX_ITER,
+            1e-6,
+            Some((-2.0, 2.0)), // tanh saturates well within ±2V
+            None,
+            |v| (root.current(v), root.current_derivative(v)),
+        );
+        self.prev_v = (a + b) * 0.5;
+        b
+    }
+
+    /// Reset NR warm-start state.
+    pub fn reset_nr_state(&mut self) {
+        self.prev_v = 0.0;
+    }
+
+    /// K-method candidacy: 2D (b_tree × I_tail).
+    pub fn k_method_candidacy(&self) -> (bool, usize) {
+        (true, 2) // 2D: wave × tail current
+    }
+}
+
+impl NlDeviceIv for DiffPairRoot {
+    #[inline]
+    fn iv(&self, v: f64) -> (f64, f64) {
+        (self.current(v), self.current_derivative(v))
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (f64, f64) {
+        (-2.0, 2.0)
     }
 }
 

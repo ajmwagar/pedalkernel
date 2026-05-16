@@ -38,10 +38,16 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
                 compiled.wiper_dividers.push(super::compiled::WiperDivider {
                     after_stage_idx: *stage_idx,
                     pot_comp_id: ctrl.component_id.clone(),
-                    position: ctrl.taper.apply(ctrl.range.0 + pedal.controls.iter()
-                        .find(|c| c.label == ctrl.label)
-                        .map(|c| c.default)
-                        .unwrap_or(0.5) * (ctrl.range.1 - ctrl.range.0)),
+                    position: ctrl.taper.apply(
+                        ctrl.range.0
+                            + pedal
+                                .controls
+                                .iter()
+                                .find(|c| c.label == ctrl.label)
+                                .map(|c| c.default)
+                                .unwrap_or(0.5)
+                                * (ctrl.range.1 - ctrl.range.0),
+                    ),
                     taper: ctrl.taper,
                 });
             }
@@ -51,9 +57,13 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
     // Create pot smoothers (one per control) for zipper-free updates.
     for (i, ctrl) in pedal.controls.iter().enumerate() {
         if i < compiled.controls.len() {
-            compiled.pot_smoothers.push(
-                super::compiled::SmoothedParam::new(ctrl.default, i, compiled.sample_rate)
-            );
+            compiled
+                .pot_smoothers
+                .push(super::compiled::SmoothedParam::new(
+                    ctrl.default,
+                    i,
+                    compiled.sample_rate,
+                ));
         }
     }
 
@@ -92,17 +102,10 @@ fn find_pot_binding(
     for (idx, stage) in compiled.stages.iter().enumerate() {
         match stage {
             Stage::Wdf(wdf) => {
-                let in_tree = wdf.tree.get_pot_position(comp_id).is_some()
-                    || wdf.tree.get_pot_position(&aw_id).is_some()
-                    || wdf.tree.get_pot_position(&wb_id).is_some();
-                let in_children = wdf.opamp_children.iter().any(|c| {
-                    c.get_pot_position(comp_id).is_some()
-                        || c.get_pot_position(&aw_id).is_some()
-                        || c.get_pot_position(&wb_id).is_some()
-                });
+                let in_wdf = wdf.has_pot(comp_id) || wdf.has_pot(&aw_id) || wdf.has_pot(&wb_id);
                 let is_feedback_pot = wdf.feedback_pot_id.as_deref() == Some(comp_id);
 
-                if in_tree || in_children || is_feedback_pot {
+                if in_wdf || is_feedback_pot {
                     return Some(make_binding(
                         ctrl,
                         comp_id,
@@ -176,6 +179,25 @@ fn find_pot_binding(
             }
             Stage::StateSpace(_) => {
                 // TODO: StateSpaceStage G-matrix delta
+            }
+            Stage::BlockwiseKMethod(bkm) => {
+                // Search K-method block trees for pots
+                for (bi, block) in bkm.blocks.iter().enumerate() {
+                    if block.tree.get_pot_position(comp_id).is_some()
+                        || block.tree.get_pot_position(&aw_id).is_some()
+                        || block.tree.get_pot_position(&wb_id).is_some()
+                    {
+                        return Some(make_binding(
+                            ctrl,
+                            comp_id,
+                            &aw_id,
+                            &wb_id,
+                            max_r,
+                            taper,
+                            ControlTarget::PotInStage(idx),
+                        ));
+                    }
+                }
             }
         }
     }

@@ -774,7 +774,9 @@ impl CircuitGraph {
             };
 
             // Find this component's index in all_components
-            let comp_idx = all_components.iter().position(|c| c.id == comp.id)
+            let comp_idx = all_components
+                .iter()
+                .position(|c| c.id == comp.id)
                 .unwrap_or(pedal_comp_idx);
 
             let mut pin_nodes: Vec<NodeId> = Vec::new();
@@ -989,14 +991,20 @@ impl CircuitGraph {
                     if let Some(node) = candidate {
                         // Count how many edges touch this node (excluding
                         // edges to GND/VCC/supply rails)
-                        let signal_edges = self.edges.iter().filter(|e| {
-                            let touches = e.node_a == node || e.node_b == node;
-                            if !touches { return false; }
-                            let other = if e.node_a == node { e.node_b } else { e.node_a };
-                            other != self.gnd_node
-                                && other != self.vcc_node
-                                && !self.supply_nodes.contains(&other)
-                        }).count();
+                        let signal_edges = self
+                            .edges
+                            .iter()
+                            .filter(|e| {
+                                let touches = e.node_a == node || e.node_b == node;
+                                if !touches {
+                                    return false;
+                                }
+                                let other = if e.node_a == node { e.node_b } else { e.node_a };
+                                other != self.gnd_node
+                                    && other != self.vcc_node
+                                    && !self.supply_nodes.contains(&other)
+                            })
+                            .count();
                         // ≥3 signal edges: cap + bias R + at least one signal
                         // component (op-amp pos, pot, etc.)
                         if signal_edges >= 3 {
@@ -2981,6 +2989,12 @@ impl CircuitGraph {
         results.sort_by_key(|info| dist.get(&info.pos_node).copied().unwrap_or(usize::MAX));
 
         results
+    }
+
+    /// Check whether two edge indices belong to the same component.
+    /// Multi-terminal devices (BJTs, MOSFETs) have multiple edges sharing one `comp_idx`.
+    pub(super) fn edges_share_component(&self, a: usize, b: usize) -> bool {
+        self.edges[a].comp_idx == self.edges[b].comp_idx
     }
 }
 

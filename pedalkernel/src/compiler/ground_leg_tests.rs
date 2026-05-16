@@ -37,7 +37,8 @@ fn measure_peak(src: &str, controls: &[(&str, f64)]) -> f64 {
     }
     let mut peak = 0.0f64;
     for s in 0..2000 {
-        let out = proc.process(0.05 * (std::f64::consts::TAU * 440.0 * (4000 + s) as f64 / SR).sin());
+        let out =
+            proc.process(0.05 * (std::f64::consts::TAU * 440.0 * (4000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
     peak
@@ -71,7 +72,10 @@ fn single_hop_ground_leg_gain() {
     let gain = bf_gain(SINGLE_HOP);
     // gain = 1 + 422k/15k = 29.13
     eprintln!("Single-hop: gain={gain:.2} (expected ~29.1)");
-    assert!((gain - 29.13).abs() < 1.0, "gain should be ~29: got {gain:.2}");
+    assert!(
+        (gain - 29.13).abs() < 1.0,
+        "gain should be ~29: got {gain:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -104,7 +108,10 @@ fn multi_hop_ground_leg_gain() {
     let gain = bf_gain(MULTI_HOP);
     // gain = 1 + 422k / (15k + 2k) = 1 + 422/17 = 25.82
     eprintln!("Multi-hop: gain={gain:.2} (expected ~25.8)");
-    assert!((gain - 25.82).abs() < 2.0, "gain should be ~25.8: got {gain:.2}");
+    assert!(
+        (gain - 25.82).abs() < 2.0,
+        "gain should be ~25.8: got {gain:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -141,7 +148,10 @@ fn multi_hop_pot_gain_at_default() {
     let gain = bf_gain(MULTI_HOP_POT);
     // gain = 1 + 422k / (15k + 2k + 50k) = 1 + 422/67 = 7.30
     eprintln!("Multi-hop pot (default 0.5): gain={gain:.2} (expected ~7.3)");
-    assert!((gain - 7.3).abs() < 2.0, "gain should be ~7.3: got {gain:.2}");
+    assert!(
+        (gain - 7.3).abs() < 2.0,
+        "gain should be ~7.3: got {gain:.2}"
+    );
 }
 
 #[test]
@@ -150,8 +160,10 @@ fn multi_hop_pot_gain_responds_to_control() {
     let peak_high = measure_peak(MULTI_HOP_POT, &[("Gain", 0.1)]);
     eprintln!("Gain=0.9 (high R, low gain): peak={peak_low:.4}");
     eprintln!("Gain=0.1 (low R, high gain): peak={peak_high:.4}");
-    assert!(peak_high > peak_low * 1.5,
-        "Lower Gain_A R should produce more gain: high={peak_high:.4} low={peak_low:.4}");
+    assert!(
+        peak_high > peak_low * 1.5,
+        "Lower Gain_A R should produce more gain: high={peak_high:.4} low={peak_low:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -188,7 +200,10 @@ fn bypass_cap_doesnt_affect_dc_gain() {
     // Ri = R5 + R6 = 17k (C_gnd has no DC resistance)
     // gain = 1 + 422k/17k = 25.82
     eprintln!("With bypass cap: gain={gain:.2} (expected ~25.8)");
-    assert!((gain - 25.82).abs() < 2.0, "C_gnd shouldn't affect Ri: got {gain:.2}");
+    assert!(
+        (gain - 25.82).abs() < 2.0,
+        "C_gnd shouldn't affect Ri: got {gain:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -227,7 +242,10 @@ fn summing_amp_gain_from_feedback_only() {
     // for the parallel input resistors or use the standard sum formula.
     eprintln!("Summing amp: gain={gain:.2}");
     // At minimum, gain should be finite and reasonable
-    assert!(gain.abs() < 50.0, "Summing amp gain should be bounded: got {gain:.2}");
+    assert!(
+        gain.abs() < 50.0,
+        "Summing amp gain should be bounded: got {gain:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -242,38 +260,52 @@ fn goldenrod_gain_pot_modulates_bf_gain() {
     );
     let source = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => { eprintln!("SKIP: goldenrod.pedal not found"); return; }
+        Err(_) => {
+            eprintln!("SKIP: goldenrod.pedal not found");
+            return;
+        }
     };
     let pedal = parse_pedal_file(&source).expect("parse");
 
     let mut low = compile_via_spqr(&pedal, SR).expect("compile");
     low.set_control("Gain", 0.1); // Gain_A pos=0.9 → high R → low gain
-    // Process samples so smoother advances and update_ri_from_pot fires
-    for _ in 0..500 { low.process(0.0); }
+                                  // Process samples so smoother advances and update_ri_from_pot fires
+    for _ in 0..500 {
+        low.process(0.0);
+    }
 
     let mut high = compile_via_spqr(&pedal, SR).expect("compile");
     high.set_control("Gain", 0.9); // Gain_A pos=0.1 → low R → high gain
-    for _ in 0..500 { high.process(0.0); }
+    for _ in 0..500 {
+        high.process(0.0);
+    }
 
     // Find U2's BF stage
     let u2_gain_low = low.stages.iter().find_map(|s| {
         if let Stage::BlackFeedback(bf) = s {
             #[cfg(debug_assertions)]
-            if bf.debug_label.contains("U2") { return Some(bf.gain()); }
+            if bf.debug_label.contains("U2") {
+                return Some(bf.gain());
+            }
         }
         None
     });
     let u2_gain_high = high.stages.iter().find_map(|s| {
         if let Stage::BlackFeedback(bf) = s {
             #[cfg(debug_assertions)]
-            if bf.debug_label.contains("U2") { return Some(bf.gain()); }
+            if bf.debug_label.contains("U2") {
+                return Some(bf.gain());
+            }
         }
         None
     });
 
     if let (Some(gl), Some(gh)) = (u2_gain_low, u2_gain_high) {
         eprintln!("Goldenrod U2 gain: low={gl:.2}, high={gh:.2}");
-        assert!(gh > gl * 1.5, "High gain setting should produce more gain: {gh:.2} vs {gl:.2}");
+        assert!(
+            gh > gl * 1.5,
+            "High gain setting should produce more gain: {gh:.2} vs {gl:.2}"
+        );
     } else {
         eprintln!("SKIP: couldn't find U2 BF stage (release build?)");
     }

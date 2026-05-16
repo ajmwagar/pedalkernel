@@ -1040,6 +1040,7 @@ fn extract_sidechain_def(
         mirrors: hashbrown::HashMap::new(),
         calibrate: false,
         subcircuits: vec![],
+        ports: vec![],
     }
 }
 

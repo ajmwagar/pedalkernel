@@ -6,8 +6,8 @@
 //! Known bug: SPQR-decomposed groups with 11+ edges don't set the complement
 //! flag, causing the pot to have no effect or V-shape behavior.
 
-use super::spqr_build::compile_via_spqr;
 use super::compiled::Stage;
+use super::spqr_build::compile_via_spqr;
 use crate::dsl::parse_pedal_file;
 use crate::PedalProcessor;
 
@@ -21,40 +21,61 @@ fn screamer_legend_level_debug_trace() {
     );
     let source = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => { eprintln!("SKIP: screamer.pedal not found"); return; }
+        Err(_) => {
+            eprintln!("SKIP: screamer.pedal not found");
+            return;
+        }
     };
     let pedal = parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
     eprintln!("=== Screamer Level Debug ===");
     for ctrl in &compiled.controls {
-        eprintln!("  control '{}' → target={:?} comp={}", ctrl.label, ctrl.target, ctrl.component_id);
+        eprintln!(
+            "  control '{}' → target={:?} comp={}",
+            ctrl.label, ctrl.target, ctrl.component_id
+        );
     }
     for (i, stage) in compiled.stages.iter().enumerate() {
         let tag = match stage {
             Stage::Wdf(w) => format!("Wdf(dist={})", w.signal_flow_distance),
             Stage::Iir(iir) => format!("Iir(dist={})", iir.signal_flow_distance),
             Stage::MultiNl(_) => "MultiNl".to_string(),
-            Stage::BlackFeedback(bf) => format!("BF(gain={:.2}, dist={})", bf.gain(), bf.signal_flow_distance),
+            Stage::BlackFeedback(bf) => format!(
+                "BF(gain={:.2}, dist={})",
+                bf.gain(),
+                bf.signal_flow_distance
+            ),
             Stage::StateSpace(_) => "StateSpace".to_string(),
+            Stage::BlockwiseKMethod(bk) => format!("BKM(dist={})", bk.signal_flow_distance),
         };
         eprintln!("  stage[{i}]: {tag}");
     }
     eprintln!("  smoothers: {}", compiled.pot_smoothers.len());
     for s in &compiled.pot_smoothers {
         let ctrl = &compiled.controls[s.control_idx];
-        eprintln!("    smoother: '{}' current={:.4} target={:.4}", ctrl.label, s.current, s.target);
+        eprintln!(
+            "    smoother: '{}' current={:.4} target={:.4}",
+            ctrl.label, s.current, s.target
+        );
     }
 
     // Set Level to 0.1, process to let smoother advance
     compiled.set_control("Level", 0.1);
-    for _ in 0..1000 { compiled.process(0.0); }
+    for _ in 0..1000 {
+        compiled.process(0.0);
+    }
 
     eprintln!("  After set_control(0.1) + 1000 samples:");
     for s in &compiled.pot_smoothers {
         let ctrl = &compiled.controls[s.control_idx];
         if ctrl.label == "Level" {
-            eprintln!("    Level smoother: current={:.4} target={:.4} settled={}", s.current, s.target, s.is_settled());
+            eprintln!(
+                "    Level smoother: current={:.4} target={:.4} settled={}",
+                s.current,
+                s.target,
+                s.is_settled()
+            );
         }
     }
 
@@ -86,7 +107,9 @@ fn screamer_legend_level_debug_trace() {
     // Reset and measure at 0.9
     let mut compiled2 = compile_via_spqr(&pedal, SR).unwrap();
     compiled2.set_control("Level", 0.9);
-    for _ in 0..1000 { compiled2.process(0.0); }
+    for _ in 0..1000 {
+        compiled2.process(0.0);
+    }
     let mut peak2 = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 440.0 * s as f64 / SR).sin();
@@ -99,7 +122,11 @@ fn screamer_legend_level_debug_trace() {
     for (i, stage) in compiled.stages.iter().enumerate() {
         if let Stage::Wdf(w) = stage {
             let has_level = w.tree.get_pot_position("Level").is_some();
-            eprintln!("  stage[{i}] tree (has_level={has_level}, probe={:?}):\n{}", w.output_probe, w.tree.debug_dump(2));
+            eprintln!(
+                "  stage[{i}] tree (has_level={has_level}, probe={:?}):\n{}",
+                w.output_probe,
+                w.tree.debug_dump(2)
+            );
         }
     }
 }

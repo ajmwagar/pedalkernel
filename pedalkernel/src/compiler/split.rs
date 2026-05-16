@@ -228,6 +228,7 @@ fn build_half(
         mirrors,
         calibrate: false,
         subcircuits: vec![],
+        ports: vec![],
     }
 }
 

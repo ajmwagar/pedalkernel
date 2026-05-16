@@ -29,9 +29,11 @@ fn measure_gain(src: &str) -> f64 {
     }
     let mut peak = 0.0f64;
     for s in 1000..1220 {
-        peak = peak.max(compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin()
-        ).abs());
+        peak = peak.max(
+            compiled
+                .process(amp * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin())
+                .abs(),
+        );
     }
     peak / amp
 }
@@ -43,12 +45,15 @@ fn measure_gain(src: &str) -> f64 {
 #[test]
 fn passive_wire_dc_step() {
     // Simplest possible test: one DC sample through a wire.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(1k) }
             nets { in -> R1.a  R1.b -> out }
             controls {}
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
     // Process DC=1.0 for 100 samples to let filters settle
@@ -57,17 +62,22 @@ fn passive_wire_dc_step() {
         out = compiled.process(1.0);
     }
     eprintln!("DC steady-state: in=1.0, out={out:.6}");
-    assert!((out.abs() - 1.0).abs() < 0.6, "DC steady-state should be ~1.0: {out:.6}");
+    assert!(
+        (out.abs() - 1.0).abs() < 0.6,
+        "DC steady-state should be ~1.0: {out:.6}"
+    );
 }
 
 #[test]
 fn passive_wire_is_unity() {
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(1k) }
             nets { in -> R1.a  R1.b -> out }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Wire: {gain:.3}");
     assert!(gain > 0.8 && gain < 1.2, "Wire should be unity: {gain:.3}");
 }
@@ -76,7 +86,8 @@ fn passive_wire_is_unity() {
 fn passive_coupling_cap_passes_audio() {
     // 10µF cap at 440Hz: Xc = 1/(2π·440·10e-6) ≈ 36Ω.
     // With 1k series R, attenuation = R/(R+Xc) ≈ 0.97. Nearly unity.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -88,7 +99,8 @@ fn passive_coupling_cap_passes_audio() {
                 C1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Coupling cap: {gain:.3}");
     assert!(gain > 0.5, "10µF cap should pass 440Hz: {gain:.3}");
 }
@@ -97,7 +109,8 @@ fn passive_coupling_cap_passes_audio() {
 fn passive_small_cap_blocks_low_freq() {
     // 1nF cap at 440Hz: Xc = 1/(2π·440·1e-9) ≈ 362kΩ.
     // With 10k series R, attenuation = R/(R+Xc) ≈ 0.027. Heavy.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -109,7 +122,8 @@ fn passive_small_cap_blocks_low_freq() {
                 C1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("1nF cap: {gain:.4}");
     assert!(gain < 0.2, "1nF cap should block 440Hz: {gain:.4}");
 }
@@ -120,7 +134,8 @@ fn passive_small_cap_blocks_low_freq() {
 
 #[test]
 fn passive_divider_50_percent() {
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -133,14 +148,16 @@ fn passive_divider_50_percent() {
                 R1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("50% divider: {gain:.3}");
     assert!(gain > 0.35 && gain < 0.65, "Should be ~0.5: {gain:.3}");
 }
 
 #[test]
 fn passive_divider_10_percent() {
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(90k)
@@ -153,7 +170,8 @@ fn passive_divider_10_percent() {
                 R1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("10% divider: {gain:.3}");
     assert!(gain > 0.05 && gain < 0.2, "Should be ~0.1: {gain:.3}");
 }
@@ -166,7 +184,8 @@ fn passive_divider_10_percent() {
 fn rc_lowpass_attenuates_hf() {
     // R=10k, C=10nF → fc = 1/(2π·R·C) ≈ 1592Hz.
     // 200Hz should pass. 5kHz should be attenuated.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -179,7 +198,9 @@ fn rc_lowpass_attenuates_hf() {
                 R1.b -> out
             }
             controls {}
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
 
     let measure_freq = |freq: f64| -> f64 {
         let mut c = compile_via_spqr(&pedal, SR).expect("compile");
@@ -189,9 +210,10 @@ fn rc_lowpass_attenuates_hf() {
         }
         let mut peak = 0.0f64;
         for s in 1000..1220 {
-            peak = peak.max(c.process(
-                amp * (std::f64::consts::TAU * freq * (1000 + s) as f64 / SR).sin()
-            ).abs());
+            peak = peak.max(
+                c.process(amp * (std::f64::consts::TAU * freq * (1000 + s) as f64 / SR).sin())
+                    .abs(),
+            );
         }
         peak
     };
@@ -200,7 +222,10 @@ fn rc_lowpass_attenuates_hf() {
     let hi = measure_freq(5000.0);
     let ratio = hi / lo.max(1e-10);
     eprintln!("RC LPF: 200Hz={lo:.4}, 5kHz={hi:.4}, ratio={ratio:.3}");
-    assert!(ratio < 0.7, "5kHz should be attenuated vs 200Hz: ratio={ratio:.3}");
+    assert!(
+        ratio < 0.7,
+        "5kHz should be attenuated vs 200Hz: ratio={ratio:.3}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -211,7 +236,8 @@ fn rc_lowpass_attenuates_hf() {
 fn diode_to_ground_clips_signal() {
     // Diode from signal to GND clips positive peaks at ~0.6V.
     // Small signal (0.01V) should pass through unclipped.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -224,7 +250,8 @@ fn diode_to_ground_clips_signal() {
                 R1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Diode to GND (small signal): {gain:.3}");
     // At 0.01V, diode doesn't conduct → signal passes through
     assert!(gain > 0.3, "Small signal should mostly pass: {gain:.3}");
@@ -234,7 +261,8 @@ fn diode_to_ground_clips_signal() {
 fn diode_to_ground_limits_large_signal() {
     // Drive 0.5V through 1k into diode to GND.
     // Diode clips at ~0.6V → output limited.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(1k)
@@ -247,7 +275,9 @@ fn diode_to_ground_limits_large_signal() {
                 R1.b -> out
             }
             controls {}
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
     let amp = 0.5;
@@ -256,9 +286,11 @@ fn diode_to_ground_limits_large_signal() {
     }
     let mut peak = 0.0f64;
     for s in 1000..1220 {
-        peak = peak.max(compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin()
-        ).abs());
+        peak = peak.max(
+            compiled
+                .process(amp * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin())
+                .abs(),
+        );
     }
 
     eprintln!("Diode to GND (large signal): peak={peak:.3}V");
@@ -274,7 +306,8 @@ fn diode_to_ground_limits_large_signal() {
 fn cascade_coupling_caps_preserve_signal() {
     // Three coupling caps in series. Each should pass 440Hz.
     // Total attenuation should be minimal.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 C1: cap(10u)
@@ -292,7 +325,8 @@ fn cascade_coupling_caps_preserve_signal() {
                 C3.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("3x coupling caps: {gain:.3}");
     assert!(gain > 0.3, "Coupling caps should pass 440Hz: {gain:.3}");
 }
@@ -301,7 +335,8 @@ fn cascade_coupling_caps_preserve_signal() {
 fn cascade_gain_then_passive_preserves_level() {
     // Gain stage (10x) → coupling cap → volume divider (50%).
     // Expected: ~5x overall.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -324,7 +359,8 @@ fn cascade_gain_then_passive_preserves_level() {
                 R_div1.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("Gain(10) + cap + divider(50%): {gain:.1}");
     assert!(gain > 2.0, "Should preserve most of the gain: {gain:.1}");
     assert!(gain < 8.0, "Divider should attenuate: {gain:.1}");
@@ -364,9 +400,10 @@ fn level_pot_standalone_changes_output() {
         }
         let mut peak = 0.0f64;
         for s in 500..720 {
-            peak = peak.max(c.process(
-                amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin()
-            ).abs());
+            peak = peak.max(
+                c.process(amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin())
+                    .abs(),
+            );
         }
         peak
     };
@@ -374,7 +411,10 @@ fn level_pot_standalone_changes_output() {
     let lo = measure(0.1);
     let hi = measure(0.9);
     eprintln!("Level pot: @0.1={lo:.4}, @0.9={hi:.4}");
-    assert!(hi > lo * 1.5, "Level pot should change output: lo={lo:.4}, hi={hi:.4}");
+    assert!(
+        hi > lo * 1.5,
+        "Level pot should change output: lo={lo:.4}, hi={hi:.4}"
+    );
 }
 
 #[test]
@@ -414,9 +454,10 @@ fn level_pot_after_gain_stage_changes_output() {
         }
         let mut peak = 0.0f64;
         for s in 500..720 {
-            peak = peak.max(c.process(
-                amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin()
-            ).abs());
+            peak = peak.max(
+                c.process(amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin())
+                    .abs(),
+            );
         }
         peak
     };
@@ -424,7 +465,10 @@ fn level_pot_after_gain_stage_changes_output() {
     let lo = measure(0.1);
     let hi = measure(0.9);
     eprintln!("Level after gain: @0.1={lo:.4}, @0.9={hi:.4}");
-    assert!(hi > lo * 1.5, "Level pot should change output: lo={lo:.4}, hi={hi:.4}");
+    assert!(
+        hi > lo * 1.5,
+        "Level pot should change output: lo={lo:.4}, hi={hi:.4}"
+    );
 }
 
 #[test]
@@ -457,9 +501,10 @@ fn level_pot_complement_correct_polarity() {
         }
         let mut peak = 0.0f64;
         for s in 500..720 {
-            peak = peak.max(c.process(
-                amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin()
-            ).abs());
+            peak = peak.max(
+                c.process(amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin())
+                    .abs(),
+            );
         }
         peak
     };
@@ -467,8 +512,10 @@ fn level_pot_complement_correct_polarity() {
     let at_zero = measure(0.0);
     let at_full = measure(1.0);
     eprintln!("Level polarity: @0.0={at_zero:.4}, @1.0={at_full:.4}");
-    assert!(at_full > at_zero * 3.0,
-        "Full level should be much louder than zero: full={at_full:.4}, zero={at_zero:.4}");
+    assert!(
+        at_full > at_zero * 3.0,
+        "Full level should be much louder than zero: full={at_full:.4}, zero={at_zero:.4}"
+    );
 }
 
 #[test]
@@ -520,9 +567,10 @@ fn level_pot_in_tone_network_changes_output() {
         }
         let mut peak = 0.0f64;
         for s in 500..720 {
-            peak = peak.max(c.process(
-                amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin()
-            ).abs());
+            peak = peak.max(
+                c.process(amp * (std::f64::consts::TAU * FREQ * (500 + s) as f64 / SR).sin())
+                    .abs(),
+            );
         }
         peak
     };
@@ -530,7 +578,10 @@ fn level_pot_in_tone_network_changes_output() {
     let lo = measure(0.1);
     let hi = measure(0.9);
     eprintln!("Level in tone network: @0.1={lo:.4}, @0.9={hi:.4}");
-    assert!(hi > lo * 1.5, "Level pot should change output in tone network: lo={lo:.4}, hi={hi:.4}");
+    assert!(
+        hi > lo * 1.5,
+        "Level pot should change output in tone network: lo={lo:.4}, hi={hi:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -542,7 +593,8 @@ fn gain_then_diode_to_ground_produces_clipped_output() {
     // Gain stage → diode to GND. The gain stage amplifies, the diode clips.
     // At small signal (0.001V), gain=10 → 0.01V (below clip) → passes.
     // At large signal (0.1V), gain=10 → 1.0V → clips at ~0.6V.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -564,7 +616,9 @@ fn gain_then_diode_to_ground_produces_clipped_output() {
                 U1.out -> out
             }
             controls {}
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
 
     // Small signal
     let mut c1 = compile_via_spqr(&pedal, SR).expect("compile");
@@ -573,9 +627,10 @@ fn gain_then_diode_to_ground_produces_clipped_output() {
     }
     let mut small_peak = 0.0f64;
     for s in 1000..1220 {
-        small_peak = small_peak.max(c1.process(
-            0.001 * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin()
-        ).abs());
+        small_peak = small_peak.max(
+            c1.process(0.001 * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin())
+                .abs(),
+        );
     }
 
     // Large signal
@@ -585,9 +640,10 @@ fn gain_then_diode_to_ground_produces_clipped_output() {
     }
     let mut large_peak = 0.0f64;
     for s in 1000..1220 {
-        large_peak = large_peak.max(c2.process(
-            0.1 * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin()
-        ).abs());
+        large_peak = large_peak.max(
+            c2.process(0.1 * (std::f64::consts::TAU * FREQ * (1000 + s) as f64 / SR).sin())
+                .abs(),
+        );
     }
 
     let small_gain = small_peak / 0.001;
@@ -596,8 +652,14 @@ fn gain_then_diode_to_ground_produces_clipped_output() {
     eprintln!("Gain+diode: small_gain={small_gain:.1}, large_gain={large_gain:.1}");
     eprintln!("  small_peak={small_peak:.4}V, large_peak={large_peak:.4}V");
 
-    assert!(small_peak > 0.002, "Small signal should amplify: {small_peak:.4}V");
-    assert!(large_peak > 0.05, "Large signal should produce output: {large_peak:.4}V");
+    assert!(
+        small_peak > 0.002,
+        "Small signal should amplify: {small_peak:.4}V"
+    );
+    assert!(
+        large_peak > 0.05,
+        "Large signal should produce output: {large_peak:.4}V"
+    );
     assert!(large_peak < 1.5, "Diodes should limit: {large_peak:.4}V");
     assert!(small_gain > large_gain * 1.5,
         "Small-signal gain should exceed large-signal gain (compression): {small_gain:.1} vs {large_gain:.1}");

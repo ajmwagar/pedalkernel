@@ -69,9 +69,7 @@ impl Component for OpAmp {
             // bias network is detected. The v_max here assumes the minimum
             // common pedal supply (9V). Pipeline patches this after bias
             // analysis with the actual supply voltage and bias point.
-            NonIdealFx::RailSaturation {
-                v_max: 3.0,
-            },
+            NonIdealFx::RailSaturation { v_max: 3.0 },
         ]
     }
 
@@ -167,7 +165,11 @@ impl Component for OpAmp {
     }
 
     fn mna_vsource_count(&self) -> usize {
-        if self.op_type.is_ota() { 0 } else { 1 }
+        if self.op_type.is_ota() {
+            0
+        } else {
+            1
+        }
     }
 
     fn mna_internal_node_count(&self) -> usize {
@@ -334,7 +336,8 @@ impl Component for OpAmp {
         const HEADROOM: f64 = 1.5; // Typical output stage headroom
 
         // Use bias voltage if provided; default to supply/2 (symmetric)
-        let bias_v = bias_voltages.get("pos")
+        let bias_v = bias_voltages
+            .get("pos")
             .or_else(|| bias_voltages.get("neg"))
             .copied()
             .unwrap_or(supply_voltage / 2.0);

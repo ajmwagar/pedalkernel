@@ -1,0 +1,35 @@
+{{/*
+  Chapter pager — shown at the bottom of every book page.
+  Finds the current page's position in the weight-sorted list of all
+  pages under the current section and emits prev/next cards.
+*/}}
+{{ $pages := sort .CurrentSection.Pages "Params.weight" "asc" }}
+{{ $cur := .RelPermalink }}
+{{ $idx := -1 }}
+{{ range $i, $p := $pages }}
+  {{ if eq $p.RelPermalink $cur }}{{ $idx = $i }}{{ end }}
+{{ end }}
+{{ if ge $idx 0 }}
+<nav class="pager" aria-label="Chapter navigation">
+  <div class="pager-cell pager-cell-prev">
+    {{ if gt $idx 0 }}
+      {{ $prev := index $pages (sub $idx 1) }}
+      <a class="pager-card pager-card-prev" href="{{ $prev.RelPermalink }}">
+        <p class="pager-kicker">&larr; Previous</p>
+        <p class="pager-title">{{ $prev.Title }}</p>
+        {{ with $prev.Description }}<p class="pager-desc">{{ . }}</p>{{ end }}
+      </a>
+    {{ end }}
+  </div>
+  <div class="pager-cell pager-cell-next">
+    {{ if lt $idx (sub (len $pages) 1) }}
+      {{ $next := index $pages (add $idx 1) }}
+      <a class="pager-card pager-card-next" href="{{ $next.RelPermalink }}">
+        <p class="pager-kicker">Next &rarr;</p>
+        <p class="pager-title">{{ $next.Title }}</p>
+        {{ with $next.Description }}<p class="pager-desc">{{ . }}</p>{{ end }}
+      </a>
+    {{ end }}
+  </div>
+</nav>
+{{ end }}

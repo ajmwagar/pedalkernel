@@ -11,9 +11,10 @@ categories = ["multimedia::audio"]
 rust-version = "1.80"
 
 [features]
-default = ["std", "jack-rt", "tui", "cli", "gummel-poon"]
+default = ["std", "jack-rt", "tui", "cli", "gummel-poon", "build-cache"]
 std = []
 serde = ["pedalkernel-rt/serde"]
+biquad-table = ["pedalkernel-rt/biquad-table"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
 cli = ["dep:clap"]
@@ -38,6 +39,10 @@ runtime-warnings = []
 # Tests that reference .pedal files from the private pedalkernel-pro repo.
 # Disabled by default so open-source consumers can still run all other tests.
 pro-pedals = []
+# Enable compile_pedal_cached() for build.rs consumers.
+# Adds postcard serialization so build scripts get a single-call
+# compile + cache + serialize utility.
+build-cache = ["dep:postcard", "pedalkernel-rt/serde"]
 
 [dependencies]
 # Runtime crate (WDF engine, elements, tree)
@@ -58,6 +63,9 @@ clap = { version = "4", features = ["derive"], optional = true }
 # Math
 num-complex = "0.4"
 
+# Serialization (optional, for build-cache feature)
+postcard = { version = "1", features = ["alloc"], optional = true }
+
 # Collections
 hashbrown = "0.15"
 
@@ -68,6 +76,7 @@ tracing = "0.1"
 criterion = "0.5"
 tempfile = "3"
 rand = "0.8"
+postcard = { version = "1", features = ["alloc"] }
 
 [[bench]]
 name = "wdf_bench"

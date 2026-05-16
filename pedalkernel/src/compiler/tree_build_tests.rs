@@ -19,7 +19,8 @@ const SR: f64 = 48000.0;
 fn adaptor_gain_single_stage_correct() {
     // R_in(10k) → U1.neg → Rf(100k) → U1.out → D1. Single group.
     // Gain should be ~Rf/Ri = 10 at small signal (below diode clip).
-    let gain = measure_small_signal_gain(r#"
+    let gain = measure_small_signal_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -34,7 +35,8 @@ fn adaptor_gain_single_stage_correct() {
                 U1.pos -> gnd  U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     eprintln!("Single stage gain: {gain:.1} (expected ~10)");
     assert!(gain > 5.0 && gain < 20.0, "Gain should be ~10: {gain:.1}");
@@ -48,7 +50,8 @@ fn adaptor_gain_single_stage_correct() {
 fn adaptor_gain_with_coupling_cap() {
     // Cin(47n) → R_in(10k) → U1.neg → Rf(100k) → U1.out → D1.
     // Cin+R_in in separate group. Gain should still be ~10.
-    let gain = measure_small_signal_gain(r#"
+    let gain = measure_small_signal_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 Cin: cap(47n)
@@ -64,15 +67,20 @@ fn adaptor_gain_with_coupling_cap() {
                 U1.pos -> gnd  U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     eprintln!("Coupled gain: {gain:.1} (expected ~10)");
-    assert!(gain > 5.0, "Should amplify even with coupling cap: {gain:.1}");
+    assert!(
+        gain > 5.0,
+        "Should amplify even with coupling cap: {gain:.1}"
+    );
 }
 
 #[test]
 fn adaptor_gain_consistent_with_and_without_cap() {
-    let gain_no_cap = measure_small_signal_gain(r#"
+    let gain_no_cap = measure_small_signal_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -87,9 +95,11 @@ fn adaptor_gain_consistent_with_and_without_cap() {
                 U1.pos -> gnd  U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
-    let gain_with_cap = measure_small_signal_gain(r#"
+    let gain_with_cap = measure_small_signal_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 Cin: cap(47n)
@@ -105,13 +115,20 @@ fn adaptor_gain_consistent_with_and_without_cap() {
                 U1.pos -> gnd  U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     eprintln!("No cap: {gain_no_cap:.1}, With cap: {gain_with_cap:.1}");
     assert!(gain_no_cap > 5.0, "No cap should amplify: {gain_no_cap:.1}");
-    assert!(gain_with_cap > 3.0, "With cap should amplify: {gain_with_cap:.1}");
+    assert!(
+        gain_with_cap > 3.0,
+        "With cap should amplify: {gain_with_cap:.1}"
+    );
     let ratio = gain_no_cap.max(gain_with_cap) / gain_no_cap.min(gain_with_cap).max(0.1);
-    assert!(ratio < 5.0, "Should be within 5x: {gain_no_cap:.1} vs {gain_with_cap:.1}");
+    assert!(
+        ratio < 5.0,
+        "Should be within 5x: {gain_no_cap:.1} vs {gain_with_cap:.1}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -122,7 +139,8 @@ fn adaptor_gain_consistent_with_and_without_cap() {
 fn adaptor_gain_with_drive_pot() {
     // Drive(500k) + R_clip(4.7k) in feedback. At 50%, Rf ≈ 255k.
     // Gain ≈ 255k / 10k ≈ 25. Diode clips, so actual < 25.
-    let gain = measure_small_signal_gain(r#"
+    let gain = measure_small_signal_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -138,7 +156,8 @@ fn adaptor_gain_with_drive_pot() {
                 U1.pos -> gnd  U1.out -> out
             }
             controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
-        }"#);
+        }"#,
+    );
 
     eprintln!("Drive pot gain: {gain:.1}");
     assert!(gain > 3.0, "Should amplify with pot: {gain:.1}");
@@ -177,13 +196,20 @@ fn measure_small_signal_gain(src: &str) -> f64 {
     }
     let mut peak = 0.0f64;
     for s in 1000..1110 {
-        peak = peak.max(compiled.process(amp * (std::f64::consts::TAU * 440.0 * (1000 + s) as f64 / SR).sin()).abs());
+        peak = peak.max(
+            compiled
+                .process(amp * (std::f64::consts::TAU * 440.0 * (1000 + s) as f64 / SR).sin())
+                .abs(),
+        );
     }
     peak / amp
 }
 
 fn load_legend(name: &str) -> crate::dsl::PedalDef {
-    let path = format!("{}/../../pedalkernel-pro/pedals/legends/{name}.pedal", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/{name}.pedal",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let src = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Can't read {path}"));
     crate::dsl::parse_pedal_file(&src).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
@@ -196,7 +222,11 @@ fn legend_small_signal_gain(pedal: &crate::dsl::PedalDef) -> f64 {
     }
     let mut peak = 0.0f64;
     for s in 2000..2110 {
-        peak = peak.max(compiled.process(amp * (std::f64::consts::TAU * 440.0 * (2000 + s) as f64 / SR).sin()).abs());
+        peak = peak.max(
+            compiled
+                .process(amp * (std::f64::consts::TAU * 440.0 * (2000 + s) as f64 / SR).sin())
+                .abs(),
+        );
     }
     peak / amp
 }
@@ -212,7 +242,8 @@ fn adaptor_gain_from_zi_zf_port_resistance() {
     use super::spqr_build::compile_via_spqr;
     use crate::PedalProcessor;
 
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -231,7 +262,8 @@ fn adaptor_gain_from_zi_zf_port_resistance() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -277,7 +309,8 @@ fn adaptor_gain_with_coupling_cap_matches_without() {
         peak / 0.001
     };
 
-    let gain_no_cap = measure(r#"
+    let gain_no_cap = measure(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -293,9 +326,11 @@ fn adaptor_gain_with_coupling_cap_matches_without() {
                 U1.pos -> gnd   U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
-    let gain_with_cap = measure(r#"
+    let gain_with_cap = measure(
+        r#"
         pedal "test" { supply 9V
             components {
                 Cin: cap(47n)
@@ -313,12 +348,19 @@ fn adaptor_gain_with_coupling_cap_matches_without() {
                 U1.pos -> gnd   U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     eprintln!("No cap: {gain_no_cap:.1}, With cap: {gain_with_cap:.1}");
     assert!(gain_no_cap > 5.0, "No cap should amplify: {gain_no_cap:.1}");
-    assert!(gain_with_cap > 3.0, "With cap should amplify: {gain_with_cap:.1}");
+    assert!(
+        gain_with_cap > 3.0,
+        "With cap should amplify: {gain_with_cap:.1}"
+    );
 
     let ratio = gain_no_cap.max(gain_with_cap) / gain_no_cap.min(gain_with_cap).max(0.1);
-    assert!(ratio < 5.0, "Gains should be within 5x: no_cap={gain_no_cap:.1}, with_cap={gain_with_cap:.1}");
+    assert!(
+        ratio < 5.0,
+        "Gains should be within 5x: no_cap={gain_no_cap:.1}, with_cap={gain_with_cap:.1}"
+    );
 }

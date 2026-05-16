@@ -1,31 +1,61 @@
+---
+title: "How it works"
+description: "The WDF compilation pipeline — from .pedal file to per-sample processing."
+section: "Guide"
+weight: 10
+source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
+preview: true
+watches:
+  - pedalkernel/src/compiler/
+  - pedalkernel/src/tree.rs
+  - pedalkernel/src/dsl.rs
+---
+
 # How PedalKernel Works
 
-PedalKernel compiles your circuit description into a real-time Wave Digital Filter (WDF) engine. This document explains the compilation pipeline and how circuits become audio.
+> **Preview.** The compilation pipeline described below is being developed on the `feature/spqr-tree` branch. The user-visible behaviour (parse → compile → process a sample) is unchanged on `main`; this page reflects how the engine will get there once SPQR lands. See [compiler internals](./compiler-internals.md) for full details.
+
+PedalKernel compiles your circuit description into a real-time Wave Digital Filter (WDF) engine. This page is the guide-level story. The [compiler internals](./compiler-internals.md) page goes deeper on data structures, algorithms, and routing decisions.
 
 ## The compilation pipeline
 
-The compiler transforms your circuit into a WDF processing tree:
+The compiler transforms a `.pedal` file into a runnable processor through a single pass built around an **SPQR decomposition** of the circuit graph. SPQR stands for Series / Parallel / Q (single edge) / Rigid — the four kinds of subgraphs a 2-connected graph can be decomposed into. Each kind maps to a different solver strategy.
 
-1. **Circuit graph** -- Union-Find merges connected pins into nodes. Components become edges.
+Roughly:
 
-2. **Nonlinear root identification** -- BFS from the input finds diodes, JFETs, triodes, pentodes, and BJTs. Each becomes a WDF root. Its neighboring passives form the WDF tree.
+1. **DSL parse** — `dsl::parse_pedal_file` turns the `.pedal` source into a `PedalDef` AST: components, nets, controls, supplies.
 
-3. **Series-parallel decomposition** -- The passive subgraph around each nonlinear element reduces into a binary tree of Series and Parallel adaptors.
+2. **Circuit graph build** — Components become edges. Nets become nodes. Pin inference handles implicit connections. The result is a directed graph where signal flow is explicit.
 
-4. **Impedance balancing** -- A raw voltage source (Rp=1) in parallel with a 100k resistor would attenuate the signal to nothing. The compiler adjusts Vs port resistance to match its sibling, giving balanced gamma for efficient signal transfer.
+3. **Signal-flow grouping** — Active elements whose outputs behave as voltage sources (op-amps, unity-gain buffers) act as *barriers* in the signal flow. Passives between barriers form one group; each group will become one or more stages. The barriers matter because on the output side of an op-amp, the upstream circuit can't load it — impedance is effectively zero — so there's no WDF benefit to treating the full passive network as one tree.
 
-5. **Per-sample processing** -- Four phases, zero allocation:
-   - Scatter up: leaves to root (reflected waves propagate)
-   - Root solve: Newton-Raphson on the nonlinear element (Shockley equation for diodes, Koren equation for triodes/pentodes)
-   - Scatter down: root to leaves (incident waves propagate)
-   - State update: capacitors and inductors latch
+4. **Per-group decomposition** — Each signal-flow group is routed by `compiler::plan::plan_stages`:
+   - **Multiple nonlinear elements** in one rigid group become a single multi-NL stage that solves them all together via Newton-Raphson on an R-type adaptor.
+   - **One nonlinear element** triggers three upgrade checks first (vari-mu 3-port, BJT 2-port, envelope-controlled OTA) — any of which promote it into a coupled multi-NL stage. Otherwise it lands in a plain WDF tree built by series/parallel reduction.
+   - **All-passive** groups become WDF trees too; if the rigid residual is linear, it can carry a precomputed biquad cascade (IIR fast path) or state-space matrix as an internal optimisation.
+   - **Unclaimed op-amps** (bridged-T, multi-path) fall through to a nullor pass that absorbs them into a multi-NL R-type stage with VCVS stamping.
+
+5. **Stage assembly** — stages land in a few separate vectors: ordinary WDF stages, multi-NL stages, push-pull pairs (Fairchild-style differential triodes), and bare op-amp stages. A `stage_order` index threads the WDF and multi-NL stages into topological order; push-pull and op-amp stages process on their own schedule.
+
+6. **Control binding** — Pot controls declared in the `.pedal` file are bound to the stages that contain them. When the user moves a pot at runtime, only the affected stages recompute.
+
+## Per-sample processing
+
+A compiled pedal processes one sample at a time by walking the stage order and dispatching to the right vector. Each stage kind runs its own code path:
+
+- **WDF stages** run the classic four phases: scatter up from leaves to root, root solve on the nonlinear element (Wright Omega explicit solver for diodes and zeners, Newton-Raphson for tubes and BJTs with the Koren and Ebers-Moll / Gummel-Poon equations, square-law for FETs), scatter down, then state update on capacitors and inductors. Some WDF stages have purely-passive roots (`Passthrough`, `CapacitorRoot`, `PassiveRType`) and skip the root solve.
+- **Multi-NL stages** run a multi-port Newton-Raphson over the coupled nonlinear devices on the R-type adaptor. If their `iir` or `state_space` field is set (linear-only passive children), the runtime takes that fast path instead.
+- **Push-pull stages** evaluate two coupled triode halves as one block.
+- **Op-amp stages** run an `OpAmpRoot` solve directly without a surrounding WDF tree.
+
+Finally, every op-amp output passes through a shared **non-ideality post-processor** — a gain-bandwidth low-pass, a slew-rate limiter, and device-aware rail saturation. This is where op-amp character (TL072 vs. LM308 vs. JRC4558) mostly lives.
 
 ## Example: Big Muff topology
 
-Two cascaded clipping stages. Each diode pair gets its own WDF tree:
+Two cascaded clipping cells. Signal-flow grouping puts each cell in its own group because there's a transistor gain stage between them. Within each group, SPQR finds a simple series/parallel structure around the diode pair:
 
 ```
-Stage 1:                          Stage 2:
+Stage 1 (WDF):                    Stage 2 (WDF):
    [DiodePair D1]                    [DiodePair D2]
          |                                 |
    ParallelAdaptor                   ParallelAdaptor
@@ -35,17 +65,17 @@ Stage 1:                          Stage 2:
 Vs    C1(100n)                   Vs    C2(100n)
 ```
 
-Each stage independently solves the diode equation and feeds the result into the next stage. The passives around each nonlinear element are already reduced to the tree shown above.
+Each stage independently solves the diode equation and feeds the result into the next. The passive coupling network between stages shows up as additional passive groups handled by IIR or WDF adaptors depending on whether it's linear.
 
 ## Supply voltage effects
 
-Pedals run at 9V by default. Crank it to 12V or 18V for more headroom -- the WDF engine models how the active elements respond to higher rail voltage. The clipping threshold shifts, the gain stages swing further before saturating, the whole feel opens up. Just like plugging a real Tube Screamer into an 18V adapter.
+Pedals run at 9V by default. Crank it to 12V or 18V for more headroom — the WDF engine and the non-ideality post-processor both respond. The clipping threshold shifts, gain stages swing further before saturating, and the op-amp rail-saturation voltage adjusts to the new supply. Just like plugging a real Tube Screamer into an 18V adapter.
 
 For tube amps, supply voltage goes up to 500V. Set `supply 460V` in a `.pedal` file and the pentode plate curves, triode operating points, and Newton-Raphson bounds all adjust to match real B+ rails.
 
 ```rust
 proc.set_supply_voltage(12.0);   // More headroom, cleaner clipping
-proc.set_supply_voltage(18.0);   // Even more -- like a Voodoo Lab Pedal Power
+proc.set_supply_voltage(18.0);   // Even more — like a Voodoo Lab Pedal Power
 proc.set_supply_voltage(460.0);  // Fender Twin Reverb B+ rail
 ```
 
@@ -58,4 +88,4 @@ Traditional pedal modeling uses measured impulse responses or simple math models
 - A 12AX7 saturates like a 12AX7; there's no "generic triode" mode
 - Changing supply voltage reshapes the entire nonlinear curve
 
-The tradeoff is CPU cost (still under 2% for complex pedals) vs accuracy (circuit-exact behavior).
+The tradeoff is CPU cost vs accuracy. See the [performance page](./performance.md) for measured per-pedal budgets across the example library — most pedals land comfortably in the low single digits of CPU on a modern machine at 48 kHz.

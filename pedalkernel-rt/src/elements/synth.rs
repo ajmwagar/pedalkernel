@@ -720,8 +720,8 @@ impl SynthProcessor {
         // Process filter envelope
         let filter_env_val = self.filter_env.tick();
         // Modulate filter cutoff: base_cutoff * 2^(env * amount)
-        let cutoff =
-            self.filter_base_cutoff * crate::math::powf(2.0_f64, filter_env_val * self.filter_env_amount);
+        let cutoff = self.filter_base_cutoff
+            * crate::math::powf(2.0_f64, filter_env_val * self.filter_env_amount);
         self.vcf.set_cutoff(cutoff);
 
         // Filter the oscillator
@@ -743,8 +743,8 @@ impl SynthProcessor {
     pub fn process_audio(&mut self, input: f64) -> f64 {
         // For audio input mode, just apply filter and envelope
         let filter_env_val = self.filter_env.tick();
-        let cutoff =
-            self.filter_base_cutoff * crate::math::powf(2.0_f64, filter_env_val * self.filter_env_amount);
+        let cutoff = self.filter_base_cutoff
+            * crate::math::powf(2.0_f64, filter_env_val * self.filter_env_amount);
         self.vcf.set_cutoff(cutoff);
 
         let filtered = self.vcf.process(input);

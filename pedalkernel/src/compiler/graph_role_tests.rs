@@ -26,30 +26,35 @@ fn edges_for_component(graph: &CircuitGraph, comp_id: &str) -> Vec<usize> {
 
 #[test]
 fn resistor_one_port_one_edge() {
-    let graph = make_graph(r#"
+    let graph = make_graph(
+        r#"
         pedal "test" { supply 9V
             components { R1: resistor(10k) }
             nets { in -> R1.a  R1.b -> out }
             controls {}
-        }"#);
+        }"#,
+    );
     assert_eq!(edges_for_component(&graph, "R1").len(), 1);
 }
 
 #[test]
 fn diode_one_port_one_edge() {
-    let graph = make_graph(r#"
+    let graph = make_graph(
+        r#"
         pedal "test" { supply 9V
             components { D1: diode(silicon) }
             nets { in -> D1.a  D1.b -> out }
             controls {}
-        }"#);
+        }"#,
+    );
     assert_eq!(edges_for_component(&graph, "D1").len(), 1);
 }
 
 #[test]
 fn opamp_one_port_one_edge() {
     // Op-amp: 1 port (neg→out). Pos is voltage-sense, no current.
-    let graph = make_graph(r#"
+    let graph = make_graph(
+        r#"
         pedal "test" { supply 9V
             components { U1: opamp(tl072)  R1: resistor(10k)  Rf: resistor(100k) }
             nets {
@@ -57,7 +62,8 @@ fn opamp_one_port_one_edge() {
                 U1.pos -> gnd  U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     // Count REAL edges for U1 (exclude virtual bridges with comp_idx=0 placeholder)
     let active_set: std::collections::HashSet<usize> =
         graph.active_edge_indices.iter().copied().collect();
@@ -66,7 +72,8 @@ fn opamp_one_port_one_edge() {
         .filter(|i| !active_set.contains(i))
         .collect();
     assert_eq!(
-        opamp_edges.len(), 1,
+        opamp_edges.len(),
+        1,
         "Op-amp has 1 real port (neg→out), got {}",
         opamp_edges.len()
     );
@@ -81,7 +88,8 @@ fn opamp_one_port_one_edge() {
 #[test]
 fn bjt_two_ports_two_edges() {
     // BJT: 2 ports (base→emitter, collector→emitter)
-    let graph = make_graph(r#"
+    let graph = make_graph(
+        r#"
         pedal "test" { supply 9V
             components { Q1: npn(2n3904)  R_c: resistor(10k)  R_b: resistor(100k) }
             nets {
@@ -90,10 +98,12 @@ fn bjt_two_ports_two_edges() {
                 Q1.emitter -> gnd  Q1.collector -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     let bjt_edges = edges_for_component(&graph, "Q1");
     assert_eq!(
-        bjt_edges.len(), 2,
+        bjt_edges.len(),
+        2,
         "BJT has 2 ports (B-E + C-E), got {}",
         bjt_edges.len()
     );
@@ -110,23 +120,30 @@ fn bjt_two_ports_two_edges() {
 #[test]
 fn pot_3term_two_ports_two_edges() {
     // Pot: 2 ports (a→wiper, wiper→b). Same comp_idx, no __aw/__wb split.
-    let graph = make_graph(r#"
+    let graph = make_graph(
+        r#"
         pedal "test" { supply 9V
             components { Volume: pot(100k, a) }
             nets { in -> Volume.a  Volume.w -> out  Volume.b -> gnd }
             controls { Volume.position -> "Volume" [0.0, 1.0] = 0.5 }
-        }"#);
+        }"#,
+    );
     let pot_edges = edges_for_component(&graph, "Volume");
     assert_eq!(
-        pot_edges.len(), 2,
+        pot_edges.len(),
+        2,
         "Pot has 2 ports (a-w + w-b), got {} (IDs: {:?})",
         pot_edges.len(),
-        pot_edges.iter().map(|&i| &graph.components[graph.edges[i].comp_idx].id).collect::<Vec<_>>()
+        pot_edges
+            .iter()
+            .map(|&i| &graph.components[graph.edges[i].comp_idx].id)
+            .collect::<Vec<_>>()
     );
     // Both use original comp_idx — no synthetic __aw/__wb
-    let has_synthetic = graph.components.iter().any(|c| {
-        c.id.contains("__aw") || c.id.contains("__wb")
-    });
+    let has_synthetic = graph
+        .components
+        .iter()
+        .any(|c| c.id.contains("__aw") || c.id.contains("__wb"));
     assert!(!has_synthetic, "No synthetic __aw/__wb components");
     // Wiper in node_names
     assert!(
@@ -141,17 +158,19 @@ fn pot_3term_two_ports_two_edges() {
 
 #[test]
 fn component_ports_resistor() {
-    use super::components::Resistor;
     use super::component::Component;
+    use super::components::Resistor;
     let r = Resistor { value: 10_000.0 };
     assert_eq!(r.ports(), vec![("a", "b")]);
 }
 
 #[test]
 fn component_ports_bjt() {
-    use super::components::Npn;
     use super::component::Component;
-    let q = Npn { model: "2n3904".to_string() };
+    use super::components::Npn;
+    let q = Npn {
+        model: "2n3904".to_string(),
+    };
     let ports = q.ports();
     assert_eq!(ports.len(), 2);
     assert!(ports.contains(&("base", "emitter")));
@@ -160,19 +179,24 @@ fn component_ports_bjt() {
 
 #[test]
 fn component_ports_opamp() {
-    use super::components::OpAmp;
     use super::component::Component;
+    use super::components::OpAmp;
     use crate::dsl::OpAmpType;
-    let u = OpAmp { op_type: OpAmpType::Tl072 };
+    let u = OpAmp {
+        op_type: OpAmpType::Tl072,
+    };
     assert_eq!(u.ports(), vec![("neg", "out")]);
 }
 
 #[test]
 fn component_ports_pot() {
-    use super::components::Potentiometer;
     use super::component::Component;
+    use super::components::Potentiometer;
     use crate::dsl::PotTaper;
-    let p = Potentiometer { max_r: 100_000.0, taper: PotTaper::A };
+    let p = Potentiometer {
+        max_r: 100_000.0,
+        taper: PotTaper::A,
+    };
     let ports = p.ports();
     // 2-terminal pot: 1 port. 3-terminal pot: 2 ports.
     // The Component doesn't know if wiper is connected — that's determined
@@ -187,7 +211,8 @@ fn component_ports_pot() {
 #[test]
 fn no_virtual_bridge_edges() {
     // With real multi-port edges, virtual bridges are redundant.
-    let graph = make_graph(r#"
+    let graph = make_graph(
+        r#"
         pedal "test" { supply 9V
             components { Q1: npn(2n3904)  R_c: resistor(10k)  R_b: resistor(100k) }
             nets {
@@ -196,7 +221,8 @@ fn no_virtual_bridge_edges() {
                 Q1.emitter -> gnd  Q1.collector -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     // active_edge_indices should be empty — real edges provide connectivity
     assert!(
         graph.active_edge_indices.is_empty(),

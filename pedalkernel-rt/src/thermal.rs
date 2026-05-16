@@ -105,7 +105,11 @@ impl ThermalState {
 
         Self {
             temperature: temp_c,
-            beta_multiplier: if beta_multiplier > 0.1 { beta_multiplier } else { 0.1 },
+            beta_multiplier: if beta_multiplier > 0.1 {
+                beta_multiplier
+            } else {
+                0.1
+            },
             is_multiplier,
             vt,
         }

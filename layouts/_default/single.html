@@ -1,0 +1,7 @@
+{{ define "main" }}
+<article class="prose">
+  {{ .Content }}
+</article>
+{{ partial "freshness.html" . }}
+{{ partial "pager.html" . }}
+{{ end }}

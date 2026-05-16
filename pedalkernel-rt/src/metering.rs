@@ -4,10 +4,10 @@
 //! to a lock-free ring buffer. The UI thread reads the latest complete frame
 //! at 60fps and applies visual ballistics (smoothing) before uploading to GPU.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::math;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use crate::math;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Maximum number of tube stages that can be monitored.
 pub const MAX_TUBES: usize = 12;

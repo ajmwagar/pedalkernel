@@ -32,6 +32,7 @@ use super::{is_inverting_topology, StageStats};
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
+use pedalkernel_rt::wdf_leaf::WdfLeaf;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Op-amp + NL root (TS/RAT/Klon pattern)
@@ -158,6 +159,7 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
         voltage: 0.0,
         rp: config.model.output_impedance,
         is_cathode_bias: false,
+        port_name: None,
     }));
 
     let oversampler = Oversampler::new(OversamplingFactor::X2);
@@ -441,19 +443,22 @@ fn stamp_passive_edges(
 
         if comp.kind.is_pot() {
             // Pots: stamp initial resistance into MNA AND create a WDF leaf
-            // for runtime updates. The leaf tracks position; flush_recompute
-            // delta-updates the G matrix when the pot moves.
-            if let Some(r) = comp.kind.resistance() {
-                let initial_r = r * 0.5; // Default position = 0.5
-                mna.stamp_resistor(n1, n2, initial_r);
-                if let Some(leaf) = comp.kind.make_leaf(&comp.id, effective_rate) {
-                    pot_stamps.push(PotStamp {
-                        leaf,
-                        mna_pos: n1,
-                        mna_neg: n2,
-                        initial_conductance: 1.0 / initial_r,
-                    });
+            // for runtime updates. A 3-terminal pot appears as two graph
+            // edges: a-w tracks position, w-b tracks 1-position.
+            if let Some(mut leaf) = comp.kind.make_leaf(&comp.id, effective_rate) {
+                if pot_edge_is_wb_half(graph, &comp.id, e.node_a, e.node_b) {
+                    if let DynNode::Leaf(ref mut l) = leaf {
+                        l.set_complement();
+                    }
                 }
+                let initial_r = leaf.port_resistance();
+                mna.stamp_resistor(n1, n2, initial_r);
+                pot_stamps.push(PotStamp {
+                    leaf,
+                    mna_pos: n1,
+                    mna_neg: n2,
+                    initial_conductance: 1.0 / initial_r,
+                });
             }
         } else if let Some(r) = comp.kind.resistance() {
             mna.stamp_resistor(n1, n2, r);
@@ -478,6 +483,20 @@ fn stamp_passive_edges(
     }
 
     (mna, reactive_edges, pot_stamps)
+}
+
+fn pot_edge_is_wb_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId) -> bool {
+    let Some(&w_node) = graph
+        .node_names
+        .get(&format!("{comp_id}.w"))
+        .or_else(|| graph.node_names.get(&format!("{comp_id}.wiper")))
+    else {
+        return false;
+    };
+    let Some(&b_node) = graph.node_names.get(&format!("{comp_id}.b")) else {
+        return false;
+    };
+    (a == w_node && b == b_node) || (a == b_node && b == w_node)
 }
 
 /// Step 4: Build WDF ports (NL + reactive + adapted input).

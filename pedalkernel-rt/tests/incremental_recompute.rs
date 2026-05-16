@@ -4,8 +4,8 @@
 //! recompute_incremental() — the infrastructure for O(log N) pot updates.
 
 use pedalkernel_rt::dyn_node::DynNode;
-use pedalkernel_rt::wdf_leaf::*;
 use pedalkernel_rt::pot_taper::PotTaper;
+use pedalkernel_rt::wdf_leaf::*;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. is_dynamic() correctness
@@ -53,6 +53,7 @@ fn wdf_voltage_source_is_not_dynamic() {
         voltage: 0.0,
         rp: 1.0,
         is_cathode_bias: false,
+        port_name: None,
     };
     assert!(!vs.is_dynamic(), "WdfVoltageSource should NOT be dynamic");
 }
@@ -84,11 +85,17 @@ fn static_tree_has_no_dynamic_flags() {
     let mut tree = DynNode::Series(Box::new(resistor_1k()), Box::new(cap_100n()));
 
     let result = tree.compute_dynamic_flags();
-    assert!(!result, "Static tree should return false from compute_dynamic_flags");
+    assert!(
+        !result,
+        "Static tree should return false from compute_dynamic_flags"
+    );
 
     match &tree {
         DynNode::Binary { has_dynamic, .. } => {
-            assert!(!has_dynamic, "Static tree root should have has_dynamic=false");
+            assert!(
+                !has_dynamic,
+                "Static tree root should have has_dynamic=false"
+            );
         }
         _ => panic!("Expected Binary node"),
     }
@@ -100,7 +107,10 @@ fn tree_with_pot_has_dynamic_flag() {
     let mut tree = DynNode::Series(Box::new(resistor_1k()), Box::new(pot_100k()));
 
     let result = tree.compute_dynamic_flags();
-    assert!(result, "Tree with pot should return true from compute_dynamic_flags");
+    assert!(
+        result,
+        "Tree with pot should return true from compute_dynamic_flags"
+    );
 
     match &tree {
         DynNode::Binary { has_dynamic, .. } => {
@@ -317,7 +327,10 @@ fn split_pot_dirty_marks_both_halves() {
 
     // Set via base name "Drive" — should match both __aw and __wb
     let found = tree.set_pot_dirty("Drive", 0.3);
-    assert!(found, "set_pot_dirty should find split pot halves via prefix");
+    assert!(
+        found,
+        "set_pot_dirty should find split pot halves via prefix"
+    );
 
     match &tree {
         DynNode::Binary { dirty, .. } => {
@@ -329,14 +342,6 @@ fn split_pot_dirty_marks_both_halves() {
     // Verify both halves updated their position
     let pos_aw = tree.get_pot_position("Drive__aw");
     let pos_wb = tree.get_pot_position("Drive__wb");
-    assert_eq!(
-        pos_aw,
-        Some(0.3),
-        "Drive__aw position should be 0.3"
-    );
-    assert_eq!(
-        pos_wb,
-        Some(0.3),
-        "Drive__wb position should be 0.3"
-    );
+    assert_eq!(pos_aw, Some(0.3), "Drive__aw position should be 0.3");
+    assert_eq!(pos_wb, Some(0.3), "Drive__wb position should be 0.3");
 }

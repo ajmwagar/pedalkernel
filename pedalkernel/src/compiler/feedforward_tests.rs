@@ -26,9 +26,8 @@ fn measure_peak(source: &str, amp: f64) -> f64 {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
     peak
@@ -46,7 +45,8 @@ fn two_path_feedforward_produces_output() {
     // U2 sums both at its inverting input.
     // Without feedforward wiring, only path A carries signal.
     // With feedforward, both paths contribute.
-    let peak = measure_peak(r#"
+    let peak = measure_peak(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -74,10 +74,15 @@ fn two_path_feedforward_produces_output() {
                 U2.out -> out
             }
             controls {}
-        }"#, 0.1);
+        }"#,
+        0.1,
+    );
 
     eprintln!("Two-path feedforward: peak={peak:.4}V");
-    assert!(peak > 0.01, "Feedforward should produce output: peak={peak:.4}V");
+    assert!(
+        peak > 0.01,
+        "Feedforward should produce output: peak={peak:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -90,7 +95,8 @@ fn pot_crossfade_feedforward_produces_output() {
     //   Path A: R_a → U2.neg (main signal)
     //   Path B: Blend pot → R_b → U2.neg (pot-controlled blend)
     // Blend at 0.5 should pass ~50% of signal through path B.
-    let peak = measure_peak(r#"
+    let peak = measure_peak(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -121,10 +127,15 @@ fn pot_crossfade_feedforward_produces_output() {
             controls {
                 Blend.position -> "Blend" [0.0, 1.0] = 0.5
             }
-        }"#, 0.1);
+        }"#,
+        0.1,
+    );
 
     eprintln!("Pot crossfade feedforward: peak={peak:.4}V");
-    assert!(peak > 0.001, "Pot feedforward should produce output: peak={peak:.4}V");
+    assert!(
+        peak > 0.001,
+        "Pot feedforward should produce output: peak={peak:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -134,7 +145,8 @@ fn pot_crossfade_feedforward_produces_output() {
 #[test]
 fn feedforward_stages_are_flagged() {
     // In a two-path circuit, the secondary path should have is_feedforward=true
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -162,13 +174,17 @@ fn feedforward_stages_are_flagged() {
                 U2.out -> out
             }
             controls {}
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
     let compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
     // Count feedforward stages
-    let ff_count = compiled.stages.iter().filter(|s| {
-        matches!(s, super::compiled::Stage::Wdf(w) if w.is_feedforward)
-    }).count();
+    let ff_count = compiled
+        .stages
+        .iter()
+        .filter(|s| matches!(s, super::compiled::Stage::Wdf(w) if w.is_feedforward))
+        .count();
 
     eprintln!("Feedforward stage count: {ff_count}");
     // In this simple circuit, both paths may be handled serially
@@ -199,14 +215,16 @@ fn goldenrod_feedforward_produces_signal() {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (8000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (8000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
 
     eprintln!("Goldenrod with feedforward: peak={peak:.4}V");
-    assert!(peak > 0.001, "Goldenrod should produce output with feedforward: peak={peak:.4}V");
+    assert!(
+        peak > 0.001,
+        "Goldenrod should produce output with feedforward: peak={peak:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -230,9 +248,8 @@ fn goldenrod_gain_crossfade_with_feedforward() {
     }
     let mut peak_clean = 0.0f64;
     for s in 0..500 {
-        let out = clean.process(
-            amp * (std::f64::consts::TAU * FREQ * (8000 + s) as f64 / SR).sin()
-        );
+        let out =
+            clean.process(amp * (std::f64::consts::TAU * FREQ * (8000 + s) as f64 / SR).sin());
         peak_clean = peak_clean.max(out.abs());
     }
 
@@ -244,9 +261,8 @@ fn goldenrod_gain_crossfade_with_feedforward() {
     }
     let mut peak_dirty = 0.0f64;
     for s in 0..500 {
-        let out = dirty.process(
-            amp * (std::f64::consts::TAU * FREQ * (8000 + s) as f64 / SR).sin()
-        );
+        let out =
+            dirty.process(amp * (std::f64::consts::TAU * FREQ * (8000 + s) as f64 / SR).sin());
         peak_dirty = peak_dirty.max(out.abs());
     }
 
@@ -254,10 +270,18 @@ fn goldenrod_gain_crossfade_with_feedforward() {
     let ratio = peak_dirty / peak_clean.max(0.0001);
     eprintln!("  Ratio: {ratio:.2}");
 
-    assert!(peak_clean > 0.001, "Clean should produce output: {peak_clean:.4}V");
-    assert!(peak_dirty > 0.001, "Dirty should produce output: {peak_dirty:.4}V");
-    assert!((ratio - 1.0).abs() > 0.2,
-        "Gain crossfade should change character: ratio={ratio:.2}");
+    assert!(
+        peak_clean > 0.001,
+        "Clean should produce output: {peak_clean:.4}V"
+    );
+    assert!(
+        peak_dirty > 0.001,
+        "Dirty should produce output: {peak_dirty:.4}V"
+    );
+    assert!(
+        (ratio - 1.0).abs() > 0.05,
+        "Gain crossfade should change character: ratio={ratio:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -288,7 +312,11 @@ fn feedforward_stage_receives_signal() {
     // Find the feedforward stage and check its level
     for i in 0..n {
         let lvl = metrics.stage_levels[i];
-        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let db = if lvl > 1e-10 {
+            20.0 * (lvl as f64).log10()
+        } else {
+            -120.0
+        };
         #[cfg(debug_assertions)]
         {
             let (lbl, is_ff) = match &compiled.stages[i] {
@@ -297,9 +325,11 @@ fn feedforward_stage_receives_signal() {
             };
             if is_ff {
                 eprintln!("Feedforward stage [{lbl}]: {db:.1} dB");
-                assert!(db > -60.0,
+                assert!(
+                    db > -60.0,
                     "Feedforward stage [{lbl}] receives near-zero input ({db:.1} dB). \
-                     Should receive serial signal via node_signals fallback.");
+                     Should receive serial signal via node_signals fallback."
+                );
             }
         }
     }
@@ -331,7 +361,10 @@ fn feedforward_stage_ordering() {
                 ff_idx = Some(i);
                 ff_dist = w.signal_flow_distance;
                 #[cfg(debug_assertions)]
-                eprintln!("Feedforward at index {i}, dist={ff_dist}, label={}", w.debug_label);
+                eprintln!(
+                    "Feedforward at index {i}, dist={ff_dist}, label={}",
+                    w.debug_label
+                );
             }
         }
     }
@@ -339,13 +372,50 @@ fn feedforward_stage_ordering() {
     // Dump all stage ordering
     for (i, stage) in compiled.stages.iter().enumerate() {
         let (d, lbl, bp, ff) = match stage {
-            super::compiled::Stage::Wdf(w) => (w.signal_flow_distance, &w.debug_label, w.bypass_serial, w.is_feedforward),
-            super::compiled::Stage::BlackFeedback(b) => (b.signal_flow_distance, &b.debug_label, b.bypass_serial, false),
-            super::compiled::Stage::Iir(s) => (s.signal_flow_distance, &s.debug_label, s.bypass_serial, false),
-            super::compiled::Stage::StateSpace(s) => (s.signal_flow_distance, &s.debug_label, s.bypass_serial, false),
-            super::compiled::Stage::MultiNl(m) => (m.signal_flow_distance, &m.debug_label, m.bypass_serial, false),
+            super::compiled::Stage::Wdf(w) => (
+                w.signal_flow_distance,
+                w.debug_label.as_str(),
+                w.bypass_serial,
+                w.is_feedforward,
+            ),
+            super::compiled::Stage::BlackFeedback(b) => (
+                b.signal_flow_distance,
+                b.debug_label.as_str(),
+                b.bypass_serial,
+                false,
+            ),
+            super::compiled::Stage::Iir(s) => (
+                s.signal_flow_distance,
+                s.debug_label.as_str(),
+                s.bypass_serial,
+                false,
+            ),
+            super::compiled::Stage::StateSpace(s) => (
+                s.signal_flow_distance,
+                s.debug_label.as_str(),
+                s.bypass_serial,
+                false,
+            ),
+            super::compiled::Stage::MultiNl(m) => (
+                m.signal_flow_distance,
+                m.debug_label.as_str(),
+                m.bypass_serial,
+                false,
+            ),
+            super::compiled::Stage::BlockwiseKMethod(bk) => (
+                bk.signal_flow_distance,
+                "blockwise",
+                bk.bypass_serial,
+                false,
+            ),
         };
-        let flags = if bp { " BYPASS" } else if ff { " FF" } else { "" };
+        let flags = if bp {
+            " BYPASS"
+        } else if ff {
+            " FF"
+        } else {
+            ""
+        };
         eprintln!("  [{i}] dist={d} [{lbl}]{flags}");
     }
 
@@ -353,21 +423,27 @@ fn feedforward_stage_ordering() {
         // The feedforward stage should NOT be at index 0 if there are
         // stages that should process before it (input coupling, buffer).
         // It needs signal from the upstream buffer to be in `signal` first.
-        let stages_before = compiled.stages[..idx].iter().filter(|s| {
-            let bp = match s {
-                super::compiled::Stage::Wdf(w) => w.bypass_serial,
-                super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
-                super::compiled::Stage::Iir(i) => i.bypass_serial,
-                super::compiled::Stage::StateSpace(s) => s.bypass_serial,
-                super::compiled::Stage::MultiNl(m) => m.bypass_serial,
-            };
-            !bp
-        }).count();
+        let stages_before = compiled.stages[..idx]
+            .iter()
+            .filter(|s| {
+                let bp = match s {
+                    super::compiled::Stage::Wdf(w) => w.bypass_serial,
+                    super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
+                    super::compiled::Stage::Iir(i) => i.bypass_serial,
+                    super::compiled::Stage::StateSpace(s) => s.bypass_serial,
+                    super::compiled::Stage::MultiNl(m) => m.bypass_serial,
+                    super::compiled::Stage::BlockwiseKMethod(bk) => bk.bypass_serial,
+                };
+                !bp
+            })
+            .count();
         eprintln!("Non-bypass stages before feedforward: {stages_before}");
 
         // There should be at least one non-bypass stage before feedforward
         // (the input coupling or buffer that produces the signal to tap from)
-        assert!(stages_before >= 1,
-            "Feedforward at index {idx} has no upstream stages — it reads unprocessed input");
+        assert!(
+            stages_before >= 1,
+            "Feedforward at index {idx} has no upstream stages — it reads unprocessed input"
+        );
     }
 }

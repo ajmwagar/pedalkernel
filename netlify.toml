@@ -1,0 +1,68 @@
+# Netlify configuration for docs.pedalkernel.com
+#
+# Two-stage build:
+#   1. cargo doc for each workspace crate   (target/doc/<crate>)
+#   2. hugo renders the site + The Book      (public/)
+#   3. rustdoc output is merged in at /api/  (public/api/<crate>)
+#
+# The build is zero-system-deps (no libjack / pkg-config) thanks to feature
+# flags chosen in the cargo-doc commands and in pedalkernel-validate's
+# Cargo.toml (default-features = false on its pedalkernel path dep).
+#
+# Caching: netlify-plugin-cache persists ~/.rustup, cargo registries, and
+# target/ across builds. Hugo is fast enough that it does not need caching.
+
+[build]
+  base = "."
+  publish = "public"
+  command = """
+    set -euo pipefail
+
+    # --- Rust toolchain -----------------------------------------------------
+    if ! command -v rustup >/dev/null 2>&1; then
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain none --profile minimal
+      . "$HOME/.cargo/env"
+    fi
+    rustup toolchain install stable --profile minimal --no-self-update
+    rustup default stable
+    rustc --version
+
+    # --- rustdoc ------------------------------------------------------------
+    cargo doc -p pedalkernel --no-deps --no-default-features --features tui,cli,gummel-poon
+    cargo doc -p pedalkernel-layout --no-deps
+    cargo doc -p pedalkernel-validate --no-deps
+    # cargo doc writes an index.html redirect at target/doc; Hugo owns /api/
+    rm -f target/doc/index.html
+
+    # --- Hugo site ----------------------------------------------------------
+    hugo version
+    hugo --minify --gc
+
+    # --- Merge rustdoc under /api/ ------------------------------------------
+    mkdir -p public/api
+    cp -r target/doc/. public/api/
+
+    # --- Search index (Pagefind) --------------------------------------------
+    # Runs post-Hugo so it sees every rendered HTML page. /api/ is excluded
+    # because rustdoc already has its own search.
+    npx --yes pagefind@latest --site public --exclude-selectors "nav.site-header, footer, nav.pager" \
+      --glob "**/*.html" --force-language en
+  """
+
+[build.environment]
+  RUST_BACKTRACE = "1"
+  CARGO_TERM_COLOR = "always"
+  CARGO_INCREMENTAL = "0"
+  HUGO_VERSION = "0.128.0"
+
+[[plugins]]
+  package = "netlify-plugin-cache"
+
+  [plugins.inputs]
+    paths = [
+      "target",
+      "~/.cargo/registry",
+      "~/.cargo/git",
+      "~/.rustup",
+    ]

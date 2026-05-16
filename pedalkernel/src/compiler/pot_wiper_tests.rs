@@ -28,9 +28,8 @@ fn measure_peak_at_position(source: &str, control: &str, pos: f64) -> f64 {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
     peak
@@ -64,9 +63,13 @@ fn pot_divider_full_sweep() {
     eprintln!("Pot divider sweep:");
     for &pos in &positions {
         let peak = measure_peak_at_position(source, "Vol", pos);
-        let arrow = if peak > prev_peak + 0.001 { "↑" }
-            else if peak < prev_peak - 0.001 { "↓ V-SHAPE!" }
-            else { "→" };
+        let arrow = if peak > prev_peak + 0.001 {
+            "↑"
+        } else if peak < prev_peak - 0.001 {
+            "↓ V-SHAPE!"
+        } else {
+            "→"
+        };
         eprintln!("  pos={pos:.1}: peak={peak:.4}V {arrow}");
         if pos > 0.0 && peak < prev_peak - 0.001 {
             monotonic = false;
@@ -120,9 +123,13 @@ fn level_pot_after_gain_full_sweep() {
     eprintln!("Level after gain sweep:");
     for &pos in &positions {
         let peak = measure_peak_at_position(source, "Level", pos);
-        let arrow = if peak > prev_peak + 0.001 { "↑" }
-            else if peak < prev_peak - 0.001 { "↓ V-SHAPE!" }
-            else { "→" };
+        let arrow = if peak > prev_peak + 0.001 {
+            "↑"
+        } else if peak < prev_peak - 0.001 {
+            "↓ V-SHAPE!"
+        } else {
+            "→"
+        };
         eprintln!("  pos={pos:.1}: peak={peak:.4}V {arrow}");
         if pos > 0.1 && peak < prev_peak - 0.001 {
             monotonic = false;
@@ -146,10 +153,15 @@ fn screamer_level_full_sweep() {
     let source = std::fs::read_to_string(&path).expect("read");
     // Remove calibrate to prevent output_gain normalization
     let source = source.replace("calibrate", "# calibrate");
-    eprintln!("Screamer controls: {:?}",
-        crate::dsl::parse_pedal_file(&source).unwrap().controls.iter()
+    eprintln!(
+        "Screamer controls: {:?}",
+        crate::dsl::parse_pedal_file(&source)
+            .unwrap()
+            .controls
+            .iter()
             .map(|c| format!("{} [{},{}] = {}", c.label, c.range.0, c.range.1, c.default))
-            .collect::<Vec<_>>());
+            .collect::<Vec<_>>()
+    );
 
     let positions = [0.1, 0.3, 0.5, 0.7, 0.9];
     let mut prev_peak = 0.0f64;
@@ -166,14 +178,17 @@ fn screamer_level_full_sweep() {
         }
         let mut peak = 0.0f64;
         for s in 0..500 {
-            let out = compiled.process(
-                amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin()
-            );
+            let out = compiled
+                .process(amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin());
             peak = peak.max(out.abs());
         }
-        let arrow = if peak > prev_peak + 0.001 { "↑" }
-            else if peak < prev_peak - 0.001 { "↓ V-SHAPE!" }
-            else { "→" };
+        let arrow = if peak > prev_peak + 0.001 {
+            "↑"
+        } else if peak < prev_peak - 0.001 {
+            "↓ V-SHAPE!"
+        } else {
+            "→"
+        };
         eprintln!("  pos={pos:.1}: peak={peak:.4}V {arrow}");
         if pos > 0.1 && peak < prev_peak - 0.001 {
             monotonic = false;
@@ -181,7 +196,10 @@ fn screamer_level_full_sweep() {
         prev_peak = peak;
     }
 
-    assert!(monotonic, "Screamer Level sweep must be monotonic (no V-shape)");
+    assert!(
+        monotonic,
+        "Screamer Level sweep must be monotonic (no V-shape)"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -238,5 +256,4 @@ fn direct_set_pot_changes_tree() {
             eprintln!("After set_pot(0.9): pos={pos:?} res={res:?}");
         }
     }
-
 }

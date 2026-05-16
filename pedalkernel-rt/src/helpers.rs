@@ -4,7 +4,10 @@
 //! needed at runtime (balance_parallel_vs, has_pot, etc.).
 
 extern crate alloc;
-use alloc::{format, string::{String, ToString}, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use crate::dyn_node::{BinaryKind, DynNode};
 use crate::wdf_leaf::WdfLeaf;
@@ -125,14 +128,15 @@ pub fn collect_pot_ids(node: &DynNode, out: &mut Vec<String>) {
 
 pub fn has_pot(node: &DynNode, comp_id: &str) -> bool {
     match node {
-        DynNode::Leaf(leaf) if leaf.type_tag() == "pot" => {
-            match leaf.comp_id() {
-                Some(id) => {
-                    id == comp_id || id == format!("{comp_id}__aw")
-                }
-                None => false,
+        DynNode::Leaf(leaf) if leaf.type_tag() == "pot" => match leaf.comp_id() {
+            Some(id) => {
+                id == comp_id
+                    || id
+                        .strip_prefix(comp_id)
+                        .is_some_and(|suffix| suffix == "__aw" || suffix == "__wb")
             }
-        }
+            None => false,
+        },
         DynNode::Binary { left, right, .. } => has_pot(left, comp_id) || has_pot(right, comp_id),
         DynNode::Transformer { secondary, .. } => has_pot(secondary, comp_id),
         DynNode::RType { children, .. } => children.iter().any(|c| has_pot(c, comp_id)),

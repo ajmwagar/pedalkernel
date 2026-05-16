@@ -9,7 +9,60 @@ use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort
 use crate::PedalProcessor;
 
 use crate::dyn_node::DynNode;
-use crate::helpers::{balance_parallel_vs, has_pot};
+use crate::helpers::balance_parallel_vs;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VsPtr: Send/Sync-safe raw pointer to a VS leaf's voltage field
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A raw pointer to a `WdfVoltageSource::voltage` field inside the WDF tree.
+///
+/// Resolved once at construction time via `DynNode::resolve_main_vs_ptr()` /
+/// `resolve_port_vs_ptr()`. At runtime, `set()` writes directly — no tree
+/// walk, no string comparison, no recursion.
+///
+/// # Safety
+/// The pointer targets a heap-allocated `Box<DynNode>` child, so it remains
+/// stable as long as the owning `WdfStage` (and its tree) is not dropped.
+/// The tree structure is never modified after construction.
+#[derive(Clone, Copy)]
+pub struct VsPtr(*mut f64);
+
+// SAFETY: VsPtr points into a Box<DynNode> owned by the same WdfStage.
+// The stage is only accessed from one thread (audio thread). No shared
+// mutation — the pointer is written only by the owning stage's process().
+unsafe impl Send for VsPtr {}
+unsafe impl Sync for VsPtr {}
+
+impl VsPtr {
+    /// Create a new VsPtr from a raw pointer.
+    #[inline(always)]
+    pub fn new(ptr: *mut f64) -> Self {
+        Self(ptr)
+    }
+
+    /// Write a voltage value directly to the VS leaf.
+    /// # Safety
+    /// Caller must ensure the pointer is still valid (tree not dropped).
+    #[inline(always)]
+    pub unsafe fn set(&self, v: f64) {
+        *self.0 = v;
+    }
+
+    /// Read the current voltage value from the VS leaf.
+    /// # Safety
+    /// Caller must ensure the pointer is still valid.
+    #[inline(always)]
+    pub unsafe fn get(&self) -> f64 {
+        *self.0
+    }
+}
+
+impl core::fmt::Debug for VsPtr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "VsPtr({:p})", self.0)
+    }
+}
 
 /// Flush denormals to zero. Subnormal floats are 100x slower to process
 /// on x86 and serve no useful purpose in audio signals.
@@ -226,6 +279,320 @@ static TRACE_COUNT_MNL: AtomicU64 = AtomicU64::new(0);
 const MAX_TRACE_MNL: u64 = 20;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// K-method lookup table for NL roots
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Precomputed lookup table replacing Newton-Raphson for a WDF NL root.
+///
+/// Maps incident wave (b_tree) → reflected wave (a_root) for a fixed port
+/// resistance. Built at compile time by evaluating the NL device's I-V curve
+/// across the operating domain.
+///
+/// 1D: single junction (diode pair, single diode) — indexed by b_tree only.
+/// 2D: two-port device (BJT, triode) — indexed by (b_tree, control_voltage).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct KTable {
+    /// Number of input dimensions (1 for diode, 2 for BJT/triode).
+    pub dims: usize,
+    /// Min/max of the b_tree input domain.
+    pub b_min: f64,
+    pub b_max: f64,
+    /// Min/max of the second dimension (control voltage). Unused for 1D.
+    pub ctrl_min: f64,
+    pub ctrl_max: f64,
+    /// Number of steps per dimension.
+    pub steps: usize,
+    /// Flat table entries: a_root values.
+    /// 1D: [steps] entries.
+    /// 2D: [steps × steps] entries, row-major (b varies fastest).
+    pub entries: alloc::vec::Vec<f64>,
+    /// Precomputed (steps-1) / (b_max - b_min). Eliminates per-sample division.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub inv_b_scale: f64,
+    /// Precomputed (steps-1) / (ctrl_max - ctrl_min). Eliminates per-sample division.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub inv_c_scale: f64,
+}
+
+impl KTable {
+    /// Precompute cached inverse scales after construction or deserialization.
+    /// Must be called once before first lookup.
+    pub fn precompute_scales(&mut self) {
+        let b_range = self.b_max - self.b_min;
+        let c_range = self.ctrl_max - self.ctrl_min;
+        let n = (self.steps.max(2) - 1) as f64;
+        self.inv_b_scale = if b_range.abs() > 1e-15 {
+            n / b_range
+        } else {
+            0.0
+        };
+        self.inv_c_scale = if c_range.abs() > 1e-15 {
+            n / c_range
+        } else {
+            0.0
+        };
+    }
+
+    /// 1D lookup: interpolate a_root from b_tree.
+    #[inline(always)]
+    pub fn lookup_1d(&self, b_tree: f64) -> f64 {
+        if self.steps < 2 || self.entries.is_empty() {
+            return 0.0;
+        }
+        // inv_b_scale = (steps-1) / (b_max - b_min), precomputed.
+        // p = (b_tree - b_min) * inv_b_scale, clamped to [0, steps-1].
+        let p = ((b_tree - self.b_min) * self.inv_b_scale).clamp(0.0, (self.steps - 1) as f64);
+        let i = (p as usize).min(self.steps - 2);
+        let frac = p - i as f64;
+        self.entries[i] + frac * (self.entries[i + 1] - self.entries[i])
+    }
+
+    /// 2D lookup: interpolate a_root from (b_tree, control_voltage).
+    #[inline(always)]
+    pub fn lookup_2d(&self, b_tree: f64, ctrl: f64) -> f64 {
+        if self.steps < 2 || self.entries.is_empty() {
+            return 0.0;
+        }
+        // Guard: if this is a 1D table, fall back to 1D lookup
+        if self.dims == 1 {
+            return self.lookup_1d(b_tree);
+        }
+        // Precomputed: inv_b_scale = (steps-1)/(b_max-b_min), same for ctrl.
+        // Eliminates 2 divisions per sample (div ~10 cycles vs mul ~3 cycles).
+        let n_max = (self.steps - 1) as f64;
+        let pb = ((b_tree - self.b_min) * self.inv_b_scale).clamp(0.0, n_max);
+        let pc = ((ctrl - self.ctrl_min) * self.inv_c_scale).clamp(0.0, n_max);
+        let ib = (pb as usize).min(self.steps - 2);
+        let ic = (pc as usize).min(self.steps - 2);
+        let fb = pb - ib as f64;
+        let fc = pc - ic as f64;
+        let s = self.steps;
+        let v00 = self.entries[ib + ic * s];
+        let v10 = self.entries[ib + 1 + ic * s];
+        let v01 = self.entries[ib + (ic + 1) * s];
+        let v11 = self.entries[ib + 1 + (ic + 1) * s];
+        // Bilinear interpolation (4 muls + 3 adds)
+        let t0 = v00 + fb * (v10 - v00);
+        let t1 = v01 + fb * (v11 - v01);
+        t0 + fc * (t1 - t0)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADAA (Antiderivative Antialiasing) for K-tables
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl KTable {
+    /// Compute the antiderivative table from the existing entries.
+    ///
+    /// The antiderivative A(b) = ∫₀ᵇ f(x) dx is approximated via
+    /// trapezoidal integration over the table entries. Stored as a
+    /// companion vector with the same grid spacing.
+    ///
+    /// For 1D tables: `antideriv[i] = ∫_{b_min}^{b_i} f(x) dx`
+    /// For 2D tables: integrates along the b axis for each ctrl slice.
+    pub fn compute_antiderivative(&self) -> Vec<f64> {
+        let s = self.steps;
+        if s < 2 || self.entries.is_empty() {
+            return Vec::new();
+        }
+        let db = (self.b_max - self.b_min) / (s - 1) as f64;
+
+        if self.dims == 1 {
+            let mut ad = vec![0.0; s];
+            for i in 1..s {
+                // Trapezoidal: A[i] = A[i-1] + (f[i-1] + f[i]) / 2 * db
+                ad[i] = ad[i - 1] + (self.entries[i - 1] + self.entries[i]) * 0.5 * db;
+            }
+            ad
+        } else {
+            // 2D: integrate along b for each ctrl row
+            let mut ad = vec![0.0; s * s];
+            for ic in 0..s {
+                for ib in 1..s {
+                    let idx = ib + ic * s;
+                    let prev = ib - 1 + ic * s;
+                    ad[idx] = ad[prev] + (self.entries[prev] + self.entries[idx]) * 0.5 * db;
+                }
+            }
+            ad
+        }
+    }
+
+    /// 1D ADAA lookup: bandwidth-limited evaluation.
+    ///
+    /// Uses first-order antiderivative antialiasing:
+    /// `y = (A(b_new) - A(b_old)) / (b_new - b_old)` when inputs differ,
+    /// falls back to direct `f(b_new)` when inputs are equal (avoids 0/0).
+    ///
+    /// `antideriv` must be the output of `compute_antiderivative()`.
+    /// `b_prev` is the previous sample's b_tree value.
+    #[inline(always)]
+    pub fn lookup_1d_adaa(&self, b_tree: f64, b_prev: f64, antideriv: &[f64]) -> f64 {
+        let delta = b_tree - b_prev;
+        if delta.abs() < 1e-7 {
+            // Inputs nearly equal — use direct evaluation (L'Hôpital)
+            return self.lookup_1d(b_tree);
+        }
+        let a_new = self.interp_table(b_tree, antideriv);
+        let a_old = self.interp_table(b_prev, antideriv);
+        (a_new - a_old) / delta
+    }
+
+    /// 2D ADAA lookup: bandwidth-limited evaluation with control voltage.
+    ///
+    /// ADAA along the b axis; ctrl axis uses standard interpolation.
+    /// `b_prev` is the previous sample's b_tree value.
+    #[inline(always)]
+    pub fn lookup_2d_adaa(&self, b_tree: f64, b_prev: f64, ctrl: f64, antideriv: &[f64]) -> f64 {
+        let delta = b_tree - b_prev;
+        if delta.abs() < 1e-7 {
+            return self.lookup_2d(b_tree, ctrl);
+        }
+        let a_new = self.interp_2d_table(b_tree, ctrl, antideriv);
+        let a_old = self.interp_2d_table(b_prev, ctrl, antideriv);
+        (a_new - a_old) / delta
+    }
+
+    /// Interpolate from an arbitrary table (antiderivative or other) using
+    /// the same grid as self.entries. 1D version.
+    #[inline(always)]
+    fn interp_table(&self, b: f64, table: &[f64]) -> f64 {
+        if self.steps < 2 || table.len() < self.steps {
+            return 0.0;
+        }
+        let p = ((b - self.b_min) * self.inv_b_scale).clamp(0.0, (self.steps - 1) as f64);
+        let i = (p as usize).min(self.steps - 2);
+        let frac = p - i as f64;
+        table[i] + frac * (table[i + 1] - table[i])
+    }
+
+    /// Interpolate from an arbitrary 2D table using the same grid.
+    #[inline(always)]
+    fn interp_2d_table(&self, b: f64, ctrl: f64, table: &[f64]) -> f64 {
+        if self.steps < 2 || table.len() < self.steps * self.steps {
+            return 0.0;
+        }
+        let n_max = (self.steps - 1) as f64;
+        let pb = ((b - self.b_min) * self.inv_b_scale).clamp(0.0, n_max);
+        let pc = ((ctrl - self.ctrl_min) * self.inv_c_scale).clamp(0.0, n_max);
+        let ib = (pb as usize).min(self.steps - 2);
+        let ic = (pc as usize).min(self.steps - 2);
+        let fb = pb - ib as f64;
+        let fc = pc - ic as f64;
+        let s = self.steps;
+        let v00 = table[ib + ic * s];
+        let v10 = table[ib + 1 + ic * s];
+        let v01 = table[ib + (ic + 1) * s];
+        let v11 = table[ib + 1 + (ic + 1) * s];
+        let t0 = v00 + fb * (v10 - v00);
+        let t1 = v01 + fb * (v11 - v01);
+        t0 + fc * (t1 - t0)
+    }
+}
+
+#[cfg(test)]
+mod adaa_tests {
+    use super::*;
+
+    fn make_tanh_table() -> KTable {
+        // 1D K-table: f(b) = tanh(b)
+        let steps = 256;
+        let b_min = -5.0;
+        let b_max = 5.0;
+        let entries: Vec<f64> = (0..steps)
+            .map(|i| {
+                let b = b_min + (b_max - b_min) * i as f64 / (steps - 1) as f64;
+                b.tanh()
+            })
+            .collect();
+        let mut kt = KTable {
+            dims: 1,
+            b_min,
+            b_max,
+            ctrl_min: 0.0,
+            ctrl_max: 1.0,
+            steps,
+            entries,
+            inv_b_scale: 0.0,
+            inv_c_scale: 0.0,
+        };
+        kt.precompute_scales();
+        kt
+    }
+
+    #[test]
+    fn adaa_antiderivative_correct_shape() {
+        let kt = make_tanh_table();
+        let ad = kt.compute_antiderivative();
+        assert_eq!(ad.len(), kt.steps);
+        // A(b) = ∫ tanh(x) dx = ln(cosh(x)). This is a U-shape (minimum at x=0).
+        // The trapezoidal integral starts at b_min, so ad[0]=0.
+        // In the right half (b > 0), the integral should increase.
+        let mid = kt.steps / 2;
+        assert!(ad[0].abs() < 1e-10, "ad[0] should be 0, got {}", ad[0]);
+        assert!(
+            ad[kt.steps - 1] > ad[mid],
+            "Right half should increase: ad[last]={}, ad[mid]={}",
+            ad[kt.steps - 1],
+            ad[mid]
+        );
+        // ad should not be all zeros
+        let max_ad = ad.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+        assert!(
+            max_ad > 0.1,
+            "Antiderivative should be nonzero, max={max_ad}"
+        );
+    }
+
+    #[test]
+    fn adaa_matches_direct_for_slow_signals() {
+        let kt = make_tanh_table();
+        let ad = kt.compute_antiderivative();
+        // For slowly varying input (small delta b), ADAA should ≈ direct lookup
+        let b_prev = 0.5;
+        let b_new = 0.500001; // tiny step
+        let adaa = kt.lookup_1d_adaa(b_new, b_prev, &ad);
+        let direct = kt.lookup_1d(b_new);
+        assert!(
+            (adaa - direct).abs() < 0.01,
+            "ADAA should match direct for slow signals: adaa={adaa:.6}, direct={direct:.6}"
+        );
+    }
+
+    #[test]
+    fn adaa_attenuates_fast_signals() {
+        let kt = make_tanh_table();
+        let ad = kt.compute_antiderivative();
+        // For fast input (large delta b), ADAA should be LESS than the peak
+        // of direct evaluation — it's averaging over the transition.
+        let b_prev = -3.0;
+        let b_new = 3.0; // big jump across the nonlinearity
+        let adaa = kt.lookup_1d_adaa(b_new, b_prev, &ad);
+        let direct_peak = kt.lookup_1d(b_new); // tanh(3) ≈ 0.995
+        assert!(
+            adaa.abs() < direct_peak.abs(),
+            "ADAA should attenuate fast transitions: adaa={adaa:.6}, direct_peak={direct_peak:.6}"
+        );
+    }
+
+    #[test]
+    fn adaa_fallback_at_zero_delta() {
+        let kt = make_tanh_table();
+        let ad = kt.compute_antiderivative();
+        // When b_prev == b_new, ADAA falls back to direct evaluation
+        let b = 1.0;
+        let adaa = kt.lookup_1d_adaa(b, b, &ad);
+        let direct = kt.lookup_1d(b);
+        assert!(
+            (adaa - direct).abs() < 1e-10,
+            "ADAA at zero delta should equal direct: adaa={adaa}, direct={direct}"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // WDF clipping stage
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -248,6 +615,14 @@ pub enum RootKind {
     VariMu(VariMuTriodeRoot),
     Pentode(PentodeRoot),
     Mosfet(MosfetRoot),
+    /// BJT as single-port WDF root (common-emitter topology).
+    /// Vbe is set externally (like triode Vgk), C-E is the WDF port.
+    /// Enables K-method tabulation (2D: b_tree × Vbe).
+    Bjt(BjtRoot),
+    /// Diff-pair macromodel for ladder filter stages.
+    /// I = α·I_tail·tanh(V/(2·n·Vt)). Cutoff CV modulates I_tail.
+    /// K-method: 2D (b_tree × I_tail).
+    DiffPair(DiffPairRoot),
     Ota(OtaRoot),
     /// Op-amp gain stage (TL072, LM308, JRC4558, etc.).
     /// Topology (inverting vs non-inverting) is stored in the root itself.
@@ -356,8 +731,10 @@ pub enum RootKind {
 
 // Shared bias constants for NL device control voltage setting.
 // Used by both RootKind (WdfStage) and NlDeviceKind (MultiNlStage).
-const TRIODE_GRID_BIAS: f64 = -2.0;
-const PENTODE_GRID_BIAS: f64 = -8.0;
+// Triode grid bias is now per-instance (TriodeRoot::vgk_bias), set from
+// circuit analysis. Default -2.0V (typical 12AX7) is set in TriodeRoot::new().
+// Pentode grid bias is now per-instance (PentodeRoot::vg1k_bias).
+// BJT base bias is set per-instance from circuit analysis (BjtRoot::set_bias).
 
 /// Maximum total NR iterations per base sample across all sub-samples.
 ///
@@ -382,6 +759,61 @@ impl RootKind {
         )
     }
 
+    /// K-method eligibility: (is_eligible, port_dimensions).
+    /// Mirrors Component::k_method_candidacy() for the runtime root type.
+    pub fn k_method_candidacy(&self) -> (bool, usize) {
+        match self {
+            RootKind::DiodePair(_)
+            | RootKind::SingleDiode(_)
+            | RootKind::ExplicitDiodePair(_)
+            | RootKind::ExplicitSingleDiode(_)
+            | RootKind::Zener(_) => (true, 1),
+            RootKind::Jfet(_)
+            | RootKind::Triode(_)
+            | RootKind::Mosfet(_)
+            | RootKind::Bjt(_)
+            | RootKind::DiffPair(_) => (true, 2),
+            RootKind::Pentode(_) => (true, 3),
+            // Not eligible: linear, variable, or hysteretic roots
+            _ => (false, 0),
+        }
+    }
+
+    /// Reset NR warm-start state for clean cold-start solve.
+    /// Used by K-table generation to ensure each entry is independent.
+    pub fn reset_nr_state(&mut self) {
+        // Process with b=0 to reset internal prev_v to a neutral state.
+        // This is a no-op functionally (zero input → near-zero output)
+        // but resets the warm-start cache.
+        let _ = self.process(0.0, 1000.0);
+    }
+
+    /// Process the NL root: incident wave → reflected wave.
+    /// Dispatches to the concrete root type's NR solver.
+    pub fn process(&mut self, b_tree: f64, rp: f64) -> f64 {
+        match self {
+            RootKind::DiodePair(dp) => dp.process(b_tree, rp),
+            RootKind::SingleDiode(d) => d.process(b_tree, rp),
+            RootKind::ExplicitDiodePair(dp) => dp.process(b_tree, rp),
+            RootKind::ExplicitSingleDiode(d) => d.process(b_tree, rp),
+            RootKind::Zener(z) => z.process(b_tree, rp),
+            RootKind::Jfet(j) => j.process(b_tree, rp),
+            RootKind::JfetVr(j) => j.process_root(b_tree, rp),
+            RootKind::Triode(t) => t.process(b_tree, rp),
+            RootKind::VariMu(t) => t.process(b_tree, rp),
+            RootKind::Pentode(p) => p.process(b_tree, rp),
+            RootKind::Mosfet(m) => m.process(b_tree, rp),
+            RootKind::Bjt(b) => b.process(b_tree, rp),
+            RootKind::DiffPair(dp) => dp.process(b_tree, rp),
+            RootKind::Ota(o) => o.process(b_tree, rp),
+            RootKind::OpAmp(op) => op.process(b_tree, rp),
+            RootKind::Passthrough => b_tree,
+            RootKind::ShortCircuit => -b_tree,
+            // Passive/linear roots: reflect without NL processing
+            _ => -b_tree,
+        }
+    }
+
     /// Set the control voltage on the nonlinear root from the input signal.
     ///
     /// Maps the audio input to the device's control terminal:
@@ -392,13 +824,24 @@ impl RootKind {
     pub fn set_control_voltage(&mut self, input: f64, compensation: f64, _bias_offset: f64) {
         match self {
             RootKind::Triode(t) => {
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+                t.set_vgk(t.vgk_bias() + input * compensation);
             }
             RootKind::VariMu(t) => {
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+                t.set_vgk(t.vgk_bias() + input * compensation);
+            }
+            RootKind::Bjt(b) => {
+                // BJT Vbe = DC bias (from circuit analysis) + AC input signal.
+                // The bias is set once at compile time via set_bias().
+                b.set_vbe(b.vbe_bias() + input * compensation);
+            }
+            RootKind::DiffPair(dp) => {
+                // Cutoff CV modulates tail current I_tail.
+                // Input maps to I_tail range: bias * (1 + input * compensation)
+                let i_tail = dp.i_tail_bias * (1.0 + input * compensation).max(0.01);
+                dp.set_i_tail(i_tail);
             }
             RootKind::Pentode(p) => {
-                p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
+                p.set_vg1k(p.vg1k_bias() + input * compensation);
             }
             _ => {}
         }
@@ -761,6 +1204,9 @@ pub struct WdfStage {
     ///
     /// NOT the same as `paired_opamp` (which is for Bridged-T all-pass circuits).
     pub feedback_opamp: Option<OpAmpRoot>,
+    /// K-method lookup table: precomputed NL root response.
+    /// When present, process() uses table lookup instead of NR iteration.
+    pub k_table: Option<KTable>,
     /// VCC injection coefficient (per-unit, wave domain).
     /// Multiply by supply voltage to get the DC bias added to the reflected wave.
     /// Computed from a small resistive MNA at build time. Zero when no VCC edge.
@@ -813,6 +1259,26 @@ pub struct WdfStage {
     /// instead of the MNA/RType adaptor or precomputed scalar gain.
     /// The gain emerges from Zf/Zi impedance ratios in the wave propagation.
     pub opamp_wdf_adaptor: Option<OpAmpWdfAdaptor>,
+
+    // ── Cached VS pointers (resolved once, used every sample) ────────────
+    //
+    // These raw pointers point directly into the WDF tree's heap-allocated
+    // VoltageSource leaves. They eliminate per-sample tree walking for
+    // set_voltage() and set_voltage_by_port(). Valid as long as the tree
+    // is not dropped or structurally modified (which never happens after
+    // construction).
+    /// Pointer to the main (non-port) voltage source's `voltage` field.
+    /// Resolved once via `cache_vs_pointers()`. Used by process() instead
+    /// of `tree.set_voltage()` to avoid pattern-match overhead.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub main_vs_ptr: Option<VsPtr>,
+
+    /// Pointers to named port voltage sources' `voltage` fields.
+    /// Each entry is (port_name, pointer). Resolved once via
+    /// `cache_vs_pointers()`. Used instead of `tree.set_voltage_by_port()`
+    /// to eliminate per-sample tree walking + string comparison.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub port_vs_ptrs: Vec<(alloc::string::String, VsPtr)>,
 }
 
 impl WdfStage {
@@ -859,6 +1325,7 @@ impl WdfStage {
             feedback_ri: f64::INFINITY,
             output_probe: None,
             feedback_opamp: None,
+            k_table: None,
             vcc_injection_coeff: 0.0,
             vcc_dc_ramp: 0,
             coupling_cap_id: None,
@@ -872,7 +1339,61 @@ impl WdfStage {
             opamp_recompute: None,
             opamp_input_child_idx: None,
             opamp_wdf_adaptor: None,
+            main_vs_ptr: None,
+            port_vs_ptrs: Vec::new(),
         }
+    }
+
+    /// Resolve and cache raw pointers to all VS leaves in the tree.
+    ///
+    /// Call once after tree construction (and after any `wrap_leaf_with_vs`).
+    /// The cached pointers eliminate per-sample tree walking in `process()`.
+    ///
+    /// `port_names`: names of ports assigned to this stage (from PortBinding).
+    pub fn cache_vs_pointers(&mut self, port_names: &[&str]) {
+        // Resolve main (non-port) VS
+        self.main_vs_ptr = self.tree.resolve_main_vs_ptr().map(VsPtr::new);
+
+        // Resolve each named port VS
+        self.port_vs_ptrs.clear();
+        for &name in port_names {
+            if let Some(ptr) = self.tree.resolve_port_vs_ptr(name) {
+                self.port_vs_ptrs
+                    .push((alloc::string::String::from(name), VsPtr::new(ptr)));
+            }
+        }
+    }
+
+    /// Set the main voltage source value via cached pointer.
+    /// Falls back to tree walk if pointer not cached.
+    #[inline(always)]
+    pub fn set_vs_voltage(&mut self, v: f64) {
+        if let Some(ptr) = self.main_vs_ptr {
+            // SAFETY: pointer was resolved from our own tree and tree
+            // structure is immutable after construction.
+            unsafe {
+                ptr.set(v);
+            }
+        } else {
+            self.tree.set_voltage(v);
+        }
+    }
+
+    /// Set a named port's voltage source via cached pointer.
+    /// Falls back to tree walk if pointer not cached.
+    #[inline(always)]
+    pub fn set_port_voltage(&mut self, port_name: &str, v: f64) {
+        for (name, ptr) in &self.port_vs_ptrs {
+            if name == port_name {
+                // SAFETY: same as set_vs_voltage
+                unsafe {
+                    ptr.set(v);
+                }
+                return;
+            }
+        }
+        // Fallback: tree walk (shouldn't happen if cache_vs_pointers was called)
+        self.tree.set_voltage_by_port(port_name, v);
     }
 }
 
@@ -1044,6 +1565,7 @@ impl WdfStage {
         // Borrow fields individually to satisfy the borrow checker
         let tree = &mut self.tree;
         let root = &mut self.root;
+        let k_table = &self.k_table;
         let compensation = self.compensation;
         let output_probe = &self.output_probe;
         let feedback_opamp = &mut self.feedback_opamp;
@@ -1172,6 +1694,9 @@ impl WdfStage {
             // Some trees produce negative b_tree with positive VS due to Series
             // adaptor nesting — negate VS to make b_tree positive for the NR solver.
             let vs_voltage = if negate_vs { -vs_voltage } else { vs_voltage };
+            // DynNode::set_voltage already has a fast path (root→left child
+            // pattern match, ~2 ops). Using the cached raw pointer here would
+            // alias with the live &mut tree borrow — technically UB.
             tree.set_voltage(vs_voltage);
             let b1 = tree.reflected();
 
@@ -1208,152 +1733,181 @@ impl WdfStage {
                 b1
             };
 
-            let rp = tree.port_resistance();
             let b_tree = b1;
 
-            let a_root = match root {
-                RootKind::DiodePair(dp) => dp.process(b_tree, rp),
-                RootKind::SingleDiode(d) => d.process(b_tree, rp),
-                RootKind::ExplicitDiodePair(dp) => dp.process(b_tree, rp),
-                RootKind::ExplicitSingleDiode(d) => d.process(b_tree, rp),
-                RootKind::Zener(z) => z.process(b_tree, rp),
-                RootKind::Jfet(j) => {
-                    if is_sf {
-                        j.process_source_follower(b_tree, rp, sample * compensation)
-                    } else {
-                        j.process(b_tree, rp)
-                    }
+            // K-method fast path: use precomputed table lookup instead of NR
+            let a_root = if let Some(ref table) = k_table {
+                if table.dims == 1 {
+                    table.lookup_1d(b_tree)
+                } else {
+                    // 2D: use the AC signal portion of the control voltage.
+                    // The table was swept with set_control_voltage(ctrl, 1.0, 0.0)
+                    // which adds the DC bias internally. So the table's ctrl axis
+                    // represents the raw signal input, not the absolute voltage.
+                    // We subtract the bias to get back to the signal domain.
+                    let ctrl = match root {
+                        RootKind::Bjt(b) => b.vbe() - b.vbe_bias(),
+                        RootKind::Triode(t) => t.vgk() - t.vgk_bias(),
+                        RootKind::Jfet(j) => j.vgs(), // no DC bias added
+                        RootKind::Mosfet(m) => m.vgs(), // no DC bias added
+                        RootKind::DiffPair(dp) => {
+                            // Ctrl axis = I_tail modulation relative to bias
+                            (dp.i_tail / dp.i_tail_bias()) - 1.0
+                        }
+                        _ => 0.0,
+                    };
+                    table.lookup_2d(b_tree, ctrl)
                 }
-                RootKind::JfetVr(j) => j.process_root(b_tree, rp),
-                RootKind::Triode(t) => t.process(b_tree, rp),
-                RootKind::VariMu(t) => t.process(b_tree, rp),
-                RootKind::Pentode(p) => p.process(b_tree, rp),
-                RootKind::Mosfet(m) => m.process(b_tree, rp),
-                RootKind::Ota(o) => o.process(b_tree, rp),
-                RootKind::OpAmp(op) => {
-                    if op.is_non_inverting() {
-                        op.set_vp(sample * compensation);
-                    }
-                    op.process(b_tree, rp)
-                }
-                // Passthrough: open-circuit termination (b = a)
-                // The tree processes normally but the root just reflects.
-                // For passive filters with voltage source, the output voltage
-                // should be extracted at the load resistor, not the root port.
-                RootKind::Passthrough => {
-                    // Open-circuit termination: a_root = b_tree (total reflection).
-                    // Port voltage V = (a + b) / 2 = (b_tree + b_tree) / 2 = b_tree.
-                    tree.set_incident(b_tree);
-                    // Check output_probe BEFORE fallback
-                    if let Some(ref probe_id) = output_probe {
-                        if let Some(v) = tree.leaf_voltage(probe_id) {
-                            return v;
+            } else {
+                // NR fallback — rp only needed here, not for K-table path
+                let rp = tree.port_resistance();
+                match root {
+                    RootKind::DiodePair(dp) => dp.process(b_tree, rp),
+                    RootKind::SingleDiode(d) => d.process(b_tree, rp),
+                    RootKind::ExplicitDiodePair(dp) => dp.process(b_tree, rp),
+                    RootKind::ExplicitSingleDiode(d) => d.process(b_tree, rp),
+                    RootKind::Zener(z) => z.process(b_tree, rp),
+                    RootKind::Jfet(j) => {
+                        if is_sf {
+                            j.process_source_follower(b_tree, rp, sample * compensation)
+                        } else {
+                            j.process(b_tree, rp)
                         }
                     }
-                    // Open circuit: full voltage appears at the port.
-                    (b_tree + b_tree) / 2.0
-                }
-                // ShortCircuit: ground termination (a = -b)
-                // Ground has zero impedance, so it reflects with inverted sign.
-                // This allows current to flow through series elements to ground.
-                RootKind::ShortCircuit => {
-                    // Short-circuit reflection: a = -b
-                    let a_root = -b_tree;
-                    tree.set_incident(a_root);
+                    RootKind::JfetVr(j) => j.process_root(b_tree, rp),
+                    RootKind::Triode(t) => t.process(b_tree, rp),
+                    RootKind::VariMu(t) => t.process(b_tree, rp),
+                    RootKind::Pentode(p) => p.process(b_tree, rp),
+                    RootKind::Mosfet(m) => m.process(b_tree, rp),
+                    RootKind::Bjt(b) => b.process(b_tree, rp),
+                    RootKind::DiffPair(dp) => dp.process(b_tree, rp),
+                    RootKind::Ota(o) => o.process(b_tree, rp),
+                    RootKind::OpAmp(op) => {
+                        if op.is_non_inverting() {
+                            op.set_vp(sample * compensation);
+                        }
+                        op.process(b_tree, rp)
+                    }
+                    // Passthrough: open-circuit termination (b = a)
+                    // The tree processes normally but the root just reflects.
+                    // For passive filters with voltage source, the output voltage
+                    // should be extracted at the load resistor, not the root port.
+                    RootKind::Passthrough => {
+                        // Open-circuit termination: a_root = b_tree (total reflection).
+                        // Port voltage V = (a + b) / 2 = (b_tree + b_tree) / 2 = b_tree.
+                        tree.set_incident(b_tree);
+                        // Check output_probe BEFORE fallback
+                        if let Some(ref probe_id) = output_probe {
+                            if let Some(v) = tree.leaf_voltage(probe_id) {
+                                return v;
+                            }
+                        }
+                        // Open circuit: full voltage appears at the port.
+                        (b_tree + b_tree) / 2.0
+                    }
+                    // ShortCircuit: ground termination (a = -b)
+                    // Ground has zero impedance, so it reflects with inverted sign.
+                    // This allows current to flow through series elements to ground.
+                    RootKind::ShortCircuit => {
+                        // Short-circuit reflection: a = -b
+                        let a_root = -b_tree;
+                        tree.set_incident(a_root);
 
-                    // Check output_probe first (for SP-reduced orphan stages)
-                    if let Some(ref probe_id) = output_probe {
-                        if let Some(v) = tree.leaf_voltage(probe_id) {
-                            return v;
+                        // Check output_probe first (for SP-reduced orphan stages)
+                        if let Some(ref probe_id) = output_probe {
+                            if let Some(v) = tree.leaf_voltage(probe_id) {
+                                return v;
+                            }
                         }
+                        // Extract output at junction (voltage across load resistor)
+                        // For Series(VS, Series(L, R)) with short at gnd:
+                        // - VS emits b_vs = 2 * Vin (already done in reflected())
+                        // - We need V_R = voltage across R (between L.b/R.a and gnd)
+                        if let Some(v_junction) = tree.short_circuit_junction_voltage(a_root) {
+                            return v_junction;
+                        }
+                        // Fallback: V at grounded port is 0 (short circuit)
+                        0.0
                     }
-                    // Extract output at junction (voltage across load resistor)
-                    // For Series(VS, Series(L, R)) with short at gnd:
-                    // - VS emits b_vs = 2 * Vin (already done in reflected())
-                    // - We need V_R = voltage across R (between L.b/R.a and gnd)
-                    if let Some(v_junction) = tree.short_circuit_junction_voltage(a_root) {
-                        return v_junction;
-                    }
-                    // Fallback: V at grounded port is 0 (short circuit)
-                    0.0
-                }
-                // VoltageSourceDriver: ideal voltage source at root port.
-                //
-                // Correct WDF scattering for ideal VS: a_root = 2*V - b_tree.
-                // This ensures V_port = (a+b)/2 = V regardless of b_tree,
-                // giving the exact bilinear-transform pole (k-1)/(k+1).
-                //
-                // Output at series junction is negated (WDF sign convention:
-                // V_root = -(V_left + V_right) in Fettweis series adaptor).
-                RootKind::VoltageSourceDriver => {
-                    let v_in = sample * compensation;
-                    let a_root = 2.0 * v_in - b_tree;
-                    tree.set_incident(a_root);
+                    // VoltageSourceDriver: ideal voltage source at root port.
+                    //
+                    // Correct WDF scattering for ideal VS: a_root = 2*V - b_tree.
+                    // This ensures V_port = (a+b)/2 = V regardless of b_tree,
+                    // giving the exact bilinear-transform pole (k-1)/(k+1).
+                    //
+                    // Output at series junction is negated (WDF sign convention:
+                    // V_root = -(V_left + V_right) in Fettweis series adaptor).
+                    RootKind::VoltageSourceDriver => {
+                        let v_in = sample * compensation;
+                        let a_root = 2.0 * v_in - b_tree;
+                        tree.set_incident(a_root);
 
-                    // Check output_probe first (for SP-reduced feedforward stages)
-                    if let Some(ref probe_id) = output_probe {
-                        if let Some(v) = tree.leaf_voltage(probe_id) {
-                            return v;
+                        // Check output_probe first (for SP-reduced feedforward stages)
+                        if let Some(ref probe_id) = output_probe {
+                            if let Some(v) = tree.leaf_voltage(probe_id) {
+                                return v;
+                            }
                         }
-                    }
-                    if let Some(v_junction) = tree.series_junction_voltage(a_root) {
-                        return -v_junction;
-                    }
-                    return (a_root + b_tree) / 2.0;
-                }
-                // Capacitor root: b = state (reflects stored incident)
-                // This gives correct RC lowpass transfer function.
-                RootKind::CapacitorRoot { state, .. } => {
-                    let b_root = *state;
-                    *state = b_tree; // Update state with new incident
-                    b_root
-                }
-                // Inductor root: b = -state (reflects negated stored incident)
-                // This gives correct RL highpass transfer function.
-                RootKind::InductorRoot { state, .. } => {
-                    let b_root = -*state;
-                    *state = b_tree; // Update state with new incident
-                    b_root
-                }
-                // Resistive termination: resistor absorbs all energy (b = 0).
-                // Output at root port = (0 + b_tree) / 2 = b_tree / 2.
-                RootKind::ResistiveTermination => 0.0,
-                // Passive R-type: self-contained processing bypassing the main tree.
-                // VS is an ideal voltage source (zero impedance) stamped into
-                // the MNA, producing an injection vector separate from the
-                // scattering matrix.
-                RootKind::PassiveRType {
-                    scattering,
-                    vs_injection,
-                    n_ports,
-                    children,
-                    output_port,
-                    ..
-                } => {
-                    let vs_voltage = sample * compensation;
-                    let n = *n_ports;
-                    // 1. Collect reflected waves from children
-                    let b_children: Vec<f64> = children.iter_mut().map(|c| c.reflected()).collect();
-                    // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
-                    let mut a_children = vec![0.0; n];
-                    for i in 0..n {
-                        let mut a_i = vs_injection[i] * vs_voltage;
-                        for j in 0..n {
-                            a_i += scattering[i * n + j] * b_children[j];
+                        if let Some(v_junction) = tree.series_junction_voltage(a_root) {
+                            return -v_junction;
                         }
-                        a_children[i] = a_i;
+                        return (a_root + b_tree) / 2.0;
                     }
-                    // 3. Set incident waves on children
-                    for (child, &a_i) in children.iter_mut().zip(a_children.iter()) {
-                        child.set_incident(a_i);
+                    // Capacitor root: b = state (reflects stored incident)
+                    // This gives correct RC lowpass transfer function.
+                    RootKind::CapacitorRoot { state, .. } => {
+                        let b_root = *state;
+                        *state = b_tree; // Update state with new incident
+                        b_root
                     }
-                    // 4. Output voltage at probe port
-                    let a_out = a_children[*output_port];
-                    let b_out = b_children[*output_port];
-                    return (a_out + b_out) / 2.0;
-                }
-            };
-            // ── Down-sweep ────────────────────────────────────────────
+                    // Inductor root: b = -state (reflects negated stored incident)
+                    // This gives correct RL highpass transfer function.
+                    RootKind::InductorRoot { state, .. } => {
+                        let b_root = -*state;
+                        *state = b_tree; // Update state with new incident
+                        b_root
+                    }
+                    // Resistive termination: resistor absorbs all energy (b = 0).
+                    // Output at root port = (0 + b_tree) / 2 = b_tree / 2.
+                    RootKind::ResistiveTermination => 0.0,
+                    // Passive R-type: self-contained processing bypassing the main tree.
+                    // VS is an ideal voltage source (zero impedance) stamped into
+                    // the MNA, producing an injection vector separate from the
+                    // scattering matrix.
+                    RootKind::PassiveRType {
+                        scattering,
+                        vs_injection,
+                        n_ports,
+                        children,
+                        output_port,
+                        ..
+                    } => {
+                        let vs_voltage = sample * compensation;
+                        let n = *n_ports;
+                        // 1. Collect reflected waves from children
+                        let b_children: Vec<f64> =
+                            children.iter_mut().map(|c| c.reflected()).collect();
+                        // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
+                        let mut a_children = vec![0.0; n];
+                        for i in 0..n {
+                            let mut a_i = vs_injection[i] * vs_voltage;
+                            for j in 0..n {
+                                a_i += scattering[i * n + j] * b_children[j];
+                            }
+                            a_children[i] = a_i;
+                        }
+                        // 3. Set incident waves on children
+                        for (child, &a_i) in children.iter_mut().zip(a_children.iter()) {
+                            child.set_incident(a_i);
+                        }
+                        // 4. Output voltage at probe port
+                        let a_out = a_children[*output_port];
+                        let b_out = b_children[*output_port];
+                        return (a_out + b_out) / 2.0;
+                    }
+                } // end NR fallback else
+            }; // end K-table if/else
+               // ── Down-sweep ────────────────────────────────────────────
             tree.set_incident(a_root);
 
             // If an output probe is set, extract voltage at that leaf
@@ -1558,12 +2112,16 @@ impl WdfStage {
             ..
         } = &mut self.root
         {
+            let mut found = false;
             for child in children.iter_mut() {
                 if child.set_pot(comp_id, value) {
-                    *needs_recompute = true;
-                    return true;
+                    found = true;
                 }
             }
+            if found {
+                *needs_recompute = true;
+            }
+            return found;
         }
         false
     }
@@ -1889,13 +2447,27 @@ impl WdfStage {
     /// recompute_all + notify_pot_changed when any pot is found.
     pub fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
         let mut found = false;
+        let aw_id = alloc::format!("{comp_id}__aw");
+        let wb_id = alloc::format!("{comp_id}__wb");
         // Main tree: use set_pot_dirty for incremental recompute.
         // Marks only the leaf-to-root path dirty instead of full recompute.
         if self.tree.set_pot_dirty(comp_id, value) {
             found = true;
         }
+        if self.tree.set_pot_dirty(&aw_id, value) {
+            found = true;
+        }
+        if self.tree.set_pot_dirty(&wb_id, 1.0 - value) {
+            found = true;
+        }
         if let Some(ref mut zf) = self.zf_child {
             if zf.set_pot_dirty(comp_id, value) {
+                found = true;
+            }
+            if zf.set_pot_dirty(&aw_id, value) {
+                found = true;
+            }
+            if zf.set_pot_dirty(&wb_id, 1.0 - value) {
                 found = true;
             }
         }
@@ -1903,9 +2475,21 @@ impl WdfStage {
             if zg.set_pot_dirty(comp_id, value) {
                 found = true;
             }
+            if zg.set_pot_dirty(&aw_id, value) {
+                found = true;
+            }
+            if zg.set_pot_dirty(&wb_id, 1.0 - value) {
+                found = true;
+            }
         }
         for child in self.opamp_children.iter_mut() {
             if child.set_pot_dirty(comp_id, value) {
+                found = true;
+            }
+            if child.set_pot_dirty(&aw_id, value) {
+                found = true;
+            }
+            if child.set_pot_dirty(&wb_id, 1.0 - value) {
                 found = true;
             }
         }
@@ -1915,7 +2499,23 @@ impl WdfStage {
                 adaptor.zi.recompute_incremental();
                 found = true;
             }
+            if adaptor.zi.set_pot_dirty(&aw_id, value) {
+                adaptor.zi.recompute_incremental();
+                found = true;
+            }
+            if adaptor.zi.set_pot_dirty(&wb_id, 1.0 - value) {
+                adaptor.zi.recompute_incremental();
+                found = true;
+            }
             if adaptor.zf.set_pot_dirty(comp_id, value) {
+                adaptor.zf.recompute_incremental();
+                found = true;
+            }
+            if adaptor.zf.set_pot_dirty(&aw_id, value) {
+                adaptor.zf.recompute_incremental();
+                found = true;
+            }
+            if adaptor.zf.set_pot_dirty(&wb_id, 1.0 - value) {
                 adaptor.zf.recompute_incremental();
                 found = true;
             }
@@ -2106,6 +2706,8 @@ impl WdfStage {
             RootKind::VariMu(_) => "VariMu",
             RootKind::Pentode(_) => "Pentode",
             RootKind::Mosfet(_) => "Mosfet",
+            RootKind::Bjt(_) => "Bjt",
+            RootKind::DiffPair(_) => "DiffPair",
             RootKind::Ota(_) => "Ota",
             RootKind::OpAmp(_) => "OpAmp",
             RootKind::Passthrough => "Passthrough",
@@ -2638,13 +3240,13 @@ impl NlDeviceKind {
     pub fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
         match self {
             NlDeviceKind::Triode(t) => {
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+                t.set_vgk(t.vgk_bias() + input * compensation);
             }
             NlDeviceKind::VariMu(t) => {
-                t.set_vgk(TRIODE_GRID_BIAS + input * compensation);
+                t.set_vgk(t.vgk_bias() + input * compensation);
             }
             NlDeviceKind::Pentode(p) => {
-                p.set_vg1k(PENTODE_GRID_BIAS + input * compensation);
+                p.set_vg1k(p.vg1k_bias() + input * compensation);
             }
             NlDeviceKind::Diode(_)
             | NlDeviceKind::DiodePair(_)
@@ -3184,6 +3786,99 @@ pub struct IirPotBinding {
     pub position: f64,
 }
 
+/// Precomputed biquad coefficient lookup table for pot-controlled IIR stages.
+///
+/// Built at compile time by sweeping pot positions over an N-dimensional grid.
+/// At runtime, `set_pot` quantizes the position and bilinearly interpolates
+/// the 5 biquad coefficients from the nearest grid neighbors. O(1) lookup,
+/// no matrix math, no alloc. Cortex-M7 safe.
+///
+/// Dimensions correspond to independent control labels (ganged pots = 1 dim).
+/// Table size: `steps^n_dims × 5` f64 entries.
+#[cfg(feature = "biquad-table")]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BiquadTable {
+    /// Number of uniformly-spaced steps per dimension (e.g. 64).
+    pub steps: usize,
+    /// Dimension labels — each is a control label (e.g. "Cutoff", "Resonance").
+    /// Order matches the index arithmetic: dim 0 is the innermost.
+    pub dim_labels: alloc::vec::Vec<alloc::string::String>,
+    /// Flattened [b0, b1, b2, a1, a2] × (steps^n_dims) entries.
+    /// Entry index for (d0, d1, ...): d0 + d1*steps + d2*steps² + ...
+    pub coeffs: alloc::vec::Vec<f64>,
+}
+
+#[cfg(feature = "biquad-table")]
+impl BiquadTable {
+    /// Number of coefficients per entry (b0, b1, b2, a1, a2).
+    const COEFF_COUNT: usize = 5;
+
+    /// Look up and interpolate biquad coefficients for given positions.
+    /// `positions` maps dim index → normalized position [0.0, 1.0].
+    /// Writes 5 values into `out`: [b0, b1, b2, a1, a2].
+    pub fn lookup(&self, positions: &[f64], out: &mut [f64; 5]) {
+        let n_dims = self.dim_labels.len();
+        if n_dims == 0 || self.steps < 2 {
+            return;
+        }
+        let max_idx = self.steps - 1;
+
+        match n_dims {
+            1 => {
+                // Linear interpolation
+                let p = positions[0].clamp(0.0, 1.0) * max_idx as f64;
+                let i0 = (p as usize).min(max_idx - 1);
+                let frac = p - i0 as f64;
+                let base0 = i0 * Self::COEFF_COUNT;
+                let base1 = (i0 + 1) * Self::COEFF_COUNT;
+                for c in 0..5 {
+                    out[c] = self.coeffs[base0 + c] * (1.0 - frac) + self.coeffs[base1 + c] * frac;
+                }
+            }
+            2 => {
+                // Bilinear interpolation
+                let p0 = positions[0].clamp(0.0, 1.0) * max_idx as f64;
+                let p1 = positions[1].clamp(0.0, 1.0) * max_idx as f64;
+                let i0 = (p0 as usize).min(max_idx - 1);
+                let i1 = (p1 as usize).min(max_idx - 1);
+                let f0 = p0 - i0 as f64;
+                let f1 = p1 - i1 as f64;
+                let s = self.steps;
+                let idx00 = (i0 + i1 * s) * Self::COEFF_COUNT;
+                let idx10 = (i0 + 1 + i1 * s) * Self::COEFF_COUNT;
+                let idx01 = (i0 + (i1 + 1) * s) * Self::COEFF_COUNT;
+                let idx11 = (i0 + 1 + (i1 + 1) * s) * Self::COEFF_COUNT;
+                let w00 = (1.0 - f0) * (1.0 - f1);
+                let w10 = f0 * (1.0 - f1);
+                let w01 = (1.0 - f0) * f1;
+                let w11 = f0 * f1;
+                for c in 0..5 {
+                    out[c] = self.coeffs[idx00 + c] * w00
+                        + self.coeffs[idx10 + c] * w10
+                        + self.coeffs[idx01 + c] * w01
+                        + self.coeffs[idx11 + c] * w11;
+                }
+            }
+            _ => {
+                // Fallback: nearest-neighbor for 3+ dims
+                let mut flat_idx = 0usize;
+                let mut stride = 1usize;
+                for d in 0..n_dims {
+                    let p = positions[d].clamp(0.0, 1.0) * max_idx as f64;
+                    let i = (p as usize).min(max_idx);
+                    flat_idx += i * stride;
+                    stride *= self.steps;
+                }
+                let base = flat_idx * Self::COEFF_COUNT;
+                for c in 0..5 {
+                    out[c] = self.coeffs[base + c];
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IirStage {
     /// The biquad filter data (coefficients + history).
@@ -3203,6 +3898,10 @@ pub struct IirStage {
     pub nonideal_fx: Vec<crate::nonideal_fx::NonIdealFx>,
     /// Pot bindings for runtime coefficient recomputation.
     pub pot_bindings: Vec<IirPotBinding>,
+    /// Precomputed biquad lookup table (compile-time sweeps over pot positions).
+    /// When present, `set_pot` interpolates from this instead of the DC gain formula.
+    #[cfg(feature = "biquad-table")]
+    pub biquad_table: Option<BiquadTable>,
     /// Sample rate (needed for GBW recomputation on gain change).
     pub sample_rate: f64,
     // ── NonIdealFx runtime state ──
@@ -3232,6 +3931,8 @@ impl IirStage {
             bypass_serial: false,
             nonideal_fx: Vec::new(),
             pot_bindings: Vec::new(),
+            #[cfg(feature = "biquad-table")]
+            biquad_table: None,
             sample_rate,
             gbw_state: 0.0,
             gbw_coeff: 1.0, // passthrough (no GBW limiting)
@@ -3300,8 +4001,11 @@ impl IirStage {
 
     /// Update pot position and recompute IIR coefficients.
     ///
-    /// For resistive feedback (no caps): recomputes dc_gain from Rf/Ri.
-    /// For resonators (caps): delegates to IirData::recompute().
+    /// With `biquad-table` feature: interpolates full biquad from precomputed
+    /// table. Handles cutoff, resonance, and any other pot — all coefficients
+    /// update correctly for frequency-dependent changes.
+    ///
+    /// Without table: falls back to DC gain recalculation (Rf/Ri).
     /// No heap allocations — all state is pre-allocated.
     pub fn set_pot(&mut self, comp_id: &str, position: f64) {
         let binding = match self.pot_bindings.iter_mut().find(|b| b.comp_id == comp_id) {
@@ -3310,15 +4014,65 @@ impl IirStage {
         };
         binding.position = position;
 
-        // Recompute dc_gain: gain = -(fixed_r + pos * max_r) / ri
+        // ── Table lookup path (full biquad interpolation) ──
+        #[cfg(feature = "biquad-table")]
+        if let Some(ref table) = self.biquad_table {
+            // Build position vector from all pot bindings, matched by comp_id
+            let mut positions = alloc::vec![0.0f64; table.dim_labels.len()];
+            for binding in &self.pot_bindings {
+                for (di, comp_id) in table.dim_labels.iter().enumerate() {
+                    if comp_id.as_str() == binding.comp_id.as_str() {
+                        positions[di] = binding.position;
+                    }
+                }
+            }
+            let mut coeffs = [0.0f64; 5];
+            table.lookup(&positions, &mut coeffs);
+            // Update biquad coefficients
+            if self.iir.b_coeffs.len() >= 3 && self.iir.a_coeffs.len() >= 3 {
+                self.iir.b_coeffs[0] = coeffs[0];
+                self.iir.b_coeffs[1] = coeffs[1];
+                self.iir.b_coeffs[2] = coeffs[2];
+                self.iir.a_coeffs[1] = coeffs[3];
+                self.iir.a_coeffs[2] = coeffs[4];
+            }
+            // Recompute GBW for new DC gain
+            if self.stored_gbw > 0.0 {
+                let dc_gain = self.iir.dc_gain().abs().max(1.0);
+                let fc = self.stored_gbw / dc_gain;
+                let w = 2.0 * core::f64::consts::PI * fc;
+                self.gbw_coeff = w / (w + self.sample_rate);
+            }
+            return;
+        }
+
+        // ── Structured feedback IIR path ──
+        // Active feedback filters keep the small set of R/C products needed
+        // to recompute the biquad directly. This is the intended fast path
+        // for RAT-style gain stages with reactive feedback/ground legs.
+        if self.iir.r_series_product > 0.0
+            && self.iir.c_shunt_product > 0.0
+            && self.iir.r_crit > 0.0
+        {
+            self.iir.r_fb = (binding.fixed_series_r + position * binding.max_r).max(1.0);
+            self.iir.recompute();
+
+            if self.stored_gbw > 0.0 {
+                let gain_abs = self.iir.dc_gain().abs().max(1.0);
+                let fc = self.stored_gbw / gain_abs;
+                let w = 2.0 * core::f64::consts::PI * fc;
+                self.gbw_coeff = w / (w + self.sample_rate);
+            }
+            return;
+        }
+
+        // ── Fallback: DC gain recalculation ──
         let rf = binding.fixed_series_r + position * binding.max_r;
         let ri = binding.ri;
         let dc_gain = if ri > 0.0 { -(rf / ri) } else { -1.0 };
 
-        // Update biquad: for DC-only (no caps), b=[gain, 0, 0], a=[1, 0, 0]
         self.iir.b_coeffs[0] = dc_gain;
 
-        // Recompute GBW coefficient for new gain (fc = GBW / |gain|)
         if self.stored_gbw > 0.0 {
             let gain_abs = dc_gain.abs().max(1.0);
             let fc = self.stored_gbw / gain_abs;
@@ -3452,6 +4206,7 @@ impl BlackFeedbackStage {
     /// Check if this stage owns a pot with the given component ID.
     pub fn has_pot(&self, comp_id: &str) -> bool {
         self.pot_comp_id.as_deref() == Some(comp_id)
+            || self.ri_pot_comp_id.as_deref() == Some(comp_id)
     }
 
     /// Set pot position (0.0–1.0). Converts to Rf = position * max_r.
@@ -3530,11 +4285,18 @@ pub struct StateSpaceStage {
     pub bypass_serial: bool,
     /// Supply voltage for rail saturation.
     pub supply_voltage: f64,
+    /// Precomputed v_rail = (supply/2 - 1.5).max(0.5) and 1/v_rail.
+    /// Eliminates per-sample division in tanh saturation loop.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    v_rail: f64,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    inv_v_rail: f64,
 }
 
 impl StateSpaceStage {
     pub fn new(ss: StateSpaceData, supply_voltage: f64) -> Self {
         let n = ss.n_states;
+        let v_rail = (supply_voltage * 0.5 - 1.5).max(0.5);
         Self {
             ss,
             work: vec![0.0; n],
@@ -3544,7 +4306,15 @@ impl StateSpaceStage {
             debug_label: String::new(),
             bypass_serial: false,
             supply_voltage,
+            v_rail,
+            inv_v_rail: 1.0 / v_rail,
         }
+    }
+
+    /// Recompute cached v_rail after supply voltage change or deserialization.
+    pub fn recompute_v_rail(&mut self) {
+        self.v_rail = (self.supply_voltage * 0.5 - 1.5).max(0.5);
+        self.inv_v_rail = 1.0 / self.v_rail;
     }
 
     #[inline]
@@ -3563,9 +4333,11 @@ impl StateSpaceStage {
         }
 
         // Op-amp rail saturation: tanh soft-clip state variables.
-        let v_rail = (self.supply_voltage * 0.5 - 1.5).max(0.5);
+        // v_rail and inv_v_rail are precomputed (supply voltage is constant).
+        let v_rail = self.v_rail;
+        let inv_v_rail = self.inv_v_rail;
         for x in &mut self.work[..n] {
-            *x = v_rail * crate::fast_math::fast_tanh(*x / v_rail);
+            *x = v_rail * crate::fast_math::fast_tanh(*x * inv_v_rail);
         }
         self.ss.x[..n].copy_from_slice(&self.work[..n]);
 
@@ -4192,27 +4964,25 @@ impl MultiNlStage {
     pub fn set_pot(&mut self, target_id: &str, value: f64) -> bool {
         let mut found = false;
 
-        // Try base name (2-terminal pot)
+        // Try base name. Native 3-terminal pots can contribute multiple
+        // children with the same component id, so update every match.
         for child in &mut self.pot_children {
             if child.set_pot(target_id, value) {
                 found = true;
-                break;
             }
         }
 
-        // Try Baxandall-decomposed halves (3-terminal pot)
+        // Try explicitly decomposed halves.
         let aw = format!("{target_id}__aw");
         for child in &mut self.pot_children {
             if child.set_pot(&aw, value) {
                 found = true;
-                break;
             }
         }
         let wb = format!("{target_id}__wb");
         for child in &mut self.pot_children {
             if child.set_pot(&wb, 1.0 - value) {
                 found = true;
-                break;
             }
         }
 
@@ -4724,5 +5494,352 @@ impl SubcircuitProcessor {
         self.prev_output = 0.0;
         self.rate_counter = self.rate_divisor;
         self.circuit.reset();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Blockwise K-method stage: wave-domain Newton for coupled NL blocks
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// A single block in the blockwise K-method stage.
+///
+/// Wraps a WDF tree + K-table as a "composite NL device." The tree contains
+/// the block's local passives (emitter resistor, bypass cap, cutoff pot) and
+/// a VS leaf for signal injection. The K-table encodes the nonlinear
+/// element's (BJT) response, precomputed at compile time.
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct KMethodBlock {
+    /// WDF tree: VS + passives (R_e_floor, C, Cutoff pot).
+    pub tree: DynNode,
+    /// Precomputed K-table: b_tree × ctrl → a_root.
+    pub k_table: KTable,
+    /// Port resistance of this block's WDF tree root.
+    pub rp: f64,
+    /// DC bias voltage for the BJT (Vbe operating point).
+    pub vbe_bias: f64,
+    /// DC operating point tracked at runtime.
+    pub dc_offset: f64,
+    /// If true, cascade output is from the passive subtree (right child
+    /// of Series adaptor = cap voltage). If false, from root port.
+    /// Set by compiler from circuit graph topology.
+    pub cascade_from_passive: bool,
+}
+
+/// Blockwise K-method stage: N coupled NL blocks with linear coupling.
+///
+/// Each block is a WDF tree + K-table (composite NL device).
+/// The coupling network is a linear scattering matrix derived from
+/// inter-block resistors (R_in, R_cv, R_fb_limit, Resonance, R_bias).
+///
+/// Wave-domain Newton iteration solves the algebraic feedback loop
+/// each sample — no unit delay in the feedback path. This preserves
+/// correct resonance tracking and fs-independent stability.
+///
+/// **Reference:** Werner, Smith, Abel (2015) "Wave Digital Filter Adaptors
+/// for Arbitrary Topologies and Multiport Linear Elements"
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BlockwiseKMethodStage {
+    /// NL blocks in signal-flow order.
+    pub blocks: Vec<KMethodBlock>,
+    /// Coupling scattering matrix (n_ports × n_ports, row-major).
+    /// Port ordering: [block_0, block_1, ..., block_{N-1}, VS_input].
+    pub coupling_s: Vec<f64>,
+    /// Port resistances for each coupling port.
+    pub coupling_rp: Vec<f64>,
+    /// Number of coupling ports (blocks.len() + 1 for VS input).
+    pub n_ports: usize,
+    /// Which block index to tap for output.
+    pub output_block: usize,
+    /// Supply voltage (V) for supply VS ports in the coupling.
+    pub supply_voltage: f64,
+    /// VS port mapping: (port_name, scattering_port_index).
+    /// Input ports from the .pedal that connect through coupling edges.
+    /// At runtime, port values are written to work_b[scattering_port_idx]
+    /// before the coupling scatter. The scattering distributes them.
+    pub vs_port_map: Vec<(String, usize)>,
+    /// Passive attenuation compensation factor.
+    pub compensation: f64,
+    /// Oversampler for antialiasing.
+    pub oversampler: Oversampler,
+    /// BFS distance from input (for pipeline ordering).
+    pub signal_flow_distance: usize,
+    /// When true, output does not overwrite the serial chain.
+    pub bypass_serial: bool,
+
+    // ── Work buffers (pre-allocated, not serialized) ────────────────────
+    /// Previous sample's reflected waves (warm-start for Newton).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub b_warm: Vec<f64>,
+    /// Work buffer: reflected waves from blocks (b_coupling).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub work_b: Vec<f64>,
+    /// Work buffer: incident waves from coupling scatter (a_coupling).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub work_a: Vec<f64>,
+    /// Cached port indices: maps vs_port_map entries to port_values indices.
+    /// Resolved once at init (cache_all_vs_pointers), no per-sample string compare.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub port_index_cache: Vec<usize>,
+}
+
+impl core::fmt::Debug for KMethodBlock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "KMethodBlock(rp={:.1}, bias={:.2})",
+            self.rp, self.vbe_bias
+        )
+    }
+}
+
+impl core::fmt::Debug for BlockwiseKMethodStage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "BlockwiseKMethodStage({}blocks, {}ports)",
+            self.blocks.len(),
+            self.n_ports
+        )
+    }
+}
+
+impl BlockwiseKMethodStage {
+    /// Maximum Newton iterations per sample.
+    const MAX_ITER: usize = 8;
+    /// Convergence tolerance on wave variables.
+    const TOL: f64 = 1e-6;
+
+    /// Solve the DC operating point by running zero-input samples until
+    /// cap states converge. This is the equivalent of SPICE `.op` analysis.
+    /// Must be called once at init (after deserialization) before audio.
+    pub fn solve_dc_operating_point(&mut self) {
+        self.init_buffers();
+        // Run 2000 samples of silence — enough for caps to reach DC equilibrium
+        let zeros = vec![0.0; self.vs_port_map.len()];
+        for _ in 0..2000 {
+            self.process(&zeros);
+        }
+        // Record the converged DC state — use the same extraction method
+        // as the cascade (cap voltage for cascade_from_passive, root port otherwise).
+        // This ensures the DC offset matches what process() subtracts.
+        //
+        // Run one more sample at DC to get the final voltages.
+        self.process(&zeros);
+        let n_blocks = self.blocks.len();
+        for i in 0..n_blocks {
+            // Re-extract at the current converged state
+            let b_tree = self.blocks[i].tree.reflected();
+            let a_root = if self.blocks[i].k_table.dims == 1 {
+                self.blocks[i].k_table.lookup_1d(b_tree)
+            } else {
+                self.blocks[i].k_table.lookup_2d(b_tree, 0.0)
+            };
+            self.blocks[i].dc_offset = if self.blocks[i].cascade_from_passive {
+                if let DynNode::Binary {
+                    kind: crate::dyn_node::BinaryKind::Series,
+                    gamma,
+                    b1,
+                    b2,
+                    ..
+                } = &self.blocks[i].tree
+                {
+                    let sum = *b1 + *b2 + a_root;
+                    let a_right = *b2 - (1.0 - *gamma) * sum;
+                    (a_right + *b2) / 2.0
+                } else {
+                    (a_root + b_tree) / 2.0
+                }
+            } else {
+                (a_root + b_tree) / 2.0
+            };
+        }
+        #[cfg(feature = "std")]
+        {
+            for (i, block) in self.blocks.iter().enumerate() {
+                let mut t = block.tree.clone();
+                t.set_voltage(0.0);
+                let b = t.reflected();
+                std::eprintln!(
+                    "  DC op: block {i} b_tree={b:.4}, dc_offset={:.4}",
+                    block.dc_offset
+                );
+            }
+        }
+    }
+
+    /// Allocate work buffers after deserialization.
+    pub fn init_buffers(&mut self) {
+        let n = self.n_ports;
+        if self.work_b.len() != n {
+            self.work_b = vec![0.0; n];
+            self.work_a = vec![0.0; n];
+            self.b_warm = vec![0.0; n];
+        }
+        // Ensure K-table scales are precomputed
+        for block in &mut self.blocks {
+            block.k_table.precompute_scales();
+        }
+    }
+
+    /// Process one sample through the blockwise K-method stage.
+    ///
+    /// The blocks are a serial cascade: each block's emitter output feeds
+    /// the next block's VS input. The coupling scattering matrix handles
+    /// bias (R_bias pull-ups) and the resonance feedback path (Q4.emitter
+    /// → Resonance → R_fb_limit → Q1.base).
+    ///
+    /// Algorithm:
+    /// 1. Compute coupling feedback from previous sample's state
+    /// 2. Set block[0].VS = input + feedback
+    /// 3. Serial cascade: each block processes, output feeds next block
+    /// 4. Newton iteration: re-run cascade with updated feedback until convergence
+    /// 5. Backward sweep to update reactive state (cap voltages)
+    /// Process one sample. `vs_signals` contains one voltage per VS port
+    /// in scattering order (matching `vs_port_map`). These are the input
+    /// signals (audio, VCO, CV) that drive the coupling network.
+    pub fn process(&mut self, vs_signals: &[f64]) -> f64 {
+        if self.work_b.len() != self.n_ports {
+            self.init_buffers();
+        }
+
+        let n_blocks = self.blocks.len();
+        let n = self.n_ports;
+
+        // Write VS signals into the coupling scattering ports.
+        // b = 2·V (WDF voltage source reflected wave).
+        // External ports (audio, CV) come from vs_signals.
+        // Supply ports (_supply_*) get the fixed supply voltage.
+        for (i, &(ref name, vs_idx)) in self.vs_port_map.iter().enumerate() {
+            if vs_idx < n {
+                let v = if name.starts_with("_supply_") {
+                    self.supply_voltage
+                } else {
+                    vs_signals.get(i).copied().unwrap_or(0.0)
+                };
+                self.work_b[vs_idx] = 2.0 * v;
+            }
+        }
+
+        let mut last_output = self.b_warm[0];
+        let mut output = 0.0;
+
+        for _iter in 0..Self::MAX_ITER {
+            // 1. Coupling scatter: compute feedback + distribute VS signals.
+            //    The coupling handles bias (R_bias), feedback (Resonance),
+            //    and input injection (audio_in, vco_in, cv_cutoff).
+            for i in 0..n {
+                let mut sum = 0.0;
+                for j in 0..n {
+                    sum += self.coupling_s[i * n + j] * self.work_b[j];
+                }
+                self.work_a[i] = sum;
+            }
+
+            // 2. Serial cascade through the rungs.
+            //    Each block's VS = previous rung's output + this block's
+            //    coupling contribution (bias from supply, feedback, etc.).
+            //    Block 0: VS from coupling only (input + feedback + bias).
+            //    Blocks 1+: VS = previous output + coupling bias.
+            let mut cascade = 0.0;
+
+            for i in 0..n_blocks {
+                // This block's voltage from the coupling scattering
+                let v_coupling = (self.work_a[i] + self.work_b[i]) / 2.0;
+
+                // Combine cascade (signal from previous rung) with coupling
+                // (bias from supply + any direct signal to this block)
+                let v_block = if i == 0 {
+                    v_coupling // block 0: all signal comes from coupling
+                } else {
+                    cascade + v_coupling // blocks 1+: cascade + bias
+                };
+
+                self.blocks[i].tree.set_voltage(v_block);
+
+                let b_tree = self.blocks[i].tree.reflected();
+                let a_root = if self.blocks[i].k_table.dims == 1 {
+                    self.blocks[i].k_table.lookup_1d(b_tree)
+                } else {
+                    self.blocks[i].k_table.lookup_2d(b_tree, 0.0)
+                };
+
+                // Cascade tap: cap voltage (lowpass filtered signal).
+                // Extract from passive subtree (right child of Series adaptor).
+                // Subtract DC offset to get AC component only — the cascade
+                // carries AC signal between rungs, not DC bias.
+                let raw_cascade = if self.blocks[i].cascade_from_passive {
+                    if let DynNode::Binary {
+                        kind: crate::dyn_node::BinaryKind::Series,
+                        gamma,
+                        b1,
+                        b2,
+                        ..
+                    } = &self.blocks[i].tree
+                    {
+                        let sum = *b1 + *b2 + a_root;
+                        let a_right = *b2 - (1.0 - *gamma) * sum;
+                        (a_right + *b2) / 2.0
+                    } else {
+                        (a_root + b_tree) / 2.0
+                    }
+                } else {
+                    (a_root + b_tree) / 2.0
+                };
+                cascade = raw_cascade - self.blocks[i].dc_offset;
+
+                // Store reflected wave for coupling scatter (feedback path)
+                self.work_b[i] = a_root;
+            }
+
+            // 3. Output from the last rung
+            output = cascade;
+
+            // 4. Convergence: Newton iterates until feedback stabilizes
+            if (output - last_output).abs() < Self::TOL {
+                break;
+            }
+            last_output = output;
+        }
+
+        // Backward sweep: update cap states with converged cascade
+        let mut cascade = 0.0;
+        for i in 0..n_blocks {
+            let v_coupling = (self.work_a[i] + self.work_b[i]) / 2.0;
+            let v_block = if i == 0 {
+                v_coupling
+            } else {
+                cascade + v_coupling
+            };
+            self.blocks[i].tree.set_voltage(-v_block);
+            let b_tree = self.blocks[i].tree.reflected();
+            let a_root = if self.blocks[i].k_table.dims == 1 {
+                self.blocks[i].k_table.lookup_1d(b_tree)
+            } else {
+                self.blocks[i].k_table.lookup_2d(b_tree, 0.0)
+            };
+            self.blocks[i].tree.set_incident(a_root);
+            cascade = (a_root + b_tree) / 2.0;
+        }
+
+        // Save warm-start for next sample
+        self.b_warm[0] = output;
+
+        // Guard against NaN
+        if output.is_finite() {
+            output
+        } else {
+            0.0
+        }
+    }
+
+    /// Debug label for tracing.
+    pub fn debug_label(&self) -> String {
+        format!(
+            "BlockwiseKMethod({}blocks, {}ports)",
+            self.blocks.len(),
+            self.n_ports,
+        )
     }
 }

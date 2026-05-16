@@ -28,7 +28,8 @@ use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::signal_flow::FlowGroup;
 use super::spqr_build::BuiltStage;
-use super::stage::{IirPotBinding, IirStage};
+use super::stage::{IirPotBinding, IirStage, OpAmpWdfAdaptor, RootKind, WdfStage};
+use crate::oversampling::{Oversampler, OversamplingFactor};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // StageStats — one-pass Component trait scan
@@ -113,10 +114,7 @@ impl StageStats {
 /// Uses port_semantic() to identify NL edges, then checks is_diode_family()
 /// for solver compatibility. This is the correct check because the WDF
 /// opamp+diode feedback path specifically creates DiodePair/SingleDiode roots.
-fn group_nl_edges_are_single_port_solvable(
-    edge_indices: &[usize],
-    graph: &CircuitGraph,
-) -> bool {
+fn group_nl_edges_are_single_port_solvable(edge_indices: &[usize], graph: &CircuitGraph) -> bool {
     let mut found_nonlinear = false;
 
     for &edge_idx in edge_indices {
@@ -197,11 +195,16 @@ pub(super) fn classify_rigid(
                 let comp = &graph.components[graph.edges[eidx].comp_idx];
                 comp.kind.capacitance().is_some() || comp.kind.inductance().is_some()
             };
-            let has_reactive_ground = g.ground_shunt_edges.iter().any(|&eidx| is_reactive(eidx));
-            let feedback_purely_resistive = g.feedback_edges.iter().all(|&eidx| !is_reactive(eidx));
-            if has_reactive_ground && feedback_purely_resistive {
-                // 808-style: caps to ground create resonance, feedback is resistive.
-                // IIR with extract_feedback_r handles this correctly.
+
+            // Any reactive element in the rigid group → IIR to capture
+            // frequency response. Covers:
+            //   - 808 bridged-T: caps to ground, resistive feedback
+            //   - MFB/Rauch: cap in feedback (C from neg to out)
+            //   - Sallen-Key (when opamp group includes filter caps)
+            // Without this, BlackFeedback computes only DC gain = Rf/Ri,
+            // losing the filter's poles and zeros.
+            let has_any_reactive = all_edges.iter().any(|&eidx| is_reactive(eidx));
+            if has_any_reactive {
                 return RigidOptimization::Iir;
             }
         }
@@ -330,18 +333,19 @@ fn collect_nonideal_fx(
 
 /// Extract pot bindings from a classified FlowGroup for IIR runtime recomputation.
 ///
-/// For each pot in the feedback path, computes:
-/// - `ri`: sum of resistance on pendant_edges (input coupling)
-/// - `fixed_series_r`: sum of non-pot resistance on feedback_edges
-/// - `max_r`: pot's maximum resistance
+/// Scans ALL edges in the group (feedback, ground shunt, pendant, active) for
+/// pots. Each pot gets an IirPotBinding so the IIR stage can recompute biquad
+/// coefficients when any pot changes.
 ///
-/// No heap allocations at runtime — all values are scalars stored at compile time.
+/// Previously only scanned feedback_edges — missed Resonance pots (ground shunt)
+/// and Cutoff pots (input path / pendant).
 fn extract_pot_bindings(
     group: &FlowGroup,
     _edge_indices: &[usize],
     graph: &CircuitGraph,
 ) -> Vec<IirPotBinding> {
     let mut bindings = Vec::new();
+    let all_edges = group.all_edges();
 
     // Ri: sum of resistance on pendant_edges (input coupling path)
     let ri: f64 = group
@@ -355,10 +359,15 @@ fn extract_pot_bindings(
         .sum();
     let ri = if ri <= 0.0 { 1.0 } else { ri }; // Safety: avoid div-by-zero
 
-    // Scan feedback edges for pots
+    // Scan ALL edges for pots — any pot in the group affects the IIR
     let mut fixed_r: f64 = 0.0;
-    for &eidx in &group.feedback_edges {
-        let comp = &graph.components[graph.edges[eidx].comp_idx];
+    let mut seen_comp: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &eidx in &all_edges {
+        let comp_idx = graph.edges[eidx].comp_idx;
+        if !seen_comp.insert(comp_idx) {
+            continue; // skip duplicate edges for same component
+        }
+        let comp = &graph.components[comp_idx];
         if let Some(pot) = comp
             .kind
             .as_any()
@@ -372,7 +381,10 @@ fn extract_pot_bindings(
                 position: 0.5, // default
             });
         } else if let Some(r) = comp.kind.resistance() {
-            fixed_r += r;
+            // Only count non-pot feedback resistors as fixed_r
+            if group.feedback_edges.contains(&eidx) {
+                fixed_r += r;
+            }
         }
     }
 
@@ -577,6 +589,37 @@ pub(super) fn build_rigid_from_group(
                 }
                 if let Some(g) = group {
                     stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
+
+                    // Build biquad lookup table for pot-controlled stages.
+                    // Each pot becomes its own dimension (ganged pots sharing a
+                    // control label are handled at the BiValve/set_pot level).
+                    #[cfg(feature = "biquad-table")]
+                    if !stage.pot_bindings.is_empty() {
+                        let labels: Vec<String> = stage
+                            .pot_bindings
+                            .iter()
+                            .map(|b| b.comp_id.clone())
+                            .collect();
+                        let table_steps = if labels.len() <= 2 { 32 } else { 16 };
+                        stage.biquad_table = iir::build_biquad_table(
+                            &edge_indices,
+                            &pendant_trees,
+                            graph,
+                            sample_rate,
+                            &labels,
+                            table_steps,
+                        );
+                        #[cfg(test)]
+                        if let Some(ref t) = stage.biquad_table {
+                            eprintln!(
+                                "  BiquadTable: {}D, {} steps, {} entries, {:.1}KB",
+                                t.dim_labels.len(),
+                                t.steps,
+                                t.coeffs.len() / 5,
+                                t.coeffs.len() as f64 * 8.0 / 1024.0,
+                            );
+                        }
+                    }
                 }
                 return Ok(BuiltStage::Iir(stage));
             }
@@ -620,11 +663,18 @@ pub(super) fn build_rigid_from_group(
                 }
             }
             if stats.vcvs_count == 1 && stats.nl_count == 0 {
-                // Linear VCVS + reactive feedback (tone stages).
-                // TODO: build OpAmpWdfAdaptor with Zf tree from feedback edges.
-                // For now, use BlackFeedback with unity passthrough — audio
-                // passes through but tone pot has no effect.
                 if let Some(g) = group {
+                    if let Some(stage) = try_build_linear_feedback_wdf_adaptor(
+                        g,
+                        &stats,
+                        graph,
+                        sample_rate,
+                        supply_voltage,
+                        bias_v_max,
+                    ) {
+                        return Ok(BuiltStage::Wdf(stage));
+                    }
+
                     let inverting = is_inverting_topology(&stats, graph);
                     let config = opamp_root::extract_opamp_config(g, inverting, graph)?;
                     let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
@@ -699,6 +749,166 @@ pub(super) fn build_rigid_from_group(
             }
         }
     }
+}
+
+/// Build a WDF op-amp constraint adaptor for linear active tone stages whose
+/// feedback impedance contains reactive or split-pot elements.
+///
+/// Heuristic: inverting VCVS, one input resistor into the inverting node, and
+/// a feedback network from inverting node to op-amp output containing a cap
+/// plus a three-terminal pot. This covers Klon/Goldenrod-style active treble
+/// shelves without lowering them to scalar BlackFeedback.
+fn try_build_linear_feedback_wdf_adaptor(
+    group: &FlowGroup,
+    stats: &StageStats,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    supply_voltage: f64,
+    bias_v_max: Option<(f64, f64)>,
+) -> Option<WdfStage> {
+    if !stats.is_single_vcvs_linear() || !is_inverting_topology(stats, graph) {
+        return None;
+    }
+
+    let vcvs_edge = stats.vcvs_edge?;
+    let vcvs_comp_idx = graph.edges[vcvs_edge].comp_idx;
+    let pins = graph
+        .nullor_pins
+        .iter()
+        .find(|p| p.comp_idx == vcvs_comp_idx)?;
+    let neg = pins.neg_node;
+    let out = pins.out_node;
+
+    let all_edges = group.all_edges();
+    let is_ground = |node: NodeId| {
+        node == graph.gnd_node
+            || graph.supply_nodes.contains(&node)
+            || graph.ac_ground_nodes.contains(&node)
+    };
+    let other = |eidx: usize, node: NodeId| {
+        let e = &graph.edges[eidx];
+        if e.node_a == node {
+            Some(e.node_b)
+        } else if e.node_b == node {
+            Some(e.node_a)
+        } else {
+            None
+        }
+    };
+    let spans = |eidx: usize, a: NodeId, b: NodeId| {
+        let e = &graph.edges[eidx];
+        (e.node_a == a && e.node_b == b) || (e.node_a == b && e.node_b == a)
+    };
+
+    let input_edge = all_edges.iter().copied().find(|&eidx| {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+            return false;
+        }
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        comp.kind.resistance().is_some()
+            && other(eidx, neg).is_some_and(|n| n != out && !is_ground(n))
+    })?;
+    let input_r = graph.components[graph.edges[input_edge].comp_idx]
+        .kind
+        .resistance()?;
+
+    let fb_r_edge = all_edges.iter().copied().find(|&eidx| {
+        graph.effective_edge_kind(eidx) == EdgeKind::Linear
+            && spans(eidx, neg, out)
+            && graph.components[graph.edges[eidx].comp_idx]
+                .kind
+                .resistance()
+                .is_some()
+    });
+
+    let cap_edge = all_edges.iter().copied().find(|&eidx| {
+        graph.effective_edge_kind(eidx) == EdgeKind::Reactive
+            && other(eidx, neg).is_some()
+            && graph.components[graph.edges[eidx].comp_idx]
+                .kind
+                .capacitance()
+                .is_some()
+    })?;
+    let cap_to = other(cap_edge, neg)?;
+    let cap_comp = &graph.components[graph.edges[cap_edge].comp_idx];
+    let cap = cap_comp.kind.capacitance()?;
+
+    let pot_comp_idx = all_edges.iter().find_map(|&eidx| {
+        let comp_idx = graph.edges[eidx].comp_idx;
+        let count = all_edges
+            .iter()
+            .filter(|&&other_eidx| graph.edges[other_eidx].comp_idx == comp_idx)
+            .count();
+        (count >= 2 && graph.components[comp_idx].kind.is_pot()).then_some(comp_idx)
+    })?;
+    let pot_comp = &graph.components[pot_comp_idx];
+    let pot_id = pot_comp.id.as_str();
+    let pot_a = graph.node_names.get(&format!("{pot_id}.a")).copied()?;
+    let pot_w = graph.node_names.get(&format!("{pot_id}.w")).copied()?;
+    let pot_b = graph.node_names.get(&format!("{pot_id}.b")).copied()?;
+    if pot_a != cap_to || pot_b != out {
+        return None;
+    }
+    let pot = pot_comp
+        .kind
+        .as_any()
+        .downcast_ref::<super::components::Potentiometer>()?;
+    let pot_max = pot.max_r;
+    let pot_taper = pot.taper;
+
+    let shelf_edge = all_edges.iter().copied().find(|&eidx| {
+        graph.effective_edge_kind(eidx) == EdgeKind::Linear
+            && spans(eidx, pot_w, out)
+            && graph.edges[eidx].comp_idx != pot_comp_idx
+            && graph.components[graph.edges[eidx].comp_idx]
+                .kind
+                .resistance()
+                .is_some()
+    })?;
+    let shelf_comp = &graph.components[graph.edges[shelf_edge].comp_idx];
+    let shelf_r = shelf_comp.kind.resistance()?;
+
+    let zi = DynNode::VoltageSource(0.0, input_r);
+    let cap_rp = 1.0 / (2.0 * sample_rate * cap);
+    let cap_node = DynNode::Capacitor(Some(cap_comp.id.clone()), cap, cap_rp);
+    let pot_aw = DynNode::Pot(format!("{pot_id}__aw"), pot_max, 0.5, pot_taper);
+    let pot_wb = DynNode::Pot(format!("{pot_id}__wb"), pot_max, 0.5, pot_taper);
+    let shelf = DynNode::Resistor(Some(shelf_comp.id.clone()), shelf_r);
+    let shelf_parallel = DynNode::Parallel(Box::new(shelf), Box::new(pot_wb));
+    let reactive_branch = DynNode::Series(
+        Box::new(DynNode::Series(Box::new(cap_node), Box::new(pot_aw))),
+        Box::new(shelf_parallel),
+    );
+    let zf = if let Some(eidx) = fb_r_edge {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        let r = comp.kind.resistance()?;
+        DynNode::Parallel(
+            Box::new(DynNode::Resistor(Some(comp.id.clone()), r)),
+            Box::new(reactive_branch),
+        )
+    } else {
+        reactive_branch
+    };
+
+    let config = opamp_root::extract_opamp_config(group, true, graph).ok()?;
+    let mut opamp = opamp_root::make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
+    opamp.set_gbw_gain((zf.port_resistance() / input_r).abs().max(1.0));
+
+    let mut stage = WdfStage::new(
+        DynNode::VoltageSource(0.0, 1.0),
+        RootKind::Passthrough,
+        Oversampler::new(OversamplingFactor::X1),
+    );
+    stage.opamp_wdf_adaptor = Some(OpAmpWdfAdaptor {
+        zi,
+        zf,
+        is_inverting: true,
+        opamp,
+        gbw_state: 0.0,
+        prev_out: 0.0,
+        feedback_pot_id: Some(pot_id.to_string()),
+    });
+    Some(stage)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

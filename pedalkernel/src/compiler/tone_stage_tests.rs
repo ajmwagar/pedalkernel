@@ -20,7 +20,8 @@ const SR: f64 = 48000.0;
 fn simple_tone_network_passes_signal() {
     // Tone pot + ground caps + output coupling. No gain stage.
     // Should pass signal near-unity at 440Hz.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_t1: resistor(1k)
@@ -39,7 +40,9 @@ fn simple_tone_network_passes_signal() {
             controls {
                 Tone.position -> "Tone" [0.0, 1.0] = 0.5
             }
-        }"#).expect("parse");
+        }"#,
+    )
+    .expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
     let amp = 0.1;
@@ -48,15 +51,17 @@ fn simple_tone_network_passes_signal() {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * 440.0 * (4000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * 440.0 * (4000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
 
     let gain = peak / amp;
     eprintln!("Simple tone: peak={peak:.4}V gain={gain:.2}");
-    assert!(gain > 0.1, "Tone network should pass signal: gain={gain:.2}");
+    assert!(
+        gain > 0.1,
+        "Tone network should pass signal: gain={gain:.2}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -81,8 +86,10 @@ fn screamer_tone_output_probe_correct() {
             #[cfg(debug_assertions)]
             {
                 if w.debug_label.contains("Tone") || w.debug_label.contains("Level") {
-                    eprintln!("Tone stage [{0}]: probe={1:?}",
-                        w.debug_label, w.output_probe);
+                    eprintln!(
+                        "Tone stage [{0}]: probe={1:?}",
+                        w.debug_label, w.output_probe
+                    );
 
                     // The probe should target a component at the output boundary
                     // (R_out_g or R_out_s), NOT an interior component (R_t2, C_t1).
@@ -121,21 +128,32 @@ fn screamer_tone_stage_not_dead() {
 
     for i in 0..n {
         let lvl = metrics.stage_levels[i];
-        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let db = if lvl > 1e-10 {
+            20.0 * (lvl as f64).log10()
+        } else {
+            -120.0
+        };
         #[cfg(debug_assertions)]
         {
             let (lbl, bypass) = match &compiled.stages[i] {
-                super::compiled::Stage::Wdf(w) => (&w.debug_label, w.bypass_serial),
-                super::compiled::Stage::MultiNl(m) => (&m.debug_label, m.bypass_serial),
-                super::compiled::Stage::Iir(s) => (&s.debug_label, s.bypass_serial),
-                super::compiled::Stage::StateSpace(s) => (&s.debug_label, s.bypass_serial),
-                super::compiled::Stage::BlackFeedback(b) => (&b.debug_label, b.bypass_serial),
+                super::compiled::Stage::Wdf(w) => (w.debug_label.as_str(), w.bypass_serial),
+                super::compiled::Stage::MultiNl(m) => (m.debug_label.as_str(), m.bypass_serial),
+                super::compiled::Stage::Iir(s) => (s.debug_label.as_str(), s.bypass_serial),
+                super::compiled::Stage::StateSpace(s) => (s.debug_label.as_str(), s.bypass_serial),
+                super::compiled::Stage::BlackFeedback(b) => {
+                    (b.debug_label.as_str(), b.bypass_serial)
+                }
+                super::compiled::Stage::BlockwiseKMethod(bk) => ("blockwise", bk.bypass_serial),
             };
-            if bypass { continue; }
+            if bypass {
+                continue;
+            }
             if lbl.contains("Tone") || lbl.contains("Level") {
                 eprintln!("Tone stage [{lbl}]: {db:.1} dB");
-                assert!(db > -40.0,
-                    "Tone stage [{lbl}] drops too much at {db:.1} dB");
+                assert!(
+                    db > -40.0,
+                    "Tone stage [{lbl}] drops too much at {db:.1} dB"
+                );
             }
         }
     }
@@ -163,30 +181,42 @@ fn output_probe_uses_output_terminal() {
     let global_terminals = vec![graph.in_node, graph.out_node];
 
     // Find the tone group
-    let tone_group = groups.iter().find(|g| {
-        g.all_edges().iter().any(|&eidx| {
-            graph.components[graph.edges[eidx].comp_idx].id == "Tone"
+    let tone_group = groups
+        .iter()
+        .find(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Tone")
         })
-    }).expect("tone group");
+        .expect("tone group");
 
     let group_edges = tone_group.all_edges();
-    let terminals = super::spqr_build::compute_group_terminals(&group_edges, &graph, &global_terminals);
+    let terminals =
+        super::spqr_build::compute_group_terminals(&group_edges, &graph, &global_terminals);
 
     eprintln!("Tone group terminals: {terminals:?}");
     eprintln!("  out_node={:?}", graph.out_node);
 
     // out_node should be one of the terminals
-    assert!(terminals.contains(&graph.out_node),
-        "out_node should be a terminal for the tone group: terminals={terminals:?}");
+    assert!(
+        terminals.contains(&graph.out_node),
+        "out_node should be a terminal for the tone group: terminals={terminals:?}"
+    );
 
     // The output boundary should prefer out_node over other terminals
-    let output_boundary = terminals.iter()
+    let output_boundary = terminals
+        .iter()
         .find(|&&t| t == graph.out_node)
         .or_else(|| terminals.iter().find(|&&t| t != graph.in_node))
         .copied()
         .unwrap_or(graph.out_node);
 
-    eprintln!("  output_boundary={output_boundary:?} (should be out_node={:?})", graph.out_node);
-    assert_eq!(output_boundary, graph.out_node,
-        "Output boundary should be out_node for the tone+output group");
+    eprintln!(
+        "  output_boundary={output_boundary:?} (should be out_node={:?})",
+        graph.out_node
+    );
+    assert_eq!(
+        output_boundary, graph.out_node,
+        "Output boundary should be out_node for the tone+output group"
+    );
 }

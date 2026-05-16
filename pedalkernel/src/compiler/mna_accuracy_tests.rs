@@ -33,8 +33,10 @@ fn wright_omega_satisfies_defining_equation() {
         let w = wright_omega(x);
         if w > 1e-15 {
             let residual = (w + w.ln() - x).abs();
-            assert!(residual < 1e-8,
-                "Wright Omega residual at x={x}: w={w:.10e}, residual={residual:.2e}");
+            assert!(
+                residual < 1e-8,
+                "Wright Omega residual at x={x}: w={w:.10e}, residual={residual:.2e}"
+            );
         }
     }
 }
@@ -53,7 +55,10 @@ fn wright_omega_known_values() {
 
     // ω(e+1) = e (e + ln(e) = e + 1)
     let we1 = wright_omega(std::f64::consts::E + 1.0);
-    assert!((we1 - std::f64::consts::E).abs() < 1e-6, "ω(e+1) = e: got {we1:.6}");
+    assert!(
+        (we1 - std::f64::consts::E).abs() < 1e-6,
+        "ω(e+1) = e: got {we1:.6}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -94,8 +99,10 @@ fn explicit_single_diode_clips_asymmetrically() {
     eprintln!("Single diode: fwd_v={v_fwd:.4}, rev_v={v_rev:.4}");
     // Forward bias: diode conducts, clips voltage → |v_fwd| small
     // Reverse bias: diode blocks, voltage passes → |v_rev| ≈ 1.0
-    assert!(v_fwd.abs() < v_rev.abs(),
-        "Forward should clip more than reverse: fwd={v_fwd:.4}, rev={v_rev:.4}");
+    assert!(
+        v_fwd.abs() < v_rev.abs(),
+        "Forward should clip more than reverse: fwd={v_fwd:.4}, rev={v_rev:.4}"
+    );
 }
 
 #[test]
@@ -115,7 +122,10 @@ fn explicit_germanium_clips_lower_than_silicon() {
     let ge_v = ((a + ge_b) / 2.0).abs();
 
     eprintln!("Clip voltages: Si={si_v:.4}V, Ge={ge_v:.4}V");
-    assert!(ge_v < si_v, "Ge should clip lower than Si: Ge={ge_v:.4} < Si={si_v:.4}");
+    assert!(
+        ge_v < si_v,
+        "Ge should clip lower than Si: Ge={ge_v:.4} < Si={si_v:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -133,8 +143,10 @@ fn silicon_diode_forward_voltage_correct() {
     let v_expected = n_vt * (i_target / is + 1.0_f64).ln();
 
     eprintln!("Silicon Vf at 1mA: {v_expected:.4}V");
-    assert!(v_expected > 0.5 && v_expected < 0.8,
-        "Silicon Vf should be 0.5-0.8V at 1mA: got {v_expected:.4}V");
+    assert!(
+        v_expected > 0.5 && v_expected < 0.8,
+        "Silicon Vf should be 0.5-0.8V at 1mA: got {v_expected:.4}V"
+    );
 }
 
 #[test]
@@ -149,8 +161,14 @@ fn germanium_diode_lower_vf_than_silicon() {
     let ge_vf = ge_nvt * (i / ge_is + 1.0_f64).ln();
 
     eprintln!("Si Vf={si_vf:.4}V, Ge Vf={ge_vf:.4}V");
-    assert!(ge_vf < si_vf, "Germanium Vf should be lower than silicon: Ge={ge_vf:.4} < Si={si_vf:.4}");
-    assert!(ge_vf > 0.1 && ge_vf < 0.4, "Germanium Vf should be 0.1-0.4V: {ge_vf:.4}");
+    assert!(
+        ge_vf < si_vf,
+        "Germanium Vf should be lower than silicon: Ge={ge_vf:.4} < Si={si_vf:.4}"
+    );
+    assert!(
+        ge_vf > 0.1 && ge_vf < 0.4,
+        "Germanium Vf should be 0.1-0.4V: {ge_vf:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -166,7 +184,8 @@ fn mna_single_stage_injects_at_circuit_input() {
     // Single-stage circuit: MNA should inject at graph.in_node.
     // R_in → U1.neg → Rf → U1.out → D1 → U1.neg.
     // Output at U1.out. Signal enters at in_node (graph.in_node).
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -185,7 +204,8 @@ fn mna_single_stage_injects_at_circuit_input() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("MNA single stage: gain={gain:.2}");
     assert!(gain > 3.0, "Single stage should amplify: {gain:.2}");
 }
@@ -194,7 +214,8 @@ fn mna_single_stage_injects_at_circuit_input() {
 fn mna_multi_stage_injects_at_vcvs_input() {
     // Multi-stage: Cin + R_in → clipping stage.
     // MNA should inject at the VCVS input pin (neg node), not graph.in_node.
-    let gain = measure_gain(r#"
+    let gain = measure_gain(
+        r#"
         pedal "test" { supply 9V
             components {
                 Cin: cap(47n)
@@ -215,7 +236,8 @@ fn mna_multi_stage_injects_at_vcvs_input() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
     eprintln!("MNA multi-stage injection: gain={gain:.2}");
     assert!(gain > 1.0, "Multi-stage should amplify: {gain:.2}");
 }
@@ -228,7 +250,8 @@ fn mna_multi_stage_injects_at_vcvs_input() {
 fn mna_output_at_opamp_output_not_virtual_ground() {
     // The output should be at the op-amp output pin, which swings
     // with the signal. NOT at the virtual ground (neg node ≈ 0V).
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -247,7 +270,8 @@ fn mna_output_at_opamp_output_not_virtual_ground() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -265,7 +289,10 @@ fn mna_output_at_opamp_output_not_virtual_ground() {
     eprintln!("MNA output extraction: peak={peak:.4}V");
     // With Rf/Ri=10 and 0.01V input, output should be ~0.1V (below clip)
     // Virtual ground would give ~0V. Op-amp output gives ~0.1V.
-    assert!(peak > 0.02, "Output should be at op-amp output, not virtual ground: {peak:.4}V");
+    assert!(
+        peak > 0.02,
+        "Output should be at op-amp output, not virtual ground: {peak:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -276,7 +303,8 @@ fn mna_output_at_opamp_output_not_virtual_ground() {
 fn mna_inverting_amp_with_diode_gain_correct() {
     // Inverting amp with diode: below clipping, gain ≈ Rf/Ri = 10.
     // Use small signal to stay below diode Vf.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -295,7 +323,8 @@ fn mna_inverting_amp_with_diode_gain_correct() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -313,7 +342,10 @@ fn mna_inverting_amp_with_diode_gain_correct() {
 
     let gain = peak / 0.001;
     eprintln!("MNA small-signal gain: {gain:.2} (expected ~10)");
-    assert!(gain > 5.0, "Small-signal gain should be ~Rf/Ri=10: {gain:.2}");
+    assert!(
+        gain > 5.0,
+        "Small-signal gain should be ~Rf/Ri=10: {gain:.2}"
+    );
     assert!(gain < 20.0, "Gain shouldn't be excessive: {gain:.2}");
 }
 
@@ -321,7 +353,8 @@ fn mna_inverting_amp_with_diode_gain_correct() {
 fn mna_diode_pair_clips_symmetrically() {
     // DiodePair in feedback: positive and negative peaks should be
     // roughly equal (symmetric clipping).
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -343,7 +376,8 @@ fn mna_diode_pair_clips_symmetrically() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -363,18 +397,28 @@ fn mna_diode_pair_clips_symmetrically() {
     }
 
     eprintln!("Symmetric clip: pos={pos_peak:.4}, neg={neg_peak:.4}");
-    assert!(pos_peak > 0.1, "Should produce positive output: {pos_peak:.4}");
-    assert!(neg_peak < -0.1, "Should produce negative output: {neg_peak:.4}");
+    assert!(
+        pos_peak > 0.1,
+        "Should produce positive output: {pos_peak:.4}"
+    );
+    assert!(
+        neg_peak < -0.1,
+        "Should produce negative output: {neg_peak:.4}"
+    );
 
     let asymmetry = (pos_peak - neg_peak.abs()).abs() / pos_peak.max(0.001);
-    assert!(asymmetry < 0.3, "Should be roughly symmetric: asymmetry={asymmetry:.2}");
+    assert!(
+        asymmetry < 0.3,
+        "Should be roughly symmetric: asymmetry={asymmetry:.2}"
+    );
 }
 
 #[test]
 fn mna_asymmetric_diodes_different_clip_levels() {
     // Ge forward + Si reverse: should clip asymmetrically.
     // Ge clips at ~0.3V, Si clips at ~0.6V.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -396,7 +440,8 @@ fn mna_asymmetric_diodes_different_clip_levels() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -415,13 +460,22 @@ fn mna_asymmetric_diodes_different_clip_levels() {
     }
 
     eprintln!("Asymmetric clip: pos={pos_peak:.4} (Ge), neg={neg_peak:.4} (Si)");
-    assert!(pos_peak > 0.05, "Should produce positive output: {pos_peak:.4}");
-    assert!(neg_peak < -0.05, "Should produce negative output: {neg_peak:.4}");
+    assert!(
+        pos_peak > 0.05,
+        "Should produce positive output: {pos_peak:.4}"
+    );
+    assert!(
+        neg_peak < -0.05,
+        "Should produce negative output: {neg_peak:.4}"
+    );
 
     // Asymmetry: Ge clips lower than Si
     let diff = (pos_peak.abs() - neg_peak.abs()).abs();
     eprintln!("Clip level difference: {diff:.4}V");
-    assert!(diff > 0.05, "Ge and Si should clip at different levels: diff={diff:.4}");
+    assert!(
+        diff > 0.05,
+        "Ge and Si should clip at different levels: diff={diff:.4}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

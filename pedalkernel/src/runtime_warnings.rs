@@ -11,8 +11,8 @@
 //! Output: `eprintln!` + thread-local ring buffer. Rate-limited to at most one
 //! warning per device per 1024 samples (~21ms at 48kHz).
 
-use std::cell::RefCell;
 use hashbrown::HashMap;
+use std::cell::RefCell;
 use std::fmt;
 
 /// Rate limit: at most one warning per device per this many samples.

@@ -1,0 +1,680 @@
+/* pedalkernel docs + landing — shared theme */
+
+:root {
+  color-scheme: light dark;
+  --bg: #0f1012;
+  --fg: #e8e6e3;
+  --muted: #9aa0a6;
+  --accent: #ffb000;
+  --accent-weak: rgba(255, 176, 0, 0.15);
+  --card: #17181c;
+  --card-hover: #1d1e22;
+  --border: #2a2b30;
+  --border-strong: #3a3b42;
+  --code-bg: #0a0a0c;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --max: 780px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fafafa;
+    --fg: #1a1a1a;
+    --muted: #5a5f66;
+    --accent: #b96800;
+    --accent-weak: rgba(185, 104, 0, 0.12);
+    --card: #ffffff;
+    --card-hover: #f4f4f5;
+    --border: #e4e4e7;
+    --border-strong: #d4d4d8;
+    --code-bg: #f4f4f5;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  line-height: 1.6;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+a { color: var(--accent); }
+a:hover { text-decoration: underline; }
+
+main { flex: 1; }
+
+/* ---------- site chrome ---------- */
+
+.site-header {
+  border-bottom: 1px solid var(--border);
+  padding: 0.9rem 1.5rem;
+  position: sticky;
+  top: 0;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(6px);
+  z-index: 10;
+}
+.site-header nav {
+  max-width: var(--max);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+}
+.site-header .brand {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+}
+.site-header .brand:hover { color: var(--accent); text-decoration: none; }
+.site-header ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 1.25rem;
+  font-size: 0.92rem;
+}
+.site-header ul a {
+  color: var(--muted);
+  text-decoration: none;
+}
+.site-header ul a:hover { color: var(--accent); }
+
+/* Pagefind search widget in the site header. Theme variables are set so
+   the bundled pagefind-ui.css adapts to our accent + card palette.
+   If pagefind has not been built (local dev without the index), the div
+   stays empty and takes no space.
+
+   Scoped both on `.site-search` and on `.site-search .pagefind-ui` so the
+   cascade beats Pagefind's own `:root` defaults regardless of how Pagefind
+   mounts its shadow DOM or scope classes. */
+.site-search,
+.site-search .pagefind-ui {
+  --pagefind-ui-scale: 0.85;
+  --pagefind-ui-primary: var(--accent);
+  --pagefind-ui-text: var(--fg);
+  /* Widget background uses --card (subtle elevation above the page bg in
+     dark mode, pure white in light mode). Using --bg instead made the
+     widget invisible in dark mode because the page was the same color. */
+  --pagefind-ui-background: var(--card);
+  --pagefind-ui-border: var(--border);
+  /* Tag pills: accent-tinted so they're visible on the card bg in both
+     themes. Was --card, which vanished into the widget background. */
+  --pagefind-ui-tag: var(--accent-weak);
+  --pagefind-ui-border-radius: 6px;
+  --pagefind-ui-border-width: 1px;
+  --pagefind-ui-font: var(--sans);
+}
+.site-search {
+  min-width: 0;
+  flex: 0 1 16rem;
+  margin-left: auto;
+}
+/* Result links take the accent color so they stand out against the
+   card background — Pagefind's default uses --pagefind-ui-text which
+   makes titles and body text indistinguishable. */
+.site-search .pagefind-ui__result-link {
+  color: var(--accent);
+}
+.site-search .pagefind-ui__result-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+/* Highlighted terms inside excerpts: use the accent-weak background so
+   matches are obvious without being garish. */
+.site-search .pagefind-ui__result-excerpt mark {
+  background: var(--accent-weak);
+  color: var(--accent);
+  padding: 0 0.15em;
+  border-radius: 2px;
+}
+.site-search :where(input, .pagefind-ui__search-input) {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  /* Input text was inheriting --pagefind-ui-text but font-weight:700 in
+     Pagefind's CSS was dominating; keep it readable. */
+  font-weight: 500;
+  color: var(--fg);
+}
+.site-search .pagefind-ui__search-input::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding: 1.5rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.site-footer a { color: var(--muted); }
+.site-footer a:hover { color: var(--accent); text-decoration: none; }
+
+/* ---------- home / switcher ---------- */
+
+body.home main {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 4rem 1.5rem 2rem;
+}
+
+.hero { margin-bottom: 2.5rem; }
+.hero h1 {
+  font-family: var(--mono);
+  font-size: 2rem;
+  margin: 0 0 0.4rem;
+  letter-spacing: -0.01em;
+}
+.hero .tagline {
+  color: var(--muted);
+  margin: 0;
+  font-size: 1.05rem;
+}
+.hero .tagline code {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: 0.95em;
+}
+
+.cards {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: 1fr;
+  margin: 2rem 0;
+}
+.card {
+  display: block;
+  padding: 1.25rem 1.4rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease, transform 0.15s ease, background 0.15s ease;
+}
+.card:hover {
+  border-color: var(--accent);
+  background: var(--card-hover);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+.card-kicker {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.4rem;
+}
+.card-name {
+  font-family: var(--mono);
+  font-size: 1.1rem;
+  color: var(--accent);
+  margin: 0 0 0.25rem;
+}
+.card-desc {
+  color: var(--muted);
+  font-size: 0.95rem;
+  margin: 0;
+}
+.card-book {
+  border-color: var(--border-strong);
+  background: linear-gradient(180deg, var(--card) 0%, color-mix(in srgb, var(--accent-weak) 55%, var(--card)) 100%);
+}
+.card-book .card-kicker { color: var(--accent); }
+
+.note {
+  margin-top: 2rem;
+  padding: 1rem 1.2rem;
+  background: var(--card);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+/* ---------- prose (book pages) ---------- */
+
+body.page main {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 2.5rem 1.5rem 3rem;
+}
+.prose-header {
+  margin-bottom: 2rem;
+  padding-bottom: 1.2rem;
+  border-bottom: 1px solid var(--border);
+}
+.prose-header h1 {
+  font-family: var(--mono);
+  font-size: 1.85rem;
+  margin: 0 0 0.35rem;
+  letter-spacing: -0.01em;
+}
+.prose-header .subtitle {
+  color: var(--muted);
+  margin: 0;
+  font-size: 1rem;
+}
+.prose h2 {
+  font-size: 1.4rem;
+  margin: 2.5rem 0 0.75rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--border);
+}
+.prose h3 {
+  font-size: 1.15rem;
+  margin: 2rem 0 0.5rem;
+  color: var(--fg);
+}
+.prose h4 {
+  font-size: 1rem;
+  margin: 1.5rem 0 0.4rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+.prose p { margin: 0.8rem 0; }
+.prose ul, .prose ol {
+  padding-left: 1.5rem;
+  margin: 0.8rem 0;
+}
+.prose li { margin: 0.2rem 0; }
+.prose li > p { margin: 0.3rem 0; }
+.prose code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: var(--code-bg);
+  padding: 0.12em 0.35em;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+.prose pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.2rem;
+  overflow-x: auto;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  margin: 1rem 0;
+}
+.prose pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+}
+.prose blockquote {
+  margin: 1rem 0;
+  padding: 0.5rem 1.2rem;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-weak);
+  border-radius: 0 4px 4px 0;
+  color: var(--muted);
+}
+.prose blockquote p { margin: 0.4rem 0; }
+.prose table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+}
+.prose th, .prose td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+.prose th {
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--card);
+}
+.prose td code { font-size: 0.85em; }
+.prose hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 2rem 0;
+}
+.prose img {
+  max-width: 100%;
+  border-radius: 6px;
+}
+
+/* ---------- book index (list of chapters) ---------- */
+
+.page-list {
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+}
+.page-list h2 {
+  border: 0;
+  margin: 1.6rem 0 0.6rem;
+  font-size: 0.82rem;
+  font-family: var(--mono);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+}
+.page-list h2:first-child { margin-top: 0; }
+.page-list ul + h2 { margin-top: 2rem; }
+.page-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.page-list li {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.page-list li:last-child { border-bottom: 0; }
+.page-list a {
+  font-family: var(--mono);
+  font-size: 1rem;
+  text-decoration: none;
+}
+.page-list-desc {
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 0.92rem;
+  margin-left: 0.4rem;
+}
+
+/* ---------- preview badge (book index) ---------- */
+
+.preview-badge {
+  display: inline-block;
+  margin: 0 0.1rem 0 0.45rem;
+  padding: 0.08rem 0.5rem 0.12rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: var(--accent-weak);
+  color: var(--accent);
+  border-radius: 999px;
+  vertical-align: 0.15em;
+  white-space: nowrap;
+}
+.preview-callout {
+  margin: 0 0 1.5rem;
+  padding: 0.7rem 1rem;
+  background: var(--card);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.preview-callout code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: transparent;
+  padding: 0;
+  border: 0;
+  color: inherit;
+}
+
+/* ---------- doc freshness badge ---------- */
+
+.doc-freshness {
+  margin: 2.5rem 0 0;
+  padding: 0.9rem 1.1rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.doc-freshness-line {
+  margin: 0;
+}
+.doc-freshness code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--accent);
+  background: transparent;
+  padding: 0;
+  border: 0;
+}
+.doc-freshness a { color: var(--accent); }
+.doc-freshness-watches {
+  margin-top: 0.6rem;
+}
+.doc-freshness-watches summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.doc-freshness-watches ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.82rem;
+}
+.doc-freshness-watches li {
+  margin: 0.1rem 0;
+  list-style: square;
+}
+
+/* ---------- chapter pager ---------- */
+
+.pager {
+  margin: 3rem 0 0;
+  padding: 1.8rem 0 0;
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: stretch;
+}
+.pager-cell {
+  min-width: 0;
+  display: flex;
+}
+.pager-cell-next { justify-content: flex-end; }
+
+.pager-card {
+  display: block;
+  flex: 1;
+  padding: 1.25rem 1.4rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-decoration: none;
+  color: inherit;
+  transition: border-color 0.15s ease, transform 0.15s ease, background 0.15s ease;
+}
+.pager-card:hover {
+  border-color: var(--accent);
+  background: var(--card-hover);
+  transform: translateY(-1px);
+  text-decoration: none;
+}
+.pager-card-next { text-align: right; }
+
+.pager-kicker {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.4rem;
+}
+.pager-title {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  color: var(--accent);
+  margin: 0 0 0.45rem;
+  line-height: 1.3;
+}
+.pager-desc {
+  color: var(--muted);
+  font-size: 0.88rem;
+  margin: 0;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  /* ---------- header: compact, no more three-row column stack ---------- */
+  .site-header {
+    padding: 0.6rem 0.9rem;
+    /* Drop sticky on mobile — a tall sticky header ate too much viewport.
+       A flick to the top is cheap; stealing 20-30% of the screen isn't. */
+    position: static;
+    backdrop-filter: none;
+  }
+  .site-header nav {
+    flex-wrap: wrap;
+    gap: 0.55rem 1rem;
+    align-items: center;
+  }
+  .site-header .brand {
+    font-size: 0.92rem;
+    flex: 0 0 auto;
+  }
+  .site-header ul {
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.85rem;
+    justify-content: flex-end;
+    margin-left: auto;
+  }
+  /* Search wraps to its own row, full width. The widget shrinks with
+     --pagefind-ui-scale so its input is finger-sized without dominating
+     the viewport. */
+  .site-search {
+    flex: 1 0 100%;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    --pagefind-ui-scale: 0.82;
+  }
+
+  /* ---------- main content: reclaim horizontal space ---------- */
+  body.home main {
+    padding: 2rem 1rem 1.5rem;
+  }
+  body.page main {
+    padding: 1.5rem 1rem 2.5rem;
+  }
+
+  /* ---------- landing ---------- */
+  .hero { margin-bottom: 1.5rem; }
+  .hero h1 { font-size: 1.55rem; }
+  .hero .tagline { font-size: 0.95rem; }
+  .card {
+    padding: 1rem 1.1rem;
+  }
+  .card-name { font-size: 1rem; }
+  .card-desc { font-size: 0.9rem; }
+  .cards { gap: 0.7rem; }
+
+  /* ---------- book TOC ---------- */
+  .page-list h2 {
+    font-size: 0.76rem;
+    margin: 1.4rem 0 0.5rem;
+  }
+  .page-list li {
+    padding: 0.55rem 0;
+    font-size: 0.95rem;
+  }
+  .page-list a { font-size: 0.95rem; }
+  .page-list-desc {
+    display: block;
+    margin: 0.15rem 0 0;
+    font-size: 0.85rem;
+  }
+  .preview-badge {
+    font-size: 0.58rem;
+    letter-spacing: 0.1em;
+    padding: 0.08rem 0.4rem;
+  }
+
+  /* ---------- prose pages ---------- */
+  .prose h1, .prose > h1 { font-size: 1.45rem; }
+  .prose h2 {
+    font-size: 1.15rem;
+    margin: 1.8rem 0 0.6rem;
+  }
+  .prose h3 {
+    font-size: 1.02rem;
+    margin: 1.4rem 0 0.4rem;
+  }
+  .prose p { margin: 0.7rem 0; }
+  .prose ul, .prose ol { padding-left: 1.2rem; }
+  .prose pre {
+    padding: 0.8rem 0.9rem;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    /* Keep code on its own scroll rail so long lines don't break layout. */
+    margin-left: -0.3rem;
+    margin-right: -0.3rem;
+    border-radius: 4px;
+  }
+  .prose code {
+    font-size: 0.88em;
+    word-break: break-word;
+  }
+  /* Tables: turn into horizontally-scrollable blocks so multi-column
+     content stays readable instead of squishing into 4-char cells. */
+  .prose table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    font-size: 0.85rem;
+  }
+  .prose th, .prose td {
+    padding: 0.4rem 0.6rem;
+    white-space: nowrap;
+  }
+  .prose blockquote {
+    margin: 0.8rem -0.3rem;
+    padding: 0.5rem 0.9rem;
+    font-size: 0.92rem;
+  }
+
+  /* ---------- freshness badge ---------- */
+  .doc-freshness {
+    padding: 0.7rem 0.9rem;
+    font-size: 0.82rem;
+  }
+
+  /* ---------- pager: stack both cells vertically ---------- */
+  .pager {
+    grid-template-columns: 1fr;
+    margin-top: 2rem;
+    padding-top: 1.2rem;
+  }
+  .pager-cell-next { justify-content: flex-start; }
+  .pager-card-next { text-align: left; }
+
+  /* ---------- preview callout on the book index ---------- */
+  .preview-callout {
+    font-size: 0.85rem;
+    padding: 0.6rem 0.9rem;
+  }
+
+  /* ---------- footer ---------- */
+  .site-footer {
+    padding: 1.2rem 0.9rem;
+    font-size: 0.8rem;
+  }
+}
+

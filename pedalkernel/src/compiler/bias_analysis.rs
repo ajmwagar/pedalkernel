@@ -33,9 +33,7 @@ pub(super) enum GroupBiasKind {
     /// The group is bypassed in the serial audio chain.
     ///
     /// `dc_voltages` maps each non-rail junction node to its DC voltage.
-    StaticBias {
-        dc_voltages: HashMap<NodeId, f64>,
-    },
+    StaticBias { dc_voltages: HashMap<NodeId, f64> },
     // Future: DynamicModulation for sidechains, envelope followers, etc.
 }
 
@@ -52,10 +50,7 @@ pub(super) enum GroupBiasKind {
 ///
 /// When StaticBias, computes the DC voltage at each interior junction node
 /// via nodal analysis of the resistor divider network.
-pub(super) fn classify_group_bias(
-    group: &FlowGroup,
-    graph: &CircuitGraph,
-) -> GroupBiasKind {
+pub(super) fn classify_group_bias(group: &FlowGroup, graph: &CircuitGraph) -> GroupBiasKind {
     // A group with any nonlinear edge is NEVER static bias.
     // Diodes/transistors to ground are signal clippers, not DC references.
     let has_nonlinear = group.all_edges().iter().any(|&eidx| {
@@ -93,7 +88,9 @@ pub(super) fn classify_group_bias(
     let reaches = interior_reaches_signal(&interior_nodes, &rail_set, graph, group);
     #[cfg(test)]
     {
-        let edge_names: Vec<_> = group.all_edges().iter()
+        let edge_names: Vec<_> = group
+            .all_edges()
+            .iter()
             .map(|&eidx| {
                 let e = &graph.edges[eidx];
                 let comp = &graph.components[e.comp_idx];
@@ -202,11 +199,8 @@ fn compute_dc_voltages(
     if n == 0 {
         return HashMap::new();
     }
-    let node_idx: HashMap<NodeId, usize> = node_list
-        .iter()
-        .enumerate()
-        .map(|(i, &n)| (n, i))
-        .collect();
+    let node_idx: HashMap<NodeId, usize> =
+        node_list.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
     // Known rail voltages
     let rail_voltage = |node: NodeId| -> f64 {
@@ -214,7 +208,11 @@ fn compute_dc_voltages(
             0.0
         } else if node == graph.vcc_node {
             // Use the supply voltage from the graph
-            graph.supply_voltages.get(&graph.vcc_node).copied().unwrap_or(9.0)
+            graph
+                .supply_voltages
+                .get(&graph.vcc_node)
+                .copied()
+                .unwrap_or(9.0)
         } else if let Some(&v) = graph.supply_voltages.get(&node) {
             v
         } else if graph.ac_ground_nodes.contains(&node) {

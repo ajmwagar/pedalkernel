@@ -1,0 +1,29 @@
+<header class="site-header">
+  <nav>
+    <a class="brand" href="{{ "/" | relURL }}">pedalkernel</a>
+    <ul>
+      {{ range .Site.Menus.main }}
+      <li><a href="{{ .URL | relURL }}">{{ .Name }}</a></li>
+      {{ end }}
+      <li><a href="{{ .Site.Params.github }}" rel="noopener">GitHub</a></li>
+    </ul>
+    {{/* Pagefind search widget. Mounts at build time (Netlify) via
+         `npx pagefind --site public` which writes /pagefind/*.
+         On local `hugo server` with no pagefind run, the div stays empty
+         and the missing /pagefind/pagefind-ui.css / .js fail quietly. */}}
+    <div id="search" class="site-search"></div>
+  </nav>
+  <script src="{{ "pagefind/pagefind-ui.js" | relURL }}"></script>
+  <script>
+    window.addEventListener("DOMContentLoaded", function () {
+      if (typeof PagefindUI !== "function") return;
+      new PagefindUI({
+        element: "#search",
+        showSubResults: true,
+        showImages: false,
+        resetStyles: false,
+        placeholder: "Search docs",
+      });
+    });
+  </script>
+</header>

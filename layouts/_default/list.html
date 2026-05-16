@@ -1,0 +1,61 @@
+{{ define "main" }}
+<article class="prose">
+  <header class="prose-header">
+    <h1>{{ .Title }}</h1>
+    {{ with .Description }}<p class="subtitle">{{ . }}</p>{{ end }}
+  </header>
+  {{ .Content }}
+
+  {{ with .Pages }}
+  {{/* Detect any preview pages so we can surface a global note. */}}
+  {{ $hasPreview := false }}
+  {{ range . }}{{ if .Params.preview }}{{ $hasPreview = true }}{{ end }}{{ end }}
+  {{ if $hasPreview }}
+  <p class="preview-callout">
+    Pages tagged
+    <span class="preview-badge">preview</span>
+    describe work-in-progress on the <code>feature/spqr-tree</code> branch
+    that is not fully on <code>main</code> yet.
+  </p>
+  {{ end }}
+
+  <section class="page-list">
+    {{ $sections := slice "Guide" "Reference" "Internals" "Project" }}
+    {{ $pages := . }}
+    {{ $grouped := dict }}
+    {{ range $pages }}
+      {{ $s := or .Params.section "Other" }}
+      {{ $grouped = merge $grouped (dict $s (append (slice .) (index $grouped $s | default (slice)))) }}
+    {{ end }}
+    {{ range $sections }}
+      {{ $section := . }}
+      {{ with index $grouped $section }}
+      <h2 class="page-list-section">{{ $section }}</h2>
+      <ul>
+        {{ range sort . "Params.weight" "asc" }}
+        <li>
+          <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+          {{ if .Params.preview }}<span class="preview-badge" title="Preview — describes feature/spqr-tree work in progress">preview</span>{{ end }}
+          {{ with .Description }}<span class="page-list-desc">&mdash; {{ . }}</span>{{ end }}
+        </li>
+        {{ end }}
+      </ul>
+      {{ end }}
+    {{ end }}
+    {{ with index $grouped "Other" }}
+      <h2 class="page-list-section">Other</h2>
+      <ul>
+        {{ range sort . "Params.weight" "asc" }}
+        <li>
+          <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+          {{ if .Params.preview }}<span class="preview-badge" title="Preview — describes feature/spqr-tree work in progress">preview</span>{{ end }}
+          {{ with .Description }}<span class="page-list-desc">&mdash; {{ . }}</span>{{ end }}
+        </li>
+        {{ end }}
+      </ul>
+    {{ end }}
+  </section>
+  {{ end }}
+</article>
+{{ end }}
+

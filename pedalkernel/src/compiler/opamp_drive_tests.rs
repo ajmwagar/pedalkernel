@@ -22,7 +22,8 @@ fn opamp_drive_level_reaches_diode_vf() {
     // Input = 0.1V → VS should drive 1.0V into the diode.
     // Diode Vf ≈ 0.6V. So the diode SHOULD clip.
     // Test: output peak should be LESS than 1.0V (clipped).
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -44,7 +45,8 @@ fn opamp_drive_level_reaches_diode_vf() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -56,9 +58,11 @@ fn opamp_drive_level_reaches_diode_vf() {
     }
     let mut peak = 0.0f64;
     for s in 2000..2220 {
-        peak = peak.max(compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (2000 + s) as f64 / SR).sin()
-        ).abs());
+        peak = peak.max(
+            compiled
+                .process(amp * (std::f64::consts::TAU * FREQ * (2000 + s) as f64 / SR).sin())
+                .abs(),
+        );
     }
 
     eprintln!("Drive test: input={amp}V, peak={peak:.4}V");
@@ -83,7 +87,8 @@ fn clipping_produces_harmonics() {
     // Non-sinusoidal → energy at harmonics (2f, 3f, 4f...).
     // Measure: compare peak to RMS. For a sine, peak/rms = √2 ≈ 1.414.
     // For a clipped sine, peak/rms < 1.414 (flattened peaks).
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -105,7 +110,8 @@ fn clipping_produces_harmonics() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -130,7 +136,10 @@ fn clipping_produces_harmonics() {
     eprintln!("Harmonics test: peak={peak:.4}V, rms={rms:.4}V, crest={crest_factor:.3}");
     eprintln!("  Pure sine crest = 1.414, clipped sine crest < 1.3");
     assert!(peak > 0.01, "Should produce output: {peak:.4}V");
-    assert!(crest_factor > 0.5, "Should have reasonable crest factor: {crest_factor:.3}");
+    assert!(
+        crest_factor > 0.5,
+        "Should have reasonable crest factor: {crest_factor:.3}"
+    );
     // A clipped waveform has lower crest factor than a pure sine
     if crest_factor < 1.3 {
         eprintln!("  GOOD: crest factor {crest_factor:.3} indicates clipping/harmonics");
@@ -147,7 +156,8 @@ fn clipping_produces_harmonics() {
 fn gain_compression_with_diode() {
     // Small signal: below Vf → clean gain ≈ Rf/Ri = 10.
     // Large signal: above Vf → diode clips → effective gain < 10.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -169,7 +179,8 @@ fn gain_compression_with_diode() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let measure = |amp: f64| -> f64 {
@@ -179,20 +190,26 @@ fn gain_compression_with_diode() {
         }
         let mut peak = 0.0f64;
         for s in 2000..2220 {
-            peak = peak.max(c.process(
-                amp * (std::f64::consts::TAU * FREQ * (2000 + s) as f64 / SR).sin()
-            ).abs());
+            peak = peak.max(
+                c.process(amp * (std::f64::consts::TAU * FREQ * (2000 + s) as f64 / SR).sin())
+                    .abs(),
+            );
         }
         peak / amp
     };
 
     let small_gain = measure(0.001); // 1mV → 10mV (below Vf)
-    let large_gain = measure(0.1);   // 100mV → 1V (above Vf)
+    let large_gain = measure(0.1); // 100mV → 1V (above Vf)
 
     eprintln!("Compression: small_gain={small_gain:.1}, large_gain={large_gain:.1}");
-    assert!(small_gain > 3.0, "Small signal should amplify: {small_gain:.1}");
-    assert!(large_gain < small_gain,
-        "Large signal gain should be compressed: large={large_gain:.1} < small={small_gain:.1}");
+    assert!(
+        small_gain > 3.0,
+        "Small signal should amplify: {small_gain:.1}"
+    );
+    assert!(
+        large_gain < small_gain,
+        "Large signal gain should be compressed: large={large_gain:.1} < small={small_gain:.1}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -203,7 +220,8 @@ fn gain_compression_with_diode() {
 fn wave_variables_at_clipping() {
     // Trace the actual b_tree, a_root, vs_voltage at the point of clipping.
     // This tells us what the diode sees and produces.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -225,7 +243,8 @@ fn wave_variables_at_clipping() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -280,9 +299,9 @@ fn screamer_has_distortion_character() {
     let n = (SR / FREQ).ceil() as usize;
     let mut samples = Vec::with_capacity(n);
     for s in 0..n {
-        samples.push(compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin()
-        ));
+        samples.push(
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (4000 + s) as f64 / SR).sin()),
+        );
     }
 
     let peak = samples.iter().map(|s| s.abs()).fold(0.0f64, f64::max);

@@ -25,6 +25,7 @@ pub(super) enum BuiltStage {
     StateSpace(StateSpaceStage),
     MultiNl(MultiNlStage),
     BlackFeedback(super::stage::BlackFeedbackStage),
+    BlockwiseKMethod(pedalkernel_rt::stage::BlockwiseKMethodStage),
 }
 
 impl BuiltStage {
@@ -91,8 +92,31 @@ pub fn compile_via_spqr_with_options(
 ) -> Result<CompiledPedal, String> {
     use super::signal_flow::find_flow_groups;
 
-    let graph = CircuitGraph::from_pedal(pedal);
+    let mut graph = CircuitGraph::from_pedal(pedal);
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
+
+    // When ports are declared, the first input port replaces `in` and
+    // the first output port replaces `out` as the circuit's I/O nodes.
+    if !pedal.ports.is_empty() {
+        if let Some(first_in) = pedal
+            .ports
+            .iter()
+            .find(|p| p.direction == pedalkernel_rt::PortDirection::Input)
+        {
+            if let Some(&node_id) = graph.node_names.get(&first_in.name) {
+                graph.in_node = node_id;
+            }
+        }
+        if let Some(first_out) = pedal
+            .ports
+            .iter()
+            .find(|p| p.direction == pedalkernel_rt::PortDirection::Output)
+        {
+            if let Some(&node_id) = graph.node_names.get(&first_out.name) {
+                graph.out_node = node_id;
+            }
+        }
+    }
 
     // Collect all non-bridge edges (passive + NL + VCVS)
     let active_set: std::collections::HashSet<usize> =
@@ -150,6 +174,9 @@ pub fn compile_via_spqr_with_options(
             bbd_wet_mix: 0.5,
             bbd_mix_pot_id: None,
             original_passive_values: hashbrown::HashMap::new(),
+            ports: Vec::new(),
+            port_values: Vec::new(),
+            initialized: false,
         };
         super::spqr_control::bind_controls(pedal, &mut compiled);
         return Ok(compiled);
@@ -158,7 +185,12 @@ pub fn compile_via_spqr_with_options(
     // Step 1: Partition edges into signal flow groups.
     // Each group = mutually-dependent components that must share a stage.
     // Uses directed dependency graph: cycles = co-solved, acyclic = sequential.
+    eprintln!(
+        "  [compile] Step 1: find_flow_groups ({} edges)...",
+        all_edges.len()
+    );
     let feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    eprintln!("  [compile] Step 1 done: {} groups", feedback_groups.len());
 
     // Step 1b: Compute signal flow distance for each group via BFS from in_node.
     // Each group's distance = min BFS hop count from in_node to any node in the group.
@@ -176,8 +208,8 @@ pub fn compile_via_spqr_with_options(
 
     // Build a map from node → DC bias voltage across all StaticBias groups.
     // Used to set op-amp v_max from the circuit's actual bias network.
-    let mut bias_node_voltages: hashbrown::HashMap<super::graph::NodeId, f64> =
-        hashbrown::HashMap::new();
+    let mut bias_node_voltages: std::collections::BTreeMap<super::graph::NodeId, f64> =
+        std::collections::BTreeMap::new();
     for kind in &group_bias {
         if let super::bias_analysis::GroupBiasKind::StaticBias { dc_voltages } = kind {
             bias_node_voltages.extend(dc_voltages);
@@ -201,6 +233,20 @@ pub fn compile_via_spqr_with_options(
                     #[cfg(debug_assertions)]
                     {
                         wdf.debug_label = $label;
+                    }
+                    // Generate K-method lookup table for NL roots
+                    // Skipped when skip_k_tables is set (debug builds).
+                    if wdf.k_table.is_none() && !options.skip_k_tables {
+                        let stage_n = stages.len();
+                        eprintln!("  K-table: generating for stage {stage_n}...");
+                        wdf.k_table = super::k_method::generate_k_table(&mut wdf);
+                        if let Some(ref kt) = wdf.k_table {
+                            eprintln!(
+                                "  K-table generated: {}D, {} entries",
+                                kt.dims,
+                                kt.entries.len()
+                            );
+                        }
                     }
                     stages.push(Stage::Wdf(wdf));
                 }
@@ -239,6 +285,14 @@ pub fn compile_via_spqr_with_options(
                         bf.debug_label = $label;
                     }
                     stages.push(Stage::BlackFeedback(bf));
+                }
+                BuiltStage::BlockwiseKMethod(mut bkm) => {
+                    // BKM stages set their own flow distance (0 = primary
+                    // signal path, processes before output coupling stages).
+                    // Don't override with the feedback group's inflated distance.
+                    bkm.bypass_serial = $bypass;
+                    bkm.init_buffers();
+                    stages.push(Stage::BlockwiseKMethod(bkm));
                 }
             }
         };
@@ -299,7 +353,33 @@ pub fn compile_via_spqr_with_options(
             );
         }
 
-        if group.has_feedback() {
+        if group.has_feedback() && !options.skip_blockwise {
+            // ── Blockwise check for feedback groups (e.g. ladder with resonance)
+            eprintln!(
+                "  [compile] group {gi}: blockwise check ({} edges)...",
+                group.all_edges().len()
+            );
+            let group_edges = group.all_edges();
+            if let Some(built_stages) = super::blockwise::try_build_blockwise(
+                &group_edges,
+                &graph,
+                &terminals,
+                sample_rate,
+                &bias_node_voltages,
+                supply_voltage,
+                &pedal.ports,
+            ) {
+                for built in built_stages {
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass
+                    );
+                }
+                continue;
+            }
+
             // Compute bias-derived v_max for op-amps in this group.
             // Find the VCVS component, look up its pos/neg pin nodes in the
             // bias voltage map, and call apply_bias to get rail limits.
@@ -456,8 +536,11 @@ pub fn compile_via_spqr_with_options(
                         let active_set: std::collections::HashSet<usize> =
                             group.active_edges.iter().copied().collect();
                         let mut barrier_nodes: std::collections::HashSet<super::graph::NodeId> =
-                            graph.nullor_pins.iter().flat_map(|p| vec![p.out_node, p.pos_node, p.neg_node])
-                            .collect();
+                            graph
+                                .nullor_pins
+                                .iter()
+                                .flat_map(|p| vec![p.out_node, p.pos_node, p.neg_node])
+                                .collect();
                         barrier_nodes.insert(graph.in_node);
                         barrier_nodes.insert(graph.out_node);
                         // Allow traversal FROM neg (the starting point)
@@ -599,6 +682,11 @@ pub fn compile_via_spqr_with_options(
                 #[cfg(not(debug_assertions))]
                 let merged_label = String::new();
                 if let Some(built) = build_ground_clip_stage(&merged_edges, &graph, sample_rate) {
+                    #[cfg(test)]
+                    eprintln!(
+                        "  Ground-clip stage built: {:?}",
+                        std::mem::discriminant(&built)
+                    );
                     push_stage!(built, group_flow_distances[gi], merged_label, is_bypass);
                 }
             }
@@ -618,8 +706,8 @@ pub fn compile_via_spqr_with_options(
                 group_edges.iter().copied().collect();
             let mut pot_edge_pairs: Vec<(usize, Vec<usize>)> = Vec::new();
             {
-                let mut pot_edges: hashbrown::HashMap<usize, Vec<usize>> =
-                    hashbrown::HashMap::new();
+                let mut pot_edges: std::collections::BTreeMap<usize, Vec<usize>> =
+                    std::collections::BTreeMap::new();
                 for &eidx in &group_edges {
                     let comp = &graph.components[graph.edges[eidx].comp_idx];
                     if comp.kind.is_pot() {
@@ -691,6 +779,92 @@ pub fn compile_via_spqr_with_options(
             if group_edges.is_empty() {
                 continue;
             } // All edges were pots
+
+            if !group.has_feedback() {
+                let feedback_nodes: std::collections::HashSet<super::graph::NodeId> =
+                    feedback_groups
+                        .iter()
+                        .filter(|g| g.has_feedback())
+                        .flat_map(|g| g.all_edges())
+                        .flat_map(|eidx| {
+                                let e = &graph.edges[eidx];
+                                [e.node_a, e.node_b].into_iter()
+                        })
+                        .collect();
+                let main_outputs: std::collections::HashSet<super::graph::NodeId> = graph
+                    .nullor_pins
+                    .iter()
+                    .map(|pins| pins.out_node)
+                    .chain(std::iter::once(graph.in_node))
+                    .collect();
+
+                let mut built_feedforward = false;
+                for &eidx in &group_edges {
+                    let e = &graph.edges[eidx];
+                    let comp = &graph.components[e.comp_idx];
+                    let Some(leaf) = comp.kind.make_leaf(&comp.id, sample_rate) else {
+                        continue;
+                    };
+
+                    let source = if main_outputs.contains(&e.node_a)
+                        && feedback_nodes.contains(&e.node_b)
+                    {
+                        Some(e.node_a)
+                    } else if main_outputs.contains(&e.node_b) && feedback_nodes.contains(&e.node_a)
+                    {
+                        Some(e.node_b)
+                    } else {
+                        None
+                    };
+
+                    let Some(source) = source else {
+                        continue;
+                    };
+
+                    let mut wdf = WdfStage::new(
+                        with_voltage_source(leaf),
+                        RootKind::Passthrough,
+                        Oversampler::new(OversamplingFactor::X1),
+                    );
+                    wdf.signal_flow_distance = group_flow_distances[gi];
+                    wdf.is_feedforward = true;
+                    wdf.injection_node_id = source;
+                    #[cfg(debug_assertions)]
+                    {
+                        wdf.debug_label = comp.id.clone();
+                    }
+                    stages.push(Stage::Wdf(wdf));
+                    built_feedforward = true;
+                }
+
+                if built_feedforward {
+                    continue;
+                }
+            }
+
+            // ── Blockwise check: can this group be split into chained NL blocks?
+            if !options.skip_blockwise {
+                if let Some(built_stages) = super::blockwise::try_build_blockwise(
+                    &group_edges,
+                    &graph,
+                    &terminals,
+                    sample_rate,
+                    &bias_node_voltages,
+                    supply_voltage,
+                    &pedal.ports,
+                ) {
+                    for built in built_stages {
+                        push_stage!(
+                            built,
+                            group_flow_distances[gi],
+                            group_label.clone(),
+                            is_bypass
+                        );
+                    }
+                    continue; // Skip normal SPQR path
+                }
+            } // !skip_blockwise
+
             let group_terminals = compute_group_terminals(&group_edges, &graph, &terminals);
             #[cfg(test)]
             eprintln!("  SPQR terminals for group: {:?}", group_terminals);
@@ -740,6 +914,7 @@ pub fn compile_via_spqr_with_options(
         Stage::StateSpace(ss) => ss.signal_flow_distance,
         Stage::MultiNl(m) => m.signal_flow_distance,
         Stage::BlackFeedback(b) => b.signal_flow_distance,
+        Stage::BlockwiseKMethod(k) => k.signal_flow_distance,
     });
 
     // ── Feedforward detection ─────────────────────────────────────────────
@@ -752,13 +927,12 @@ pub fn compile_via_spqr_with_options(
     {
         // BFS node distances for feedforward stage ordering
         let node_dist = {
-            use hashbrown::HashMap;
-            use std::collections::VecDeque;
-            let mut dist: HashMap<usize, usize> = HashMap::new();
+            use std::collections::{BTreeMap, VecDeque};
+            let mut dist: BTreeMap<usize, usize> = BTreeMap::new();
             let mut queue: VecDeque<usize> = VecDeque::new();
             dist.insert(graph.in_node, 0);
             queue.push_back(graph.in_node);
-            let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
+            let mut adj: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
             for e in &graph.edges {
                 adj.entry(e.node_a).or_default().push(e.node_b);
                 adj.entry(e.node_b).or_default().push(e.node_a);
@@ -990,8 +1164,21 @@ pub fn compile_via_spqr_with_options(
             Stage::StateSpace(ss) => (ss.signal_flow_distance, false),
             Stage::MultiNl(m) => (m.signal_flow_distance, false),
             Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
+            Stage::BlockwiseKMethod(k) => (k.signal_flow_distance, false),
         };
         (d, ff as u8) // false=0 sorts before true=1
+    });
+
+    stages.sort_by_key(|s| {
+        let (d, ff) = match s {
+            Stage::Wdf(w) => (w.signal_flow_distance, w.is_feedforward),
+            Stage::Iir(i) => (i.signal_flow_distance, false),
+            Stage::StateSpace(ss) => (ss.signal_flow_distance, false),
+            Stage::MultiNl(m) => (m.signal_flow_distance, false),
+            Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
+            Stage::BlockwiseKMethod(k) => (k.signal_flow_distance, false),
+        };
+        (d, ff as u8)
     });
 
     let mut compiled = CompiledPedal {
@@ -1037,6 +1224,9 @@ pub fn compile_via_spqr_with_options(
         bbd_wet_mix: 0.5,
         bbd_mix_pot_id: None,
         original_passive_values: hashbrown::HashMap::new(),
+        ports: Vec::new(),
+        port_values: Vec::new(),
+        initialized: false,
     };
 
     if pedal.calibrate {
@@ -1045,6 +1235,81 @@ pub fn compile_via_spqr_with_options(
 
     // Bind pot controls to their stages (WDF, IIR, MultiNl).
     super::spqr_control::bind_controls(pedal, &mut compiled);
+
+    // Bind named ports: resolve port names to graph NodeIds.
+    if !pedal.ports.is_empty() {
+        let mut port_bindings = Vec::new();
+        let mut port_values = Vec::new();
+        for (i, port_def) in pedal.ports.iter().enumerate() {
+            let node_id = graph
+                .node_names
+                .get(&port_def.name)
+                .copied()
+                .unwrap_or(usize::MAX);
+            #[cfg(test)]
+            if node_id == usize::MAX {
+                eprintln!(
+                    "  WARNING: port '{}' not found in graph node_names",
+                    port_def.name
+                );
+            }
+            port_bindings.push(pedalkernel_rt::processor::PortBinding {
+                name: port_def.name.clone(),
+                direction: port_def.direction,
+                index: i,
+                node_id,
+                default_value: 0.0,
+                stage_idx: usize::MAX, // resolved below for input ports
+            });
+            port_values.push(0.0);
+        }
+        // For each input port, find the component connected to the port
+        // node and wrap its WDF leaf with a named VS in series.
+        // The VS drives current through the component into the circuit,
+        // modelling a voltage source at the port jack.
+        for port_binding in &mut port_bindings {
+            if port_binding.direction != pedalkernel_rt::PortDirection::Input {
+                continue;
+            }
+            if port_binding.node_id == graph.in_node {
+                continue; // Main input already has VS from with_voltage_source()
+            }
+            // Find the component connected to this port node
+            let port_comp_id: Option<String> = graph
+                .edges
+                .iter()
+                .find(|e| e.node_a == port_binding.node_id || e.node_b == port_binding.node_id)
+                .map(|e| graph.components[e.comp_idx].id.clone());
+
+            if let Some(comp_id) = port_comp_id {
+                // Find the WDF stage containing this component and wrap
+                // its leaf with a named VS in series. Record stage index
+                // so runtime only touches this stage for this port.
+                for (si, stage) in compiled.stages.iter_mut().enumerate() {
+                    if let pedalkernel_rt::processor::Stage::Wdf(ref mut wdf) = stage {
+                        let found = wdf.tree.wrap_leaf_with_vs(&comp_id, &port_binding.name);
+                        if found {
+                            wdf.tree.recompute();
+                            port_binding.stage_idx = si;
+                            #[cfg(test)]
+                            eprintln!(
+                                "  Injected port VS '{}' at leaf '{}' in stage {si}",
+                                port_binding.name, comp_id
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        compiled.ports = port_bindings;
+        compiled.port_values = port_values;
+    }
+
+    // Cache raw pointers to all VS leaves for zero-cost runtime access.
+    // Must be after port binding (wrap_leaf_with_vs) and recompute.
+    compiled.cache_all_vs_pointers();
 
     Ok(compiled)
 }
@@ -1131,11 +1396,21 @@ fn build_pot_divider(
 /// The WDF tree needs a voltage source leaf to receive the input signal.
 /// Creates `Series(VoltageSource, passive_tree)` — the standard WDF
 /// topology where VS drives the tree and the root terminates it.
+/// Default VS source impedance (Ω). Used when no port impedance is declared.
+/// 10kΩ is a reasonable general-purpose value — high enough for RC filters
+/// to work but not so high that it dominates the circuit.
+const DEFAULT_VS_RP: f64 = 10_000.0;
+
 pub(super) fn with_voltage_source(passive_tree: DynNode) -> DynNode {
+    with_voltage_source_rp(passive_tree, DEFAULT_VS_RP)
+}
+
+pub(super) fn with_voltage_source_rp(passive_tree: DynNode, rp: f64) -> DynNode {
     let vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
         voltage: 0.0,
-        rp: 1.0,
+        rp,
         is_cathode_bias: false,
+        port_name: None,
     }));
     DynNode::Series(Box::new(vs), Box::new(passive_tree))
 }
@@ -1248,14 +1523,8 @@ pub(super) fn build_spqr_stage(
                 )
                 .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
 
-            if matches!(
-                nl_kind,
-                NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
-            ) {
-                return build_general_mna_from_edges(&edge_indices, graph, _sample_rate)
-                    .map(BuiltStage::MultiNl);
-            }
-
+            // BJTs now use BjtRoot (single-port WDF root with external Vbe),
+            // same as triodes use TriodeRoot. No MultiNL fallback needed.
             let (root, base_diode_model) = create_root(&nl_kind, false);
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);
@@ -1297,6 +1566,19 @@ fn is_ground_clip_group(
     if nl_edges.is_empty() {
         return false;
     }
+    let mut pot_edge_counts = std::collections::HashMap::new();
+    for eidx in group.all_edges() {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if comp.kind.is_pot() {
+            *pot_edge_counts
+                .entry(graph.edges[eidx].comp_idx)
+                .or_insert(0usize) += 1;
+        }
+    }
+    if pot_edge_counts.values().any(|&count| count > 1) {
+        return false;
+    }
+
     nl_edges.iter().all(|&eidx| {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
@@ -1424,6 +1706,7 @@ fn build_ground_clip_stage(
             voltage: 0.0,
             rp: 100.0,
             is_cathode_bias: false,
+            port_name: None,
         },
     ));
 
@@ -1450,7 +1733,7 @@ fn build_ground_clip_stage(
 fn compute_bias_v_max_for_group(
     group: &super::signal_flow::FlowGroup,
     graph: &super::graph::CircuitGraph,
-    bias_node_voltages: &hashbrown::HashMap<super::graph::NodeId, f64>,
+    bias_node_voltages: &std::collections::BTreeMap<super::graph::NodeId, f64>,
     supply_voltage: f64,
 ) -> Option<(f64, f64)> {
     use super::component::BiasResult;
@@ -1494,6 +1777,7 @@ fn compute_group_flow_distances(
     groups: &[super::signal_flow::FlowGroup],
     graph: &super::graph::CircuitGraph,
 ) -> Vec<usize> {
+    use super::component::EdgeKind;
     use super::graph::NodeId;
     use hashbrown::HashMap;
     use std::collections::{HashSet, VecDeque};
@@ -1525,13 +1809,62 @@ fn compute_group_flow_distances(
         node_dist
     }
 
+    fn passive_path_exists(
+        start: NodeId,
+        target: NodeId,
+        graph: &super::graph::CircuitGraph,
+    ) -> bool {
+        if start == target {
+            return true;
+        }
+
+        let mut queue: VecDeque<NodeId> = VecDeque::new();
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        visited.insert(start);
+        queue.push_back(start);
+
+        while let Some(node) = queue.pop_front() {
+            for (eidx, e) in graph.edges.iter().enumerate() {
+                let next = if e.node_a == node {
+                    e.node_b
+                } else if e.node_b == node {
+                    e.node_a
+                } else {
+                    continue;
+                };
+
+                match graph.effective_edge_kind(eidx) {
+                    EdgeKind::Linear | EdgeKind::Reactive => {}
+                    EdgeKind::Vcvs
+                    | EdgeKind::Vccs
+                    | EdgeKind::Behavioral
+                    | EdgeKind::Nonlinear => continue,
+                }
+
+                if next == target {
+                    return true;
+                }
+                if next == graph.gnd_node
+                    || graph.supply_nodes.contains(&next)
+                    || graph.ac_ground_nodes.contains(&next)
+                {
+                    continue;
+                }
+                if visited.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        false
+    }
+
     let mut node_dist: HashMap<NodeId, usize> = HashMap::new();
     node_dist.extend(bfs_distances(graph.in_node, graph));
     let out_dist = bfs_distances(graph.out_node, graph);
     let span = graph.edges.len() + graph.components.len() + groups.len() + 1;
 
-    // For each group, find the minimum distance of any node it touches.
-    groups
+    let min_dists: Vec<usize> = groups
         .iter()
         .map(|group| {
             let mut min_dist = usize::MAX;
@@ -1544,11 +1877,32 @@ fn compute_group_flow_distances(
                     min_dist = min_dist.min(d);
                 }
             }
+            min_dist
+        })
+        .collect();
+
+    let mut distances: Vec<usize> = groups
+        .iter()
+        .enumerate()
+        .map(|(gi, group)| {
+            let min_dist = min_dists[gi];
             if min_dist == usize::MAX {
                 return groups.len() * span;
             }
+            let touches_output = group.all_edges().iter().any(|&eidx| {
+                let e = &graph.edges[eidx];
+                e.node_a == graph.out_node || e.node_b == graph.out_node
+            });
 
-            if group.has_feedback() {
+            if touches_output && !group.has_feedback() {
+                // A non-feedback group touching the circuit output is a sink
+                // network: output pot, coupling cap, load, or final pad. Its
+                // nearest node may be an upstream op-amp output, so min-hop
+                // BFS can place it before the active stages that feed it.
+                // Keep it after upstream feedback/active groups while still
+                // preserving deterministic ordering among multiple sinks.
+                groups.len() * span + min_dist
+            } else if group.has_feedback() {
                 let mut max_active_out_to_output = 0usize;
                 for &eidx in group.active_edges.iter() {
                     let comp_idx = graph.edges[eidx].comp_idx;
@@ -1563,7 +1917,39 @@ fn compute_group_flow_distances(
                 min_dist
             }
         })
-        .collect()
+        .collect();
+
+    for (gi, group) in groups.iter().enumerate() {
+        if !is_ground_clip_group(group, graph) {
+            continue;
+        }
+
+        let clip_node = get_ground_clip_signal_node(group, graph);
+        let mut driven_by_active = None;
+        for (driver_gi, driver_group) in groups.iter().enumerate() {
+            if !driver_group.has_feedback() {
+                continue;
+            }
+            for &active_eidx in &driver_group.active_edges {
+                let comp_idx = graph.edges[active_eidx].comp_idx;
+                let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == comp_idx) else {
+                    continue;
+                };
+                if passive_path_exists(pins.out_node, clip_node, graph) {
+                    driven_by_active = Some(
+                        driven_by_active
+                            .map_or(distances[driver_gi], |d: usize| d.min(distances[driver_gi])),
+                    );
+                }
+            }
+        }
+
+        if let Some(driver_dist) = driven_by_active {
+            distances[gi] = distances[gi].max(driver_dist.saturating_add(1));
+        }
+    }
+
+    distances
 }
 
 /// Instead of using the global [in_node, out_node], find the group's actual

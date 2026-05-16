@@ -386,6 +386,10 @@ pub struct WdfVoltageSource {
     pub rp: f64,
     /// If true, set_voltage is a no-op (cathode bias behavior).
     pub is_cathode_bias: bool,
+    /// Port name for named voltage ports (CV inputs).
+    /// When set, this VS can be addressed by name via `set_voltage_by_port`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub port_name: Option<alloc::string::String>,
 }
 
 impl WdfLeaf for WdfVoltageSource {
@@ -395,6 +399,9 @@ impl WdfLeaf for WdfVoltageSource {
     fn set_incident(&mut self, _a: f64) {}
     fn port_resistance(&self) -> f64 {
         self.rp
+    }
+    fn comp_id(&self) -> Option<&str> {
+        self.port_name.as_deref()
     }
     fn type_tag(&self) -> &'static str {
         if self.is_cathode_bias {
@@ -408,6 +415,11 @@ impl WdfLeaf for WdfVoltageSource {
         true
     }
     fn set_voltage(&mut self, v: f64) -> bool {
+        // Port-named VS leaves are set independently via set_voltage_by_port.
+        // The global set_voltage() (main input) should not overwrite them.
+        if self.port_name.is_some() {
+            return false;
+        }
         if !self.is_cathode_bias {
             self.voltage = v;
             true

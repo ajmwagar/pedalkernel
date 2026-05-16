@@ -14,9 +14,9 @@
 //! 4. Elements without mutual dependency are separate stages.
 
 use hashbrown::HashMap;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
-use super::component::{EdgeKind, SignalTerminals};
+use super::component::{EdgeKind, OutputImpedance, SignalTerminals};
 use super::graph::{CircuitGraph, NodeId};
 
 /// A group of mutually-dependent active elements (same stage).
@@ -189,11 +189,15 @@ fn build_passive_adjacency(
     graph: &CircuitGraph,
     rails: &HashSet<NodeId>,
     active_edge_set: &HashSet<usize>,
-) -> HashMap<NodeId, Vec<(usize, NodeId)>> {
-    let mut adj: HashMap<NodeId, Vec<(usize, NodeId)>> = HashMap::new();
+) -> BTreeMap<NodeId, Vec<(usize, NodeId)>> {
+    let mut adj: BTreeMap<NodeId, Vec<(usize, NodeId)>> = BTreeMap::new();
     for &eidx in edge_indices {
         // Skip active element edges — we only traverse passive signal paths
         if active_edge_set.contains(&eidx) {
+            continue;
+        }
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
             continue;
         }
         let e = &graph.edges[eidx];
@@ -211,7 +215,7 @@ fn build_passive_adjacency(
 /// to prevent "backward" traversal through a cascade.
 fn bfs_reachable_nodes(
     start: NodeId,
-    adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
+    adj: &BTreeMap<NodeId, Vec<(usize, NodeId)>>,
     blocked_outputs: &HashSet<NodeId>,
 ) -> HashSet<NodeId> {
     let mut visited = HashSet::new();
@@ -250,7 +254,7 @@ fn bfs_reachable_nodes(
 /// -> R_mid -> U1.out -> Rf1 -> U1.neg would incorrectly create U2->U1).
 fn build_flow_graph(
     elements: &[ActiveElement],
-    adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
+    adj: &BTreeMap<NodeId, Vec<(usize, NodeId)>>,
     rails: &HashSet<NodeId>,
     graph: &CircuitGraph,
 ) -> Vec<Vec<usize>> {
@@ -441,7 +445,7 @@ fn tarjan_scc(flow_adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
 fn dfs_find_paths(
     current: NodeId,
     target: NodeId,
-    adj: &HashMap<NodeId, Vec<(usize, NodeId)>>,
+    adj: &BTreeMap<NodeId, Vec<(usize, NodeId)>>,
     visited: &mut HashSet<NodeId>,
     path: &mut Vec<usize>,
     result: &mut HashSet<usize>,
@@ -463,6 +467,365 @@ fn dfs_find_paths(
             visited.remove(&next);
         }
     }
+}
+
+/// DFS variant for feedback extraction. Barrier nodes are legal endpoints only
+/// when they are the target input; otherwise they are stage boundaries and must
+/// not be expanded through.
+fn dfs_find_paths_blocked(
+    current: NodeId,
+    target: NodeId,
+    adj: &BTreeMap<NodeId, Vec<(usize, NodeId)>>,
+    blocked: &HashSet<NodeId>,
+    visited: &mut HashSet<NodeId>,
+    path: &mut Vec<usize>,
+    result: &mut HashSet<usize>,
+) {
+    if current != target && blocked.contains(&current) {
+        return;
+    }
+
+    if let Some(neighbors) = adj.get(&current) {
+        for &(eidx, next) in neighbors {
+            if next == target {
+                result.insert(eidx);
+                result.extend(path.iter());
+                continue;
+            }
+            if blocked.contains(&next) || visited.contains(&next) {
+                continue;
+            }
+            visited.insert(next);
+            path.push(eidx);
+            dfs_find_paths_blocked(next, target, adj, blocked, visited, path, result);
+            path.pop();
+            visited.remove(&next);
+        }
+    }
+}
+
+/// Merge SCCs whose active elements share a `comp_idx`.
+///
+/// Multi-terminal devices (BJTs, MOSFETs) have multiple edges in the flow graph.
+/// Without feedback, Tarjan places them in separate SCCs. This merges them so
+/// the device stays in one FlowGroup.
+fn merge_same_component_sccs(
+    sccs: Vec<Vec<usize>>,
+    active_elements: &[ActiveElement],
+    graph: &CircuitGraph,
+) -> Vec<Vec<usize>> {
+    if sccs.len() <= 1 {
+        return sccs;
+    }
+
+    // Map each SCC to a merge-group ID via union-find on comp_idx
+    let mut group_of: Vec<usize> = (0..sccs.len()).collect(); // identity
+
+    fn find(group_of: &mut [usize], mut i: usize) -> usize {
+        while group_of[i] != i {
+            group_of[i] = group_of[group_of[i]];
+            i = group_of[i];
+        }
+        i
+    }
+    fn union(group_of: &mut [usize], a: usize, b: usize) {
+        let ra = find(group_of, a);
+        let rb = find(group_of, b);
+        if ra != rb {
+            group_of[rb] = ra;
+        }
+    }
+
+    // Build comp_idx → first SCC index map
+    let mut comp_to_scc: std::collections::BTreeMap<usize, usize> =
+        std::collections::BTreeMap::new();
+    for (si, scc) in sccs.iter().enumerate() {
+        for &elem_idx in scc {
+            let eidx = active_elements[elem_idx].edge_idx;
+            let comp_idx = graph.edges[eidx].comp_idx;
+            if let Some(&prev_si) = comp_to_scc.get(&comp_idx) {
+                union(&mut group_of, si, prev_si);
+            } else {
+                comp_to_scc.insert(comp_idx, si);
+            }
+        }
+    }
+
+    // Collect merged SCCs (BTreeMap for deterministic iteration order)
+    let mut merged: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (si, scc) in sccs.into_iter().enumerate() {
+        let root = find(&mut group_of, si);
+        merged.entry(root).or_default().extend(scc);
+    }
+
+    merged.into_values().collect()
+}
+
+/// Classify unclaimed passive edges as ground-shunts or pendants relative
+/// to a set of active elements and their signal nodes.
+///
+/// Shared by both standalone (non-feedback) and feedback NL paths so that
+/// passive claiming logic is not duplicated.
+fn claim_passive_edges(
+    scc: &[usize],
+    active_elements: &[ActiveElement],
+    active_edges: &[usize],
+    feedback_edges: &[usize],
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    rails: &HashSet<NodeId>,
+    claimed: &HashSet<usize>,
+) -> (Vec<usize>, Vec<usize>) {
+    // Collect group signal nodes from active + feedback edges
+    let mut group_nodes: HashSet<NodeId> = HashSet::new();
+    for &eidx in active_edges.iter().chain(feedback_edges.iter()) {
+        let e = &graph.edges[eidx];
+        if !rails.contains(&e.node_a) {
+            group_nodes.insert(e.node_a);
+        }
+        if !rails.contains(&e.node_b) {
+            group_nodes.insert(e.node_b);
+        }
+    }
+
+    // Input terminal nodes for pendant detection.
+    // Includes BOTH the feedback input (neg for op-amps) AND the signal
+    // input (pos for non-inverting op-amps). The control pin carries signal
+    // in non-inverting topologies — edges touching it are input coupling.
+    let input_terminals: HashSet<NodeId> = scc
+        .iter()
+        .flat_map(|&i| {
+            let elem = &active_elements[i];
+            let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+            let mut nodes = vec![elem.input_node];
+            // Also include the control pin (pos for op-amps)
+            if let SignalTerminals::Amplifier {
+                control: Some(ctrl),
+                ..
+            } = comp.kind.signal_terminals()
+            {
+                if let Some(node) = resolve_pin(&comp.id, ctrl, graph) {
+                    nodes.push(node);
+                }
+            }
+            nodes
+        })
+        .filter(|node| !rails.contains(node))
+        .collect();
+
+    // Collect active element output nodes. Edges at these nodes that
+    // shunt to ground are post-amplification components (tone caps,
+    // coupling caps), NOT feedback network shunts. They should fall
+    // through to passive grouping, not be claimed by the active group.
+    let active_output_nodes: HashSet<NodeId> = scc
+        .iter()
+        .map(|&ei| active_elements[ei].output_node)
+        .collect();
+    let voltage_source_output_nodes: HashSet<NodeId> = scc
+        .iter()
+        .filter_map(|&ei| {
+            let elem = &active_elements[ei];
+            let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+            if comp.kind.output_impedance() == OutputImpedance::VoltageSource
+                && !rails.contains(&elem.output_node)
+            {
+                Some(elem.output_node)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let mut pendant_edges = Vec::new();
+    let mut ground_shunt_edges = Vec::new();
+
+    for &eidx in edge_indices {
+        if claimed.contains(&eidx) || active_edges.contains(&eidx) || feedback_edges.contains(&eidx)
+        {
+            continue;
+        }
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        let a_rail = rails.contains(&e.node_a);
+        let b_rail = rails.contains(&e.node_b);
+
+        // Ground shunt: one terminal on rail, other in group_nodes.
+        // But NOT if the non-rail terminal is an active output node AND
+        // the rail is ground — those are post-amp shunts (e.g. C_tone in
+        // RAT), not part of the amplifier. Supply-side load resistors
+        // (VCC → plate/drain/collector) ARE essential and must be claimed.
+        let non_rail_node = if a_rail {
+            e.node_b
+        } else if b_rail {
+            e.node_a
+        } else {
+            e.node_a
+        };
+        let rail_node = if a_rail { e.node_a } else { e.node_b };
+        let rail_is_ground =
+            rail_node == graph.gnd_node || graph.ac_ground_nodes.contains(&rail_node);
+        let at_output = active_output_nodes.contains(&non_rail_node) && rail_is_ground;
+
+        if !at_output
+            && ((a_rail && group_nodes.contains(&e.node_b))
+                || (b_rail && group_nodes.contains(&e.node_a)))
+        {
+            ground_shunt_edges.push(eidx);
+        } else if (input_terminals.contains(&e.node_a)
+            && !voltage_source_output_nodes.contains(&e.node_a))
+            || (input_terminals.contains(&e.node_b)
+                && !voltage_source_output_nodes.contains(&e.node_b))
+        {
+            pendant_edges.push(eidx);
+        }
+    }
+
+    // ── BFS expansion: claim multi-hop chains from group_nodes ──────────
+    //
+    // The single-hop pass above only claims edges directly touching
+    // group_nodes or input_terminals. In BJT ladders (e.g., TB303),
+    // emitter components form chains: Q.emitter → R_e → Cutoff → GND.
+    // R_e has no rail endpoint and Cutoff's non-rail side isn't a group_node.
+    // Without BFS expansion, these chains escape into passive groups and
+    // create degenerate IIR stages that kill signal.
+    //
+    // BFS from group_nodes through unclaimed passive edges:
+    // - Edge to rail (GND/ac_ground) → claim as ground_shunt
+    // - Edge to interior (non-rail, non-barrier) node → claim as pendant,
+    //   add endpoint to frontier, continue BFS
+    // - Stop at barrier nodes (other active inputs, circuit terminals)
+
+    // Build barrier set for BFS: active input nodes of OTHER SCCs,
+    // plus circuit I/O terminals. This prevents the BFS from crossing
+    // into downstream active elements' domains (e.g., IC1a's BFS
+    // reaching IC1b.neg through a pot).
+    let scc_set: HashSet<usize> = scc.iter().copied().collect();
+    let mut bfs_barriers: HashSet<NodeId> = HashSet::new();
+    if !rails.contains(&graph.in_node) {
+        bfs_barriers.insert(graph.in_node);
+    }
+    if !rails.contains(&graph.out_node) {
+        bfs_barriers.insert(graph.out_node);
+    }
+    for &node in &graph.output_pin_nodes {
+        if !voltage_source_output_nodes.contains(&node) && !rails.contains(&node) {
+            bfs_barriers.insert(node);
+        }
+    }
+    for pins in &graph.nullor_pins {
+        for node in [pins.pos_node, pins.neg_node] {
+            if !input_terminals.contains(&node) && !rails.contains(&node) {
+                bfs_barriers.insert(node);
+            }
+        }
+    }
+    for (i, elem) in active_elements.iter().enumerate() {
+        if !scc_set.contains(&i) && !rails.contains(&elem.input_node) {
+            bfs_barriers.insert(elem.input_node);
+        }
+        // Also barrier on other elements' output nodes (voltage sources
+        // like op-amp outputs are natural split points).
+        if !scc_set.contains(&i) && !rails.contains(&elem.output_node) {
+            bfs_barriers.insert(elem.output_node);
+        }
+    }
+
+    let mut already_claimed: HashSet<usize> = HashSet::new();
+    for &eidx in pendant_edges.iter().chain(ground_shunt_edges.iter()) {
+        already_claimed.insert(eidx);
+    }
+
+    // Expand group_nodes with nodes from already-claimed edges
+    let mut expanded_nodes = group_nodes.clone();
+    for &eidx in pendant_edges.iter().chain(ground_shunt_edges.iter()) {
+        let e = &graph.edges[eidx];
+        if !rails.contains(&e.node_a) {
+            expanded_nodes.insert(e.node_a);
+        }
+        if !rails.contains(&e.node_b) {
+            expanded_nodes.insert(e.node_b);
+        }
+    }
+
+    // BFS frontier: start from all expanded group nodes
+    let mut frontier: VecDeque<NodeId> = expanded_nodes.iter().copied().collect();
+    let mut visited_bfs: HashSet<NodeId> = expanded_nodes.clone();
+
+    while let Some(node) = frontier.pop_front() {
+        // Barrier nodes may be reached by a directly claimed pendant edge
+        // (for example an op-amp input resistor connected to the previous
+        // buffer's output). The edge itself belongs to this group, but other
+        // branches leaving that upstream output are independent feedforward or
+        // tone paths and must not be swallowed by this active group.
+        if bfs_barriers.contains(&node) {
+            continue;
+        }
+        for &eidx in edge_indices {
+            if claimed.contains(&eidx)
+                || active_edges.contains(&eidx)
+                || feedback_edges.contains(&eidx)
+                || already_claimed.contains(&eidx)
+            {
+                continue;
+            }
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+                continue;
+            }
+            let e = &graph.edges[eidx];
+
+            // Edge must touch the current BFS node
+            let (touching, other) = if e.node_a == node {
+                (e.node_a, e.node_b)
+            } else if e.node_b == node {
+                (e.node_b, e.node_a)
+            } else {
+                continue;
+            };
+            let _ = touching;
+
+            // Voltage-source outputs are split boundaries. Feedback paths
+            // were already claimed by the explicit out->in DFS, so any
+            // remaining passive edge leaving this node is downstream load or
+            // tone shaping and must not be swallowed by the active group.
+            if voltage_source_output_nodes.contains(&node) {
+                continue;
+            }
+
+            // Don't cross into barriers
+            if bfs_barriers.contains(&other) {
+                continue;
+            }
+
+            if rails.contains(&other) {
+                // Ground/rail termination → ground shunt
+                let rail_is_gnd = other == graph.gnd_node || graph.ac_ground_nodes.contains(&other);
+                // Respect at_output exclusion for ground shunts at active outputs
+                if rail_is_gnd && active_output_nodes.contains(&node) {
+                    continue;
+                }
+                ground_shunt_edges.push(eidx);
+                already_claimed.insert(eidx);
+            } else if !visited_bfs.contains(&other) {
+                // Interior node → pendant, continue BFS
+                pendant_edges.push(eidx);
+                already_claimed.insert(eidx);
+                visited_bfs.insert(other);
+                frontier.push_back(other);
+            } else {
+                // Edge connects two already-known group nodes (e.g.,
+                // R_fb_limit connecting resonance path back to Q1.base).
+                // Claim it — it's internal to this group.
+                pendant_edges.push(eidx);
+                already_claimed.insert(eidx);
+            }
+        }
+    }
+
+    (pendant_edges, ground_shunt_edges)
 }
 
 /// Partition circuit edges into signal flow groups.
@@ -491,6 +854,11 @@ pub(in crate::compiler) fn find_flow_groups(
     // Build directed flow graph and find SCCs
     let flow_adj = build_flow_graph(&active_elements, &adj, &rails, graph);
     let sccs = tarjan_scc(&flow_adj);
+
+    // Merge SCCs that contain edges from the same multi-edge component (e.g. BJT).
+    // A BJT has 2 active elements (B-E, C-E) from the same comp_idx. Without
+    // feedback they land in separate SCCs, but must be co-solved as one device.
+    let sccs = merge_same_component_sccs(sccs, &active_elements, graph);
 
     // Build classified FlowGroup for each SCC
     let mut claimed: HashSet<usize> = HashSet::new();
@@ -533,15 +901,46 @@ pub(in crate::compiler) fn find_flow_groups(
         let has_feedback = has_mutual || has_self_feedback;
 
         if !has_feedback {
-            // Standalone NL element — no passive claiming
-            for &eidx in &active_edges {
+            // Standalone device stages sometimes need adjacent local passive
+            // networks to remain physically meaningful: transistor/tube
+            // emitter/source/cathode chains are part of the device operating
+            // point. Standalone diode clippers are different: downstream tone,
+            // coupling, and feedforward networks should remain split so they
+            // can compile as passive WDF/IIR stages with independent controls.
+            let should_claim_local_passives = scc.iter().any(|&i| {
+                let comp = &graph.components[graph.edges[active_elements[i].edge_idx].comp_idx];
+                comp.kind.is_bjt()
+                    || comp.kind.is_jfet()
+                    || comp.kind.is_mosfet()
+                    || comp.kind.is_tube()
+            });
+
+            let (pendant_edges, ground_shunt_edges) = if should_claim_local_passives {
+                claim_passive_edges(
+                    &scc,
+                    &active_elements,
+                    &active_edges,
+                    &[], // no feedback edges
+                    edge_indices,
+                    graph,
+                    &rails,
+                    &claimed,
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            for &eidx in active_edges
+                .iter()
+                .chain(&pendant_edges)
+                .chain(&ground_shunt_edges)
+            {
                 claimed.insert(eidx);
             }
             groups.push(FlowGroup {
                 active_edges,
                 feedback_edges: Vec::new(),
-                pendant_edges: Vec::new(),
-                ground_shunt_edges: Vec::new(),
+                pendant_edges,
+                ground_shunt_edges,
             });
             continue;
         }
@@ -565,17 +964,60 @@ pub(in crate::compiler) fn find_flow_groups(
             if rails.contains(&elem.input_node) || rails.contains(&elem.output_node) {
                 continue;
             }
+            let mut feedback_block = terminal_block.clone();
+            let own_comp_idx = graph.edges[elem.edge_idx].comp_idx;
+            for &node in &graph.output_pin_nodes {
+                if node != elem.output_node && !rails.contains(&node) {
+                    feedback_block.insert(node);
+                }
+            }
+            for pins in &graph.nullor_pins {
+                if pins.comp_idx == own_comp_idx {
+                    continue;
+                }
+                for node in [pins.pos_node, pins.neg_node] {
+                    if node != elem.input_node && !rails.contains(&node) {
+                        feedback_block.insert(node);
+                    }
+                }
+            }
+            for (j, other) in active_elements.iter().enumerate() {
+                let other_comp = &graph.components[graph.edges[other.edge_idx].comp_idx];
+                if j != ei {
+                    feedback_block.extend(
+                        other
+                            .output_nodes
+                            .iter()
+                            .copied()
+                            .filter(|node| !rails.contains(node)),
+                    );
+                    if other_comp.kind.feedback_input_is_barrier()
+                        && !rails.contains(&other.input_node)
+                    {
+                        feedback_block.insert(other.input_node);
+                    }
+                }
+            }
+            let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+            if let SignalTerminals::Amplifier {
+                control: Some(ctrl),
+                ..
+            } = comp.kind.signal_terminals()
+            {
+                if let Some(node) = resolve_pin(&comp.id, ctrl, graph) {
+                    if node != elem.input_node && !rails.contains(&node) {
+                        feedback_block.insert(node);
+                    }
+                }
+            }
             let mut path = Vec::new();
             let mut visited = HashSet::new();
             visited.insert(elem.output_node);
-            // Block terminal nodes from expansion
-            for &t in &terminal_block {
-                visited.insert(t);
-            }
-            dfs_find_paths(
+            dfs_find_paths_blocked(
                 elem.output_node,
                 elem.input_node,
                 &adj,
+                &feedback_block,
                 &mut visited,
                 &mut path,
                 &mut feedback_set,
@@ -594,16 +1036,47 @@ pub(in crate::compiler) fn find_flow_groups(
                     if rails.contains(&elem_i.output_node) || rails.contains(&elem_j.input_node) {
                         continue;
                     }
+                    let mut feedback_block = terminal_block.clone();
+                    for &node in &graph.output_pin_nodes {
+                        if node != elem_i.output_node && !rails.contains(&node) {
+                            feedback_block.insert(node);
+                        }
+                    }
+                    for pins in &graph.nullor_pins {
+                        for node in [pins.pos_node, pins.neg_node] {
+                            if node != elem_i.input_node
+                                && node != elem_j.input_node
+                                && !rails.contains(&node)
+                            {
+                                feedback_block.insert(node);
+                            }
+                        }
+                    }
+                    for (k, other) in active_elements.iter().enumerate() {
+                        let other_comp = &graph.components[graph.edges[other.edge_idx].comp_idx];
+                        if k != ei && k != ej {
+                            feedback_block.extend(
+                                other
+                                    .output_nodes
+                                    .iter()
+                                    .copied()
+                                    .filter(|node| !rails.contains(node)),
+                            );
+                            if other_comp.kind.feedback_input_is_barrier()
+                                && !rails.contains(&other.input_node)
+                            {
+                                feedback_block.insert(other.input_node);
+                            }
+                        }
+                    }
                     let mut path = Vec::new();
                     let mut visited = HashSet::new();
                     visited.insert(elem_i.output_node);
-                    for &t in &terminal_block {
-                        visited.insert(t);
-                    }
-                    dfs_find_paths(
+                    dfs_find_paths_blocked(
                         elem_i.output_node,
                         elem_j.input_node,
                         &adj,
+                        &feedback_block,
                         &mut visited,
                         &mut path,
                         &mut feedback_set,
@@ -616,99 +1089,92 @@ pub(in crate::compiler) fn find_flow_groups(
         for &ae in &active_edges {
             feedback_set.remove(&ae);
         }
-        let feedback_edges: Vec<usize> = feedback_set.into_iter().collect();
 
-        // Collect group signal nodes
-        let mut group_nodes: HashSet<NodeId> = HashSet::new();
-        for &eidx in active_edges.iter().chain(feedback_edges.iter()) {
-            let e = &graph.edges[eidx];
-            if !rails.contains(&e.node_a) {
-                group_nodes.insert(e.node_a);
-            }
-            if !rails.contains(&e.node_b) {
-                group_nodes.insert(e.node_b);
-            }
-        }
-
-        // Input terminal nodes for pendant detection.
-        // Includes BOTH the feedback input (neg for op-amps) AND the signal
-        // input (pos for non-inverting op-amps). The control pin carries signal
-        // in non-inverting topologies — edges touching it are input coupling.
-        let input_terminals: HashSet<NodeId> = scc
+        let scc_input_nodes: HashSet<NodeId> = scc
             .iter()
-            .flat_map(|&i| {
-                let elem = &active_elements[i];
-                let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
-                let mut nodes = vec![elem.input_node];
-                // Also include the control pin (pos for op-amps)
-                if let SignalTerminals::Amplifier {
-                    control: Some(ctrl),
-                    ..
-                } = comp.kind.signal_terminals()
-                {
-                    if let Some(node) = resolve_pin(&comp.id, ctrl, graph) {
-                        nodes.push(node);
-                    }
-                }
-                nodes
-            })
+            .map(|&ei| active_elements[ei].input_node)
             .filter(|node| !rails.contains(node))
             .collect();
-
-        // Classify remaining passive edges: pendant or ground shunt
-        let mut pendant_edges = Vec::new();
-        let mut ground_shunt_edges = Vec::new();
-
-        // Collect active element output nodes. Edges at these nodes that
-        // shunt to ground are post-amplification components (tone caps,
-        // coupling caps), NOT feedback network shunts. They should fall
-        // through to passive grouping, not be claimed by the feedback group.
-        let active_output_nodes: HashSet<NodeId> = scc
+        let scc_voltage_source_outputs: HashSet<NodeId> = scc
             .iter()
-            .map(|&ei| active_elements[ei].output_node)
+            .filter_map(|&ei| {
+                let elem = &active_elements[ei];
+                let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+                if comp.kind.output_impedance() == OutputImpedance::VoltageSource
+                    && !rails.contains(&elem.output_node)
+                {
+                    Some(elem.output_node)
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        for &eidx in edge_indices {
-            if claimed.contains(&eidx)
-                || active_edges.contains(&eidx)
-                || feedback_edges.contains(&eidx)
-            {
-                continue;
-            }
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
-                continue;
-            }
-            let e = &graph.edges[eidx];
-            let a_rail = rails.contains(&e.node_a);
-            let b_rail = rails.contains(&e.node_b);
+        if !scc_voltage_source_outputs.is_empty() {
+            let feedback_return_nodes: HashSet<NodeId> = scc_input_nodes
+                .difference(&scc_voltage_source_outputs)
+                .copied()
+                .collect();
+            let mut blocked = terminal_block.clone();
+            blocked.extend(scc_voltage_source_outputs.iter().copied());
+            feedback_set.retain(|&eidx| {
+                let e = &graph.edges[eidx];
+                let touches_voltage_source_output = scc_voltage_source_outputs.contains(&e.node_a)
+                    || scc_voltage_source_outputs.contains(&e.node_b);
+                if !touches_voltage_source_output {
+                    return true;
+                }
 
-            // Ground shunt: one terminal on rail, other in group_nodes.
-            // But NOT if the non-rail terminal is an active output node —
-            // those are post-amp shunts (e.g. C_tone in RAT), not feedback.
-            let non_rail_node = if a_rail {
-                e.node_b
-            } else if b_rail {
-                e.node_a
-            } else {
-                e.node_a
-            };
-            let at_output = active_output_nodes.contains(&non_rail_node);
+                let start = if scc_voltage_source_outputs.contains(&e.node_a) {
+                    e.node_b
+                } else {
+                    e.node_a
+                };
+                if feedback_return_nodes.contains(&start) {
+                    return true;
+                }
+                if blocked.contains(&start) {
+                    return false;
+                }
 
-            if !at_output
-                && ((a_rail && group_nodes.contains(&e.node_b))
-                    || (b_rail && group_nodes.contains(&e.node_a)))
-            {
-                ground_shunt_edges.push(eidx);
-            } else if input_terminals.contains(&e.node_a) || input_terminals.contains(&e.node_b) {
-                pendant_edges.push(eidx);
-            }
+                let mut visited = HashSet::new();
+                let mut queue = VecDeque::new();
+                visited.insert(start);
+                queue.push_back(start);
+
+                while let Some(node) = queue.pop_front() {
+                    if let Some(neighbors) = adj.get(&node) {
+                        for &(_next_eidx, next) in neighbors {
+                            if feedback_return_nodes.contains(&next) {
+                                return true;
+                            }
+                            if blocked.contains(&next) || !visited.insert(next) {
+                                continue;
+                            }
+                            queue.push_back(next);
+                        }
+                    }
+                }
+
+                false
+            });
         }
 
-        // NOTE: Ground-leg chain detection was removed. Multi-hop ground-leg
-        // impedance (neg → R5 → R6 → Gain_A → GND) is now handled by the
-        // Ri BFS in spqr_build.rs, which searches ALL passive edges reachable
-        // from neg (not just pendant or non-feedback edges).
+        let mut feedback_edges: Vec<usize> = feedback_set.into_iter().collect();
+        feedback_edges.sort_unstable(); // deterministic ordering
+
+        // Claim passive edges (ground shunts and pendants) adjacent to
+        // the active + feedback edges.
+        let (pendant_edges, ground_shunt_edges) = claim_passive_edges(
+            &scc,
+            &active_elements,
+            &active_edges,
+            &feedback_edges,
+            edge_indices,
+            graph,
+            &rails,
+            &claimed,
+        );
 
         // Mark all claimed
         for &eidx in active_edges
@@ -738,7 +1204,6 @@ pub(in crate::compiler) fn find_flow_groups(
     //
     // Edges sharing a non-barrier node are grouped → one WDF stage.
     // This prevents standalone caps from acting as high-pass filters.
-    use super::component::OutputImpedance;
 
     let mut barrier_nodes = rails.clone();
 
@@ -825,7 +1290,7 @@ fn group_by_connectivity(
     }
 
     // Build node → edge index mapping (skip barrier nodes)
-    let mut node_to_edges: HashMap<NodeId, Vec<usize>> = HashMap::new();
+    let mut node_to_edges: BTreeMap<NodeId, Vec<usize>> = BTreeMap::new();
     for &eidx in edges {
         let e = &graph.edges[eidx];
         if !barrier_nodes.contains(&e.node_a) {
@@ -837,7 +1302,7 @@ fn group_by_connectivity(
     }
 
     // Union-find: edges sharing a non-barrier node are in the same group
-    let edge_pos: HashMap<usize, usize> = edges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
+    let edge_pos: BTreeMap<usize, usize> = edges.iter().enumerate().map(|(i, &e)| (e, i)).collect();
     let mut parent: Vec<usize> = (0..edges.len()).collect();
 
     fn find(parent: &mut [usize], mut x: usize) -> usize {
@@ -862,8 +1327,8 @@ fn group_by_connectivity(
         }
     }
 
-    // Collect groups
-    let mut groups_map: HashMap<usize, Vec<usize>> = HashMap::new();
+    // Collect groups (BTreeMap for deterministic iteration order)
+    let mut groups_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, &eidx) in edges.iter().enumerate() {
         let root = find(&mut parent, i);
         groups_map.entry(root).or_default().push(eidx);
@@ -1117,6 +1582,80 @@ mod tests {
             u1_group, d2_group,
             "Op-amp and feedback diode D2 should be in SAME group"
         );
+    }
+
+    #[test]
+    fn flow_voltage_source_feedback_does_not_claim_downstream_tone_network() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R_in: resistor(4.7k)
+                    U1: opamp(tl072)
+                    R_fb: resistor(51k)
+                    Drive: pot(500k, a)
+                    D1: diode(silicon)
+                    D2: diode(silicon)
+                    R_tone_in: resistor(1k)
+                    Tone: pot(20k, b)
+                    C_tone: cap(220n)
+                    R_level_in: resistor(220)
+                    C_level: cap(220n)
+                    Level: pot(100k, a)
+                    R_out: resistor(10k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U1.neg
+                    U1.neg -> R_fb.a
+                    R_fb.b -> Drive.a
+                    Drive.b -> U1.out
+                    U1.neg -> D1.a
+                    D1.b -> U1.out
+                    U1.neg -> D2.b
+                    D2.a -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> R_tone_in.a
+                    R_tone_in.b -> Tone.a
+                    Tone.b -> C_tone.a
+                    C_tone.b -> gnd
+                    Tone.w -> R_level_in.a
+                    R_level_in.b -> C_level.a
+                    C_level.b -> gnd
+                    Tone.w -> Level.a
+                    Level.b -> gnd
+                    Level.w -> R_out.a
+                    R_out.b -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let u1_group_idx =
+            find_group_containing(&groups, &graph, "U1").expect("Should have U1 feedback group");
+        let u1_group = &groups[u1_group_idx];
+
+        for comp_id in ["R_fb", "Drive", "D1", "D2"] {
+            assert!(
+                u1_group
+                    .all_edges()
+                    .iter()
+                    .any(|&eidx| { graph.components[graph.edges[eidx].comp_idx].id == comp_id }),
+                "{comp_id} should stay in the voltage-source feedback group"
+            );
+        }
+
+        for comp_id in ["R_tone_in", "Tone", "C_tone", "Level", "R_out"] {
+            assert!(
+                !u1_group
+                    .all_edges()
+                    .iter()
+                    .any(|&eidx| { graph.components[graph.edges[eidx].comp_idx].id == comp_id }),
+                "{comp_id} is downstream of the op-amp voltage-source output and should be split"
+            );
+        }
     }
 
     // ── Test 5: 808 bridged-T — single op-amp with T-network ────────────
@@ -1945,91 +2484,207 @@ mod tests {
         );
     }
 
-    // ── Screamer topology: tone/level pots must NOT be in feedback group ─
+    // ── Test: BJT ladder last-stage emitter chain claimed ────────────────
     //
-    // TS-808 topology: opamp + diode clipping in feedback, with a tone
-    // stack and level pot AFTER the opamp output. The tone/level pots
-    // connect to U1.out but are NOT part of the feedback loop — they're
-    // downstream passive components.
-    //
-    // At v0.5.4 these were correctly in their own passive group.
-    // A BFS expansion regression pulled them into the feedback group.
+    // In a diode-connected BJT cascade (TB303 ladder), each BJT's emitter
+    // connects to the next BJT's base. For Q1-Q3, their emitter node IS an
+    // input_terminal for the next BJT, so emitter components get claimed as
+    // pendants. Q4 (last stage) has NO next BJT — its emitter is NOT an
+    // input_terminal. Without BFS expansion, R_e_floor4 and Cutoff4 escape
+    // into an unclaimed passive group, creating a degenerate IIR that kills
+    // signal.
 
     #[test]
-    fn flow_screamer_tone_pot_not_in_feedback_group() {
-        // Simplified Screamer: opamp + diode clipping feedback + tone pot + level pot
+    fn flow_bjt_ladder_last_stage_emitter_components_claimed() {
+        // Minimal 2-stage diode-connected BJT ladder.
+        // Q2 is the last stage — R_e2 + Cutoff2 must be in Q2's group.
         let (graph, edges) = make_graph_all_edges(
             r#"
             pedal "test" { supply 9V
                 components {
+                    Q1: npn(2n3904)
+                    Q2: npn(2n3904)
+                    R_bias1: resistor(100k)
+                    R_bias2: resistor(100k)
+                    C1: cap(33n)
+                    C2: cap(33n)
+                    R_e1: resistor(220)
+                    Cutoff1: resistor(5k)
+                    R_e2: resistor(220)
+                    Cutoff2: resistor(5k)
                     R_in: resistor(10k)
-                    U1: opamp(tl072)
-                    Rf: resistor(100k)
-                    D1: diode(silicon)
-                    D2: diode(silicon)
-                    C_hp: cap(47n)
-                    Tone: pot(20k, a)
-                    R_t1: resistor(10k)
-                    C_t1: cap(220n)
-                    Level: pot(100k, a)
-                    C_out: cap(10u)
+                    C_out: cap(100n)
+                    R_out: resistor(100k)
                 }
                 nets {
+                    vcc -> R_bias1.a
+                    R_bias1.b -> Q1.base, Q1.collector
+                    vcc -> R_bias2.a
+                    R_bias2.b -> Q2.base, Q2.collector
                     in -> R_in.a
-                    R_in.b -> U1.neg
-                    U1.neg -> Rf.a
-                    Rf.b -> U1.out
-                    U1.neg -> D1.a
-                    D1.b -> U1.out
-                    U1.neg -> D2.b
-                    D2.a -> U1.out
-                    U1.pos -> gnd
-                    U1.out -> C_hp.a
-                    C_hp.b -> Tone.a
-                    Tone.w -> R_t1.a
-                    R_t1.b -> gnd
-                    Tone.b -> C_t1.a
-                    C_t1.b -> gnd
-                    Tone.w -> Level.a
-                    Level.w -> C_out.a
-                    Level.b -> gnd
+                    R_in.b -> Q1.base
+                    Q1.emitter -> C1.a
+                    C1.b -> gnd
+                    Q1.emitter -> R_e1.a
+                    R_e1.b -> Cutoff1.a
+                    Cutoff1.b -> gnd
+                    Q1.emitter -> Q2.base
+                    Q2.emitter -> C2.a
+                    C2.b -> gnd
+                    Q2.emitter -> R_e2.a
+                    R_e2.b -> Cutoff2.a
+                    Cutoff2.b -> gnd
+                    Q2.emitter -> C_out.a
+                    C_out.b -> R_out.a
+                    R_out.b -> gnd
                     C_out.b -> out
                 }
-                controls {
-                    Tone.position -> "Tone" [0.0, 1.0] = 0.5
-                    Level.position -> "Level" [0.0, 1.0] = 0.5
-                }
+                controls {}
             }"#,
         );
 
         let groups = find_flow_groups(&edges, &graph);
 
-        let u1_group = find_group_containing(&groups, &graph, "U1");
-        let tone_group = find_group_containing(&groups, &graph, "Tone");
-        let level_group = find_group_containing(&groups, &graph, "Level");
+        // R_e2 and Cutoff2 must be in the same group as Q2
+        let q2_group = find_group_containing(&groups, &graph, "Q2");
+        let re2_group = find_group_containing(&groups, &graph, "R_e2");
+        let cutoff2_group = find_group_containing(&groups, &graph, "Cutoff2");
 
-        assert!(u1_group.is_some(), "Should have U1 group");
-        assert!(tone_group.is_some(), "Should have Tone group");
-        assert!(level_group.is_some(), "Should have Level group");
-
-        // Tone and Level must NOT be in the same group as U1.
-        // They connect to U1.out but are downstream passive components,
-        // not part of the feedback loop.
-        assert_ne!(
-            u1_group, tone_group,
-            "Tone pot should be in a SEPARATE group from the opamp feedback. \
-             It connects to U1.out (a voltage source output) and is downstream, \
-             not part of the Rf/D1/D2 feedback loop."
-        );
-        assert_ne!(
-            u1_group, level_group,
-            "Level pot should be in a SEPARATE group from the opamp feedback."
-        );
-
-        // Tone and Level should be in the SAME passive group (they're connected)
+        assert!(q2_group.is_some(), "Q2 should be in a group");
         assert_eq!(
-            tone_group, level_group,
-            "Tone and Level should be in the same passive group (connected network)"
+            q2_group, re2_group,
+            "R_e2 (last-stage emitter resistor) must be in Q2's group, not a separate passive group"
+        );
+        assert_eq!(
+            q2_group, cutoff2_group,
+            "Cutoff2 (last-stage emitter pot) must be in Q2's group, not a separate passive group"
+        );
+    }
+
+    #[test]
+    fn flow_bjt_ladder_output_coupling_separate() {
+        // Output coupling (C_out + R_out) should NOT be in the BJT group.
+        // They are post-amplification components in a separate passive stage.
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    Q1: npn(2n3904)
+                    R_bias1: resistor(100k)
+                    C1: cap(33n)
+                    R_e1: resistor(220)
+                    Cutoff1: resistor(5k)
+                    R_in: resistor(10k)
+                    C_out: cap(100n)
+                    R_out: resistor(100k)
+                }
+                nets {
+                    vcc -> R_bias1.a
+                    R_bias1.b -> Q1.base, Q1.collector
+                    in -> R_in.a
+                    R_in.b -> Q1.base
+                    Q1.emitter -> C1.a
+                    C1.b -> gnd
+                    Q1.emitter -> R_e1.a
+                    R_e1.b -> Cutoff1.a
+                    Cutoff1.b -> gnd
+                    Q1.emitter -> C_out.a
+                    C_out.b -> R_out.a
+                    R_out.b -> gnd
+                    C_out.b -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let q1_group = find_group_containing(&groups, &graph, "Q1");
+        let re1_group = find_group_containing(&groups, &graph, "R_e1");
+        let cutoff1_group = find_group_containing(&groups, &graph, "Cutoff1");
+
+        assert!(q1_group.is_some(), "Q1 should be in a group");
+        // Emitter components must be claimed into BJT group
+        assert_eq!(
+            q1_group, re1_group,
+            "R_e1 must be in Q1's group (emitter resistor chain)"
+        );
+        assert_eq!(
+            q1_group, cutoff1_group,
+            "Cutoff1 must be in Q1's group (emitter ground termination)"
+        );
+    }
+
+    #[test]
+    fn flow_bjt_ladder_resonance_feedback_claimed() {
+        // In a TB303-style ladder, the Resonance pot feeds Q4.emitter
+        // back to Q1.base via R_fb_limit. These components connect
+        // the last stage back to the first — they must be in the
+        // BJT feedback group.
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    Q1: npn(2n3904)
+                    Q2: npn(2n3904)
+                    R_bias1: resistor(100k)
+                    R_bias2: resistor(100k)
+                    C1: cap(33n)
+                    C2: cap(33n)
+                    R_e1: resistor(220)
+                    R_e2: resistor(220)
+                    Cutoff1: resistor(5k)
+                    Cutoff2: resistor(5k)
+                    R_in: resistor(10k)
+                    Resonance: resistor(50k)
+                    R_fb_limit: resistor(33k)
+                    C_out: cap(100n)
+                    R_out: resistor(100k)
+                }
+                nets {
+                    vcc -> R_bias1.a
+                    R_bias1.b -> Q1.base, Q1.collector
+                    vcc -> R_bias2.a
+                    R_bias2.b -> Q2.base, Q2.collector
+                    in -> R_in.a
+                    R_in.b -> Q1.base
+                    Q1.emitter -> C1.a
+                    C1.b -> gnd
+                    Q1.emitter -> R_e1.a
+                    R_e1.b -> Cutoff1.a
+                    Cutoff1.b -> gnd
+                    Q1.emitter -> Q2.base
+                    Q2.emitter -> C2.a
+                    C2.b -> gnd
+                    Q2.emitter -> R_e2.a
+                    R_e2.b -> Cutoff2.a
+                    Cutoff2.b -> gnd
+                    Q2.emitter -> C_out.a
+                    C_out.b -> R_out.a
+                    R_out.b -> gnd
+                    C_out.b -> out
+                    Q2.emitter -> Resonance.a
+                    Resonance.b -> R_fb_limit.a
+                    R_fb_limit.b -> Q1.base
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+
+        let q1_group = find_group_containing(&groups, &graph, "Q1");
+        let res_group = find_group_containing(&groups, &graph, "Resonance");
+        let fb_group = find_group_containing(&groups, &graph, "R_fb_limit");
+
+        assert!(q1_group.is_some(), "Q1 should be in a group");
+        assert_eq!(
+            q1_group, res_group,
+            "Resonance (Q2.emitter → Q1.base feedback path) must be in the BJT group"
+        );
+        assert_eq!(
+            q1_group, fb_group,
+            "R_fb_limit (feedback limiting resistor) must be in the BJT group"
         );
     }
 }

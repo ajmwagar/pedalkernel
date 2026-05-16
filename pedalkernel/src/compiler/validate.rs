@@ -1163,6 +1163,7 @@ mod tests {
             mirrors: hashbrown::HashMap::new(),
             calibrate: false,
             subcircuits: vec![],
+            ports: vec![],
         }
     }
 
@@ -1305,6 +1306,7 @@ mod tests {
             mirrors: hashbrown::HashMap::new(),
             calibrate: false,
             subcircuits: vec![],
+            ports: vec![],
         };
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "no-signal-path"));
@@ -2086,6 +2088,7 @@ mod tests {
             mirrors: hashbrown::HashMap::new(),
             calibrate: false,
             subcircuits: vec![],
+            ports: vec![],
         }
     }
 

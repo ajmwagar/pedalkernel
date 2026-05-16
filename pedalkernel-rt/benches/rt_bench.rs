@@ -146,7 +146,11 @@ fn bench_wdf_scattering(c: &mut Criterion) {
     {
         let vs = DynNode::VoltageSource(0.0, 1.0);
         let r = DynNode::Resistor(Some("R1".into()), 4700.0);
-        let cap = DynNode::Capacitor(Some("C1".into()), 220e-9, 1.0 / (2.0 * SAMPLE_RATE * 220e-9));
+        let cap = DynNode::Capacitor(
+            Some("C1".into()),
+            220e-9,
+            1.0 / (2.0 * SAMPLE_RATE * 220e-9),
+        );
         let inner = DynNode::Series(Box::new(r), Box::new(cap));
         let mut tree = DynNode::Series(Box::new(vs), Box::new(inner));
         tree.recompute();
@@ -171,7 +175,11 @@ fn bench_wdf_scattering(c: &mut Criterion) {
         let c1 = DynNode::Capacitor(Some("C1".into()), 47e-9, 1.0 / (2.0 * SAMPLE_RATE * 47e-9));
         let r2 = DynNode::Resistor(Some("R2".into()), 51000.0);
         let pot = DynNode::Pot("Drive".into(), 500000.0, 0.5, PotTaper::B);
-        let c2 = DynNode::Capacitor(Some("C2".into()), 100e-9, 1.0 / (2.0 * SAMPLE_RATE * 100e-9));
+        let c2 = DynNode::Capacitor(
+            Some("C2".into()),
+            100e-9,
+            1.0 / (2.0 * SAMPLE_RATE * 100e-9),
+        );
 
         let branch1 = DynNode::Parallel(Box::new(r2), Box::new(pot));
         let branch2 = DynNode::Parallel(Box::new(branch1), Box::new(c1));
@@ -210,7 +218,11 @@ fn bench_incremental_recompute(c: &mut Criterion) {
     let c1 = DynNode::Capacitor(Some("C1".into()), 47e-9, 1.0 / (2.0 * SAMPLE_RATE * 47e-9));
     let r2 = DynNode::Resistor(Some("R2".into()), 51000.0);
     let pot = DynNode::Pot("Drive".into(), 500000.0, 0.5, PotTaper::B);
-    let c2 = DynNode::Capacitor(Some("C2".into()), 100e-9, 1.0 / (2.0 * SAMPLE_RATE * 100e-9));
+    let c2 = DynNode::Capacitor(
+        Some("C2".into()),
+        100e-9,
+        1.0 / (2.0 * SAMPLE_RATE * 100e-9),
+    );
 
     let branch1 = DynNode::Parallel(Box::new(r2), Box::new(pot));
     let branch2 = DynNode::Parallel(Box::new(branch1), Box::new(c1));
@@ -364,29 +376,88 @@ fn bench_oversampler(c: &mut Criterion) {
 
 // ═══════════════════════════════════════════════════════════════════
 
-criterion_group!(
+criterion_group!(elements, bench_wdf_elements,);
+
+criterion_group!(scattering, bench_wdf_scattering,);
+
+criterion_group!(recompute, bench_incremental_recompute,);
+
+criterion_group!(fast_math_group, bench_fast_math,);
+
+criterion_group!(oversampling, bench_oversampler,);
+
+// ═══════════════════════════════════════════════════════════════════
+// Voice DSP primitives (VCO, Envelope, Glide)
+// ═══════════════════════════════════════════════════════════════════
+
+fn bench_voice_primitives(c: &mut Criterion) {
+    let mut group = c.benchmark_group("voice_primitives");
+    group.throughput(Throughput::Elements(NUM_OPS));
+
+    // VCO — saw
+    {
+        let mut vco = pedalkernel_rt::oscillator::Vco::new(SAMPLE_RATE);
+        group.bench_function("vco_saw", |b| {
+            b.iter(|| {
+                for _ in 0..NUM_OPS {
+                    black_box(vco.process(black_box(3.0), black_box(0.0), false));
+                }
+            })
+        });
+    }
+
+    // VCO — square
+    {
+        let mut vco = pedalkernel_rt::oscillator::Vco::new(SAMPLE_RATE);
+        group.bench_function("vco_square", |b| {
+            b.iter(|| {
+                for _ in 0..NUM_OPS {
+                    black_box(vco.process(black_box(3.0), black_box(0.0), true));
+                }
+            })
+        });
+    }
+
+    // Decay envelope
+    {
+        let mut env = pedalkernel_rt::envelope::DecayEnvelope::new(SAMPLE_RATE);
+        env.set_decay_from_knob(0.5);
+        env.trigger();
+        group.bench_function("decay_envelope", |b| {
+            b.iter(|| {
+                for _ in 0..NUM_OPS {
+                    black_box(env.process());
+                }
+                env.trigger(); // re-trigger to keep it non-zero
+            })
+        });
+    }
+
+    // Glide
+    {
+        let mut glide = pedalkernel_rt::glide::Glide::new(SAMPLE_RATE);
+        glide.set_time_from_knob(0.5);
+        glide.set_target(3.0);
+        glide.activate();
+        group.bench_function("glide", |b| {
+            b.iter(|| {
+                for _ in 0..NUM_OPS {
+                    black_box(glide.process());
+                }
+            })
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(voice_group, bench_voice_primitives,);
+
+criterion_main!(
     elements,
-    bench_wdf_elements,
-);
-
-criterion_group!(
     scattering,
-    bench_wdf_scattering,
-);
-
-criterion_group!(
     recompute,
-    bench_incremental_recompute,
-);
-
-criterion_group!(
     fast_math_group,
-    bench_fast_math,
-);
-
-criterion_group!(
     oversampling,
-    bench_oversampler,
+    voice_group
 );
-
-criterion_main!(elements, scattering, recompute, fast_math_group, oversampling);
