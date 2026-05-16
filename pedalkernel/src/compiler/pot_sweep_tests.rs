@@ -9,6 +9,7 @@
 
 use super::spqr_build::compile_via_spqr;
 use crate::PedalProcessor;
+use std::collections::HashSet;
 
 fn load_legend(name: &str) -> crate::dsl::PedalDef {
     let path = format!(
@@ -164,6 +165,176 @@ fn assert_spectrum_changes(pedal: &crate::dsl::PedalDef, pedal_name: &str, contr
     assert!(
         ratio_diff > 0.1 || level_diff > 0.001,
         "{pedal_name}/{control}: tone pot has no spectral effect (ratio_diff={ratio_diff:.2}, level_diff={level_diff:.4})"
+    );
+}
+
+fn settle_control(proc: &mut super::compiled::CompiledPedal) {
+    for _ in 0..6000 {
+        proc.process(0.0);
+    }
+}
+
+fn smoothed_values_for_control(proc: &super::compiled::CompiledPedal, label: &str) -> Vec<f64> {
+    proc.resolve_control(label)
+        .into_iter()
+        .map(|control_idx| {
+            proc.pot_smoothers
+                .iter()
+                .find(|s| s.control_idx == control_idx)
+                .unwrap_or_else(|| panic!("missing smoother for {label} binding {control_idx}"))
+                .current
+        })
+        .collect()
+}
+
+fn debug_leaf_values_for_component(
+    proc: &super::compiled::CompiledPedal,
+    component_id: &str,
+) -> Vec<(f64, f64)> {
+    proc.control_debug_info()
+        .into_iter()
+        .filter_map(|(name, position, resistance)| {
+            (name.starts_with('[') && name.ends_with(component_id))
+                .then_some((position, resistance))
+        })
+        .collect()
+}
+
+#[test]
+fn core_legend_12_user_pots_have_runtime_bindings() {
+    let cases: &[(&str, &str, &[(&str, usize)])] = &[
+        (
+            "ratking_v1a",
+            "ratking_non_invert_v1a",
+            &[("Distortion", 1), ("Filter", 1), ("Volume", 1)],
+        ),
+        (
+            "screamer",
+            "screamer",
+            &[("Drive", 1), ("Tone", 1), ("Level", 1)],
+        ),
+        ("sd1", "sd1", &[("Drive", 1), ("Tone", 1), ("Level", 1)]),
+        (
+            "goldenrod",
+            "goldenrod",
+            &[("Gain", 2), ("Treble", 1), ("Output", 1)],
+        ),
+    ];
+
+    let mut user_pot_count = 0;
+    let mut runtime_binding_count = 0;
+
+    for (display_name, legend_name, expected_controls) in cases {
+        let pedal = load_legend(legend_name);
+        let declared_labels: HashSet<&str> = pedal
+            .controls
+            .iter()
+            .map(|control| control.label.as_str())
+            .collect();
+
+        let expected_labels: HashSet<&str> =
+            expected_controls.iter().map(|(label, _)| *label).collect();
+        assert_eq!(
+            declared_labels, expected_labels,
+            "{display_name}: declared controls changed"
+        );
+
+        let mut proc = compile_via_spqr(&pedal, 48_000.0)
+            .unwrap_or_else(|e| panic!("{display_name}: compile failed: {e}"));
+
+        for (label, expected_bindings) in *expected_controls {
+            user_pot_count += 1;
+
+            let binding_indices = proc.resolve_control(label);
+            runtime_binding_count += binding_indices.len();
+            assert_eq!(
+                binding_indices.len(),
+                *expected_bindings,
+                "{display_name}/{label}: wrong runtime binding count"
+            );
+
+            proc.set_control(label, 0.13);
+            settle_control(&mut proc);
+            let low_values = smoothed_values_for_control(&proc, label);
+            let low_leaf_values: Vec<_> = pedal
+                .controls
+                .iter()
+                .filter(|control| control.label == *label)
+                .map(|control| {
+                    (
+                        control.component.as_str(),
+                        debug_leaf_values_for_component(&proc, &control.component),
+                    )
+                })
+                .collect();
+
+            proc.set_control(label, 0.87);
+            settle_control(&mut proc);
+            let high_values = smoothed_values_for_control(&proc, label);
+            let high_leaf_values: Vec<_> = pedal
+                .controls
+                .iter()
+                .filter(|control| control.label == *label)
+                .map(|control| {
+                    (
+                        control.component.as_str(),
+                        debug_leaf_values_for_component(&proc, &control.component),
+                    )
+                })
+                .collect();
+
+            assert_eq!(
+                low_values.len(),
+                high_values.len(),
+                "{display_name}/{label}: binding count changed during sweep"
+            );
+
+            let changed = low_values
+                .iter()
+                .zip(&high_values)
+                .any(|(low, high)| (low - high).abs() > 0.05);
+            eprintln!(
+                "{display_name}/{label}: bindings={} low={low_values:?} high={high_values:?}",
+                binding_indices.len()
+            );
+            assert!(
+                changed,
+                "{display_name}/{label}: set_control did not move runtime smoother state"
+            );
+
+            for ((component, low_leaf), (_, high_leaf)) in
+                low_leaf_values.iter().zip(&high_leaf_values)
+            {
+                if low_leaf.is_empty() && high_leaf.is_empty() {
+                    continue;
+                }
+                assert_eq!(
+                    low_leaf.len(),
+                    high_leaf.len(),
+                    "{display_name}/{label}/{component}: debug leaf count changed"
+                );
+                let leaf_changed =
+                    low_leaf
+                        .iter()
+                        .zip(high_leaf)
+                        .any(|((low_pos, low_r), (high_pos, high_r))| {
+                            (low_pos - high_pos).abs() > 0.05 || (low_r - high_r).abs() > 1.0
+                        });
+                eprintln!(
+                    "{display_name}/{label}/{component}: leaf low={low_leaf:?} high={high_leaf:?}"
+                );
+                assert!(
+                    leaf_changed,
+                    "{display_name}/{label}/{component}: stage leaf did not move"
+                );
+            }
+        }
+    }
+
+    assert_eq!(user_pot_count, 12, "expected 12 user-facing pots");
+    assert_eq!(
+        runtime_binding_count, 13,
+        "expected 13 runtime bindings because Goldenrod Gain is dual-gang"
     );
 }
 
