@@ -21,6 +21,58 @@ fn load_legend(name: &str) -> crate::dsl::PedalDef {
     crate::dsl::parse_pedal_file(&source).unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
 }
 
+fn measure_default_rms_peak(mut compiled: pedalkernel_rt::processor::CompiledPedal) -> (f64, f64) {
+    for i in 0..24_000 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin();
+        compiled.process(input);
+    }
+    let mut sum_sq = 0.0;
+    let mut peak = 0.0f64;
+    for i in 0..4_800 {
+        let input =
+            0.05 * (2.0 * std::f64::consts::PI * 1000.0 * (24_000 + i) as f64 / 48000.0).sin();
+        let out = compiled.process(input);
+        sum_sq += out * out;
+        peak = peak.max(out.abs());
+    }
+    ((sum_sq / 4_800.0).sqrt(), peak)
+}
+
+#[test]
+fn legend_default_output_calibration_uses_bound_controls() {
+    let mut rms_values = Vec::new();
+    for name in ["ratking_non_invert_v1a", "goldenrod", "screamer", "sd1"] {
+        let pedal = load_legend(name);
+        let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+        let pre_gain = compiled.pre_gain;
+        let output_gain = compiled.output_gain;
+        let stages = compiled.stages.len();
+        let (rms, peak) = measure_default_rms_peak(compiled);
+        eprintln!(
+            "{name}: calibrate={} stages={} pre_gain={pre_gain:.6} output_gain={output_gain:.6} rms={rms:.6} peak={peak:.6}",
+            pedal.calibrate, stages,
+        );
+        assert!(
+            peak < 0.5,
+            "{name}: calibrated default output is too hot: peak={peak:.6}, rms={rms:.6}, output_gain={output_gain:.6}"
+        );
+        rms_values.push((name, rms));
+    }
+
+    let min_rms = rms_values
+        .iter()
+        .map(|(_, rms)| *rms)
+        .fold(f64::INFINITY, f64::min);
+    let max_rms = rms_values
+        .iter()
+        .map(|(_, rms)| *rms)
+        .fold(0.0f64, f64::max);
+    assert!(
+        max_rms / min_rms < 5.0,
+        "calibrated default outputs are not comparable: {rms_values:?}"
+    );
+}
+
 /// Measure peak output at a given control setting.
 /// Feeds 440Hz guitar-level signal, returns peak absolute output.
 fn measure_peak(pedal: &crate::dsl::PedalDef, control: &str, value: f64) -> f64 {

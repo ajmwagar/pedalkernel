@@ -1240,12 +1240,12 @@ pub fn compile_via_spqr_with_options(
         initialized: false,
     };
 
+    // Bind pot controls to their stages (WDF, IIR, MultiNl).
+    super::spqr_control::bind_controls(pedal, &mut compiled);
+
     if pedal.calibrate {
         super::calibrate::calibrate_output(&mut compiled);
     }
-
-    // Bind pot controls to their stages (WDF, IIR, MultiNl).
-    super::spqr_control::bind_controls(pedal, &mut compiled);
 
     // Bind named ports: resolve port names to graph NodeIds.
     if !pedal.ports.is_empty() {
