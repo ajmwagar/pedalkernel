@@ -1042,6 +1042,46 @@ pub fn is_mix_label(label: &str) -> bool {
 }
 
 impl CompiledPedal {
+    fn normalized_control_name(input: &str) -> alloc::string::String {
+        input
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    }
+
+    fn control_label_matches_port(label: &str, port_name: &str) -> bool {
+        let label = Self::normalized_control_name(label);
+        if label.is_empty() {
+            return false;
+        }
+
+        let port = Self::normalized_control_name(port_name);
+        if port == label {
+            return true;
+        }
+
+        port.strip_prefix("cv")
+            .is_some_and(|suffix| suffix == label)
+            || port
+                .strip_suffix("cv")
+                .is_some_and(|prefix| prefix == label)
+    }
+
+    fn set_matching_input_port_control(&mut self, label: &str, value: f64) -> bool {
+        let mut found = false;
+        for port in &self.ports {
+            if port.direction == crate::PortDirection::Input
+                && port.index < self.port_values.len()
+                && Self::control_label_matches_port(label, &port.name)
+            {
+                self.port_values[port.index] = value;
+                found = true;
+            }
+        }
+        found
+    }
+
     /// Set the supply voltage and update all voltage-dependent models.
     ///
     /// This affects:
@@ -1729,6 +1769,10 @@ impl CompiledPedal {
                     }
                 }
             }
+        }
+
+        if !found {
+            found = self.set_matching_input_port_control(label, value);
         }
 
         if !found {

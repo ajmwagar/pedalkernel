@@ -1103,7 +1103,11 @@ pub(super) fn try_build_blockwise(
                     let b0 = dc_tree.reflected();
                     let mut dc_kt = k_table.clone();
                     dc_kt.precompute_scales();
-                    let a0 = dc_kt.lookup_2d(b0, 0.0);
+                    let a0 = if dc_kt.dims == 1 {
+                        dc_kt.lookup_1d(b0)
+                    } else {
+                        dc_kt.lookup_2d(b0, 0.0)
+                    };
                     dc_tree.set_incident(a0);
                     let dc_offset = wdf
                         .output_probe

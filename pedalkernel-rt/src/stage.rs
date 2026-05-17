@@ -5725,11 +5725,11 @@ impl BlockwiseKMethodStage {
         block.source_polarity * physical_voltage
     }
 
-    fn block_root_incident(block: &KMethodBlock, b_tree: f64) -> f64 {
+    fn block_root_incident(block: &KMethodBlock, b_tree: f64, ctrl: f64) -> f64 {
         if block.k_table.dims == 1 {
             block.k_table.lookup_1d(b_tree)
         } else {
-            block.k_table.lookup_2d(b_tree, 0.0)
+            block.k_table.lookup_2d(b_tree, ctrl)
         }
     }
 
@@ -5740,7 +5740,7 @@ impl BlockwiseKMethodStage {
         let drive_voltage = Self::block_drive_voltage(block, physical_voltage);
         block.tree.set_voltage(drive_voltage);
         let b_tree = block.tree.reflected();
-        let a_root = Self::block_root_incident(block, b_tree);
+        let a_root = Self::block_root_incident(block, b_tree, drive_voltage);
         let raw_cascade = Self::block_output_voltage(block, a_root, b_tree);
         (a_root, b_tree, raw_cascade - block.dc_offset)
     }
@@ -5960,7 +5960,7 @@ impl BlockwiseKMethodStage {
         for i in 0..n_blocks {
             // Re-extract at the current converged state
             let b_tree = self.blocks[i].tree.reflected();
-            let a_root = Self::block_root_incident(&self.blocks[i], b_tree);
+            let a_root = Self::block_root_incident(&self.blocks[i], b_tree, 0.0);
             self.blocks[i].dc_offset = if self.blocks[i].cascade_from_passive {
                 Self::block_output_voltage(&self.blocks[i], a_root, b_tree)
             } else {
@@ -6091,5 +6091,62 @@ impl BlockwiseKMethodStage {
             self.blocks.len(),
             self.n_ports,
         )
+    }
+}
+
+#[cfg(test)]
+mod blockwise_k_method_tests {
+    use super::*;
+    use crate::dyn_node::DynNode;
+
+    fn control_sensitive_table() -> KTable {
+        let steps = 3;
+        let mut entries = Vec::with_capacity(steps * steps);
+        for ic in 0..steps {
+            let ctrl = ic as f64;
+            for ib in 0..steps {
+                let b = ib as f64;
+                entries.push(b + 10.0 * ctrl);
+            }
+        }
+
+        let mut table = KTable {
+            dims: 2,
+            b_min: 0.0,
+            b_max: 2.0,
+            ctrl_min: 0.0,
+            ctrl_max: 2.0,
+            steps,
+            entries,
+            inv_b_scale: 0.0,
+            inv_c_scale: 0.0,
+        };
+        table.precompute_scales();
+        table
+    }
+
+    fn test_block(vbe_bias: f64) -> KMethodBlock {
+        KMethodBlock {
+            tree: DynNode::VoltageSource(0.0, 1.0),
+            k_table: control_sensitive_table(),
+            rp: 1.0,
+            vbe_bias,
+            dc_offset: 0.0,
+            cascade_from_passive: false,
+            cascade_probe_id: None,
+            source_polarity: 1.0,
+        }
+    }
+
+    #[test]
+    fn bkm_2d_k_table_uses_runtime_drive_control_coordinate() {
+        let block = test_block(1.0);
+
+        let a_root = BlockwiseKMethodStage::block_root_incident(&block, 0.5, 0.25);
+
+        assert!(
+            (a_root - 3.0).abs() < 1e-9,
+            "2D BKM K-table lookup must use the runtime drive as the control coordinate"
+        );
     }
 }

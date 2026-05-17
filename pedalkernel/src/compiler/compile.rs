@@ -446,6 +446,38 @@ mod tests {
     }
 
     #[test]
+    fn set_control_falls_back_to_matching_cv_input_port() {
+        use crate::PedalProcessor;
+
+        let src = r#"pedal "ControlToCvPort" {
+    supply 9V
+    ports {
+        audio_in: input
+        cv_cutoff: input
+        audio_out: output
+    }
+    components { R1: resistor(10k) R_cv: resistor(100k) }
+    nets {
+        audio_in -> R1.a
+        cv_cutoff -> R_cv.a
+        R_cv.b -> R1.a
+        R1.b -> audio_out
+    }
+    controls {}
+}"#;
+        let pedal = parse_pedal_file(src).unwrap();
+        let mut compiled = compile_pedal(&pedal, 48000.0).unwrap();
+        let cv_idx = compiled.resolve_port("cv_cutoff").unwrap();
+
+        compiled.set_control("Cutoff", 0.75);
+
+        assert_eq!(
+            compiled.port_values[cv_idx], 0.75,
+            "unbound Cutoff control should drive matching cv_cutoff input port"
+        );
+    }
+
+    #[test]
     fn compile_without_ports_has_empty_ports() {
         let src = r#"pedal "NoPort" {
     supply 9V
