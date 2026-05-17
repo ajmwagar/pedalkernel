@@ -35,6 +35,21 @@ where
     (sum_sq / count.max(1) as f64).sqrt()
 }
 
+fn ac_rms(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mean = values.iter().copied().sum::<f64>() / values.len() as f64;
+    let sum_sq = values
+        .iter()
+        .map(|value| {
+            let ac = *value - mean;
+            ac * ac
+        })
+        .sum::<f64>();
+    (sum_sq / values.len() as f64).sqrt()
+}
+
 const TWO_RUNG_DIODE_LADDER: &str = r#"
 pedal "Two Rung Diode Ladder" { supply 9V
   ports {
@@ -1061,20 +1076,18 @@ fn tb303_bkm_block_outputs_show_cascaded_lowpass_shape() {
             let _ = bkm.debug_process_with_block_outputs(&[input, 0.0, 0.0, 0.0]);
         }
 
-        let mut sum_sq = vec![0.0f64; bkm.blocks.len()];
-        let mut count = 0usize;
+        let mut values = vec![Vec::new(); bkm.blocks.len()];
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
             let (_, blocks) = bkm.debug_process_with_block_outputs(&[input, 0.0, 0.0, 0.0]);
-            for (acc, value) in sum_sq.iter_mut().zip(blocks.iter()) {
-                *acc += value * value;
+            for (block_values, value) in values.iter_mut().zip(blocks.iter()) {
+                block_values.push(*value);
             }
-            count += 1;
         }
 
-        sum_sq
-            .into_iter()
-            .map(|v| (v / count.max(1) as f64).sqrt())
+        values
+            .iter()
+            .map(|block_values| ac_rms(block_values))
             .collect()
     };
 
@@ -1090,6 +1103,393 @@ fn tb303_bkm_block_outputs_show_cascaded_lowpass_shape() {
         "final BKM rung should show cascaded lowpass shape: 100Hz={:.6}, 10kHz={:.6}",
         low[3],
         high[3]
+    );
+}
+
+#[test]
+fn tb303_bkm_rung_response_matches_forced_serial_wdf_order() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let measure_serial = |freq: f64| -> Vec<f64> {
+        let mut options = super::compile::CompileOptions::default();
+        options.force_serial_blockwise = true;
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
+        proc.set_control("Resonance", 0.0);
+
+        for i in 0..9600 {
+            let _ = proc.process(0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin());
+        }
+
+        let mut sums = Vec::new();
+        let mut count = 0usize;
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let mut x = input;
+            let mut rung = 0usize;
+            for stage in &mut proc.stages {
+                let pedalkernel_rt::processor::Stage::Wdf(wdf) = stage else {
+                    continue;
+                };
+                x = wdf.process(x);
+                if rung < 4 {
+                    if sums.len() <= rung {
+                        sums.push(0.0);
+                    }
+                    sums[rung] += x * x;
+                    rung += 1;
+                }
+            }
+            count += 1;
+        }
+
+        sums.into_iter()
+            .map(|v| (v / count.max(1) as f64).sqrt())
+            .collect()
+    };
+
+    let measure_bkm = |freq: f64| -> Vec<f64> {
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+                .expect("compile failed");
+        proc.set_control("Resonance", 0.0);
+
+        let bkm = proc
+            .stages
+            .iter_mut()
+            .find_map(|s| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .expect("TB303 should compile to BKM");
+
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = bkm.debug_process_with_block_outputs(&[input, 0.0, 0.0, 0.0]);
+        }
+
+        let mut values = vec![Vec::new(); bkm.blocks.len()];
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let (_, outputs) = bkm.debug_process_with_block_outputs(&[input, 0.0, 0.0, 0.0]);
+            for (block_values, value) in values.iter_mut().zip(outputs.iter()) {
+                block_values.push(*value);
+            }
+        }
+
+        values
+            .iter()
+            .map(|block_values| ac_rms(block_values))
+            .collect()
+    };
+
+    let serial_low = measure_serial(100.0);
+    let serial_high = measure_serial(10_000.0);
+    let bkm_low = measure_bkm(100.0);
+    let bkm_high = measure_bkm(10_000.0);
+
+    let serial_ratio: Vec<f64> = serial_low
+        .iter()
+        .zip(serial_high.iter())
+        .map(|(lo, hi)| lo / hi.max(1e-12))
+        .collect();
+    let bkm_ratio: Vec<f64> = bkm_low
+        .iter()
+        .zip(bkm_high.iter())
+        .map(|(lo, hi)| lo / hi.max(1e-12))
+        .collect();
+
+    eprintln!("  serial low RMS: {serial_low:.6?}");
+    eprintln!("  serial high RMS: {serial_high:.6?}");
+    eprintln!("  serial low/high per rung: {serial_ratio:.3?}");
+    eprintln!("  BKM low RMS: {bkm_low:.6?}");
+    eprintln!("  BKM high RMS: {bkm_high:.6?}");
+    eprintln!("  BKM low/high per rung: {bkm_ratio:.3?}");
+
+    assert_eq!(serial_ratio.len(), 4);
+    assert_eq!(bkm_ratio.len(), 4);
+    assert!(
+        bkm_ratio[1] > bkm_ratio[0] * 1.5,
+        "BKM second rung should add another pole like forced-serial WDF. \
+         serial ratios={serial_ratio:.3?}, BKM ratios={bkm_ratio:.3?}"
+    );
+}
+
+#[test]
+fn tb303_bkm_direct_block_matches_forced_serial_first_rung_order() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let measure_serial_first = |freq: f64| -> f64 {
+        let mut options = super::compile::CompileOptions::default();
+        options.force_serial_blockwise = true;
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
+        proc.set_control("Resonance", 0.0);
+
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            for stage in &mut proc.stages {
+                if let pedalkernel_rt::processor::Stage::Wdf(wdf) = stage {
+                    let _ = wdf.process(input);
+                    break;
+                }
+            }
+        }
+
+        let mut sum_sq = 0.0;
+        let mut count = 0usize;
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            for stage in &mut proc.stages {
+                if let pedalkernel_rt::processor::Stage::Wdf(wdf) = stage {
+                    let out = wdf.process(input);
+                    sum_sq += out * out;
+                    count += 1;
+                    break;
+                }
+            }
+        }
+
+        (sum_sq / count.max(1) as f64).sqrt()
+    };
+
+    let measure_bkm_first_direct = |freq: f64| -> f64 {
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+                .expect("compile failed");
+        proc.set_control("Resonance", 0.0);
+
+        let bkm = proc
+            .stages
+            .iter_mut()
+            .find_map(|s| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .expect("TB303 should compile to BKM");
+
+        for v in &mut bkm.work_b {
+            *v = 0.0;
+        }
+        for v in &mut bkm.work_a {
+            *v = 0.0;
+        }
+        for &(ref name, port_idx) in &bkm.vs_port_map {
+            if name.starts_with("_supply_") {
+                bkm.work_b[port_idx] = 2.0 * bkm.supply_voltage;
+            }
+        }
+        for row in 0..bkm.n_ports {
+            let mut sum = 0.0;
+            for col in 0..bkm.n_ports {
+                sum += bkm.coupling_s[row * bkm.n_ports + col] * bkm.work_b[col];
+            }
+            bkm.work_a[row] = sum;
+        }
+        let dc_drive = (bkm.work_a[0] + bkm.work_b[0]) / 2.0;
+
+        let mut block = bkm.blocks[0].clone();
+        block.k_table.precompute_scales();
+
+        let mut process_block = |input: f64| {
+            let physical_input = dc_drive + input;
+            block
+                .tree
+                .set_voltage(block.source_polarity * physical_input);
+            let b_tree = block.tree.reflected();
+            let a_root = if block.k_table.dims == 1 {
+                block.k_table.lookup_1d(b_tree)
+            } else {
+                block
+                    .k_table
+                    .lookup_2d(b_tree, block.source_polarity * physical_input)
+            };
+            let raw = if let Some(ref probe_id) = block.cascade_probe_id {
+                block
+                    .tree
+                    .leaf_voltage_for_incident(probe_id, a_root)
+                    .unwrap_or((a_root + b_tree) / 2.0)
+            } else {
+                (a_root + b_tree) / 2.0
+            };
+            block.tree.set_incident(a_root);
+            raw - block.dc_offset
+        };
+
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = process_block(input);
+        }
+
+        let mut values = Vec::new();
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let out = process_block(input);
+            values.push(out);
+        }
+
+        ac_rms(&values)
+    };
+
+    let serial_low = measure_serial_first(100.0);
+    let serial_high = measure_serial_first(10_000.0);
+    let bkm_low = measure_bkm_first_direct(100.0);
+    let bkm_high = measure_bkm_first_direct(10_000.0);
+    let serial_ratio = serial_low / serial_high.max(1e-12);
+    let bkm_ratio = bkm_low / bkm_high.max(1e-12);
+
+    eprintln!(
+        "  first rung direct WDF: 100Hz={serial_low:.6}, 10kHz={serial_high:.6}, ratio={serial_ratio:.3}"
+    );
+    eprintln!(
+        "  first rung direct BKM: 100Hz={bkm_low:.6}, 10kHz={bkm_high:.6}, ratio={bkm_ratio:.3}"
+    );
+
+    assert!(
+        bkm_ratio > serial_ratio * 0.9,
+        "direct BKM first block should preserve the same one-pole order as forced WDF. \
+         serial ratio={serial_ratio:.3}, BKM ratio={bkm_ratio:.3}"
+    );
+}
+
+#[test]
+fn tb303_bkm_direct_blocks_each_have_lowpass_order() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let measure_blocks = |freq: f64| -> Vec<f64> {
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+                .expect("compile failed");
+        proc.set_control("Resonance", 0.0);
+
+        let bkm = proc
+            .stages
+            .iter_mut()
+            .find_map(|s| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .expect("TB303 should compile to BKM");
+
+        for v in &mut bkm.work_b {
+            *v = 0.0;
+        }
+        for v in &mut bkm.work_a {
+            *v = 0.0;
+        }
+        for &(ref name, port_idx) in &bkm.vs_port_map {
+            if name.starts_with("_supply_") {
+                bkm.work_b[port_idx] = 2.0 * bkm.supply_voltage;
+            }
+        }
+        for row in 0..bkm.n_ports {
+            let mut sum = 0.0;
+            for col in 0..bkm.n_ports {
+                sum += bkm.coupling_s[row * bkm.n_ports + col] * bkm.work_b[col];
+            }
+            bkm.work_a[row] = sum;
+        }
+        let dc_drives: Vec<f64> = (0..bkm.blocks.len())
+            .map(|i| (bkm.work_a[i] + bkm.work_b[i]) / 2.0)
+            .collect();
+        eprintln!(
+            "  direct BKM probes: {:?}",
+            bkm.blocks
+                .iter()
+                .map(|block| block.cascade_probe_id.as_deref().unwrap_or("<root>"))
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "  direct BKM rp: {:?}",
+            bkm.blocks.iter().map(|block| block.rp).collect::<Vec<_>>()
+        );
+        let mut blocks = bkm.blocks.clone();
+        for block in &mut blocks {
+            block.k_table.precompute_scales();
+        }
+
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            for (block_idx, block) in blocks.iter_mut().enumerate() {
+                let physical_input = dc_drives[block_idx] + input;
+                block
+                    .tree
+                    .set_voltage(block.source_polarity * physical_input);
+                let b_tree = block.tree.reflected();
+                let a_root = if block.k_table.dims == 1 {
+                    block.k_table.lookup_1d(b_tree)
+                } else {
+                    block
+                        .k_table
+                        .lookup_2d(b_tree, block.source_polarity * physical_input)
+                };
+                block.tree.set_incident(a_root);
+            }
+        }
+
+        let mut values = vec![Vec::new(); blocks.len()];
+        for i in 0..9600 {
+            let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            for (block_idx, block) in blocks.iter_mut().enumerate() {
+                let physical_input = dc_drives[block_idx] + input;
+                block
+                    .tree
+                    .set_voltage(block.source_polarity * physical_input);
+                let b_tree = block.tree.reflected();
+                let a_root = if block.k_table.dims == 1 {
+                    block.k_table.lookup_1d(b_tree)
+                } else {
+                    block
+                        .k_table
+                        .lookup_2d(b_tree, block.source_polarity * physical_input)
+                };
+                let raw = if let Some(ref probe_id) = block.cascade_probe_id {
+                    block
+                        .tree
+                        .leaf_voltage_for_incident(probe_id, a_root)
+                        .unwrap_or((a_root + b_tree) / 2.0)
+                } else {
+                    (a_root + b_tree) / 2.0
+                };
+                block.tree.set_incident(a_root);
+                let out = raw - block.dc_offset;
+                values[block_idx].push(out);
+            }
+        }
+
+        values
+            .iter()
+            .map(|block_values| ac_rms(block_values))
+            .collect()
+    };
+
+    let low = measure_blocks(100.0);
+    let high = measure_blocks(10_000.0);
+    let ratios: Vec<f64> = low
+        .iter()
+        .zip(high.iter())
+        .map(|(lo, hi)| lo / hi.max(1e-12))
+        .collect();
+
+    eprintln!("  direct BKM block 100Hz RMS: {low:.6?}");
+    eprintln!("  direct BKM block 10kHz RMS: {high:.6?}");
+    eprintln!("  direct BKM block low/high: {ratios:.3?}");
+
+    assert!(
+        ratios.iter().all(|ratio| *ratio > 2.0),
+        "each independently driven BKM block should retain local lowpass behavior: {ratios:.3?}"
     );
 }
 
