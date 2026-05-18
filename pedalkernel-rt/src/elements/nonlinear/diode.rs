@@ -268,6 +268,44 @@ impl DiodeModel {
         }
     }
 
+    /// Small-signal resistance at a diode operating point set by Thevenin
+    /// sources feeding the diode anode.
+    pub fn dynamic_resistance_from_sources(&self, sources: &[(f64, f64)]) -> f64 {
+        let mut vj = 0.6f64;
+        for _ in 0..32 {
+            let x = (vj / self.n_vt).clamp(-80.0, 80.0);
+            let ev = crate::math::exp(x);
+            let i_diode = self.is * (ev - 1.0);
+            let g_diode = self.is * ev / self.n_vt;
+            let v_total = vj + i_diode * self.rs;
+            let dv_total = 1.0 + g_diode * self.rs;
+
+            let mut i_source = 0.0;
+            let mut g_source = 0.0;
+            for &(v_src, r_src) in sources {
+                if r_src.is_finite() && r_src > 1e-9 {
+                    i_source += (v_src - v_total) / r_src;
+                    g_source += 1.0 / r_src;
+                }
+            }
+
+            let f = i_source - i_diode;
+            let df = -g_source * dv_total - g_diode;
+            if df.abs() < 1e-18 {
+                break;
+            }
+            let step = (f / df).clamp(-0.25, 0.25);
+            vj -= step;
+            if step.abs() < 1e-9 {
+                break;
+            }
+        }
+
+        let x = (vj / self.n_vt).clamp(-80.0, 80.0);
+        let conductance = self.is * crate::math::exp(x) / self.n_vt;
+        (1.0 / conductance.max(1e-18) + self.rs).clamp(1.0, 1_000_000.0)
+    }
+
     /// Generic silicon diode — averaged parameters for 1N914/1N4148 family.
     pub fn silicon() -> Self {
         // 1N4148 datasheet: Is ≈ 2.52nA, n ≈ 1.752, Rs ≈ 0.568Ω

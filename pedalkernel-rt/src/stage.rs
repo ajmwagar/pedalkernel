@@ -5597,6 +5597,8 @@ pub struct KMethodBlock {
     pub explicit_diode_root: Option<ExplicitDiodeRoot>,
     /// Nominal voltage-source resistance used when the block was compiled.
     pub nominal_vs_rp: f64,
+    /// Circuit-derived cutoff calibration for explicit diode ladders.
+    pub diode_cutoff: Option<DiodeCutoffCalibration>,
     /// Port resistance of this block's WDF tree root.
     pub rp: f64,
     /// DC bias voltage for the BJT (Vbe operating point).
@@ -5616,6 +5618,34 @@ pub struct KMethodBlock {
     /// computes physical block drive voltages in the coupling/cascade domain,
     /// then maps them into the WDF tree's voltage-source convention here.
     pub source_polarity: f64,
+}
+
+/// Circuit data needed to map cutoff CV to diode small-signal resistance.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DiodeCutoffCalibration {
+    pub bias_voltage: f64,
+    pub bias_resistance: f64,
+    pub cv_resistance: Option<f64>,
+    pub min_rp: f64,
+    pub max_rp: f64,
+}
+
+impl DiodeCutoffCalibration {
+    pub fn source_resistance(&self, model: DiodeModel, cutoff_cv: f64) -> f64 {
+        if let Some(r_cv) = self.cv_resistance {
+            model
+                .dynamic_resistance_from_sources(&[
+                    (self.bias_voltage, self.bias_resistance),
+                    (cutoff_cv, r_cv),
+                ])
+                .clamp(self.min_rp, self.max_rp)
+        } else {
+            model
+                .dynamic_resistance_from_sources(&[(self.bias_voltage, self.bias_resistance)])
+                .clamp(self.min_rp, self.max_rp)
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -5784,10 +5814,11 @@ impl BlockwiseKMethodStage {
             })
             .unwrap_or(0.0);
         if self.cutoff_cv_port.is_some() {
-            let scale = crate::math::powf(2.0, cutoff_cv.clamp(-4.0, 4.0));
             for block in &mut self.blocks {
-                if block.explicit_diode_root.is_some() {
-                    let rp = (block.nominal_vs_rp / scale).clamp(10.0, 100_000.0);
+                if let (Some(root), Some(calibration)) =
+                    (block.explicit_diode_root, block.diode_cutoff.as_ref())
+                {
+                    let rp = calibration.source_resistance(root.model, cutoff_cv);
                     block.tree.set_vs_port_resistance(rp);
                     block.rp = block.tree.port_resistance();
                 }
@@ -6167,6 +6198,7 @@ mod blockwise_k_method_tests {
             k_table: control_sensitive_table(),
             explicit_diode_root: None,
             nominal_vs_rp: 1.0,
+            diode_cutoff: None,
             rp: 1.0,
             vbe_bias,
             dc_offset: 0.0,
@@ -6185,6 +6217,28 @@ mod blockwise_k_method_tests {
         assert!(
             (a_root - 3.0).abs() < 1e-9,
             "2D BKM K-table lookup must use the runtime drive as the control coordinate"
+        );
+    }
+
+    #[test]
+    fn diode_cutoff_calibration_uses_circuit_sources_not_octave_scaling() {
+        let calibration = DiodeCutoffCalibration {
+            bias_voltage: 9.0,
+            bias_resistance: 100_000.0,
+            cv_resistance: Some(47_000.0),
+            min_rp: 10.0,
+            max_rp: 100_000.0,
+        };
+        let model = DiodeModel::silicon();
+
+        let r_0v = calibration.source_resistance(model, 0.0);
+        let r_3v = calibration.source_resistance(model, 3.0);
+        let ratio = r_3v / r_0v;
+
+        assert!(
+            ratio > 0.35 && ratio < 0.85,
+            "3V cutoff CV should follow diode dynamic resistance from R_bias/R_cv, \
+             not the old 2^-3 octave heuristic: r0={r_0v:.3}, r3={r_3v:.3}, ratio={ratio:.3}"
         );
     }
 }

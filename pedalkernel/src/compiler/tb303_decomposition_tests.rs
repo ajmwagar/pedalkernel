@@ -629,6 +629,42 @@ fn two_rung_normal_diode_ladder_cutoff_cv_is_reversible() {
 }
 
 #[test]
+fn two_rung_normal_diode_ladder_cutoff_uses_circuit_calibration() {
+    let def = crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK_AND_CV)
+        .expect("parse failed");
+    let mut proc = super::compile_pedal(&def, SR).expect("compile failed");
+    let cv_idx = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
+
+    let measure_rp = |proc: &mut super::compiled::CompiledPedal, cv_voltage: f64| -> f64 {
+        let mut ports = vec![0.0; proc.port_count()];
+        ports[cv_idx] = cv_voltage;
+        proc.process_ports(&mut ports);
+        proc.stages
+            .iter()
+            .find_map(|stage| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+                    Some(bkm.blocks[0].rp)
+                } else {
+                    None
+                }
+            })
+            .expect("normal diode ladder should compile to BKM")
+    };
+
+    let rp_0v = measure_rp(&mut proc, 0.0);
+    let rp_3v = measure_rp(&mut proc, 3.0);
+    let ratio = rp_3v / rp_0v;
+
+    eprintln!("  circuit-calibrated normal diode cutoff Rp: 0V={rp_0v:.3}, +3V={rp_3v:.3}, ratio={ratio:.3}");
+
+    assert!(
+        ratio > 0.35 && ratio < 0.85,
+        "cutoff CV should use diode dynamic resistance from R_bias/R_cv, not 2^CV scaling: \
+         rp_0v={rp_0v:.3}, rp_3v={rp_3v:.3}, ratio={ratio:.3}"
+    );
+}
+
+#[test]
 fn two_rung_feedback_diode_ladder_compiles_to_bkm() {
     let def =
         crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK).expect("parse failed");
@@ -1659,8 +1695,8 @@ fn tb303_bkm_k_tables_are_generated_per_rung_not_shared() {
 
     let blob = super::compile::compile_pedal_cached(
         &source,
-        "tb303_bkm_ktable_ownership_v2",
-        "tb303_bkm_ktable_ownership_v2",
+        "tb303_bkm_ktable_ownership_v3",
+        "tb303_bkm_ktable_ownership_v3",
         SR,
         &super::compile::CompileOptions::default(),
         &cache_dir,
@@ -2299,8 +2335,8 @@ fn tb303_cv_port_modulates_output() {
     let options = super::compile::CompileOptions::default();
     let blob = super::compile::compile_pedal_cached(
         &source,
-        "tb303_cv_test_v2",
-        "tb303_cv_test_v2",
+        "tb303_cv_test_v3",
+        "tb303_cv_test_v3",
         SR,
         &options,
         &cache_dir,
@@ -2365,8 +2401,8 @@ fn tb303_cv_port_moves_explicit_diode_ladder_cutoff() {
     let options = super::compile::CompileOptions::default();
     let blob = super::compile::compile_pedal_cached(
         &source,
-        "tb303_cv_ac_cutoff_test_v3",
-        "tb303_cv_ac_cutoff_test_v3",
+        "tb303_cv_ac_cutoff_test_v4",
+        "tb303_cv_ac_cutoff_test_v4",
         SR,
         &options,
         &cache_dir,
@@ -2421,6 +2457,61 @@ fn tb303_cv_port_moves_explicit_diode_ladder_cutoff() {
         "raising cv_cutoff should move the ExplicitSingleDiode ladder cutoff upward at 12kHz: \
          low={low_cv_12k:.6}, high={high_cv_12k:.6}, ratio={:.3}",
         high_cv_12k / low_cv_12k.max(1e-12)
+    );
+}
+
+#[test]
+fn tb303_cutoff_cv_uses_circuit_calibrated_diode_resistance() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let options = super::compile::CompileOptions::default();
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_cv_rp_calibration_test_v1",
+        "tb303_cv_rp_calibration_test_v1",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let mut proc: super::compiled::CompiledPedal =
+        postcard::from_bytes(&blob).expect("deserialize failed");
+    let cv_idx = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
+
+    let measure_rp = |proc: &mut super::compiled::CompiledPedal, cv_voltage: f64| -> f64 {
+        let mut ports = vec![0.0; proc.port_count()];
+        ports[cv_idx] = cv_voltage;
+        proc.process_ports(&mut ports);
+        proc.stages
+            .iter()
+            .find_map(|stage| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+                    Some(bkm.blocks[1].rp)
+                } else {
+                    None
+                }
+            })
+            .expect("tb303 filter should compile to BKM")
+    };
+
+    let rp_0v = measure_rp(&mut proc, 0.0);
+    let rp_3v = measure_rp(&mut proc, 3.0);
+    let ratio = rp_3v / rp_0v;
+
+    eprintln!(
+        "  circuit-calibrated TB303 cutoff Rp: 0V={rp_0v:.3}, +3V={rp_3v:.3}, ratio={ratio:.3}"
+    );
+
+    assert!(
+        ratio > 0.35 && ratio < 0.85,
+        "TB303 cutoff CV should use diode dynamic resistance from R_bias/R_cv, not 2^CV scaling: \
+         rp_0v={rp_0v:.3}, rp_3v={rp_3v:.3}, ratio={ratio:.3}"
     );
 }
 

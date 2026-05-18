@@ -1074,6 +1074,25 @@ pub(super) fn try_build_blockwise(
             .and_then(|port| port.impedance)
             .unwrap_or(10_000.0);
 
+        let cutoff_port_node = port_defs
+            .iter()
+            .find(|port| {
+                port.direction == pedalkernel_rt::PortDirection::Input
+                    && port.name.to_ascii_lowercase().contains("cutoff")
+            })
+            .and_then(|port| graph.node_names.get(&port.name).copied());
+        let cutoff_cv_resistance = cutoff_port_node.and_then(|cv_node| {
+            plan.coupling_edges.iter().find_map(|&eidx| {
+                let e = &graph.edges[eidx];
+                let comp = &graph.components[e.comp_idx];
+                if e.node_a == cv_node || e.node_b == cv_node {
+                    comp.kind.resistance()
+                } else {
+                    None
+                }
+            })
+        });
+
         let mut k_blocks = Vec::new();
         for (bi, built) in all_stages.iter_mut().enumerate() {
             if let BuiltStage::Wdf(ref mut wdf) = built {
@@ -1134,6 +1153,39 @@ pub(super) fn try_build_blockwise(
                     } else {
                         root_polarity
                     };
+                    let block_port_node = plan.blocks.get(bi).and_then(|block| {
+                        block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph)
+                    });
+                    let block_bias_resistance = block_port_node
+                        .and_then(|port_node| {
+                            plan.coupling_edges.iter().find_map(|&eidx| {
+                                let e = &graph.edges[eidx];
+                                let comp = &graph.components[e.comp_idx];
+                                let touches_port = e.node_a == port_node || e.node_b == port_node;
+                                let touches_supply = e.node_a == graph.vcc_node
+                                    || e.node_b == graph.vcc_node
+                                    || graph.supply_nodes.contains(&e.node_a)
+                                    || graph.supply_nodes.contains(&e.node_b);
+                                if touches_port && touches_supply {
+                                    comp.kind.resistance()
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or(r_bias_value);
+                    let diode_cutoff = match &wdf.root {
+                        pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_) => {
+                            Some(pedalkernel_rt::stage::DiodeCutoffCalibration {
+                                bias_voltage: supply_voltage,
+                                bias_resistance: block_bias_resistance,
+                                cv_resistance: cutoff_cv_resistance,
+                                min_rp: 10.0,
+                                max_rp: 100_000.0,
+                            })
+                        }
+                        _ => None,
+                    };
                     // The cascade tap is at the passive subtree (cap voltage),
                     // not the root port (diode residual). This is determined
                     // by the circuit: the cascade node (Q.emitter) is where
@@ -1149,6 +1201,7 @@ pub(super) fn try_build_blockwise(
                             _ => None,
                         },
                         nominal_vs_rp: block_source_r,
+                        diode_cutoff,
                         rp: wdf.tree.port_resistance(),
                         vbe_bias,
                         dc_offset,
