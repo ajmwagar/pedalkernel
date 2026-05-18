@@ -8,6 +8,7 @@
 // in the output. A pot that does nothing indicates a binding or routing failure.
 
 use super::spqr_build::compile_via_spqr;
+use super::{compile_pedal_with_options, CompileOptions};
 use crate::PedalProcessor;
 use std::collections::HashSet;
 
@@ -105,6 +106,43 @@ fn measure_peak_with_source_z(pedal: &crate::dsl::PedalDef, control: &str, value
         peak = peak.max(compiled.process(input).abs());
     }
     peak
+}
+
+fn measure_peak_skip_blockwise(pedal: &crate::dsl::PedalDef, control: &str, value: f64) -> f64 {
+    let opts = CompileOptions {
+        skip_blockwise: true,
+        skip_k_tables: true,
+        ..Default::default()
+    };
+    let mut compiled = compile_pedal_with_options(pedal, 48000.0, opts).expect("compile");
+    compiled.set_control(control, value);
+    for _ in 0..2000 {
+        compiled.process(0.0);
+    }
+    let mut peak = 0.0f64;
+    for s in 0..4800 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 440.0 * s as f64 / 48000.0).sin();
+        peak = peak.max(compiled.process(input).abs());
+    }
+    peak
+}
+
+fn assert_skip_blockwise_gain_changes(
+    pedal: &crate::dsl::PedalDef,
+    pedal_name: &str,
+    control: &str,
+) {
+    let low = measure_peak_skip_blockwise(pedal, control, 0.0);
+    let high = measure_peak_skip_blockwise(pedal, control, 1.0);
+    let diff = (low - high).abs();
+    let ratio = low.max(high) / low.min(high).max(1e-10);
+    eprintln!(
+        "{pedal_name}/{control} skip_blockwise: low={low:.4}, high={high:.4}, ratio={ratio:.1}x"
+    );
+    assert!(
+        diff > 0.001 || ratio > 1.5,
+        "{pedal_name}/{control} lost feedback control when blockwise is skipped (low={low:.4}, high={high:.4})"
+    );
 }
 
 /// Measure spectral balance: ratio of high-frequency energy to low-frequency energy.
@@ -420,6 +458,12 @@ fn ratking_v1a_vst_distortion_and_volume_survive_source_impedance() {
     assert_vst_gain_changes(&pedal, "ratking_v1a", "Volume");
 }
 
+#[test]
+fn ratking_v1a_distortion_survives_skip_blockwise() {
+    let pedal = load_legend("ratking_non_invert_v1a");
+    assert_skip_blockwise_gain_changes(&pedal, "ratking_v1a", "Distortion");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SCREAMER (TS-808)
 // Controls: Drive [0,1], Tone [0,1], Level [1,0]
@@ -429,6 +473,12 @@ fn ratking_v1a_vst_distortion_and_volume_survive_source_impedance() {
 fn screamer_drive_changes_gain() {
     let pedal = load_legend("screamer");
     assert_gain_changes(&pedal, "screamer", "Drive");
+}
+
+#[test]
+fn screamer_drive_survives_skip_blockwise() {
+    let pedal = load_legend("screamer");
+    assert_skip_blockwise_gain_changes(&pedal, "screamer", "Drive");
 }
 
 #[test]

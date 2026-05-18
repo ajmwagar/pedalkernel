@@ -353,32 +353,34 @@ pub fn compile_via_spqr_with_options(
             );
         }
 
-        if group.has_feedback() && !options.skip_blockwise {
+        if group.has_feedback() {
             // ── Blockwise check for feedback groups (e.g. ladder with resonance)
-            eprintln!(
-                "  [compile] group {gi}: blockwise check ({} edges)...",
-                group.all_edges().len()
-            );
             let group_edges = group.all_edges();
-            if let Some(built_stages) = super::blockwise::try_build_blockwise(
-                &group_edges,
-                &graph,
-                &terminals,
-                sample_rate,
-                &bias_node_voltages,
-                supply_voltage,
-                &pedal.ports,
-                options.force_serial_blockwise,
-            ) {
-                for built in built_stages {
-                    push_stage!(
-                        built,
-                        group_flow_distances[gi],
-                        group_label.clone(),
-                        is_bypass
-                    );
+            if !options.skip_blockwise {
+                eprintln!(
+                    "  [compile] group {gi}: blockwise check ({} edges)...",
+                    group_edges.len()
+                );
+                if let Some(built_stages) = super::blockwise::try_build_blockwise(
+                    &group_edges,
+                    &graph,
+                    &terminals,
+                    sample_rate,
+                    &bias_node_voltages,
+                    supply_voltage,
+                    &pedal.ports,
+                    options.force_serial_blockwise,
+                ) {
+                    for built in built_stages {
+                        push_stage!(
+                            built,
+                            group_flow_distances[gi],
+                            group_label.clone(),
+                            is_bypass
+                        );
+                    }
+                    continue;
                 }
-                continue;
             }
 
             // Compute bias-derived v_max for op-amps in this group.
