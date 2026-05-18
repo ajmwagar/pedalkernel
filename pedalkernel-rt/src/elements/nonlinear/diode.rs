@@ -255,6 +255,19 @@ pub struct DiodeModel {
 }
 
 impl DiodeModel {
+    /// Base-emitter diode approximation from a Gummel-Poon BJT model.
+    ///
+    /// Used for diode-connected BJTs where base and collector are shorted.
+    /// The resulting one-port uses the BJT's saturation current and forward
+    /// ideality factor, with emitter resistance represented as series Rs.
+    pub fn from_bjt_base_emitter(model: &super::bjt::GummelPoonModel) -> Self {
+        Self {
+            is: model.is,
+            n_vt: model.nf * model.vt,
+            rs: model.re,
+        }
+    }
+
     /// Generic silicon diode — averaged parameters for 1N914/1N4148 family.
     pub fn silicon() -> Self {
         // 1N4148 datasheet: Is ≈ 2.52nA, n ≈ 1.752, Rs ≈ 0.568Ω

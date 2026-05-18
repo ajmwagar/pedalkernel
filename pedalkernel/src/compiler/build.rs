@@ -152,11 +152,7 @@ pub(super) fn create_root(
                 // BjtRoot computes Ic(Vce) at fixed Vbe → flat b-axis (no signal
                 // response). DiodeRoot computes Id(Vd) = Is·(exp(V/nVt)-1) where
                 // V IS the port voltage — signal enters through b_tree naturally.
-                let diode_model = DiodeModel {
-                    is: model.is,
-                    n_vt: model.nf * model.vt,
-                    rs: model.re, // emitter resistance as series R
-                };
+                let diode_model = DiodeModel::from_bjt_base_emitter(&model);
                 (
                     RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(diode_model)),
                     Some(diode_model),
@@ -173,11 +169,7 @@ pub(super) fn create_root(
         } => {
             let model = gummel_poon_model(model_name);
             if base_node == collector_node {
-                let diode_model = DiodeModel {
-                    is: model.is,
-                    n_vt: model.nf * model.vt,
-                    rs: model.re,
-                };
+                let diode_model = DiodeModel::from_bjt_base_emitter(&model);
                 (
                     RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(diode_model)),
                     Some(diode_model),

@@ -127,6 +127,52 @@ pedal "Two Rung Diode Ladder Feedback" { supply 9V
 }
 "#;
 
+const TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK_AND_CV: &str = r#"
+pedal "Two Rung Diode Ladder Feedback CV" { supply 9V
+  ports {
+    audio_in: input(10k)
+    cv_cutoff: input(47k)
+    audio_out: output
+  }
+  components {
+    D1: diode(silicon)
+    D2: diode(silicon)
+    R_bias1: resistor(100k)
+    R_bias2: resistor(100k)
+    R_in: resistor(10k)
+    R_cv: resistor(47k)
+    C1: cap(33n)
+    C2: cap(33n)
+    Resonance: pot(100k, b)
+    R_fb_limit: resistor(33k)
+  }
+  nets {
+    vcc -> R_bias1.a
+    R_bias1.b -> D1.a
+    audio_in -> R_in.a
+    R_in.b -> D1.a
+    cv_cutoff -> R_cv.a
+    R_cv.b -> D1.a
+
+    D1.b -> C1.a
+    C1.b -> gnd
+    D1.b -> D2.a
+
+    vcc -> R_bias2.a
+    R_bias2.b -> D2.a
+    D2.b -> C2.a
+    C2.b -> gnd
+    D2.b -> audio_out
+    D2.b -> Resonance.a
+    Resonance.b -> R_fb_limit.a
+    R_fb_limit.b -> D1.a
+  }
+  controls {
+    Resonance.position -> "Resonance" [0.0, 0.95] = 0.0
+  }
+}
+"#;
+
 /// Try to load a .pedal file from the pro crate's acidattack-core directory.
 fn load_pro_pedal(filename: &str) -> Option<String> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -469,6 +515,116 @@ fn two_rung_diode_ladder_bkm_direct_path_is_lowpass() {
     assert!(
         gain_100 > gain_10k,
         "two-rung diode ladder BKM should be lowpass: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}"
+    );
+}
+
+#[test]
+fn two_rung_normal_diode_ladder_cv_moves_cutoff() {
+    let def = crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK_AND_CV)
+        .expect("parse failed");
+    let probe = super::compile_pedal(&def, SR).expect("compile failed");
+    assert!(
+        probe
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_))),
+        "normal diode CV ladder should compile to BKM"
+    );
+
+    let measure_ac = |cv_voltage: f64, freq: f64| -> f64 {
+        let mut proc = super::compile_pedal(&def, SR).expect("compile failed");
+        let in_idx = proc.resolve_port("audio_in").expect("audio_in port");
+        let cv_idx = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
+        let out_idx = proc.resolve_port("audio_out").expect("audio_out port");
+
+        for _ in 0..9600 {
+            let mut ports = vec![0.0; proc.port_count()];
+            ports[cv_idx] = cv_voltage;
+            proc.process_ports(&mut ports);
+        }
+
+        let mut values = Vec::new();
+        for i in 0..9600 {
+            let input = 0.05 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let mut ports = vec![0.0; proc.port_count()];
+            ports[in_idx] = input;
+            ports[cv_idx] = cv_voltage;
+            proc.process_ports(&mut ports);
+            values.push(ports[out_idx]);
+        }
+        ac_rms(&values)
+    };
+
+    let low_cv_8k = measure_ac(-1.0, 8_000.0);
+    let high_cv_8k = measure_ac(3.0, 8_000.0);
+    let low_cv_12k = measure_ac(-1.0, 12_000.0);
+    let high_cv_12k = measure_ac(3.0, 12_000.0);
+
+    eprintln!(
+        "  normal diode cutoff CV AC: 8k -1V={low_cv_8k:.6}, +3V={high_cv_8k:.6}; \
+         12k -1V={low_cv_12k:.6}, +3V={high_cv_12k:.6}"
+    );
+
+    assert!(
+        high_cv_8k > low_cv_8k * 1.25,
+        "raising cv_cutoff should move the normal diode ladder cutoff upward at 8kHz: \
+         low={low_cv_8k:.6}, high={high_cv_8k:.6}, ratio={:.3}",
+        high_cv_8k / low_cv_8k.max(1e-12)
+    );
+    assert!(
+        high_cv_12k > low_cv_12k * 1.25,
+        "raising cv_cutoff should move the normal diode ladder cutoff upward at 12kHz: \
+         low={low_cv_12k:.6}, high={high_cv_12k:.6}, ratio={:.3}",
+        high_cv_12k / low_cv_12k.max(1e-12)
+    );
+}
+
+#[test]
+fn two_rung_normal_diode_ladder_cutoff_cv_is_reversible() {
+    let def = crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK_AND_CV)
+        .expect("parse failed");
+    let mut proc = super::compile_pedal(&def, SR).expect("compile failed");
+    let in_idx = proc.resolve_port("audio_in").expect("audio_in port");
+    let cv_idx = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
+    let out_idx = proc.resolve_port("audio_out").expect("audio_out port");
+
+    let measure_ac = |proc: &mut super::compiled::CompiledPedal, cv_voltage: f64| -> f64 {
+        for _ in 0..9600 {
+            let mut ports = vec![0.0; proc.port_count()];
+            ports[cv_idx] = cv_voltage;
+            proc.process_ports(&mut ports);
+        }
+
+        let mut values = Vec::new();
+        for i in 0..9600 {
+            let input = 0.05 * (2.0 * std::f64::consts::PI * 12_000.0 * i as f64 / SR).sin();
+            let mut ports = vec![0.0; proc.port_count()];
+            ports[in_idx] = input;
+            ports[cv_idx] = cv_voltage;
+            proc.process_ports(&mut ports);
+            values.push(ports[out_idx]);
+        }
+        ac_rms(&values)
+    };
+
+    let low_initial = measure_ac(&mut proc, 0.0);
+    let high = measure_ac(&mut proc, 3.0);
+    let low_again = measure_ac(&mut proc, 0.0);
+
+    eprintln!(
+        "  reversible normal diode cutoff CV AC: 12k 0V={low_initial:.6}, \
+         +3V={high:.6}, back-to-0V={low_again:.6}"
+    );
+
+    assert!(
+        high > low_initial * 1.25,
+        "raising cv_cutoff should open the normal diode ladder before reversal: \
+         low={low_initial:.6}, high={high:.6}"
+    );
+    assert!(
+        low_again < high / 1.25,
+        "returning cv_cutoff to 0V should restore the lower cutoff instead of keeping stale Rp: \
+         high={high:.6}, low_again={low_again:.6}"
     );
 }
 
@@ -1503,8 +1659,8 @@ fn tb303_bkm_k_tables_are_generated_per_rung_not_shared() {
 
     let blob = super::compile::compile_pedal_cached(
         &source,
-        "tb303_bkm_ktable_ownership",
-        "tb303_bkm_ktable_ownership",
+        "tb303_bkm_ktable_ownership_v2",
+        "tb303_bkm_ktable_ownership_v2",
         SR,
         &super::compile::CompileOptions::default(),
         &cache_dir,
@@ -2143,8 +2299,8 @@ fn tb303_cv_port_modulates_output() {
     let options = super::compile::CompileOptions::default();
     let blob = super::compile::compile_pedal_cached(
         &source,
-        "tb303_cv_test",
-        "tb303_cv_test",
+        "tb303_cv_test_v2",
+        "tb303_cv_test_v2",
         SR,
         &options,
         &cache_dir,
@@ -2194,6 +2350,77 @@ fn tb303_cv_port_modulates_output() {
         max_gain > min_gain * 1.1,
         "CV should modulate filter: max={max_gain:.6}, min={min_gain:.6} (ratio={:.2}×)",
         max_gain / min_gain.max(1e-12)
+    );
+}
+
+#[test]
+fn tb303_cv_port_moves_explicit_diode_ladder_cutoff() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let options = super::compile::CompileOptions::default();
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_cv_ac_cutoff_test_v3",
+        "tb303_cv_ac_cutoff_test_v3",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let measure_ac = |cv_voltage: f64, freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control("Resonance", 0.0);
+        let in_idx = proc.resolve_port("audio_in").expect("audio_in port");
+        let cv_idx = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
+        let out_idx = proc.resolve_port("audio_out").expect("audio_out port");
+
+        for _ in 0..9600 {
+            let mut ports = vec![0.0; proc.port_count()];
+            ports[cv_idx] = cv_voltage;
+            proc.process_ports(&mut ports);
+        }
+
+        let mut values = Vec::new();
+        for i in 0..9600 {
+            let input = 0.05 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let mut ports = vec![0.0; proc.port_count()];
+            ports[in_idx] = input;
+            ports[cv_idx] = cv_voltage;
+            proc.process_ports(&mut ports);
+            values.push(ports[out_idx]);
+        }
+
+        ac_rms(&values)
+    };
+
+    let low_cv_8k = measure_ac(-1.0, 8_000.0);
+    let high_cv_8k = measure_ac(3.0, 8_000.0);
+    let low_cv_12k = measure_ac(-1.0, 12_000.0);
+    let high_cv_12k = measure_ac(3.0, 12_000.0);
+
+    eprintln!(
+        "  cutoff CV AC: 8k -1V={low_cv_8k:.6}, +3V={high_cv_8k:.6}; \
+         12k -1V={low_cv_12k:.6}, +3V={high_cv_12k:.6}"
+    );
+
+    assert!(
+        high_cv_8k > low_cv_8k * 1.25,
+        "raising cv_cutoff should move the ExplicitSingleDiode ladder cutoff upward at 8kHz: \
+         low={low_cv_8k:.6}, high={high_cv_8k:.6}, ratio={:.3}",
+        high_cv_8k / low_cv_8k.max(1e-12)
+    );
+    assert!(
+        high_cv_12k > low_cv_12k * 1.25,
+        "raising cv_cutoff should move the ExplicitSingleDiode ladder cutoff upward at 12kHz: \
+         low={low_cv_12k:.6}, high={high_cv_12k:.6}, ratio={:.3}",
+        high_cv_12k / low_cv_12k.max(1e-12)
     );
 }
 

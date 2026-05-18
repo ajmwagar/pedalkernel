@@ -5589,6 +5589,14 @@ pub struct KMethodBlock {
     pub tree: DynNode,
     /// Precomputed K-table: b_tree × ctrl → a_root.
     pub k_table: KTable,
+    /// Direct explicit diode root for one-port diode ladders.
+    ///
+    /// Diode ladder cutoff can move by changing the block source impedance.
+    /// K-tables are generated for one fixed tree Rp, so diode BKM blocks keep
+    /// the explicit root and bypass the table when Rp is modulated.
+    pub explicit_diode_root: Option<ExplicitDiodeRoot>,
+    /// Nominal voltage-source resistance used when the block was compiled.
+    pub nominal_vs_rp: f64,
     /// Port resistance of this block's WDF tree root.
     pub rp: f64,
     /// DC bias voltage for the BJT (Vbe operating point).
@@ -5665,6 +5673,11 @@ pub struct BlockwiseKMethodStage {
     /// At runtime, port values are written to work_b[scattering_port_idx]
     /// before the coupling scatter. The scattering distributes them.
     pub vs_port_map: Vec<(String, usize)>,
+    /// Optional input port that modulates diode-ladder cutoff.
+    ///
+    /// Set by the compiler for blockwise explicit-diode ladders with a cutoff
+    /// CV/input port in the coupling network.
+    pub cutoff_cv_port: Option<String>,
     /// Internal feedback drives: (block_index, scattering_port_index).
     /// These inject the latest cascade output into coupling nodes such as the
     /// TB-303 resonance path from the final emitter back to the first base.
@@ -5725,8 +5738,10 @@ impl BlockwiseKMethodStage {
         block.source_polarity * physical_voltage
     }
 
-    fn block_root_incident(block: &KMethodBlock, b_tree: f64, ctrl: f64) -> f64 {
-        if block.k_table.dims == 1 {
+    fn block_root_incident(block: &mut KMethodBlock, b_tree: f64, ctrl: f64) -> f64 {
+        if let Some(ref mut root) = block.explicit_diode_root {
+            root.process(b_tree, block.tree.port_resistance())
+        } else if block.k_table.dims == 1 {
             block.k_table.lookup_1d(b_tree)
         } else {
             block.k_table.lookup_2d(b_tree, ctrl)
@@ -5757,6 +5772,27 @@ impl BlockwiseKMethodStage {
 
     fn write_vs_ports(&mut self, vs_signals: &[f64]) {
         let n = self.n_ports;
+        let cutoff_cv = self
+            .cutoff_cv_port
+            .as_ref()
+            .and_then(|cutoff_name| {
+                self.vs_port_map
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (name, _))| name.eq_ignore_ascii_case(cutoff_name))
+                    .and_then(|(i, _)| vs_signals.get(i).copied())
+            })
+            .unwrap_or(0.0);
+        if self.cutoff_cv_port.is_some() {
+            let scale = crate::math::powf(2.0, cutoff_cv.clamp(-4.0, 4.0));
+            for block in &mut self.blocks {
+                if block.explicit_diode_root.is_some() {
+                    let rp = (block.nominal_vs_rp / scale).clamp(10.0, 100_000.0);
+                    block.tree.set_vs_port_resistance(rp);
+                    block.rp = block.tree.port_resistance();
+                }
+            }
+        }
         for (i, &(ref name, vs_idx)) in self.vs_port_map.iter().enumerate() {
             if vs_idx < n {
                 let v = if name.starts_with("_supply_") {
@@ -5960,7 +5996,7 @@ impl BlockwiseKMethodStage {
         for i in 0..n_blocks {
             // Re-extract at the current converged state
             let b_tree = self.blocks[i].tree.reflected();
-            let a_root = Self::block_root_incident(&self.blocks[i], b_tree, 0.0);
+            let a_root = Self::block_root_incident(&mut self.blocks[i], b_tree, 0.0);
             self.blocks[i].dc_offset = if self.blocks[i].cascade_from_passive {
                 Self::block_output_voltage(&self.blocks[i], a_root, b_tree)
             } else {
@@ -6129,6 +6165,8 @@ mod blockwise_k_method_tests {
         KMethodBlock {
             tree: DynNode::VoltageSource(0.0, 1.0),
             k_table: control_sensitive_table(),
+            explicit_diode_root: None,
+            nominal_vs_rp: 1.0,
             rp: 1.0,
             vbe_bias,
             dc_offset: 0.0,
@@ -6140,9 +6178,9 @@ mod blockwise_k_method_tests {
 
     #[test]
     fn bkm_2d_k_table_uses_runtime_drive_control_coordinate() {
-        let block = test_block(1.0);
+        let mut block = test_block(1.0);
 
-        let a_root = BlockwiseKMethodStage::block_root_incident(&block, 0.5, 0.25);
+        let a_root = BlockwiseKMethodStage::block_root_incident(&mut block, 0.5, 0.25);
 
         assert!(
             (a_root - 3.0).abs() < 1e-9,

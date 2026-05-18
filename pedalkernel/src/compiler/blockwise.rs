@@ -1142,6 +1142,13 @@ pub(super) fn try_build_blockwise(
                     k_blocks.push(pedalkernel_rt::stage::KMethodBlock {
                         tree: wdf.tree.clone(),
                         k_table: k_table.clone(),
+                        explicit_diode_root: match &wdf.root {
+                            pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => {
+                                Some(*root)
+                            }
+                            _ => None,
+                        },
+                        nominal_vs_rp: block_source_r,
                         rp: wdf.tree.port_resistance(),
                         vbe_bias,
                         dc_offset,
@@ -1495,6 +1502,18 @@ pub(super) fn try_build_blockwise(
 
         // ── Package as BlockwiseKMethodStage ─────────────────────────────
         let output_block = n_blocks - 1; // Last block is the output
+        let has_explicit_diode_blocks = k_blocks
+            .iter()
+            .any(|block| block.explicit_diode_root.is_some());
+        let cutoff_cv_port = if has_explicit_diode_blocks {
+            vs_port_map
+                .iter()
+                .map(|(name, _)| name)
+                .find(|name| name.to_ascii_lowercase().contains("cutoff"))
+                .cloned()
+        } else {
+            None
+        };
 
         let bkm = pedalkernel_rt::stage::BlockwiseKMethodStage {
             blocks: k_blocks,
@@ -1507,6 +1526,7 @@ pub(super) fn try_build_blockwise(
             output_block,
             supply_voltage,
             vs_port_map,
+            cutoff_cv_port,
             feedback_port_map,
             compensation: 1.0,
             oversampler: pedalkernel_rt::oversampling::Oversampler::new(
