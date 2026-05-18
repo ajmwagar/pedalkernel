@@ -41,13 +41,13 @@ impl Glide {
     }
 
     /// Set glide time from a 0..1 knob.
-    /// 0.0 = instant (no glide), 1.0 = ~300ms glide.
+    /// 0.0 = instant (no glide), 1.0 = ~360ms glide (Devil Fish Manual max).
     pub fn set_time_from_knob(&mut self, knob: f64) {
         let clamped = knob.clamp(0.0, 1.0);
         if clamped < 1e-4 {
             self.glide_coeff = 0.0; // instant
         } else {
-            let time_ms = 5.0 * math::powf(300.0 / 5.0, clamped);
+            let time_ms = 5.0 * math::powf(360.0 / 5.0, clamped);
             let time_samples = time_ms * 0.001 * self.sample_rate;
             self.glide_coeff = math::exp(-1.0 / time_samples);
         }
@@ -61,6 +61,12 @@ impl Glide {
     /// Activate glide (legato: gate held, new pitch).
     pub fn activate(&mut self) {
         self.active = true;
+    }
+
+    /// Deactivate glide (slide gate went low). Pitch will snap on next process()
+    /// call rather than gliding. Does not change the current pitch value.
+    pub fn deactivate(&mut self) {
+        self.active = false;
     }
 
     /// Snap to target and deactivate (staccato: gate retrigger).
