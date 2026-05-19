@@ -28,7 +28,7 @@ use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::signal_flow::FlowGroup;
 use super::spqr_build::BuiltStage;
-use super::stage::{IirPotBinding, IirStage, OpAmpWdfAdaptor, RootKind, WdfStage};
+use super::stage::{IirPotBinding, IirPotRole, IirStage, OpAmpWdfAdaptor, RootKind, WdfStage};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -358,6 +358,27 @@ fn extract_pot_bindings(
         })
         .sum();
     let ri = if ri <= 0.0 { 1.0 } else { ri }; // Safety: avoid div-by-zero
+    let vcvs_pins = group.active_edges.iter().find_map(|&eidx| {
+        let comp_idx = graph.edges[eidx].comp_idx;
+        graph
+            .nullor_pins
+            .iter()
+            .find(|rec| rec.comp_idx == comp_idx)
+    });
+    let feedback_r = vcvs_pins
+        .map(|pins| {
+            all_edges
+                .iter()
+                .filter_map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    let spans_feedback = (e.node_a == pins.neg_node && e.node_b == pins.out_node)
+                        || (e.node_a == pins.out_node && e.node_b == pins.neg_node);
+                    spans_feedback.then(|| graph.components[e.comp_idx].kind.resistance())?
+                })
+                .sum::<f64>()
+        })
+        .unwrap_or(0.0);
+    let non_inverting = !is_inverting_topology(&StageStats::from_edges(&all_edges, graph), graph);
 
     // Scan ALL edges for pots — any pot in the group affects the IIR
     let mut fixed_r: f64 = 0.0;
@@ -373,12 +394,36 @@ fn extract_pot_bindings(
             .as_any()
             .downcast_ref::<crate::compiler::components::Potentiometer>()
         {
+            let role = vcvs_pins
+                .map(|pins| {
+                    classify_iir_pot_role(
+                        eidx,
+                        comp_idx,
+                        pins.neg_node,
+                        pins.out_node,
+                        &all_edges,
+                        graph,
+                    )
+                })
+                .unwrap_or(IirPotRole::Generic);
+            let fixed_series_r = if role == IirPotRole::GroundLeg {
+                vcvs_pins
+                    .and_then(|pins| {
+                        ground_leg_fixed_resistance(eidx, pins.neg_node, &all_edges, graph)
+                    })
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
             bindings.push(IirPotBinding {
                 comp_id: comp.id.clone(),
                 max_r: pot.max_r,
-                fixed_series_r: 0.0, // filled in below
+                fixed_series_r,
                 ri,
                 position: 0.5, // default
+                role,
+                feedback_r,
+                non_inverting,
             });
         } else if let Some(r) = comp.kind.resistance() {
             // Only count non-pot feedback resistors as fixed_r
@@ -390,10 +435,101 @@ fn extract_pot_bindings(
 
     // Set fixed_series_r on all pot bindings
     for b in &mut bindings {
-        b.fixed_series_r = fixed_r;
+        if b.role != IirPotRole::GroundLeg {
+            b.fixed_series_r = fixed_r;
+        }
     }
 
     bindings
+}
+
+fn classify_iir_pot_role(
+    pot_edge_idx: usize,
+    pot_comp_idx: usize,
+    neg: NodeId,
+    out: NodeId,
+    group_edges: &[usize],
+    graph: &CircuitGraph,
+) -> IirPotRole {
+    let e = &graph.edges[pot_edge_idx];
+    let spans_feedback =
+        (e.node_a == neg && e.node_b == out) || (e.node_a == out && e.node_b == neg);
+    if spans_feedback {
+        return IirPotRole::Feedback;
+    }
+
+    if ground_leg_fixed_resistance(pot_edge_idx, neg, group_edges, graph).is_some() {
+        let touches_ground = |node| {
+            node == graph.gnd_node
+                || graph.ac_ground_nodes.contains(&node)
+                || graph.supply_nodes.contains(&node)
+        };
+        let has_ground_end = group_edges.iter().any(|&eidx| {
+            graph.edges[eidx].comp_idx == pot_comp_idx
+                && (touches_ground(graph.edges[eidx].node_a)
+                    || touches_ground(graph.edges[eidx].node_b))
+        });
+        if has_ground_end {
+            return IirPotRole::GroundLeg;
+        }
+    }
+
+    IirPotRole::Generic
+}
+
+fn ground_leg_fixed_resistance(
+    pot_edge_idx: usize,
+    neg: NodeId,
+    group_edges: &[usize],
+    graph: &CircuitGraph,
+) -> Option<f64> {
+    let pot_edge = &graph.edges[pot_edge_idx];
+    let touches_ground = |node| {
+        node == graph.gnd_node
+            || graph.ac_ground_nodes.contains(&node)
+            || graph.supply_nodes.contains(&node)
+    };
+    let start = if touches_ground(pot_edge.node_a) {
+        pot_edge.node_b
+    } else if touches_ground(pot_edge.node_b) {
+        pot_edge.node_a
+    } else {
+        return None;
+    };
+
+    let mut stack = vec![(start, 0.0f64)];
+    let mut visited = std::collections::HashSet::new();
+    while let Some((node, r_sum)) = stack.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        if node == neg {
+            return Some(r_sum);
+        }
+
+        for &eidx in group_edges {
+            if eidx == pot_edge_idx {
+                continue;
+            }
+            let e = &graph.edges[eidx];
+            let next = if e.node_a == node {
+                e.node_b
+            } else if e.node_b == node {
+                e.node_a
+            } else {
+                continue;
+            };
+            let comp = &graph.components[e.comp_idx];
+            if comp.kind.is_pot() {
+                continue;
+            }
+            if let Some(r) = comp.kind.resistance() {
+                stack.push((next, r_sum + r));
+            }
+        }
+    }
+
+    None
 }
 
 /// Find a pot in the feedback edges and create a WDF leaf for it.
@@ -465,7 +601,17 @@ pub(super) fn build_rigid(
     graph: &CircuitGraph,
     sample_rate: f64,
 ) -> Result<BuiltStage, String> {
-    build_rigid_from_group(edge_indices, graph, sample_rate, None, 9.0, None)
+    build_rigid_from_group(edge_indices, graph, sample_rate, None, 9.0, None, true)
+}
+
+pub(super) fn build_rigid_without_iir(
+    edge_indices: Vec<usize>,
+    _boundary_nodes: Vec<NodeId>,
+    _pendant_trees: Vec<(DynNode, NodeId)>,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Result<BuiltStage, String> {
+    build_rigid_from_group(edge_indices, graph, sample_rate, None, 9.0, None, false)
 }
 
 /// Build from a FlowGroup with full classification.
@@ -476,6 +622,7 @@ pub(super) fn build_rigid_from_group(
     group: Option<&FlowGroup>,
     supply_voltage: f64,
     bias_v_max: Option<(f64, f64)>,
+    allow_iir: bool,
 ) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph, group);
@@ -499,10 +646,11 @@ pub(super) fn build_rigid_from_group(
     // classify_rigid picks the entry point; we fall through from there.
 
     let try_black_feedback = matches!(optimization, RigidOptimization::BlackFeedback);
-    let try_iir = matches!(
-        optimization,
-        RigidOptimization::BlackFeedback | RigidOptimization::Iir
-    );
+    let try_iir = allow_iir
+        && matches!(
+            optimization,
+            RigidOptimization::BlackFeedback | RigidOptimization::Iir
+        );
 
     // ── BlackFeedback: O(1)/sample, resistive feedback only ──────────
     if try_black_feedback {
@@ -550,7 +698,7 @@ pub(super) fn build_rigid_from_group(
     }
 
     // ── IIR: O(1)/sample, ≤2 reactive elements ──────────────────────
-    if try_iir || try_black_feedback {
+    if try_iir || (allow_iir && try_black_feedback) {
         let pendant_trees = Vec::new();
 
         // Skip rail-only groups (no signal nodes)
@@ -643,6 +791,23 @@ pub(super) fn build_rigid_from_group(
         }
     }
 
+    // When IIR synthesis is disabled, passive rigid RC/RLC networks still need
+    // a cheap compiled form. StateSpace is the nearest non-IIR fallback for
+    // linear, non-VCVS subgraphs; active feedback groups continue below into
+    // the WDF feedback adaptor cases.
+    if !allow_iir && stats.vcvs_count == 0 {
+        let pendant_trees = Vec::new();
+        if let Ok(ss) = state_space::build_state_space_stage(
+            &edge_indices,
+            &pendant_trees,
+            graph,
+            sample_rate,
+            supply_voltage,
+        ) {
+            return Ok(BuiltStage::StateSpace(ss));
+        }
+    }
+
     // ── Original classification-specific paths ───────────────────────
     match optimization {
         RigidOptimization::BlackFeedback | RigidOptimization::Iir => {
@@ -698,10 +863,21 @@ pub(super) fn build_rigid_from_group(
                     return Ok(BuiltStage::BlackFeedback(stage));
                 }
             }
-            // No VCVS or no group — unity passthrough
-            let iir =
-                super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
-            Ok(BuiltStage::Iir(IirStage::new(iir)))
+            // No VCVS or no group — unity passthrough. In no-IIR diagnostic
+            // mode, report the miss instead of silently creating an IIR.
+            if allow_iir {
+                let iir = super::stage::IirData::new(
+                    vec![1.0, 0.0, 0.0],
+                    vec![1.0, 0.0, 0.0],
+                    sample_rate,
+                );
+                Ok(BuiltStage::Iir(IirStage::new(iir)))
+            } else {
+                Err(format!(
+                    "IIR disabled: no WDF/StateSpace fallback for rigid group (vcvs={}, nl={}, linear={}, reactive={})",
+                    stats.vcvs_count, stats.nl_count, stats.linear_count, stats.reactive_count
+                ))
+            }
         }
         RigidOptimization::StateSpace => {
             let pendant_trees = Vec::new(); // Empty — input coupling handled by SPQR passive stages

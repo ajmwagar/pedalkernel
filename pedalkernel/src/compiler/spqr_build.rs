@@ -11,7 +11,9 @@ use super::classify::NonlinearKind;
 use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
-use super::rigid::{build_general_mna_from_edges, build_rigid, build_rigid_from_group};
+use super::rigid::{
+    build_general_mna_from_edges, build_rigid, build_rigid_from_group, build_rigid_without_iir,
+};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
@@ -374,6 +376,7 @@ pub fn compile_via_spqr_with_options(
                     supply_voltage,
                     &pedal.ports,
                     options.force_serial_blockwise,
+                    options.disable_iir,
                 ) {
                     for built in built_stages {
                         push_stage!(
@@ -400,6 +403,7 @@ pub fn compile_via_spqr_with_options(
                 Some(group),
                 supply_voltage,
                 bias_v_max,
+                !options.disable_iir,
             )
             .map_err(|e| format!("Group {gi}: {e}"))?;
 
@@ -798,6 +802,34 @@ pub fn compile_via_spqr_with_options(
                 continue;
             } // All edges were pots
 
+            let group_has_runtime_pot = group_edges
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].kind.is_pot());
+            let group_has_nonlinear = group_edges.iter().any(|&eidx| {
+                graph.effective_edge_kind(eidx) == super::component::EdgeKind::Nonlinear
+            });
+            if group_has_runtime_pot && group_has_nonlinear {
+                #[cfg(test)]
+                eprintln!("  → rigid whole-group: NL group contains runtime pot");
+                let built = build_rigid_from_group(
+                    group_edges,
+                    &graph,
+                    sample_rate,
+                    Some(group),
+                    supply_voltage,
+                    None,
+                    !options.disable_iir,
+                )
+                .map_err(|e| format!("Group {gi}: {e}"))?;
+                push_stage!(
+                    built,
+                    group_flow_distances[gi],
+                    group_label.clone(),
+                    is_bypass
+                );
+                continue;
+            }
+
             if !group.has_feedback() {
                 let feedback_nodes: std::collections::HashSet<super::graph::NodeId> =
                     feedback_groups
@@ -871,6 +903,7 @@ pub fn compile_via_spqr_with_options(
                     supply_voltage,
                     &pedal.ports,
                     options.force_serial_blockwise,
+                    options.disable_iir,
                 ) {
                     for built in built_stages {
                         push_stage!(
@@ -911,8 +944,13 @@ pub fn compile_via_spqr_with_options(
                 }
 
                 for stage in spqr_stages {
-                    let built = build_spqr_stage(stage, &graph, sample_rate)
-                        .map_err(|e| format!("Group {gi}: {e}"))?;
+                    let built = build_spqr_stage_with_options(
+                        stage,
+                        &graph,
+                        sample_rate,
+                        options.disable_iir,
+                    )
+                    .map_err(|e| format!("Group {gi}: {e}"))?;
                     push_stage!(
                         built,
                         group_flow_distances[gi],
@@ -1521,6 +1559,15 @@ pub(super) fn build_spqr_stage(
     graph: &CircuitGraph,
     _sample_rate: f64,
 ) -> Result<BuiltStage, String> {
+    build_spqr_stage_with_options(stage, graph, _sample_rate, false)
+}
+
+pub(super) fn build_spqr_stage_with_options(
+    stage: SpqrStage,
+    graph: &CircuitGraph,
+    _sample_rate: f64,
+    disable_iir: bool,
+) -> Result<BuiltStage, String> {
     match stage {
         SpqrStage::PassiveWdf {
             tree, edge_indices, ..
@@ -1654,13 +1701,25 @@ pub(super) fn build_spqr_stage(
             boundary_nodes,
             pendant_trees,
             ..
-        } => build_rigid(
-            edge_indices,
-            boundary_nodes,
-            pendant_trees,
-            graph,
-            _sample_rate,
-        ),
+        } => {
+            if disable_iir {
+                build_rigid_without_iir(
+                    edge_indices,
+                    boundary_nodes,
+                    pendant_trees,
+                    graph,
+                    _sample_rate,
+                )
+            } else {
+                build_rigid(
+                    edge_indices,
+                    boundary_nodes,
+                    pendant_trees,
+                    graph,
+                    _sample_rate,
+                )
+            }
+        }
     }
 }
 

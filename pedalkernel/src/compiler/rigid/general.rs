@@ -258,7 +258,9 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
         all_edges,
     );
     let n_passive = passive_children.len();
-    let extract_output_nodes = node_to_mna(graph.out_node).map(|out| (Some(out), None));
+    let extract_output_nodes = find_output_extract_node(all_edges, &node_set, graph)
+        .and_then(node_to_mna)
+        .map(|out| (Some(out), None));
 
     // Step 5: Derive scattering matrix + Thevenin adaptation
     let (scattering, vcc_injection_vec) =
@@ -320,6 +322,30 @@ fn collect_mna_nodes(all_edges: &[usize], graph: &CircuitGraph) -> Vec<NodeId> {
         }
     }
     nodes
+}
+
+fn find_output_extract_node(
+    all_edges: &[usize],
+    node_set: &[NodeId],
+    graph: &CircuitGraph,
+) -> Option<NodeId> {
+    if node_set.contains(&graph.out_node) {
+        return Some(graph.out_node);
+    }
+
+    let edge_set: HashSet<usize> = all_edges.iter().copied().collect();
+    graph.edges.iter().enumerate().find_map(|(eidx, edge)| {
+        if edge_set.contains(&eidx) {
+            return None;
+        }
+        if edge.node_a == graph.out_node && node_set.contains(&edge.node_b) {
+            Some(edge.node_b)
+        } else if edge.node_b == graph.out_node && node_set.contains(&edge.node_a) {
+            Some(edge.node_a)
+        } else {
+            None
+        }
+    })
 }
 
 /// Step 2: Classify NL edges into NonlinearKind + terminal pairs.

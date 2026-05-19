@@ -3880,6 +3880,14 @@ impl IirData {
 /// When the stage contains an op-amp, component-declared `NonIdealFx`
 /// are applied as post-processing: GBW rolloff → slew limiting → rail clamp.
 /// Pot binding info stored in IirStage for runtime coefficient recomputation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum IirPotRole {
+    Generic,
+    Feedback,
+    GroundLeg,
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IirPotBinding {
@@ -3893,6 +3901,12 @@ pub struct IirPotBinding {
     pub ri: f64,
     /// Current pot position (0.0–1.0).
     pub position: f64,
+    /// Circuit role of this pot inside the IIR group.
+    pub role: IirPotRole,
+    /// Feedback resistance used by ground-leg gain recomputation.
+    pub feedback_r: f64,
+    /// True when the op-amp topology is non-inverting.
+    pub non_inverting: bool,
 }
 
 /// Precomputed biquad coefficient lookup table for pot-controlled IIR stages.
@@ -4117,11 +4131,13 @@ impl IirStage {
     /// Without table: falls back to DC gain recalculation (Rf/Ri).
     /// No heap allocations — all state is pre-allocated.
     pub fn set_pot(&mut self, comp_id: &str, position: f64) {
-        let binding = match self.pot_bindings.iter_mut().find(|b| b.comp_id == comp_id) {
-            Some(b) => b,
+        let binding_idx = match self.pot_bindings.iter().position(|b| b.comp_id == comp_id) {
+            Some(idx) => idx,
             None => return,
         };
-        binding.position = position;
+        let old_position = self.pot_bindings[binding_idx].position;
+        self.pot_bindings[binding_idx].position = position;
+        let binding = self.pot_bindings[binding_idx].clone();
 
         // ── Table lookup path (full biquad interpolation) ──
         #[cfg(feature = "biquad-table")]
@@ -4162,12 +4178,42 @@ impl IirStage {
         if self.iir.r_series_product > 0.0
             && self.iir.c_shunt_product > 0.0
             && self.iir.r_crit > 0.0
+            && binding.role != IirPotRole::GroundLeg
         {
             self.iir.r_fb = (binding.fixed_series_r + position * binding.max_r).max(1.0);
             self.iir.recompute();
 
             if self.stored_gbw > 0.0 {
                 let gain_abs = self.iir.dc_gain().abs().max(1.0);
+                let fc = self.stored_gbw / gain_abs;
+                let w = 2.0 * core::f64::consts::PI * fc;
+                self.gbw_coeff = w / (w + self.sample_rate);
+            }
+            return;
+        }
+
+        if binding.role == IirPotRole::GroundLeg && binding.feedback_r > 0.0 {
+            let gain_for = |pos: f64| {
+                let rg = (binding.fixed_series_r + pos * binding.max_r).max(1.0);
+                if binding.non_inverting {
+                    1.0 + binding.feedback_r / rg
+                } else {
+                    -(binding.feedback_r / rg)
+                }
+            };
+            let old_gain = gain_for(old_position);
+            let new_gain = gain_for(position);
+            let scale = if old_gain.abs() > 1e-12 {
+                new_gain / old_gain
+            } else {
+                new_gain
+            };
+            for b in &mut self.iir.b_coeffs {
+                *b *= scale;
+            }
+
+            if self.stored_gbw > 0.0 {
+                let gain_abs = new_gain.abs().max(1.0);
                 let fc = self.stored_gbw / gain_abs;
                 let w = 2.0 * core::f64::consts::PI * fc;
                 self.gbw_coeff = w / (w + self.sample_rate);
@@ -5652,6 +5698,18 @@ pub struct KMethodBlock {
     /// computes physical block drive voltages in the coupling/cascade domain,
     /// then maps them into the WDF tree's voltage-source convention here.
     pub source_polarity: f64,
+    /// Polarity used for K-table control axes such as bias voltage.
+    ///
+    /// This is intentionally separate from `source_polarity`: the WDF tree may
+    /// need a sign flip for its voltage-source convention, while a K-table
+    /// bias axis is defined in the physical device voltage convention.
+    #[cfg_attr(feature = "serde", serde(default = "default_k_table_control_polarity"))]
+    pub k_table_control_polarity: f64,
+}
+
+#[cfg(feature = "serde")]
+fn default_k_table_control_polarity() -> f64 {
+    1.0
 }
 
 /// Circuit data needed to map cutoff CV to diode small-signal resistance.
@@ -5802,10 +5860,12 @@ impl BlockwiseKMethodStage {
         block.source_polarity * physical_voltage
     }
 
+    fn block_control_voltage(block: &KMethodBlock, physical_voltage: f64) -> f64 {
+        block.k_table_control_polarity * physical_voltage
+    }
+
     fn block_root_incident(block: &mut KMethodBlock, b_tree: f64, ctrl: f64) -> f64 {
-        if let Some(ref mut root) = block.explicit_diode_root {
-            root.process(b_tree, block.tree.port_resistance())
-        } else if block.k_table.dims == 1 {
+        if block.k_table.dims == 1 {
             block.k_table.lookup_1d(b_tree)
         } else {
             block.k_table.lookup_2d(b_tree, ctrl)
@@ -5815,49 +5875,28 @@ impl BlockwiseKMethodStage {
     fn solve_block_without_state_update(
         block: &mut KMethodBlock,
         physical_voltage: f64,
-    ) -> (f64, f64, f64) {
+    ) -> (f64, f64, f64, f64) {
         let drive_voltage = Self::block_drive_voltage(block, physical_voltage);
+        let control_voltage = Self::block_control_voltage(block, physical_voltage);
         block.tree.set_voltage(drive_voltage);
         let b_tree = block.tree.reflected();
-        let a_root = Self::block_root_incident(block, b_tree, drive_voltage);
+        let a_root = Self::block_root_incident(block, b_tree, control_voltage);
         let raw_cascade = Self::block_output_voltage(block, a_root, b_tree);
-        (a_root, b_tree, raw_cascade - block.dc_offset)
+        (a_root, b_tree, raw_cascade, raw_cascade - block.dc_offset)
     }
 
     fn solve_block_and_update_state(
         block: &mut KMethodBlock,
         physical_voltage: f64,
-    ) -> (f64, f64, f64) {
-        let (a_root, b_tree, cascade) =
+    ) -> (f64, f64, f64, f64) {
+        let (a_root, b_tree, raw_cascade, ac_cascade) =
             Self::solve_block_without_state_update(block, physical_voltage);
         block.tree.set_incident(a_root);
-        (a_root, b_tree, cascade)
+        (a_root, b_tree, raw_cascade, ac_cascade)
     }
 
     fn write_vs_ports(&mut self, vs_signals: &[f64]) {
         let n = self.n_ports;
-        let cutoff_cv = self
-            .cutoff_cv_port
-            .as_ref()
-            .and_then(|cutoff_name| {
-                self.vs_port_map
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (name, _))| name.eq_ignore_ascii_case(cutoff_name))
-                    .and_then(|(i, _)| vs_signals.get(i).copied())
-            })
-            .unwrap_or(0.0);
-        if self.cutoff_cv_port.is_some() {
-            for block in &mut self.blocks {
-                if let (Some(root), Some(calibration)) =
-                    (block.explicit_diode_root, block.diode_cutoff.as_ref())
-                {
-                    let rp = calibration.source_resistance(root.model, cutoff_cv);
-                    block.tree.set_vs_port_resistance(rp);
-                    block.rp = block.tree.port_resistance();
-                }
-            }
-        }
         for (i, &(ref name, vs_idx)) in self.vs_port_map.iter().enumerate() {
             if vs_idx < n {
                 let v = if name.starts_with("_supply_") {
@@ -5865,7 +5904,7 @@ impl BlockwiseKMethodStage {
                 } else {
                     vs_signals.get(i).copied().unwrap_or(0.0)
                 };
-                self.work_b[vs_idx] = 2.0 * v;
+                self.work_b[vs_idx] = 2.0 * v - self.work_a[vs_idx];
             }
         }
     }
@@ -5901,26 +5940,28 @@ impl BlockwiseKMethodStage {
         update_state: bool,
         mut block_outputs: Option<&mut alloc::vec::Vec<f64>>,
     ) -> f64 {
-        let mut cascade = 0.0;
+        let mut cascade_drive = 0.0;
+        let mut cascade_out = 0.0;
         for i in 0..self.blocks.len() {
             let v_coupling = (self.work_a[i] + self.work_b[i]) / 2.0;
             let v_block = if include_cascade && i > 0 {
-                v_coupling + cascade
+                v_coupling + cascade_drive
             } else {
                 v_coupling
             };
-            let (a_root, _, next_cascade) = if update_state {
+            let (a_root, _, raw_cascade, ac_cascade) = if update_state {
                 Self::solve_block_and_update_state(&mut self.blocks[i], v_block)
             } else {
                 Self::solve_block_without_state_update(&mut self.blocks[i], v_block)
             };
-            cascade = next_cascade;
+            cascade_drive = raw_cascade;
+            cascade_out = ac_cascade;
             self.work_b[i] = a_root;
             if let Some(outputs) = block_outputs.as_deref_mut() {
-                outputs.push(cascade);
+                outputs.push(ac_cascade);
             }
         }
-        cascade
+        cascade_out
     }
 
     pub fn debug_process_with_block_outputs(
@@ -6226,6 +6267,22 @@ mod blockwise_k_method_tests {
         table
     }
 
+    fn one_dimensional_table() -> KTable {
+        let mut table = KTable {
+            dims: 1,
+            b_min: 0.0,
+            b_max: 2.0,
+            ctrl_min: 0.0,
+            ctrl_max: 0.0,
+            steps: 3,
+            entries: vec![0.0, 1.0, 2.0],
+            inv_b_scale: 0.0,
+            inv_c_scale: 0.0,
+        };
+        table.precompute_scales();
+        table
+    }
+
     fn test_block(vbe_bias: f64) -> KMethodBlock {
         KMethodBlock {
             tree: DynNode::VoltageSource(0.0, 1.0),
@@ -6239,6 +6296,7 @@ mod blockwise_k_method_tests {
             cascade_from_passive: false,
             cascade_probe_id: None,
             source_polarity: 1.0,
+            k_table_control_polarity: 1.0,
         }
     }
 
@@ -6251,6 +6309,151 @@ mod blockwise_k_method_tests {
         assert!(
             (a_root - 3.0).abs() < 1e-9,
             "2D BKM K-table lookup must use the runtime drive as the control coordinate"
+        );
+    }
+
+    #[test]
+    fn bkm_control_coordinate_is_independent_from_tree_source_polarity() {
+        let mut block = test_block(1.0);
+        block.source_polarity = -1.0;
+        block.k_table_control_polarity = 1.0;
+
+        let drive = BlockwiseKMethodStage::block_drive_voltage(&block, 0.25);
+        let control = BlockwiseKMethodStage::block_control_voltage(&block, 0.25);
+
+        assert!(
+            (drive + 0.25).abs() < 1e-9 && (control - 0.25).abs() < 1e-9,
+            "BKM must allow WDF source orientation to differ from K-table bias/control orientation"
+        );
+    }
+
+    #[test]
+    fn bkm_diode_cutoff_uses_voltage_wave_not_port_resistance_axis() {
+        let mut block = test_block(1.0);
+        block.k_table = one_dimensional_table();
+        block.explicit_diode_root = Some(ExplicitDiodeRoot::new(DiodeModel::silicon()));
+        block.diode_cutoff = Some(DiodeCutoffCalibration {
+            bias_voltage: 9.0,
+            bias_resistance: 100_000.0,
+            cv_resistance: Some(47_000.0),
+            min_rp: 1.0,
+            max_rp: 2.0,
+        });
+        block.tree = DynNode::VoltageSource(0.0, 1.5);
+
+        let a_root = BlockwiseKMethodStage::block_root_incident(&mut block, 0.5, 0.25);
+
+        assert!(
+            (a_root - 0.5).abs() < 1e-9,
+            "cv_cutoff is a voltage in the coupling network; diode BKM lookup \
+             should use the incident wave table, not reinterpret CV as Rp"
+        );
+    }
+
+    #[test]
+    fn bkm_cutoff_cv_write_does_not_recompute_block_port_resistance() {
+        let mut stage = BlockwiseKMethodStage {
+            blocks: vec![{
+                let mut block = test_block(1.0);
+                block.explicit_diode_root = Some(ExplicitDiodeRoot::new(DiodeModel::silicon()));
+                block.diode_cutoff = Some(DiodeCutoffCalibration {
+                    bias_voltage: 9.0,
+                    bias_resistance: 100_000.0,
+                    cv_resistance: Some(47_000.0),
+                    min_rp: 1.0,
+                    max_rp: 100_000.0,
+                });
+                block
+            }],
+            coupling_s: vec![1.0],
+            coupling_rp: vec![1.0],
+            coupling_n_mna: 0,
+            coupling_ports: vec![crate::tree::WdfPort {
+                node_pos: None,
+                node_neg: None,
+                resistance: 1.0,
+            }],
+            coupling_elements: vec![],
+            n_ports: 1,
+            output_block: 0,
+            supply_voltage: 9.0,
+            vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
+            cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
+            feedback_port_map: vec![],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            b_warm: vec![0.0],
+            work_b: vec![0.0],
+            work_a: vec![0.0],
+            port_index_cache: vec![],
+        };
+        let rp_before = stage.blocks[0].tree.port_resistance();
+
+        stage.write_vs_ports(&[3.0]);
+
+        assert_eq!(stage.work_b[0], 6.0);
+        assert!(
+            (stage.blocks[0].tree.port_resistance() - rp_before).abs() < 1e-12,
+            "writing cv_cutoff volts should update the coupling VS wave, not mutate block Rp"
+        );
+    }
+
+    #[test]
+    fn bkm_voltage_sources_reflect_incident_coupling_wave() {
+        let mut stage = BlockwiseKMethodStage {
+            blocks: vec![test_block(1.0)],
+            coupling_s: vec![1.0],
+            coupling_rp: vec![1.0],
+            coupling_n_mna: 0,
+            coupling_ports: vec![crate::tree::WdfPort {
+                node_pos: None,
+                node_neg: None,
+                resistance: 1.0,
+            }],
+            coupling_elements: vec![],
+            n_ports: 1,
+            output_block: 0,
+            supply_voltage: 9.0,
+            vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
+            cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
+            feedback_port_map: vec![],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            b_warm: vec![0.0],
+            work_b: vec![0.0],
+            work_a: vec![1.25],
+            port_index_cache: vec![],
+        };
+
+        stage.write_vs_ports(&[3.0]);
+
+        assert!(
+            (stage.work_b[0] - 4.75).abs() < 1e-12,
+            "BKM voltage-source ports must use b=2V-a so source impedance participates in coupling"
+        );
+    }
+
+    #[test]
+    fn bkm_block_solve_returns_raw_and_ac_cascade_voltages() {
+        let mut block = test_block(1.0);
+        block.k_table = one_dimensional_table();
+        block.dc_offset = 0.75;
+
+        let (_, _, raw, ac) =
+            BlockwiseKMethodStage::solve_block_without_state_update(&mut block, 0.25);
+
+        assert!(
+            (raw - ac - 0.75).abs() < 1e-12,
+            "BKM should keep raw cascade voltage available for driving downstream nonlinear blocks \
+             while exposing AC output separately"
         );
     }
 

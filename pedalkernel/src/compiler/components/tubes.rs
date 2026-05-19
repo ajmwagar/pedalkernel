@@ -4,8 +4,9 @@ use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
-    Component, ComponentEdge, EdgeKind, GraphRole, ModulationSink, ModulationSinkKind, PinConfig,
-    PinDirection, SignalTerminals, StampResult,
+    Component, ComponentEdge, EdgeKind, GraphRole, KMethodSpec, ModulationSink, ModulationSinkKind,
+    PinConfig, PinDirection, SignalTerminals, StampResult, K_AXIS_INCIDENT_CONTROL_2D,
+    K_AXIS_INCIDENT_CONTROL_CONTROL_3D,
 };
 use crate::compiler::graph::NodeId;
 use crate::tree::MnaSystem;
@@ -146,8 +147,11 @@ impl Component for Triode {
     fn is_gain_device(&self) -> bool {
         true
     }
-    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
-        (true, 2, "tube: 2D memoryless I-V")
+    fn k_method_spec(&self) -> Option<KMethodSpec> {
+        Some(KMethodSpec {
+            axes: K_AXIS_INCIDENT_CONTROL_2D,
+            reason: "tube: 2D memoryless I-V",
+        })
     }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
@@ -290,8 +294,11 @@ impl Component for Pentode {
     fn is_gain_device(&self) -> bool {
         true
     }
-    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
-        (true, 2, "tube: 2D memoryless I-V")
+    fn k_method_spec(&self) -> Option<KMethodSpec> {
+        Some(KMethodSpec {
+            axes: K_AXIS_INCIDENT_CONTROL_2D,
+            reason: "tube: 2D memoryless I-V",
+        })
     }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
@@ -432,8 +439,11 @@ impl Component for VariMu {
     fn is_gain_device(&self) -> bool {
         true
     }
-    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
-        (true, 3, "pentode: 3D memoryless I-V (Vg1k, Vg2k, Vpk)")
+    fn k_method_spec(&self) -> Option<KMethodSpec> {
+        Some(KMethodSpec {
+            axes: K_AXIS_INCIDENT_CONTROL_CONTROL_3D,
+            reason: "pentode: 3D memoryless I-V (Vg1k, Vg2k, Vpk)",
+        })
     }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)

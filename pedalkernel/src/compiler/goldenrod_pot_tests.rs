@@ -12,6 +12,7 @@
 
 use super::compiled::CompiledPedal;
 use super::spqr_build::compile_via_spqr;
+use super::{compile_pedal_with_options, CompileOptions};
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -25,6 +26,16 @@ fn load_goldenrod() -> CompiledPedal {
     let source = std::fs::read_to_string(&path).expect("read goldenrod.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     compile_via_spqr(&pedal, SR).expect("compile")
+}
+
+fn load_goldenrod_with_options(options: CompileOptions) -> CompiledPedal {
+    let path = format!(
+        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
+        env!("CARGO_MANIFEST_DIR"),
+    );
+    let source = std::fs::read_to_string(&path).expect("read goldenrod.pedal");
+    let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
+    compile_pedal_with_options(&pedal, SR, options).expect("compile")
 }
 
 fn measure_peak(compiled: &mut CompiledPedal, amp: f64) -> f64 {
@@ -217,6 +228,63 @@ fn goldenrod_stage_dump() {
     let gain_count = labels.iter().filter(|&&l| l == "Gain").count();
     eprintln!("  Gain bindings: {gain_count} (should be 2 for ganged)");
     assert_eq!(gain_count, 2, "Ganged Gain pot should have 2 bindings");
+}
+
+#[test]
+fn goldenrod_disable_iir_compiles_without_iir_stages() {
+    let compiled = load_goldenrod_with_options(CompileOptions {
+        disable_iir: true,
+        skip_k_tables: true,
+        ..Default::default()
+    });
+
+    let iir_count = compiled
+        .stages
+        .iter()
+        .filter(|stage| matches!(stage, super::compiled::Stage::Iir(_)))
+        .count();
+    let wdf_count = compiled
+        .stages
+        .iter()
+        .filter(|stage| matches!(stage, super::compiled::Stage::Wdf(_)))
+        .count();
+
+    assert_eq!(iir_count, 0, "disable_iir should suppress IIR stages");
+    assert!(
+        wdf_count > 0,
+        "disable_iir should still leave WDF stages available"
+    );
+}
+
+#[test]
+fn goldenrod_disable_iir_gain_changes_output() {
+    let mut low_gain = load_goldenrod_with_options(CompileOptions {
+        disable_iir: true,
+        skip_k_tables: true,
+        ..Default::default()
+    });
+    low_gain.set_control("Gain", 0.0);
+    low_gain.set_control("Output", 0.7);
+
+    let mut high_gain = load_goldenrod_with_options(CompileOptions {
+        disable_iir: true,
+        skip_k_tables: true,
+        ..Default::default()
+    });
+    high_gain.set_control("Gain", 1.0);
+    high_gain.set_control("Output", 0.7);
+
+    let (low_peak, low_rms) = measure_peak_and_rms(&mut low_gain, 0.05);
+    let (high_peak, high_rms) = measure_peak_and_rms(&mut high_gain, 0.05);
+    let ratio = high_rms.max(low_rms) / high_rms.min(low_rms).max(1e-12);
+
+    eprintln!(
+        "Goldenrod disable_iir Gain: low_peak={low_peak:.6}, high_peak={high_peak:.6}, low_rms={low_rms:.6}, high_rms={high_rms:.6}, ratio={ratio:.3}"
+    );
+    assert!(
+        ratio > 1.2 || (high_peak - low_peak).abs() > 0.01,
+        "Goldenrod disable_iir Gain should measurably change output"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -549,6 +617,10 @@ fn goldenrod_gain_moves_clean_and_dirty_paths() {
         assert!(
             dirty_low > 0.01 && dirty_high > 0.01,
             "U2 dirty path should stay alive at both ends: low={dirty_low:.4}, high={dirty_high:.4}"
+        );
+        assert!(
+            (dirty_high / dirty_low.max(1e-9) - 1.0).abs() > 0.05,
+            "Gain_A should move the U2 dirty gain stage on the IIR path: low={dirty_low:.4}, high={dirty_high:.4}"
         );
         assert!(
             (sum_high / sum_low.max(1e-9) - 1.0).abs() > 0.05,

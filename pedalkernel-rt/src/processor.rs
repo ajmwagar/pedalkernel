@@ -322,6 +322,9 @@ mod tests {
             fixed_series_r: 0.0,
             ri: 10_000.0,
             position: 0.0,
+            role: crate::stage::IirPotRole::Generic,
+            feedback_r: 0.0,
+            non_inverting: false,
         });
         let mut stage = Stage::Iir(iir_stage);
 
@@ -2493,8 +2496,6 @@ impl PedalProcessor for CompiledPedal {
         // Node routing: trigger impulses were already pushed to node_signals above.
 
         for stage_idx in 0..self.stages.len() {
-            let signal_before_stage = signal;
-
             // Determine variant type to dispatch correctly.
             let is_wdf = matches!(&self.stages[stage_idx], Stage::Wdf(_));
             let is_mnl = matches!(&self.stages[stage_idx], Stage::MultiNl(_));
@@ -2829,12 +2830,13 @@ impl PedalProcessor for CompiledPedal {
             }
 
             // Apply output wiper dividers after the stage that contains them.
-            // These stages are passive sink networks whose WDF probe can report
-            // the wrong pot side. Use the incoming serial signal and explicit
-            // wiper position as the output divider.
+            // The WDF stage still owns the passive filtering/loading behavior;
+            // this routing layer only applies the explicit wiper ratio. Using
+            // the pre-stage signal here discards any other controls in the same
+            // passive group, e.g. RAT Filter + Volume.
             for wd in &self.wiper_dividers {
                 if wd.after_stage_idx == stage_idx {
-                    signal = signal_before_stage * wd.position;
+                    signal *= wd.position;
                 }
             }
         }

@@ -242,6 +242,45 @@ pub struct ComponentEdge {
     pub port_group: Option<usize>,
 }
 
+/// Semantic axis in a K-method lookup table.
+///
+/// Components declare these axes so table generation does not need to infer
+/// solver dimensionality from concrete component names. The compiler may add
+/// topology-derived axes, such as source impedance, when the adapted WDF block
+/// makes the nonlinear root depend on more than the device I-V coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KMethodAxis {
+    /// Incident wave at the nonlinear root.
+    IncidentWave,
+    /// Device control voltage/current, e.g. BJT Vbe or triode Vgk.
+    DeviceControl,
+    /// Bias/control voltage injected by the surrounding circuit, e.g. a CV
+    /// source summed into a nonlinear ladder bias node.
+    BiasVoltage,
+}
+
+/// Component-declared K-method table shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KMethodSpec {
+    pub axes: &'static [KMethodAxis],
+    pub reason: &'static str,
+}
+
+impl KMethodSpec {
+    pub const fn dimensions(self) -> usize {
+        self.axes.len()
+    }
+}
+
+pub const K_AXIS_INCIDENT_1D: &[KMethodAxis] = &[KMethodAxis::IncidentWave];
+pub const K_AXIS_INCIDENT_CONTROL_2D: &[KMethodAxis] =
+    &[KMethodAxis::IncidentWave, KMethodAxis::DeviceControl];
+pub const K_AXIS_INCIDENT_CONTROL_CONTROL_3D: &[KMethodAxis] = &[
+    KMethodAxis::IncidentWave,
+    KMethodAxis::DeviceControl,
+    KMethodAxis::DeviceControl,
+];
+
 // ── Control & modulation declarations ─────────────────────────────────────
 
 /// A controllable parameter declared by a component.
@@ -874,34 +913,44 @@ pub trait Component: std::fmt::Debug {
 
     // ── K-method candidacy ────────────────────────────────────────────────
 
-    /// Whether this nonlinear element can be replaced by a precomputed
-    /// lookup table (K-method / wave digital tabulation).
-    ///
-    /// Returns `(is_candidate, port_dimensions, rejection_reason)`.
+    /// K-method table shape declared by the component.
     ///
     /// Requirements for candidacy:
     /// 1. Memoryless: the NL is purely algebraic (no internal state/caps)
     /// 2. Low port count: ≤3 dimensions for practical table sizes
     /// 3. Monotonic: unique output for any input (no fold-back/hysteresis)
     ///
-    /// Port dimensions:
-    /// - 1D: single junction (diode, zener, single-port JFET Rds)
-    /// - 2D: two coupled junctions (BJT Vbe+Vce, triode Vgk+Vpk)
-    /// - 3D: three-port (pentode Vg1k+Vg2k+Vpk) — borderline feasible
+    /// Axis dimensions:
+    /// - 1D: incident wave only, e.g. diode/zener junction
+    /// - 2D: incident wave + device control, e.g. BJT Vbe or triode Vgk
+    /// - 3D: incident wave + two controls, e.g. pentode grids
     ///
     /// Linear components return (false, 0, "linear") — they don't need
     /// NL tabulation. Variable components (pots, photocouplers) return
     /// false because their parameters change at runtime.
-    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+    fn k_method_spec(&self) -> Option<KMethodSpec> {
         if !self.is_nonlinear() {
-            return (false, 0, "linear — not a nonlinear element");
+            return None;
         }
-        // Default for unknown NL: reject conservatively
-        (
-            false,
-            0,
-            "unknown nonlinear type — override k_method_candidacy()",
-        )
+        // Default for unknown NL: reject conservatively.
+        None
+    }
+
+    /// Compatibility wrapper for callers that still only need yes/no +
+    /// dimensionality. New code should prefer [`Component::k_method_spec`]
+    /// because it preserves the meaning of each table axis.
+    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
+        if let Some(spec) = self.k_method_spec() {
+            (true, spec.dimensions(), spec.reason)
+        } else if self.is_nonlinear() {
+            (
+                false,
+                0,
+                "unknown nonlinear type — override k_method_spec()",
+            )
+        } else {
+            (false, 0, "linear — not a nonlinear element")
+        }
     }
 
     // ── Composite classification ─────────────────────────────────────────

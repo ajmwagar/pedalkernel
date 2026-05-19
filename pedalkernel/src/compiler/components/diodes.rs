@@ -4,8 +4,8 @@ use hashbrown::HashMap;
 
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
-    Component, ComponentEdge, EdgeKind, GraphRole, PinConfig, PinDirection, SignalTerminals,
-    SolverMethod, StampResult,
+    Component, ComponentEdge, EdgeKind, GraphRole, KMethodSpec, PinConfig, PinDirection,
+    SignalTerminals, SolverMethod, StampResult, K_AXIS_INCIDENT_1D,
 };
 use crate::compiler::graph::NodeId;
 use crate::compiler::validate::Severity;
@@ -126,8 +126,11 @@ impl Component for Diode {
     fn diode_type(&self) -> Option<DiodeType> {
         Some(self.diode_type)
     }
-    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
-        (true, 1, "diode: 1D memoryless monotonic I-V")
+    fn k_method_spec(&self) -> Option<KMethodSpec> {
+        Some(KMethodSpec {
+            axes: K_AXIS_INCIDENT_1D,
+            reason: "diode: 1D memoryless monotonic I-V",
+        })
     }
 }
 
@@ -243,8 +246,11 @@ impl Component for DiodePair {
     fn diode_type(&self) -> Option<DiodeType> {
         Some(self.diode_type)
     }
-    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
-        (true, 1, "diode pair: 1D memoryless symmetric I-V")
+    fn k_method_spec(&self) -> Option<KMethodSpec> {
+        Some(KMethodSpec {
+            axes: K_AXIS_INCIDENT_1D,
+            reason: "diode pair: 1D memoryless symmetric I-V",
+        })
     }
 }
 
@@ -369,8 +375,11 @@ impl Component for Zener {
     fn is_diode_family(&self) -> bool {
         true
     }
-    fn k_method_candidacy(&self) -> (bool, usize, &'static str) {
-        (true, 1, "zener: 1D memoryless I-V with reverse breakdown")
+    fn k_method_spec(&self) -> Option<KMethodSpec> {
+        Some(KMethodSpec {
+            axes: K_AXIS_INCIDENT_1D,
+            reason: "zener: 1D memoryless I-V with reverse breakdown",
+        })
     }
 }
 

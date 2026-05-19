@@ -1356,6 +1356,13 @@ fn diode_component_is_memoryless() {
     let (ok, dims, _) = diode.kind.k_method_candidacy();
     assert!(ok, "Diode should be memoryless");
     assert_eq!(dims, 1);
+
+    let spec = diode.kind.k_method_spec().expect("diode K-method spec");
+    assert_eq!(
+        spec.axes,
+        super::component::K_AXIS_INCIDENT_1D,
+        "diode should declare its K-table axes at the component layer"
+    );
 }
 
 #[test]
@@ -1369,6 +1376,13 @@ fn bjt_component_is_memoryless_2d() {
     let (ok, dims, _) = bjt.kind.k_method_candidacy();
     assert!(ok, "BJT should be memoryless");
     assert_eq!(dims, 2);
+
+    let spec = bjt.kind.k_method_spec().expect("BJT K-method spec");
+    assert_eq!(
+        spec.axes,
+        super::component::K_AXIS_INCIDENT_CONTROL_2D,
+        "BJT should declare incident-wave plus control-voltage axes"
+    );
 }
 
 #[test]

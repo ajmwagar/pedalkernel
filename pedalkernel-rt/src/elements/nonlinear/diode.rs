@@ -27,6 +27,14 @@ use crate::elements::WdfRoot;
 /// ```
 #[inline]
 pub fn wright_omega(x: f64) -> f64 {
+    if !x.is_finite() {
+        return if x.is_sign_positive() {
+            1.0e12
+        } else {
+            1.0e-300
+        };
+    }
+
     // Guard against extreme underflow
     if x <= -33.0 {
         return 0.0;
@@ -134,6 +142,17 @@ pub fn wright_omega(x: f64) -> f64 {
 /// * `n_vt` - Thermal voltage × ideality factor (V)
 #[inline]
 pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
+    if !a.is_finite()
+        || !rp.is_finite()
+        || !is.is_finite()
+        || !n_vt.is_finite()
+        || rp <= 0.0
+        || is <= 0.0
+        || n_vt <= 0.0
+    {
+        return 0.0;
+    }
+
     // α = Rp·Is / nVt
     let alpha = rp * is / n_vt;
     let ln_alpha = crate::math::ln(alpha);
@@ -205,6 +224,17 @@ pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
 /// * `n_vt` - Thermal voltage × ideality factor (V)
 #[inline]
 pub fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
+    if !a.is_finite()
+        || !rp.is_finite()
+        || !is.is_finite()
+        || !n_vt.is_finite()
+        || rp <= 0.0
+        || is <= 0.0
+        || n_vt <= 0.0
+    {
+        return 0.0;
+    }
+
     // α = Rp·Is / nVt
     let alpha = rp * is / n_vt;
     let ln_alpha = crate::math::ln(alpha);

@@ -561,6 +561,81 @@ fn merge_same_component_sccs(
     merged.into_values().collect()
 }
 
+/// Merge SCCs whose active devices share a non-rail circuit node.
+///
+/// Directly node-coupled transistor structures such as current mirrors,
+/// differential pairs, and Wilson mirrors exchange bias/control currents
+/// through active terminals, not through passive signal edges. If those active
+/// devices are split into serial stages, a bias pot can mutate one stage while
+/// the audio-controlling device in the next stage never sees that operating
+/// point change.
+fn merge_shared_active_node_sccs(
+    sccs: Vec<Vec<usize>>,
+    active_elements: &[ActiveElement],
+    graph: &CircuitGraph,
+    rails: &HashSet<NodeId>,
+) -> Vec<Vec<usize>> {
+    if sccs.len() <= 1 {
+        return sccs;
+    }
+
+    let mut group_of: Vec<usize> = (0..sccs.len()).collect();
+
+    fn find(group_of: &mut [usize], mut i: usize) -> usize {
+        while group_of[i] != i {
+            group_of[i] = group_of[group_of[i]];
+            i = group_of[i];
+        }
+        i
+    }
+    fn union(group_of: &mut [usize], a: usize, b: usize) {
+        let ra = find(group_of, a);
+        let rb = find(group_of, b);
+        if ra != rb {
+            group_of[rb] = ra;
+        }
+    }
+
+    let mut elem_to_scc = vec![0usize; active_elements.len()];
+    for (si, scc) in sccs.iter().enumerate() {
+        for &elem_idx in scc {
+            elem_to_scc[elem_idx] = si;
+        }
+    }
+
+    let mut node_to_scc: BTreeMap<NodeId, usize> = BTreeMap::new();
+    for (elem_idx, elem) in active_elements.iter().enumerate() {
+        let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+        if !comp.kind.is_bjt() {
+            continue;
+        }
+        let si = elem_to_scc[elem_idx];
+        for node in elem
+            .output_nodes
+            .iter()
+            .copied()
+            .chain(std::iter::once(elem.input_node))
+        {
+            if rails.contains(&node) || node == graph.in_node || node == graph.out_node {
+                continue;
+            }
+            if let Some(&prev_si) = node_to_scc.get(&node) {
+                union(&mut group_of, si, prev_si);
+            } else {
+                node_to_scc.insert(node, si);
+            }
+        }
+    }
+
+    let mut merged: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (si, scc) in sccs.into_iter().enumerate() {
+        let root = find(&mut group_of, si);
+        merged.entry(root).or_default().extend(scc);
+    }
+
+    merged.into_values().collect()
+}
+
 /// Classify unclaimed passive edges as ground-shunts or pendants relative
 /// to a set of active elements and their signal nodes.
 ///
@@ -868,6 +943,7 @@ pub(in crate::compiler) fn find_flow_groups(
     // A BJT has 2 active elements (B-E, C-E) from the same comp_idx. Without
     // feedback they land in separate SCCs, but must be co-solved as one device.
     let sccs = merge_same_component_sccs(sccs, &active_elements, graph);
+    let sccs = merge_shared_active_node_sccs(sccs, &active_elements, graph, &rails);
 
     // Build classified FlowGroup for each SCC
     let mut claimed: HashSet<usize> = HashSet::new();
@@ -1388,6 +1464,17 @@ mod tests {
         })
     }
 
+    fn group_component_names(group: &FlowGroup, graph: &CircuitGraph) -> Vec<String> {
+        let mut names: Vec<String> = group
+            .all_edges()
+            .iter()
+            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     // ── Test 1: Two op-amps in cascade, no inter-stage feedback ──────────
 
     #[test]
@@ -1431,6 +1518,121 @@ mod tests {
         assert_ne!(
             u1_group, u2_group,
             "Cascaded op-amps without inter-stage feedback should be in SEPARATE groups"
+        );
+    }
+
+    #[test]
+    fn flow_claims_supply_side_bias_pot_chain_for_bjt_group() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 12V
+                components {
+                    Q_tail: pnp(2n3906)
+                    Q_mirror: pnp(2n3906)
+                    R_tail_floor: resistor(1k)
+                    VCA_Gain: pot(100k, b)
+                    R_emit: resistor(1k)
+                }
+                nets {
+                    vcc -> VCA_Gain.a
+                    VCA_Gain.b -> R_tail_floor.a
+                    R_tail_floor.b -> Q_mirror.emitter
+                    Q_mirror.base -> Q_mirror.collector
+                    Q_mirror.collector -> Q_tail.base
+                    vcc -> Q_tail.emitter
+                    Q_tail.collector -> R_emit.a
+                    R_emit.b -> gnd
+                }
+                controls {
+                    VCA_Gain.position -> "VCA_Gain" [0.0, 1.0] = 1.0
+                }
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+        let mirror_group =
+            find_group_containing(&groups, &graph, "Q_mirror").expect("Q_mirror group");
+        let names = group_component_names(&groups[mirror_group], &graph);
+
+        assert!(
+            names.iter().any(|name| name == "VCA_Gain"),
+            "supply-side bias pot must be claimed with current-mirror BJT group; group={names:?}"
+        );
+    }
+
+    #[test]
+    fn flow_keeps_tb303_vca_gain_pot_in_runtime_group() {
+        const TB303_VCA: &str = r#"
+            pedal "TB303 VCA" { supply 12V
+                components {
+                    Q_diff_p: npn(2n3904)
+                    Q_diff_n: npn(2n3904)
+                    Q_tail: pnp(2n3906)
+                    Q_mirror: pnp(2n3906)
+                    R_tail_floor: resistor(1k)
+                    VCA_Gain: pot(100k, b)
+                    Q_wilson_a: pnp(2n3906)
+                    Q_wilson_b: pnp(2n3906)
+                    R_load: resistor(47k)
+                    R_in: resistor(10k)
+                    C_in: cap(100n)
+                    R_bias_top: resistor(100k)
+                    R_bias_bot: resistor(100k)
+                    C_out: cap(100n)
+                    R_out: resistor(10k)
+                }
+                nets {
+                    vcc -> R_bias_top.a
+                    R_bias_top.b -> R_bias_bot.a
+                    R_bias_bot.b -> gnd
+                    R_bias_top.b -> Q_diff_p.base
+                    in -> C_in.a
+                    C_in.b -> R_in.a
+                    R_in.b -> Q_diff_n.base
+                    R_bias_top.b -> Q_diff_n.base
+                    vcc -> VCA_Gain.a
+                    VCA_Gain.b -> R_tail_floor.a
+                    R_tail_floor.b -> Q_mirror.emitter
+                    Q_mirror.base -> Q_mirror.collector
+                    Q_mirror.collector -> Q_tail.base
+                    vcc -> Q_tail.emitter
+                    Q_tail.collector -> Q_diff_p.emitter, Q_diff_n.emitter
+                    vcc -> Q_wilson_a.emitter
+                    vcc -> Q_wilson_b.emitter
+                    Q_wilson_a.base -> Q_wilson_b.collector, Q_diff_p.collector
+                    Q_wilson_b.base -> Q_wilson_a.collector
+                    Q_wilson_a.collector -> Q_diff_n.collector
+                    Q_wilson_a.collector -> R_load.a
+                    R_load.b -> gnd
+                    Q_wilson_a.collector -> C_out.a
+                    C_out.b -> R_out.a
+                    R_out.b -> out
+                }
+                controls {
+                    VCA_Gain.position -> "VCA_Gain" [0.0, 1.0] = 1.0
+                }
+            }"#;
+        let (graph, edges) = make_graph_all_edges(TB303_VCA);
+
+        let groups = find_flow_groups(&edges, &graph);
+        let gain_group =
+            find_group_containing(&groups, &graph, "VCA_Gain").expect("VCA_Gain group");
+        let names = group_component_names(&groups[gain_group], &graph);
+
+        assert!(
+            names.iter().any(|name| name == "Q_mirror")
+                || names.iter().any(|name| name == "Q_tail"),
+            "VCA_Gain must stay with a nonlinear runtime group; group={names:?}"
+        );
+
+        let pedal = crate::dsl::parse_pedal_file(TB303_VCA).expect("parse failed");
+        let compiled = crate::compiler::compile_pedal(&pedal, 48_000.0).expect("compile failed");
+        assert!(
+            compiled
+                .controls
+                .iter()
+                .any(|control| control.label == "VCA_Gain"),
+            "VCA_Gain must bind to a runtime stage"
         );
     }
 

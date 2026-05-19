@@ -934,6 +934,7 @@ pub(super) fn try_build_blockwise(
     supply_voltage: f64,
     port_defs: &[crate::dsl::PortDef],
     force_serial: bool,
+    disable_iir: bool,
 ) -> Option<Vec<BuiltStage>> {
     let plan = analyze_blockwise(edge_indices, graph)?;
 
@@ -970,7 +971,13 @@ pub(super) fn try_build_blockwise(
 
         for (si, stage) in spqr_stages.into_iter().enumerate() {
             eprintln!("  [blockwise] block {bi} stage {si}: building...");
-            let mut built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate).ok()?;
+            let mut built = super::spqr_build::build_spqr_stage_with_options(
+                stage,
+                graph,
+                sample_rate,
+                disable_iir,
+            )
+            .ok()?;
             eprintln!("  [blockwise] block {bi} stage {si}: built");
 
             if let BuiltStage::Wdf(ref mut wdf) = built {
@@ -1074,25 +1081,6 @@ pub(super) fn try_build_blockwise(
             .and_then(|port| port.impedance)
             .unwrap_or(10_000.0);
 
-        let cutoff_port_node = port_defs
-            .iter()
-            .find(|port| {
-                port.direction == pedalkernel_rt::PortDirection::Input
-                    && port.name.to_ascii_lowercase().contains("cutoff")
-            })
-            .and_then(|port| graph.node_names.get(&port.name).copied());
-        let cutoff_cv_resistance = cutoff_port_node.and_then(|cv_node| {
-            plan.coupling_edges.iter().find_map(|&eidx| {
-                let e = &graph.edges[eidx];
-                let comp = &graph.components[e.comp_idx];
-                if e.node_a == cv_node || e.node_b == cv_node {
-                    comp.kind.resistance()
-                } else {
-                    None
-                }
-            })
-        });
-
         let mut k_blocks = Vec::new();
         for (bi, built) in all_stages.iter_mut().enumerate() {
             if let BuiltStage::Wdf(ref mut wdf) = built {
@@ -1106,8 +1094,54 @@ pub(super) fn try_build_blockwise(
                 };
                 wdf.tree.set_vs_port_resistance(block_source_r);
 
-                // Generate K-table with correct port resistance
-                wdf.k_table = super::k_method::generate_k_table(wdf);
+                let block_port_node = plan.blocks.get(bi).and_then(|block| {
+                    block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph)
+                });
+                let block_bias_resistance = block_port_node
+                    .and_then(|port_node| {
+                        plan.coupling_edges.iter().find_map(|&eidx| {
+                            let e = &graph.edges[eidx];
+                            let comp = &graph.components[e.comp_idx];
+                            let touches_port = e.node_a == port_node || e.node_b == port_node;
+                            let touches_supply = e.node_a == graph.vcc_node
+                                || e.node_b == graph.vcc_node
+                                || graph.supply_nodes.contains(&e.node_a)
+                                || graph.supply_nodes.contains(&e.node_b);
+                            if touches_port && touches_supply {
+                                comp.kind.resistance()
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or(r_bias_value);
+                let diode_cutoff = match &wdf.root {
+                    pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_) => {
+                        Some(pedalkernel_rt::stage::DiodeCutoffCalibration {
+                            bias_voltage: supply_voltage,
+                            bias_resistance: block_bias_resistance,
+                            cv_resistance: None,
+                            min_rp: 10.0,
+                            max_rp: 100_000.0,
+                        })
+                    }
+                    _ => None,
+                };
+
+                // Generate K-table with the correct adapted tree impedance.
+                // A diode-connected ladder block needs a bias-voltage axis:
+                // the local reactive tree removes DC from b_tree, but the
+                // nonlinear diode's small-signal conductance is set by the
+                // raw coupling/cascade voltage.
+                wdf.k_table = match &wdf.root {
+                    pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => {
+                        Some(super::k_method::generate_biased_single_diode_k_table(
+                            root.model,
+                            wdf.tree.port_resistance(),
+                        ))
+                    }
+                    _ => super::k_method::generate_k_table(wdf),
+                };
 
                 if let Some(ref k_table) = wdf.k_table {
                     let vbe_bias = match &wdf.root {
@@ -1153,38 +1187,12 @@ pub(super) fn try_build_blockwise(
                     } else {
                         root_polarity
                     };
-                    let block_port_node = plan.blocks.get(bi).and_then(|block| {
-                        block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph)
-                    });
-                    let block_bias_resistance = block_port_node
-                        .and_then(|port_node| {
-                            plan.coupling_edges.iter().find_map(|&eidx| {
-                                let e = &graph.edges[eidx];
-                                let comp = &graph.components[e.comp_idx];
-                                let touches_port = e.node_a == port_node || e.node_b == port_node;
-                                let touches_supply = e.node_a == graph.vcc_node
-                                    || e.node_b == graph.vcc_node
-                                    || graph.supply_nodes.contains(&e.node_a)
-                                    || graph.supply_nodes.contains(&e.node_b);
-                                if touches_port && touches_supply {
-                                    comp.kind.resistance()
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                        .unwrap_or(r_bias_value);
-                    let diode_cutoff = match &wdf.root {
-                        pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_) => {
-                            Some(pedalkernel_rt::stage::DiodeCutoffCalibration {
-                                bias_voltage: supply_voltage,
-                                bias_resistance: block_bias_resistance,
-                                cv_resistance: cutoff_cv_resistance,
-                                min_rp: 10.0,
-                                max_rp: 100_000.0,
-                            })
-                        }
-                        _ => None,
+                    let k_table_control_polarity = match &wdf.root {
+                        // The biased diode K-table axis is physical diode bias,
+                        // not the voltage-source orientation used to drive the
+                        // WDF tree.
+                        pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_) => 1.0,
+                        _ => source_polarity,
                     };
                     // The cascade tap is at the passive subtree (cap voltage),
                     // not the root port (diode residual). This is determined
@@ -1208,6 +1216,7 @@ pub(super) fn try_build_blockwise(
                         cascade_from_passive: true,
                         cascade_probe_id: wdf.output_probe.clone(),
                         source_polarity,
+                        k_table_control_polarity,
                     });
                 }
             }
@@ -1555,19 +1564,6 @@ pub(super) fn try_build_blockwise(
 
         // ── Package as BlockwiseKMethodStage ─────────────────────────────
         let output_block = n_blocks - 1; // Last block is the output
-        let has_explicit_diode_blocks = k_blocks
-            .iter()
-            .any(|block| block.explicit_diode_root.is_some());
-        let cutoff_cv_port = if has_explicit_diode_blocks {
-            vs_port_map
-                .iter()
-                .map(|(name, _)| name)
-                .find(|name| name.to_ascii_lowercase().contains("cutoff"))
-                .cloned()
-        } else {
-            None
-        };
-
         let bkm = pedalkernel_rt::stage::BlockwiseKMethodStage {
             blocks: k_blocks,
             coupling_s: scattering,
@@ -1579,7 +1575,7 @@ pub(super) fn try_build_blockwise(
             output_block,
             supply_voltage,
             vs_port_map,
-            cutoff_cv_port,
+            cutoff_cv_port: None,
             feedback_port_map,
             compensation: 1.0,
             oversampler: pedalkernel_rt::oversampling::Oversampler::new(

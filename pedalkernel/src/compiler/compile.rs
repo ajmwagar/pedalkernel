@@ -37,6 +37,10 @@ pub struct CompileOptions {
     /// delay-free BlockwiseKMethod coupling stage. This intentionally breaks
     /// delay-free feedback, so it is only useful for isolating rung behavior.
     pub force_serial_blockwise: bool,
+    /// Diagnostic mode: do not synthesize IIR stages from rigid subgraphs.
+    /// Rigid passive networks fall through to StateSpace where possible, and
+    /// active feedback networks fall through to the existing WDF adaptors.
+    pub disable_iir: bool,
 }
 
 impl Default for CompileOptions {
@@ -49,6 +53,7 @@ impl Default for CompileOptions {
             skip_k_tables: false,
             skip_blockwise: false,
             force_serial_blockwise: false,
+            disable_iir: false,
         }
     }
 }
@@ -129,6 +134,7 @@ pub fn compile_cache_key(source: &str, sample_rate: f64, options: &CompileOption
     options.collapse_nl.hash(&mut hasher);
     options.skip_blockwise.hash(&mut hasher);
     options.force_serial_blockwise.hash(&mut hasher);
+    options.disable_iir.hash(&mut hasher);
     (options.oversampling as u8).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
