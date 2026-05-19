@@ -18,7 +18,7 @@ use hashbrown::HashMap;
 
 use crate::stage::{
     IirStage, MultiNlStage, NlDeviceGroupKind, NlDeviceKind, PushPullStage, RootKind,
-    SidechainProcessor, StateSpaceStage, SubcircuitProcessor, WdfStage,
+    SerialDelayedFeedbackStage, SidechainProcessor, StateSpaceStage, SubcircuitProcessor, WdfStage,
 };
 
 /// A single processing stage in the compiled pedal.
@@ -33,6 +33,7 @@ pub enum Stage {
     StateSpace(StateSpaceStage),
     BlackFeedback(crate::stage::BlackFeedbackStage),
     BlockwiseKMethod(crate::stage::BlockwiseKMethodStage),
+    SerialDelayedFeedback(SerialDelayedFeedbackStage),
 }
 
 impl core::fmt::Debug for Stage {
@@ -44,6 +45,9 @@ impl core::fmt::Debug for Stage {
             Stage::StateSpace(_) => write!(f, "Stage::StateSpace(..)"),
             Stage::BlackFeedback(_) => write!(f, "Stage::BlackFeedback(..)"),
             Stage::BlockwiseKMethod(_) => write!(f, "Stage::BlockwiseKMethod(..)"),
+            Stage::SerialDelayedFeedback(_) => {
+                write!(f, "Stage::SerialDelayedFeedback(..)")
+            }
         }
     }
 }
@@ -112,6 +116,9 @@ impl Stage {
                 }
                 None
             }
+            Stage::SerialDelayedFeedback(serial) => serial
+                .has_pot(comp_id)
+                .then_some(ControlTarget::PotInStage(stage_idx)),
             Stage::StateSpace(_) => None,
         }
     }
@@ -154,6 +161,7 @@ impl Stage {
                 }
             }
             Stage::BlockwiseKMethod(bkm) => bkm.set_pot(comp_id, value),
+            Stage::SerialDelayedFeedback(serial) => serial.set_pot(comp_id, value),
             Stage::StateSpace(_) => false,
         }
     }
@@ -1240,6 +1248,13 @@ impl CompiledPedal {
                         .collect();
                     bkm.solve_dc_operating_point();
                 }
+                Stage::SerialDelayedFeedback(ref mut serial) => {
+                    for wdf in &mut serial.stages {
+                        if let Some(ref mut kt) = wdf.k_table {
+                            kt.precompute_scales();
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1955,6 +1970,14 @@ impl CompiledPedal {
                         k.debug_label()
                     ));
                 }
+                Stage::SerialDelayedFeedback(serial) => {
+                    s.push_str(&format!(
+                        "\n[Stage {} (SerialDelayedFeedback)] {} WDF rungs, gain={:+.3}\n",
+                        i,
+                        serial.stages.len(),
+                        serial.feedback_gain
+                    ));
+                }
             }
         }
 
@@ -2503,6 +2526,7 @@ impl PedalProcessor for CompiledPedal {
             let is_ss = matches!(&self.stages[stage_idx], Stage::StateSpace(_));
             let is_bf = matches!(&self.stages[stage_idx], Stage::BlackFeedback(_));
             let is_bkm = matches!(&self.stages[stage_idx], Stage::BlockwiseKMethod(_));
+            let is_serial_fb = matches!(&self.stages[stage_idx], Stage::SerialDelayedFeedback(_));
 
             // Check bypass_serial: static bias networks process for metering
             // but don't overwrite the serial audio signal.
@@ -2513,6 +2537,7 @@ impl PedalProcessor for CompiledPedal {
                 Stage::StateSpace(s) => s.bypass_serial,
                 Stage::BlackFeedback(b) => b.bypass_serial,
                 Stage::BlockwiseKMethod(k) => k.bypass_serial,
+                Stage::SerialDelayedFeedback(s) => s.bypass_serial,
             };
 
             if bypass_serial {
@@ -2535,6 +2560,9 @@ impl PedalProcessor for CompiledPedal {
                     }
                     Stage::BlockwiseKMethod(k) => {
                         let _ = k.process(&[]);
+                    }
+                    Stage::SerialDelayedFeedback(s) => {
+                        let _ = s.process(0.0);
                     }
                 }
                 continue;
@@ -2824,6 +2852,18 @@ impl PedalProcessor for CompiledPedal {
                     };
                 }
                 signal = bkm_stage.process(&vs_signals);
+                if stage_idx < crate::metering::MAX_STAGES {
+                    stage_levels[stage_idx] = signal;
+                }
+            } else if is_serial_fb {
+                prev_was_clipping = false;
+                let serial_stage =
+                    if let Stage::SerialDelayedFeedback(s) = &mut self.stages[stage_idx] {
+                        s
+                    } else {
+                        unreachable!()
+                    };
+                signal = serial_stage.process(signal);
                 if stage_idx < crate::metering::MAX_STAGES {
                     stage_levels[stage_idx] = signal;
                 }
@@ -3215,6 +3255,7 @@ impl PedalProcessor for CompiledPedal {
             match stage {
                 Stage::Wdf(wdf) => wdf.reset(),
                 Stage::MultiNl(mnl) => mnl.reset(),
+                Stage::SerialDelayedFeedback(serial) => serial.reset(),
                 // IIR, StateSpace, BlackFeedback don't have reset()
                 _ => {}
             }
@@ -3291,6 +3332,7 @@ impl PedalProcessor for CompiledPedal {
                 Stage::StateSpace(_) => "StateSpace",
                 Stage::BlackFeedback(_) => "BlackFB",
                 Stage::BlockwiseKMethod(_) => "BKM",
+                Stage::SerialDelayedFeedback(_) => "SerialFB",
             };
             out.push((format!("{{S{si}}} {type_name}"), 0.0, 0.0));
         }

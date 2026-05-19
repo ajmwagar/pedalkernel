@@ -408,6 +408,12 @@ fn feedforward_stage_ordering() {
                 bk.bypass_serial,
                 false,
             ),
+            super::compiled::Stage::SerialDelayedFeedback(s) => (
+                s.signal_flow_distance,
+                "serial_feedback",
+                s.bypass_serial,
+                false,
+            ),
         };
         let flags = if bp {
             " BYPASS"
@@ -433,6 +439,7 @@ fn feedforward_stage_ordering() {
                     super::compiled::Stage::StateSpace(s) => s.bypass_serial,
                     super::compiled::Stage::MultiNl(m) => m.bypass_serial,
                     super::compiled::Stage::BlockwiseKMethod(bk) => bk.bypass_serial,
+                    super::compiled::Stage::SerialDelayedFeedback(s) => s.bypass_serial,
                 };
                 !bp
             })

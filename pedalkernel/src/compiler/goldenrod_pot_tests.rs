@@ -76,6 +76,7 @@ fn stage_label(stage: &super::compiled::Stage) -> &str {
         super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
         super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
         super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+        super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
     }
 }
 
@@ -200,6 +201,12 @@ fn goldenrod_stage_dump() {
                     "blockwise",
                     bk.bypass_serial,
                     bk.signal_flow_distance,
+                ),
+                super::compiled::Stage::SerialDelayedFeedback(s) => (
+                    "SerialFB",
+                    "serial_feedback",
+                    s.bypass_serial,
+                    s.signal_flow_distance,
                 ),
             };
             let bp = if bypass { " BYPASS" } else { "" };

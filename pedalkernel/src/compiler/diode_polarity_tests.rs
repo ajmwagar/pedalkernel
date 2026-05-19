@@ -117,6 +117,12 @@ fn dump_stage_metering(compiled: &mut CompiledPedal, amp: f64, warmup: usize, me
                 "blockwise",
                 bk.bypass_serial,
             ),
+            super::compiled::Stage::SerialDelayedFeedback(s) => (
+                "SerialFB",
+                s.signal_flow_distance,
+                "serial_feedback",
+                s.bypass_serial,
+            ),
         };
         let bypass_tag = if bypass { " BYPASS" } else { "" };
         eprintln!("    stage {i}: [{stage_type}] dist={dist} [{label}]{bypass_tag} → {lvl:.4} ({db:.1} dB)");

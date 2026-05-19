@@ -78,6 +78,9 @@ fn measure_gain_metered(source: &str, label: &str) -> f64 {
                 super::compiled::Stage::BlockwiseKMethod(bk) => {
                     ("BKM", "blockwise", bk.bypass_serial)
                 }
+                super::compiled::Stage::SerialDelayedFeedback(s) => {
+                    ("SerialFB", "serial_feedback", s.bypass_serial)
+                }
             };
             let bp = if bypass { " BYPASS" } else { "" };
             eprintln!("    stage {i}: [{stype}] [{lbl}]{bp} → {lvl:.4} ({db:.1} dB)");
@@ -911,6 +914,9 @@ fn ratking_tone_volume_stage_not_dead() {
                     (b.debug_label.as_str(), b.bypass_serial)
                 }
                 super::compiled::Stage::BlockwiseKMethod(bk) => ("blockwise", bk.bypass_serial),
+                super::compiled::Stage::SerialDelayedFeedback(s) => {
+                    ("serial_feedback", s.bypass_serial)
+                }
             };
             if bypass {
                 continue;
@@ -1080,6 +1086,9 @@ fn goldenrod_gain_b_stage_not_dead() {
                     (b.debug_label.as_str(), b.bypass_serial)
                 }
                 super::compiled::Stage::BlockwiseKMethod(bk) => ("blockwise", bk.bypass_serial),
+                super::compiled::Stage::SerialDelayedFeedback(s) => {
+                    ("serial_feedback", s.bypass_serial)
+                }
             };
             if bypass {
                 continue;

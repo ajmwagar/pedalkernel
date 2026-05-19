@@ -985,6 +985,13 @@ fn print_stages(name: &str, compiled: &super::compiled::CompiledPedal) {
             super::compiled::Stage::BlockwiseKMethod(bk) => {
                 eprintln!("  [{i}] BKM dist={}", bk.signal_flow_distance);
             }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                eprintln!(
+                    "  [{i}] SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                );
+            }
         }
     }
 }

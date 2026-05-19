@@ -1472,6 +1472,49 @@ fn tb303_bkm_full_processor_vco_port_path_is_not_flat() {
 }
 
 #[test]
+fn tb303_bkm_resonance_control_changes_cutoff_band() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let measure = |freq: f64, resonance: f64| -> f64 {
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+                .expect("compile failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", resonance);
+
+        settled_sine_ac_rms_ports(
+            &mut proc,
+            freq,
+            0.01,
+            &[("audio_in", 1.0), ("vco_in", 1.0)],
+            &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+            "audio_out",
+        )
+    };
+
+    let low_res_500 = measure(500.0, 0.0);
+    let high_res_500 = measure(500.0, 0.85);
+    let low_res_2k = measure(2_000.0, 0.0);
+    let high_res_2k = measure(2_000.0, 0.85);
+    let low_res_5k = measure(5_000.0, 0.0);
+    let high_res_5k = measure(5_000.0, 0.85);
+
+    let boost_500 = db_norm(high_res_500, low_res_500);
+    let boost_2k = db_norm(high_res_2k, low_res_2k);
+    let boost_5k = db_norm(high_res_5k, low_res_5k);
+    eprintln!(
+        "  BKM resonance boost: 500Hz={boost_500:+.2}dB, 2kHz={boost_2k:+.2}dB, 5kHz={boost_5k:+.2}dB"
+    );
+
+    assert!(
+        boost_500.abs().max(boost_2k.abs()).max(boost_5k.abs()) > 1.0,
+        "BKM Resonance control should measurably change the cutoff-band transfer: \
+         500Hz={boost_500:+.2}dB, 2kHz={boost_2k:+.2}dB, 5kHz={boost_5k:+.2}dB"
+    );
+}
+
+#[test]
 fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1819,6 +1862,130 @@ fn tb303_forced_serial_tracks_stinchcombe_htb_shape() {
         max_abs_err < 4.0,
         "forced-serial WDF should stay close to normalized H_tb shape after best-fit cutoff; \
          best_fc={best_fc:.1}Hz, max_abs_err={max_abs_err:.2}dB"
+    );
+}
+
+#[test]
+fn tb303_forced_serial_delayed_feedback_fit_vs_stinchcombe_htb() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let freqs = [100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0];
+
+    let measure_serial_feedback = |freq: f64, feedback_gain: f64| -> f64 {
+        let mut options = super::compile::CompileOptions::default();
+        options.force_serial_blockwise = true;
+        options.force_serial_blockwise_feedback_gain = feedback_gain;
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", 0.0);
+
+        settled_sine_ac_rms(freq, 0.03, |input| proc.process(input))
+    };
+
+    let fit_error = |gains: &[f64]| -> (f64, f64) {
+        let target: Vec<f64> = gains.iter().map(|gain| db_norm(*gain, gains[0])).collect();
+        let mut best_fc = 100.0;
+        let mut best_err = f64::INFINITY;
+
+        for step in 0..240 {
+            let t = step as f64 / 239.0;
+            let fc = 100.0 * (80.0f64).powf(t);
+            let h_ref = stinchcombe_htb_magnitude(freqs[0], fc);
+            let mut err = 0.0;
+            for (i, &freq) in freqs.iter().enumerate() {
+                let h_db = db_norm(stinchcombe_htb_magnitude(freq, fc), h_ref);
+                let diff = target[i] - h_db;
+                err += diff * diff;
+            }
+            if err < best_err {
+                best_err = err;
+                best_fc = fc;
+            }
+        }
+
+        let h_ref = stinchcombe_htb_magnitude(freqs[0], best_fc);
+        let max_abs_err = freqs
+            .iter()
+            .enumerate()
+            .map(|(i, &freq)| {
+                let h_db = db_norm(stinchcombe_htb_magnitude(freq, best_fc), h_ref);
+                (target[i] - h_db).abs()
+            })
+            .fold(0.0, f64::max);
+        (best_fc, max_abs_err)
+    };
+
+    let candidates = [
+        -0.95, -0.85, -0.7, -0.55, -0.4, -0.25, -0.1, 0.0, 0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 0.95,
+    ];
+    let mut best_gain = 0.0;
+    let mut best_fc = 0.0;
+    let mut best_err = f64::INFINITY;
+
+    for feedback_gain in candidates {
+        let gains: Vec<f64> = freqs
+            .iter()
+            .map(|&freq| measure_serial_feedback(freq, feedback_gain))
+            .collect();
+        if gains.iter().any(|gain| !gain.is_finite() || *gain <= 1e-12) {
+            continue;
+        }
+        let (fit_fc, max_err) = fit_error(&gains);
+        eprintln!(
+            "  delayed serial fb={feedback_gain:+.2}: best_fc={fit_fc:.1}Hz, max_abs_err={max_err:.2}dB"
+        );
+        if max_err < best_err {
+            best_err = max_err;
+            best_fc = fit_fc;
+            best_gain = feedback_gain;
+        }
+    }
+
+    eprintln!(
+        "  best delayed serial feedback fit: fb={best_gain:+.2}, best_fc={best_fc:.1}Hz, max_abs_err={best_err:.2}dB"
+    );
+
+    assert!(
+        best_err < 3.0,
+        "one-sample serial feedback should be at least competitive with the no-feedback serial H_tb fit; \
+         best fb={best_gain:+.2}, fc={best_fc:.1}Hz, max_abs_err={best_err:.2}dB"
+    );
+}
+
+#[test]
+fn tb303_force_serial_feedback_compiles_to_serial_feedback_stage() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut options = super::compile::CompileOptions::default();
+    options.force_serial_blockwise = true;
+    options.force_serial_blockwise_feedback_gain = -0.55;
+
+    let proc = super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
+    let serial = proc.stages.iter().find_map(|stage| {
+        if let pedalkernel_rt::processor::Stage::SerialDelayedFeedback(serial) = stage {
+            Some(serial)
+        } else {
+            None
+        }
+    });
+
+    assert!(
+        serial.is_some(),
+        "forced serial feedback should compile into a SerialDelayedFeedback stage"
+    );
+    let serial = serial.unwrap();
+    assert!(
+        serial.stages.len() >= 4,
+        "TB303 forced serial feedback should wrap the ladder rung WDF stages"
+    );
+    assert_eq!(serial.feedback_gain, -0.55);
+    assert!(
+        !proc
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_))),
+        "forced serial feedback should bypass the BKM packaging path"
     );
 }
 
@@ -2271,6 +2438,7 @@ fn tb303_forced_serial_stage_outputs_show_reference_shape() {
                     pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) => {
                         bkm.process(&[x, 0.0, 0.0, 0.0])
                     }
+                    pedalkernel_rt::processor::Stage::SerialDelayedFeedback(s) => s.process(x),
                 };
                 sums[si] += x * x;
             }

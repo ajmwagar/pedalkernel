@@ -48,6 +48,11 @@ fn screamer_legend_level_debug_trace() {
             ),
             Stage::StateSpace(_) => "StateSpace".to_string(),
             Stage::BlockwiseKMethod(bk) => format!("BKM(dist={})", bk.signal_flow_distance),
+            Stage::SerialDelayedFeedback(s) => format!(
+                "SerialFB(rungs={}, dist={})",
+                s.stages.len(),
+                s.signal_flow_distance
+            ),
         };
         eprintln!("  stage[{i}]: {tag}");
     }

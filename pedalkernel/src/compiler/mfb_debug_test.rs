@@ -92,6 +92,13 @@ fn trace_mfb_pot_compilation() {
             super::compiled::Stage::BlockwiseKMethod(bk) => {
                 format!("BKM dist={}", bk.signal_flow_distance)
             }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                format!(
+                    "SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                )
+            }
         };
         eprintln!("  [{i}] {kind}");
     }
@@ -154,6 +161,13 @@ fn trace_mfb_hpf_compilation() {
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
             super::compiled::Stage::BlockwiseKMethod(bk) => {
                 format!("BKM dist={}", bk.signal_flow_distance)
+            }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                format!(
+                    "SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                )
             }
         };
         eprintln!("  [{i}] {kind}");
@@ -233,6 +247,13 @@ fn trace_mfb_hpf_fixed_compilation() {
             super::compiled::Stage::BlockwiseKMethod(bk) => {
                 format!("BKM dist={}", bk.signal_flow_distance)
             }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                format!(
+                    "SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                )
+            }
         };
         eprintln!("  [{i}] {kind}");
     }
@@ -275,6 +296,13 @@ fn trace_mfb_fixed_compilation() {
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
             super::compiled::Stage::BlockwiseKMethod(bk) => {
                 format!("BKM dist={}", bk.signal_flow_distance)
+            }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                format!(
+                    "SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                )
             }
         };
         eprintln!("  [{i}] {kind}");

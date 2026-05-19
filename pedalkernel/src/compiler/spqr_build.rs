@@ -29,6 +29,7 @@ pub(super) enum BuiltStage {
     MultiNl(MultiNlStage),
     BlackFeedback(super::stage::BlackFeedbackStage),
     BlockwiseKMethod(pedalkernel_rt::stage::BlockwiseKMethodStage),
+    SerialDelayedFeedback(pedalkernel_rt::stage::SerialDelayedFeedbackStage),
 }
 
 impl BuiltStage {
@@ -300,6 +301,15 @@ pub fn compile_via_spqr_with_options(
                     bkm.init_buffers();
                     stages.push(Stage::BlockwiseKMethod(bkm));
                 }
+                BuiltStage::SerialDelayedFeedback(mut serial) => {
+                    serial.signal_flow_distance = $flow_distance;
+                    serial.bypass_serial = $bypass;
+                    #[cfg(debug_assertions)]
+                    {
+                        serial.debug_label = $label;
+                    }
+                    stages.push(Stage::SerialDelayedFeedback(serial));
+                }
             }
         };
     }
@@ -376,6 +386,7 @@ pub fn compile_via_spqr_with_options(
                     supply_voltage,
                     &pedal.ports,
                     options.force_serial_blockwise,
+                    options.force_serial_blockwise_feedback_gain,
                     options.disable_iir,
                 ) {
                     for built in built_stages {
@@ -903,6 +914,7 @@ pub fn compile_via_spqr_with_options(
                     supply_voltage,
                     &pedal.ports,
                     options.force_serial_blockwise,
+                    options.force_serial_blockwise_feedback_gain,
                     options.disable_iir,
                 ) {
                     for built in built_stages {
@@ -972,6 +984,7 @@ pub fn compile_via_spqr_with_options(
         Stage::MultiNl(m) => m.signal_flow_distance,
         Stage::BlackFeedback(b) => b.signal_flow_distance,
         Stage::BlockwiseKMethod(k) => k.signal_flow_distance,
+        Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
     });
 
     // ── Feedforward detection ─────────────────────────────────────────────
@@ -1222,6 +1235,7 @@ pub fn compile_via_spqr_with_options(
             Stage::MultiNl(m) => (m.signal_flow_distance, false),
             Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
             Stage::BlockwiseKMethod(k) => (k.signal_flow_distance, false),
+            Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
         };
         (d, ff as u8) // false=0 sorts before true=1
     });
@@ -1234,6 +1248,7 @@ pub fn compile_via_spqr_with_options(
             Stage::MultiNl(m) => (m.signal_flow_distance, false),
             Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
             Stage::BlockwiseKMethod(k) => (k.signal_flow_distance, false),
+            Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
         };
         (d, ff as u8)
     });

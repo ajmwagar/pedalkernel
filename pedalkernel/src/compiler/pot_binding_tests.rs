@@ -1018,6 +1018,12 @@ fn screamer_pot_stage_diagnostic() {
                 ("BF", t, l, d)
             }
             pedalkernel_rt::processor::Stage::BlockwiseKMethod(_) => ("BKM", false, false, false),
+            pedalkernel_rt::processor::Stage::SerialDelayedFeedback(serial) => (
+                "SerialFB",
+                serial.has_pot("Tone"),
+                serial.has_pot("Level"),
+                serial.has_pot("Drive"),
+            ),
         };
         eprintln!("  stage {i} ({stype}): Tone={has_tone}, Level={has_level}, Drive={has_drive}");
     }

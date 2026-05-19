@@ -88,6 +88,12 @@ fn dump_stages(compiled: &CompiledPedal, label: &str) {
                     bk.bypass_serial,
                     bk.signal_flow_distance,
                 ),
+                super::compiled::Stage::SerialDelayedFeedback(s) => (
+                    "SerialFB",
+                    "serial_feedback",
+                    s.bypass_serial,
+                    s.signal_flow_distance,
+                ),
             };
             let bp = if bypass { " BYPASS" } else { "" };
             eprintln!("    {i}: [{stype}] d={dist} [{lbl}]{bp} → {db:.1} dB");
@@ -115,6 +121,7 @@ fn all_signal_path_components_have_stages() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             })
             .collect();
 
@@ -151,6 +158,7 @@ fn output_network_is_after_tone_stage() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             })
             .collect();
 
@@ -190,6 +198,7 @@ fn both_diodes_present_in_pipeline() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             })
             .collect::<Vec<_>>()
             .join(" | ");
@@ -234,6 +243,7 @@ fn gain_b_feedforward_path_exists() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             lbl.contains("Gain_B")
         });
@@ -276,6 +286,7 @@ fn no_signal_path_stage_is_dead() {
             super::compiled::Stage::StateSpace(s) => s.bypass_serial,
             super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
             super::compiled::Stage::BlockwiseKMethod(bk) => bk.bypass_serial,
+            super::compiled::Stage::SerialDelayedFeedback(s) => s.bypass_serial,
         };
         if bypass {
             continue;
@@ -290,6 +301,7 @@ fn no_signal_path_stage_is_dead() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             assert!(
                 db > -60.0,
@@ -369,6 +381,7 @@ fn minimal_feedforward_pot_produces_stage() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             })
             .collect();
         eprintln!("Stages: {labels:?}");
@@ -430,6 +443,7 @@ fn feedforward_with_multiple_paths_produces_stages() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             })
             .collect();
         eprintln!("Feedforward stages: {labels:?}");
@@ -487,6 +501,7 @@ fn spqr_with_many_terminals_produces_stages() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             })
             .collect();
         eprintln!("Multi-terminal stages: {labels:?}");

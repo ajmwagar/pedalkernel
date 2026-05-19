@@ -155,6 +155,7 @@ fn antiparallel_diodes_to_ground_clip_both_directions() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             eprintln!("    stage {i}: [{label}] → {lvl:.4} ({db:.1} dB)");
         }
@@ -240,6 +241,7 @@ fn diode_to_ground_stage_exists_in_pipeline() {
                 super::compiled::Stage::StateSpace(ss) => ss.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             label.contains("D1")
         });
@@ -438,6 +440,12 @@ fn ratking_stage_diagnostic() {
                     bk.bypass_serial,
                     bk.signal_flow_distance,
                 ),
+                super::compiled::Stage::SerialDelayedFeedback(s) => (
+                    "SerialFB",
+                    "serial_feedback",
+                    s.bypass_serial,
+                    s.signal_flow_distance,
+                ),
             };
             let bp = if bypass { " BYPASS" } else { "" };
             eprintln!("  stage {i}: [{stype}] dist={dist} [{lbl}]{bp} → {lvl:.4} ({db:.1} dB)");
@@ -505,6 +513,7 @@ fn merged_diodes_label_contains_both() {
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             })
             .collect();
         eprintln!("Stages: {labels:?}");

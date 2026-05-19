@@ -268,6 +268,9 @@ fn screamer_tone_stage_not_dead() {
                     (b.debug_label.as_str(), b.bypass_serial)
                 }
                 super::compiled::Stage::BlockwiseKMethod(bk) => ("blockwise", bk.bypass_serial),
+                super::compiled::Stage::SerialDelayedFeedback(s) => {
+                    ("serial_feedback", s.bypass_serial)
+                }
             };
             if bypass {
                 continue;

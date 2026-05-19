@@ -4414,6 +4414,79 @@ impl BlackFeedbackStage {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SerialDelayedFeedbackStage: diagnostic serial WDF cascade + z^-1 feedback
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Diagnostic wrapper for forced-serial blockwise ladders.
+///
+/// This keeps the individual WDF rung stages intact, but adds a one-sample
+/// output feedback path around the serial cascade. It is not a replacement for
+/// delay-free BKM coupling; it exists to compare the serial approximation
+/// against the fully coupled ladder while preserving normal compiled-stage
+/// execution and control binding.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SerialDelayedFeedbackStage {
+    pub stages: Vec<WdfStage>,
+    pub feedback_gain: f64,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub delayed_output: f64,
+    pub signal_flow_distance: usize,
+    pub bypass_serial: bool,
+    #[cfg(debug_assertions)]
+    pub debug_label: String,
+}
+
+impl SerialDelayedFeedbackStage {
+    pub fn new(stages: Vec<WdfStage>, feedback_gain: f64) -> Self {
+        Self {
+            stages,
+            feedback_gain,
+            delayed_output: 0.0,
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            #[cfg(debug_assertions)]
+            debug_label: String::new(),
+        }
+    }
+
+    pub fn has_pot(&self, comp_id: &str) -> bool {
+        let aw_id = format!("{comp_id}__aw");
+        let wb_id = format!("{comp_id}__wb");
+        self.stages
+            .iter()
+            .any(|stage| stage.has_pot(comp_id) || stage.has_pot(&aw_id) || stage.has_pot(&wb_id))
+    }
+
+    pub fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
+        let mut changed = false;
+        for stage in &mut self.stages {
+            if stage.set_pot(comp_id, value) {
+                stage.flush_recompute();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn reset(&mut self) {
+        self.delayed_output = 0.0;
+        for stage in &mut self.stages {
+            stage.reset();
+        }
+    }
+
+    #[inline]
+    pub fn process(&mut self, input: f64) -> f64 {
+        let mut signal = input + self.feedback_gain * self.delayed_output;
+        for stage in &mut self.stages {
+            signal = stage.process(signal);
+        }
+        self.delayed_output = signal;
+        signal
+    }
+}
+
 /// Standalone state-space stage for linear circuits with 3+ reactive elements.
 ///
 /// Implements discrete-time state-space simulation:

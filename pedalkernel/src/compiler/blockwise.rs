@@ -934,6 +934,7 @@ pub(super) fn try_build_blockwise(
     supply_voltage: f64,
     port_defs: &[crate::dsl::PortDef],
     force_serial: bool,
+    force_serial_feedback_gain: f64,
     disable_iir: bool,
 ) -> Option<Vec<BuiltStage>> {
     let plan = analyze_blockwise(edge_indices, graph)?;
@@ -1238,6 +1239,25 @@ pub(super) fn try_build_blockwise(
         }
 
         if force_serial {
+            if force_serial_feedback_gain.abs() > 0.0 {
+                let mut rung_stages = Vec::with_capacity(all_stages.len());
+                for built in all_stages {
+                    match built {
+                        BuiltStage::Wdf(wdf) => rung_stages.push(wdf),
+                        other => return Some(vec![other]),
+                    }
+                }
+                eprintln!(
+                    "  [blockwise] force_serial: wrapping {} rung stages with z^-1 feedback gain {force_serial_feedback_gain:+.3}",
+                    rung_stages.len()
+                );
+                return Some(vec![BuiltStage::SerialDelayedFeedback(
+                    pedalkernel_rt::stage::SerialDelayedFeedbackStage::new(
+                        rung_stages,
+                        force_serial_feedback_gain,
+                    ),
+                )]);
+            }
             eprintln!(
                 "  [blockwise] force_serial: returning {} rung stages without BKM coupling",
                 all_stages.len()
