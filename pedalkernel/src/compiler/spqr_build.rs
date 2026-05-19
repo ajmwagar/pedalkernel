@@ -17,6 +17,7 @@ use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
+use pedalkernel_rt::tree::{MnaSystem, WdfPort};
 
 /// A stage built from the SPQR pipeline.
 pub(super) enum BuiltStage {
@@ -236,7 +237,10 @@ pub fn compile_via_spqr_with_options(
                     }
                     // Generate K-method lookup table for NL roots
                     // Skipped when skip_k_tables is set (debug builds).
-                    if wdf.k_table.is_none() && !options.skip_k_tables {
+                    if wdf.k_table.is_none()
+                        && !options.skip_k_tables
+                        && root_supports_k_table(&wdf.root)
+                    {
                         let stage_n = stages.len();
                         eprintln!("  K-table: generating for stage {stage_n}...");
                         wdf.k_table = super::k_method::generate_k_table(&mut wdf);
@@ -1406,6 +1410,27 @@ fn build_pot_divider(
     )))
 }
 
+fn root_supports_k_table(root: &RootKind) -> bool {
+    matches!(
+        root,
+        RootKind::DiodePair(_)
+            | RootKind::SingleDiode(_)
+            | RootKind::ExplicitDiodePair(_)
+            | RootKind::ExplicitSingleDiode(_)
+            | RootKind::Zener(_)
+            | RootKind::Jfet(_)
+            | RootKind::JfetVr(_)
+            | RootKind::Triode(_)
+            | RootKind::VariMu(_)
+            | RootKind::Pentode(_)
+            | RootKind::Mosfet(_)
+            | RootKind::Bjt(_)
+            | RootKind::DiffPair(_)
+            | RootKind::Ota(_)
+            | RootKind::OpAmp(_)
+    )
+}
+
 /// Wrap a passive DynNode tree with a voltage source input port.
 ///
 /// The WDF tree needs a voltage source leaf to receive the input signal.
@@ -1500,6 +1525,12 @@ pub(super) fn build_spqr_stage(
         SpqrStage::PassiveWdf {
             tree, edge_indices, ..
         } => {
+            if passive_split_pot_rc_needs_rtype(&edge_indices, graph) {
+                if let Some(wdf) = build_passive_rtype_stage(&edge_indices, graph, _sample_rate) {
+                    return Ok(BuiltStage::Wdf(wdf));
+                }
+            }
+
             if let Some(wdf) =
                 build_grounded_series_reactive_load(&edge_indices, graph, _sample_rate)
             {
@@ -1631,6 +1662,206 @@ pub(super) fn build_spqr_stage(
             _sample_rate,
         ),
     }
+}
+
+fn passive_split_pot_rc_needs_rtype(edge_indices: &[usize], graph: &CircuitGraph) -> bool {
+    let mut has_split_pot = false;
+    let mut split_pot_nodes = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for &eidx in edge_indices {
+        let comp_idx = graph.edges[eidx].comp_idx;
+        if !seen.insert(comp_idx) {
+            continue;
+        }
+        let comp = &graph.components[comp_idx];
+        if !comp.kind.is_pot() {
+            continue;
+        }
+
+        let pot_edges = edge_indices
+            .iter()
+            .filter(|&&other| graph.edges[other].comp_idx == comp_idx)
+            .count();
+        if pot_edges > 1 {
+            has_split_pot = true;
+            for pin in ["a", "w", "wiper", "b"] {
+                if let Some(&node) = graph.node_names.get(&format!("{}.{}", comp.id, pin)) {
+                    split_pot_nodes.insert(node);
+                }
+            }
+        }
+    }
+
+    if !has_split_pot {
+        return false;
+    }
+
+    edge_indices.iter().any(|&eidx| {
+        let edge = &graph.edges[eidx];
+        let comp = &graph.components[edge.comp_idx];
+        (comp.kind.capacitance().is_some() || comp.kind.inductance().is_some())
+            && (split_pot_nodes.contains(&edge.node_a) || split_pot_nodes.contains(&edge.node_b))
+    })
+}
+
+fn build_passive_rtype_stage(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Option<WdfStage> {
+    let is_ground = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+
+    let terminals =
+        compute_group_terminals(edge_indices, graph, &vec![graph.in_node, graph.out_node]);
+    let output_node = terminals
+        .iter()
+        .copied()
+        .find(|&t| t == graph.out_node)
+        .or_else(|| {
+            terminals
+                .iter()
+                .copied()
+                .find(|&t| !is_ground(t) && t != graph.in_node)
+        })?;
+    let input_node = terminals
+        .iter()
+        .copied()
+        .find(|&t| t == graph.in_node)
+        .or_else(|| {
+            terminals
+                .iter()
+                .copied()
+                .find(|&t| !is_ground(t) && t != output_node)
+        })?;
+
+    let mut nodes: Vec<NodeId> = edge_indices
+        .iter()
+        .flat_map(|&eidx| {
+            let e = &graph.edges[eidx];
+            [e.node_a, e.node_b]
+        })
+        .filter(|&n| !is_ground(n))
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+
+    let node_to_mna =
+        |node: NodeId, nodes: &[NodeId]| -> Option<usize> { nodes.iter().position(|&n| n == node) };
+
+    let mut mna = MnaSystem::new(nodes.len(), 1);
+    let vs_node = node_to_mna(input_node, &nodes);
+    mna.stamp_voltage_source(vs_node, None, 0);
+
+    let mut children = Vec::new();
+    let mut ports = Vec::new();
+    let mut pot_stamps = Vec::new();
+    let mut seen_pots = std::collections::HashSet::new();
+
+    for &eidx in edge_indices {
+        let edge = &graph.edges[eidx];
+        let comp = &graph.components[edge.comp_idx];
+        let n1 = node_to_mna(edge.node_a, &nodes);
+        let n2 = node_to_mna(edge.node_b, &nodes);
+
+        if comp.kind.is_pot() {
+            if let Some(pot) = comp
+                .kind
+                .as_any()
+                .downcast_ref::<super::components::Potentiometer>()
+            {
+                let mut child = DynNode::Pot(comp.id.clone(), pot.max_r, 0.5, pot.taper);
+                if pot_edge_is_aw_half_for_build(graph, &comp.id, edge.node_a, edge.node_b) {
+                    if let DynNode::Leaf(ref mut leaf) = child {
+                        leaf.set_complement();
+                    }
+                }
+                let r = child.port_resistance();
+                mna.stamp_resistor(n1, n2, r);
+                pot_stamps.push((children.len(), n1, n2, 1.0 / r));
+                children.push(child);
+                seen_pots.insert(edge.comp_idx);
+            }
+            continue;
+        }
+
+        if let Some(r) = comp.kind.resistance() {
+            mna.stamp_resistor(n1, n2, r);
+        } else if comp.kind.capacitance().is_some() || comp.kind.inductance().is_some() {
+            let child = comp.kind.make_leaf(&comp.id, sample_rate)?;
+            let rp = child.port_resistance();
+            ports.push(WdfPort {
+                node_pos: n1,
+                node_neg: n2,
+                resistance: rp,
+            });
+            children.insert(ports.len() - 1, child);
+            for stamp in &mut pot_stamps {
+                if stamp.0 >= ports.len() - 1 {
+                    stamp.0 += 1;
+                }
+            }
+        }
+    }
+
+    if ports.is_empty() || seen_pots.is_empty() {
+        return None;
+    }
+
+    let output_mna = node_to_mna(output_node, &nodes);
+    let (scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
+    let (extraction_coeffs, extraction_vs) =
+        mna.derive_extraction_coeffs(&ports, 0, output_mna, None);
+
+    if scattering.iter().any(|v| !v.is_finite())
+        || vs_injection.iter().any(|v| !v.is_finite())
+        || extraction_coeffs.iter().any(|v| !v.is_finite())
+        || !extraction_vs.is_finite()
+    {
+        return None;
+    }
+
+    let mut wdf = WdfStage::new(
+        DynNode::Resistor(Some("__passive_rtype_dummy".to_string()), 1.0),
+        RootKind::PassiveRType {
+            scattering,
+            vs_injection,
+            n_ports: ports.len(),
+            children,
+            output_port: 0,
+            extraction_coeffs,
+            extraction_vs,
+            extraction_output_pos: output_mna,
+            extraction_output_neg: None,
+            recompute_mna: Some(mna),
+            recompute_ports: Some(ports),
+            pot_stamps,
+            needs_recompute: false,
+            interp_table: None,
+        },
+        Oversampler::new(OversamplingFactor::X1),
+    );
+    wdf.output_probe = None;
+    Some(wdf)
+}
+
+fn pot_edge_is_aw_half_for_build(
+    graph: &CircuitGraph,
+    comp_id: &str,
+    a: NodeId,
+    b: NodeId,
+) -> bool {
+    let Some(&w_node) = graph
+        .node_names
+        .get(&format!("{comp_id}.w"))
+        .or_else(|| graph.node_names.get(&format!("{comp_id}.wiper")))
+    else {
+        return false;
+    };
+    let Some(&a_node) = graph.node_names.get(&format!("{comp_id}.a")) else {
+        return false;
+    };
+    (a == w_node && b == a_node) || (a == a_node && b == w_node)
 }
 
 /// Determine which groups are on the audio signal path (in_node → ... → out_node).

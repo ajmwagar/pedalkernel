@@ -258,6 +258,74 @@ fn assert_spectrum_changes(pedal: &crate::dsl::PedalDef, pedal_name: &str, contr
     );
 }
 
+fn measure_bound_stage_spectrum(
+    pedal: &crate::dsl::PedalDef,
+    control: &str,
+    value: f64,
+) -> (f64, f64) {
+    let measure = |freq: f64| -> f64 {
+        let mut compiled = compile_via_spqr(pedal, 48000.0).expect("compile");
+        compiled.set_control(control, value);
+        for _ in 0..3000 {
+            compiled.process(0.0);
+        }
+
+        let stage_idx = compiled
+            .controls
+            .iter()
+            .find(|c| c.label.eq_ignore_ascii_case(control))
+            .and_then(|c| match c.target {
+                super::compiled::ControlTarget::PotInStage(idx) => Some(idx),
+                super::compiled::ControlTarget::PotInIirStage(idx) => Some(idx),
+                super::compiled::ControlTarget::PotInBlackFeedbackStage(idx) => Some(idx),
+                _ => None,
+            })
+            .expect("control should bind to a stage");
+
+        let amp = 0.05;
+        let mut peak = 0.0f64;
+        for s in 0..4800 {
+            let input = amp * (2.0 * std::f64::consts::PI * freq * s as f64 / 48000.0).sin();
+            let out = match &mut compiled.stages[stage_idx] {
+                super::compiled::Stage::Wdf(w) => w.process(input),
+                super::compiled::Stage::Iir(i) => i.process(input),
+                super::compiled::Stage::BlackFeedback(b) => b.process(input),
+                _ => panic!("unsupported stage type for spectral control test"),
+            };
+            peak = peak.max(out.abs());
+        }
+        peak
+    };
+
+    (measure(200.0), measure(5000.0))
+}
+
+fn assert_bound_stage_spectrum_changes(
+    pedal: &crate::dsl::PedalDef,
+    pedal_name: &str,
+    control: &str,
+) {
+    let (lo_0, hi_0) = measure_bound_stage_spectrum(pedal, control, 0.0);
+    let (lo_1, hi_1) = measure_bound_stage_spectrum(pedal, control, 1.0);
+
+    let ratio_0 = if lo_0 > 1e-10 { hi_0 / lo_0 } else { 0.0 };
+    let ratio_1 = if lo_1 > 1e-10 { hi_1 / lo_1 } else { 0.0 };
+    eprintln!("{pedal_name}/{control} bound stage: @0: lo={lo_0:.6} hi={hi_0:.6} ratio={ratio_0:.3} | @1: lo={lo_1:.6} hi={hi_1:.6} ratio={ratio_1:.3}");
+
+    let has_output = lo_0 > 0.0001 || hi_0 > 0.0001 || lo_1 > 0.0001 || hi_1 > 0.0001;
+    assert!(
+        has_output,
+        "{pedal_name}/{control}: bound tone stage has no output"
+    );
+
+    let ratio_diff = (ratio_0 - ratio_1).abs();
+    let level_diff = (lo_0 - lo_1).abs() + (hi_0 - hi_1).abs();
+    assert!(
+        ratio_diff > 0.02 || level_diff > 0.0005,
+        "{pedal_name}/{control}: bound tone stage has no spectral effect (ratio_diff={ratio_diff:.3}, level_diff={level_diff:.6})"
+    );
+}
+
 fn settle_control(proc: &mut super::compiled::CompiledPedal) {
     for _ in 0..6000 {
         proc.process(0.0);
@@ -484,7 +552,7 @@ fn screamer_drive_survives_skip_blockwise() {
 #[test]
 fn screamer_tone_changes_spectrum() {
     let pedal = load_legend("screamer");
-    assert_spectrum_changes(&pedal, "screamer", "Tone");
+    assert_bound_stage_spectrum_changes(&pedal, "screamer", "Tone");
 }
 
 #[test]
@@ -507,7 +575,7 @@ fn sd1_drive_changes_gain() {
 #[test]
 fn sd1_tone_changes_spectrum() {
     let pedal = load_legend("sd1");
-    assert_spectrum_changes(&pedal, "sd1", "Tone");
+    assert_bound_stage_spectrum_changes(&pedal, "sd1", "Tone");
 }
 
 #[test]

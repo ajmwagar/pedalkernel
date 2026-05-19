@@ -714,6 +714,16 @@ pub enum RootKind {
         children: Vec<DynNode>,
         /// Index into `children` for the output probe port.
         output_port: usize,
+        /// Direct node-voltage extraction coefficients for output.
+        ///
+        /// When present, output is read from the original MNA output node:
+        /// `Vout = sum(extraction_coeffs[i] * b[i]) + extraction_vs * Vin`.
+        /// This avoids using a high-Z probe port as an approximation of a
+        /// circuit node voltage.
+        extraction_coeffs: Vec<f64>,
+        extraction_vs: f64,
+        extraction_output_pos: Option<usize>,
+        extraction_output_neg: Option<usize>,
         /// Stored MNA system for pot recomputation (None if no pots).
         recompute_mna: Option<MnaSystem>,
         /// WDF port definitions (reactive ports only, not pots).
@@ -1893,6 +1903,8 @@ impl WdfStage {
                         n_ports,
                         children,
                         output_port,
+                        extraction_coeffs,
+                        extraction_vs,
                         ..
                     } => {
                         let vs_voltage = sample * compensation;
@@ -1914,9 +1926,17 @@ impl WdfStage {
                             child.set_incident(a_i);
                         }
                         // 4. Output voltage at probe port
-                        let a_out = a_children[*output_port];
-                        let b_out = b_children[*output_port];
-                        return (a_out + b_out) / 2.0;
+                        if !extraction_coeffs.is_empty() {
+                            let mut out = *extraction_vs * vs_voltage;
+                            for i in 0..n {
+                                out += extraction_coeffs[i] * b_children[i];
+                            }
+                            return out;
+                        } else {
+                            let a_out = a_children[*output_port];
+                            let b_out = b_children[*output_port];
+                            return (a_out + b_out) / 2.0;
+                        }
                     }
                 } // end NR fallback else
             }; // end K-table if/else
@@ -2153,6 +2173,10 @@ impl WdfStage {
             pot_stamps,
             children,
             interp_table,
+            extraction_coeffs,
+            extraction_vs,
+            extraction_output_pos,
+            extraction_output_neg,
             ..
         } = &mut self.root
         {
@@ -2187,6 +2211,16 @@ impl WdfStage {
                 }
                 // Re-derive scattering matrix and VS injection vector
                 let (new_s, new_k) = mna.derive_scattering_and_vs_injection(ports, 0);
+                if !extraction_coeffs.is_empty() {
+                    let (new_extract, new_extract_vs) = mna.derive_extraction_coeffs(
+                        ports,
+                        0,
+                        *extraction_output_pos,
+                        *extraction_output_neg,
+                    );
+                    *extraction_coeffs = new_extract;
+                    *extraction_vs = new_extract_vs;
+                }
                 *scattering = new_s;
                 *vs_injection = new_k;
                 *needs_recompute = false;

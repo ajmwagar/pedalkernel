@@ -894,10 +894,10 @@ pub(super) fn spqr_to_dyn_node(
             let e = &graph.edges[*edge_idx];
             let comp = &graph.components[e.comp_idx];
             let mut leaf = comp.kind.make_leaf(&comp.id, sample_rate)?;
-            // For 3-terminal pots (two edges, same comp_idx): the half
-            // NOT touching ground is the complement (uses 1-position).
-            // R_aw = (1-pos) * max_R (signal to wiper), R_wb = pos * max_R (wiper to gnd).
-            // At pos=1.0: R_aw=0 (short), R_wb=max (high Z to gnd) → full signal at wiper.
+            // For 3-terminal pots (two edges, same comp_idx): the a-w half
+            // is the complement (uses 1-position), and the w-b half tracks
+            // position. Use terminal identity rather than "touches ground"
+            // because tone/blend pots often connect b through a cap.
             if comp.kind.is_pot() {
                 let is_3term = graph
                     .edges
@@ -905,15 +905,9 @@ pub(super) fn spqr_to_dyn_node(
                     .filter(|other| other.comp_idx == e.comp_idx)
                     .count()
                     > 1;
-                if is_3term {
-                    let touches_gnd = e.node_a == graph.gnd_node
-                        || e.node_b == graph.gnd_node
-                        || graph.ac_ground_nodes.contains(&e.node_a)
-                        || graph.ac_ground_nodes.contains(&e.node_b);
-                    if touches_gnd {
-                        if let DynNode::Leaf(ref mut l) = leaf {
-                            l.set_complement();
-                        }
+                if is_3term && pot_edge_is_aw_half(graph, &comp.id, e.node_a, e.node_b) {
+                    if let DynNode::Leaf(ref mut l) = leaf {
+                        l.set_complement();
                     }
                 }
             }
@@ -935,6 +929,20 @@ pub(super) fn spqr_to_dyn_node(
         }
         SpqrNode::R { .. } => None,
     }
+}
+
+fn pot_edge_is_aw_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId) -> bool {
+    let Some(&w_node) = graph
+        .node_names
+        .get(&format!("{comp_id}.w"))
+        .or_else(|| graph.node_names.get(&format!("{comp_id}.wiper")))
+    else {
+        return false;
+    };
+    let Some(&a_node) = graph.node_names.get(&format!("{comp_id}.a")) else {
+        return false;
+    };
+    (a == w_node && b == a_node) || (a == a_node && b == w_node)
 }
 
 /// Convert an S/P/Q subtree to a WDF DynNode, skipping one NL edge.
