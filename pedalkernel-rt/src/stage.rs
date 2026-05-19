@@ -5913,14 +5913,45 @@ impl BlockwiseKMethodStage {
         let n = self.n_ports;
         for &(block_idx, port_idx) in &self.feedback_port_map {
             if port_idx < n {
+                if !self.feedback_port_is_active(port_idx) {
+                    self.work_b[port_idx] = 0.0;
+                    continue;
+                }
                 let v = if block_idx == self.output_block {
                     output
                 } else {
                     self.b_warm.get(block_idx).copied().unwrap_or(0.0)
                 };
-                self.work_b[port_idx] = 2.0 * v;
+                self.work_b[port_idx] = 2.0 * v - self.work_a[port_idx];
             }
         }
+    }
+
+    fn feedback_port_is_active(&self, port_idx: usize) -> bool {
+        let Some(port) = self.coupling_ports.get(port_idx) else {
+            return true;
+        };
+        let feedback_node = port.node_pos;
+
+        let mut saw_gated_feedback = false;
+        for element in &self.coupling_elements {
+            if element.node_a != feedback_node && element.node_b != feedback_node {
+                continue;
+            }
+            let Some(max_r) = element.pot_max_resistance else {
+                continue;
+            };
+            if !element.invert_control {
+                continue;
+            }
+
+            saw_gated_feedback = true;
+            if element.resistance < max_r * 0.9 {
+                return true;
+            }
+        }
+
+        !saw_gated_feedback
     }
 
     fn scatter_coupling(&mut self) {
@@ -5954,9 +5985,17 @@ impl BlockwiseKMethodStage {
             } else {
                 Self::solve_block_without_state_update(&mut self.blocks[i], v_block)
             };
-            cascade_drive = raw_cascade;
+            cascade_drive = if include_cascade {
+                ac_cascade
+            } else {
+                raw_cascade
+            };
             cascade_out = ac_cascade;
-            self.work_b[i] = a_root;
+            self.work_b[i] = if include_cascade && i > 0 {
+                0.0
+            } else {
+                a_root
+            };
             if let Some(outputs) = block_outputs.as_deref_mut() {
                 outputs.push(ac_cascade);
             }
@@ -6041,7 +6080,7 @@ impl BlockwiseKMethodStage {
                         value
                     };
                     let tapered = element.taper.apply(position.clamp(0.0, 1.0));
-                    element.resistance = (tapered * max_r).max(1.0);
+                    element.resistance = (tapered * max_r).max(1.0e-3);
                     coupling_found = true;
                 }
             }
@@ -6068,7 +6107,11 @@ impl BlockwiseKMethodStage {
 
         let mut mna = crate::tree::MnaSystem::new(self.coupling_n_mna, 0);
         for element in &self.coupling_elements {
-            mna.stamp_resistor(element.node_a, element.node_b, element.resistance.max(1.0));
+            mna.stamp_resistor(
+                element.node_a,
+                element.node_b,
+                element.resistance.max(1.0e-3),
+            );
         }
         for i in 0..self.coupling_n_mna {
             mna.stamp_resistor(Some(i), None, 1e9);
@@ -6172,6 +6215,21 @@ impl BlockwiseKMethodStage {
         self.process_inner(vs_signals, true)
     }
 
+    pub fn debug_process_without_feedback_ports(&mut self, vs_signals: &[f64]) -> f64 {
+        if self.work_b.len() != self.n_ports {
+            self.init_buffers();
+        }
+
+        self.write_vs_ports(vs_signals);
+        for &(_, port_idx) in &self.feedback_port_map {
+            if port_idx < self.n_ports {
+                self.work_b[port_idx] = 0.0;
+            }
+        }
+        self.scatter_coupling();
+        self.run_block_cascade(true, true, None)
+    }
+
     fn process_inner(&mut self, vs_signals: &[f64], include_cascade: bool) -> f64 {
         if self.work_b.len() != self.n_ports {
             self.init_buffers();
@@ -6184,7 +6242,6 @@ impl BlockwiseKMethodStage {
         self.write_vs_ports(vs_signals);
 
         let mut last_output = self.b_warm[0];
-        let mut output = 0.0;
 
         self.write_feedback_ports(last_output);
 
@@ -6199,7 +6256,7 @@ impl BlockwiseKMethodStage {
             //    coupling contribution (bias from supply, feedback, etc.).
             //    Block 0: VS from coupling only (input + feedback + bias).
             //    Blocks 1+: VS = previous output + coupling bias.
-            output = self.run_block_cascade(include_cascade, false, None);
+            let output = self.run_block_cascade(include_cascade, false, None);
 
             // 3. Feed current cascade output back into coupling ports for the
             // next Newton iteration.
@@ -6212,8 +6269,10 @@ impl BlockwiseKMethodStage {
             last_output = output;
         }
 
-        // Backward sweep: update cap states with converged cascade
-        let _ = self.run_block_cascade(include_cascade, true, None);
+        // Backward sweep: update cap states with converged cascade. The
+        // observable output must come from this pass because reactive WDF
+        // state is committed here.
+        let output = self.run_block_cascade(include_cascade, true, None);
 
         // Save warm-start for next sample
         self.b_warm[0] = output;
@@ -6438,6 +6497,108 @@ mod blockwise_k_method_tests {
         assert!(
             (stage.work_b[0] - 4.75).abs() < 1e-12,
             "BKM voltage-source ports must use b=2V-a so source impedance participates in coupling"
+        );
+    }
+
+    #[test]
+    fn bkm_inactive_feedback_port_clears_stale_wave() {
+        let mut stage = BlockwiseKMethodStage {
+            blocks: vec![test_block(1.0)],
+            coupling_s: vec![1.0, 0.0, 0.0, 1.0],
+            coupling_rp: vec![1.0, 1.0],
+            coupling_n_mna: 1,
+            coupling_ports: vec![
+                crate::tree::WdfPort {
+                    node_pos: None,
+                    node_neg: None,
+                    resistance: 1.0,
+                },
+                crate::tree::WdfPort {
+                    node_pos: Some(0),
+                    node_neg: None,
+                    resistance: 1.0,
+                },
+            ],
+            coupling_elements: vec![CouplingElement {
+                comp_id: alloc::string::String::from("Resonance"),
+                node_a: Some(0),
+                node_b: None,
+                resistance: 100_000.0,
+                pot_max_resistance: Some(100_000.0),
+                taper: crate::pot_taper::PotTaper::B,
+                invert_control: true,
+            }],
+            n_ports: 2,
+            output_block: 0,
+            supply_voltage: 9.0,
+            vs_port_map: vec![],
+            cutoff_cv_port: None,
+            feedback_port_map: vec![(0, 1)],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            b_warm: vec![0.0, 0.0],
+            work_b: vec![0.0, 123.0],
+            work_a: vec![0.0, 5.0],
+            port_index_cache: vec![],
+        };
+
+        stage.write_feedback_ports(0.75);
+
+        assert_eq!(
+            stage.work_b[1], 0.0,
+            "an open resonance leg must remove the synthetic feedback source; \
+             leaving stale b waves lets the coupling matrix bypass the lowpass cascade"
+        );
+    }
+
+    #[test]
+    fn bkm_active_feedback_port_reflects_incident_coupling_wave() {
+        let mut stage = BlockwiseKMethodStage {
+            blocks: vec![test_block(1.0)],
+            coupling_s: vec![1.0],
+            coupling_rp: vec![1.0],
+            coupling_n_mna: 1,
+            coupling_ports: vec![crate::tree::WdfPort {
+                node_pos: Some(0),
+                node_neg: None,
+                resistance: 1.0,
+            }],
+            coupling_elements: vec![CouplingElement {
+                comp_id: alloc::string::String::from("Resonance"),
+                node_a: Some(0),
+                node_b: None,
+                resistance: 10_000.0,
+                pot_max_resistance: Some(100_000.0),
+                taper: crate::pot_taper::PotTaper::B,
+                invert_control: true,
+            }],
+            n_ports: 1,
+            output_block: 0,
+            supply_voltage: 9.0,
+            vs_port_map: vec![],
+            cutoff_cv_port: None,
+            feedback_port_map: vec![(0, 0)],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            b_warm: vec![0.0],
+            work_b: vec![0.0],
+            work_a: vec![0.25],
+            port_index_cache: vec![],
+        };
+
+        stage.write_feedback_ports(0.75);
+
+        assert!(
+            (stage.work_b[0] - 1.25).abs() < 1e-12,
+            "active BKM feedback ports are ideal voltage sources and must write b=2V-a"
         );
     }
 

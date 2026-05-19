@@ -1049,7 +1049,9 @@ pub(super) fn try_build_blockwise(
         // Without this, VS Rp = 10kΩ for all blocks → gamma ≈ 0.97 → cap
         // can't filter → each stage adds gain → 12× total gain explosion.
 
-        // Compute 1/gm from bias: I = (V_supply - V_be) / R_bias
+        // Compute a fallback 1/gm from bias: I = (V_supply - V_be) / R_bias.
+        // Individual blocks below prefer their own bias leg because cascaded
+        // diode ladders often use different bias resistors per rung.
         let vt = 0.02585; // thermal voltage at 25°C
         let v_be = 0.6; // typical forward bias
                         // Find the typical R_bias value from coupling edges
@@ -1084,16 +1086,6 @@ pub(super) fn try_build_blockwise(
         let mut k_blocks = Vec::new();
         for (bi, built) in all_stages.iter_mut().enumerate() {
             if let BuiltStage::Wdf(ref mut wdf) = built {
-                // Block 0 is driven through the declared input impedance.
-                // Downstream rungs are driven by the previous diode follower,
-                // whose small-signal output impedance is approximately 1/gm.
-                let block_source_r = if bi == 0 {
-                    first_block_source_r
-                } else {
-                    r_source_cascade
-                };
-                wdf.tree.set_vs_port_resistance(block_source_r);
-
                 let block_port_node = plan.blocks.get(bi).and_then(|block| {
                     block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph)
                 });
@@ -1115,6 +1107,29 @@ pub(super) fn try_build_blockwise(
                         })
                     })
                     .unwrap_or(r_bias_value);
+                // Block 0 is driven through the declared input impedance.
+                // Downstream rungs are driven by the previous diode follower,
+                // whose small-signal output impedance is set by that rung's
+                // own DC bias current.
+                let block_source_r = if bi == 0 {
+                    first_block_source_r
+                } else {
+                    match &wdf.root {
+                        pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => root
+                            .model
+                            .dynamic_resistance_from_sources(&[(
+                                supply_voltage,
+                                block_bias_resistance,
+                            )])
+                            .clamp(10.0, 10_000.0),
+                        _ => {
+                            let i_bias = (supply_voltage - v_be).max(0.1) / block_bias_resistance;
+                            let gm = i_bias / vt;
+                            (1.0 / gm).clamp(10.0, 10_000.0)
+                        }
+                    }
+                };
+                wdf.tree.set_vs_port_resistance(block_source_r);
                 let diode_cutoff = match &wdf.root {
                     pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_) => {
                         Some(pedalkernel_rt::stage::DiodeCutoffCalibration {
@@ -1371,7 +1386,7 @@ pub(super) fn try_build_blockwise(
             if let Some(pn) = best_node {
                 let mna_idx = node_to_mna[&pn];
                 let rp = if bi < k_blocks.len() {
-                    k_blocks[bi].rp
+                    k_blocks[bi].nominal_vs_rp
                 } else {
                     1000.0
                 };
