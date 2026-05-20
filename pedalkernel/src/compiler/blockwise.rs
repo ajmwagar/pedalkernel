@@ -2115,6 +2115,9 @@ pub(super) fn try_build_blockwise(
         let mut feedback_port_map: Vec<(usize, usize)> = Vec::new();
         let output_block_idx = n_blocks.saturating_sub(1);
         for (bi, block) in plan.blocks.iter().enumerate() {
+            if use_coupled_solve {
+                break;
+            }
             if bi != output_block_idx {
                 continue;
             }

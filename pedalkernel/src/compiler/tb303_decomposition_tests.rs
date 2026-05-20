@@ -3523,15 +3523,11 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
     let n = bkm.n_ports;
 
     let input_ports = bkm.block_port_indices[0].clone();
-    let output_ports: Vec<usize> = bkm
-        .feedback_port_map
-        .iter()
-        .filter_map(|&(block_idx, port_idx)| (block_idx == bkm.output_block).then_some(port_idx))
-        .collect();
     assert!(
-        !output_ports.is_empty(),
-        "coupled BKM must expose a single-ended output feedback port for the resonance return"
+        bkm.feedback_port_map.is_empty(),
+        "coupled BKM resonance must be represented by passive coupling elements, not synthetic feedback source ports"
     );
+    let output_ports = bkm.block_port_indices[bkm.output_block].clone();
     let mut best_feedback_delta = 0.0f64;
     let mut best_feedback_entry = None;
     for &row in &input_ports {
@@ -3545,13 +3541,13 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
         }
     }
 
-    eprintln!("  input ports={input_ports:?}, feedback output ports={output_ports:?}");
+    eprintln!("  input ports={input_ports:?}, output rung ports={output_ports:?}");
     eprintln!(
         "  best output->input resonance delta={best_feedback_delta:.8?} at {best_feedback_entry:?}"
     );
     assert!(
         best_feedback_delta > 1.0e-3,
-        "moving Resonance must materially change coupling from the output feedback port back to an input rung port"
+        "moving Resonance must materially change passive coupling from an output rung port back to an input rung port"
     );
 }
 
