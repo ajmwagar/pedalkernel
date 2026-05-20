@@ -6272,10 +6272,43 @@ impl BlockwiseKMethodStage {
         };
         let incident = a.get(primary_port).copied().unwrap_or(0.0)
             + if block_idx == 0 { serial_input } else { 0.0 };
-        let (output_voltage, primary_reflected) =
-            Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
 
         if let Some(port_indices) = self.block_port_indices.get(block_idx) {
+            if port_indices.len() == 3 {
+                let bottom_left = port_indices[0];
+                let bottom_right = port_indices[1];
+                let top_diff = port_indices[2];
+                let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0);
+                let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0);
+                let differential_incident = a_bottom_left - a_bottom_right
+                    + if block_idx == 0 { serial_input } else { 0.0 };
+                let (output_voltage, _) = Self::solve_block_port(
+                    &mut self.blocks[block_idx],
+                    differential_incident,
+                    update_state,
+                );
+
+                if bottom_left < b_out.len() {
+                    b_out[bottom_left] =
+                        differential_incident - a.get(bottom_left).copied().unwrap_or(0.0);
+                }
+                if bottom_right < b_out.len() {
+                    b_out[bottom_right] =
+                        -differential_incident - a.get(bottom_right).copied().unwrap_or(0.0);
+                }
+                if top_diff < b_out.len() {
+                    b_out[top_diff] =
+                        2.0 * output_voltage - a.get(top_diff).copied().unwrap_or(0.0);
+                }
+                return if block_idx == self.output_block {
+                    differential_incident
+                } else {
+                    output_voltage
+                };
+            }
+
+            let (output_voltage, primary_reflected) =
+                Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
             let is_multiport_block = port_indices.len() > 1;
             if primary_port < b_out.len() {
                 b_out[primary_port] = if is_multiport_block {
@@ -6291,11 +6324,17 @@ impl BlockwiseKMethodStage {
                         2.0 * output_voltage - a.get(port_idx).copied().unwrap_or(0.0);
                 }
             }
+            output_voltage
         } else if primary_port < b_out.len() {
+            let (output_voltage, primary_reflected) =
+                Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
             b_out[primary_port] = primary_reflected;
+            output_voltage
+        } else {
+            let (output_voltage, _) =
+                Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
+            output_voltage
         }
-
-        output_voltage
     }
 
     fn block_root_incident(block: &mut KMethodBlock, b_tree: f64, ctrl: f64) -> f64 {
@@ -6564,6 +6603,43 @@ impl BlockwiseKMethodStage {
             output_derivative_by_block[block_idx] = d_out;
 
             if let Some(port_indices) = self.block_port_indices.get(block_idx) {
+                if port_indices.len() == 3 {
+                    let bottom_left = port_indices[0];
+                    let bottom_right = port_indices[1];
+                    let top_diff = port_indices[2];
+                    let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0);
+                    let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0);
+                    let differential_incident = a_bottom_left - a_bottom_right
+                        + if block_idx == 0 { serial_input } else { 0.0 };
+                    let h = 1.0e-5 * differential_incident.abs().max(1.0);
+                    let (out_hi, _) = Self::solve_block_port(
+                        &mut self.blocks[block_idx],
+                        differential_incident + h,
+                        false,
+                    );
+                    let (out_lo, _) = Self::solve_block_port(
+                        &mut self.blocks[block_idx],
+                        differential_incident - h,
+                        false,
+                    );
+                    let d_out = ((out_hi - out_lo) / (2.0 * h)).clamp(-1.0e6, 1.0e6);
+                    let d_out = if d_out.is_finite() { d_out } else { 0.0 };
+                    output_derivative_by_block[block_idx] = d_out;
+
+                    if bottom_left < n {
+                        db_da[bottom_left * n + bottom_right] = -1.0;
+                    }
+                    if bottom_right < n {
+                        db_da[bottom_right * n + bottom_left] = -1.0;
+                    }
+                    if top_diff < n {
+                        db_da[top_diff * n + bottom_left] = 2.0 * d_out;
+                        db_da[top_diff * n + bottom_right] = -2.0 * d_out;
+                        db_da[top_diff * n + top_diff] = -1.0;
+                    }
+                    continue;
+                }
+
                 let is_multiport_block = port_indices.len() > 1;
                 db_da[primary_port * n + primary_port] = if is_multiport_block {
                     // Multiport block primary ports currently reflect the

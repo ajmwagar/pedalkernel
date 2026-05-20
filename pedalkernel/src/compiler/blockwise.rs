@@ -1988,45 +1988,45 @@ pub(super) fn try_build_blockwise(
         let mut used_ports: HashSet<NodeId> = HashSet::new();
         for (bi, block) in plan.blocks.iter().enumerate() {
             if let Some(rung_ports) = differential_rung_ports(block, graph) {
-                let left = rung_ports.bottom_left;
-                let right = rung_ports.bottom_right;
-                let Some(&left_idx) = node_to_mna.get(&left) else {
-                    block_port_indices[bi].push(ports.len());
-                    ports.push(pedalkernel_rt::tree::WdfPort {
-                        node_pos: None,
-                        node_neg: None,
-                        resistance: 1000.0,
-                    });
-                    #[cfg(test)]
-                    eprintln!("    block {bi}: port_node=None (missing differential left node)");
-                    continue;
-                };
-                let Some(&right_idx) = node_to_mna.get(&right) else {
-                    block_port_indices[bi].push(ports.len());
-                    ports.push(pedalkernel_rt::tree::WdfPort {
-                        node_pos: None,
-                        node_neg: None,
-                        resistance: 1000.0,
-                    });
-                    #[cfg(test)]
-                    eprintln!("    block {bi}: port_node=None (missing differential right node)");
-                    continue;
-                };
                 let rp = if bi < k_blocks.len() {
                     k_blocks[bi].nominal_vs_rp
                 } else {
                     1000.0
                 };
-                block_port_indices[bi].push(ports.len());
-                ports.push(pedalkernel_rt::tree::WdfPort {
-                    node_pos: Some(left_idx),
-                    node_neg: Some(right_idx),
-                    resistance: rp,
-                });
-                #[cfg(test)]
-                eprintln!(
-                    "    block {bi}: port_node=Some(({left},{right})) → mna_node=Some(({left_idx},{right_idx}))"
-                );
+                for (label, node) in [
+                    ("bottom_left", rung_ports.bottom_left),
+                    ("bottom_right", rung_ports.bottom_right),
+                ] {
+                    let port_idx = ports.len();
+                    block_port_indices[bi].push(port_idx);
+                    ports.push(pedalkernel_rt::tree::WdfPort {
+                        node_pos: node_to_mna.get(&node).copied(),
+                        node_neg: None,
+                        resistance: rp,
+                    });
+                    #[cfg(test)]
+                    eprintln!(
+                        "    block {bi}: {label}=Some({node}) → mna_node={:?}, scattering_port={port_idx}",
+                        node_to_mna.get(&node)
+                    );
+                }
+                if let (Some(&left_idx), Some(&right_idx)) = (
+                    node_to_mna.get(&rung_ports.top_left),
+                    node_to_mna.get(&rung_ports.top_right),
+                ) {
+                    let port_idx = ports.len();
+                    block_port_indices[bi].push(port_idx);
+                    ports.push(pedalkernel_rt::tree::WdfPort {
+                        node_pos: Some(left_idx),
+                        node_neg: Some(right_idx),
+                        resistance: rp,
+                    });
+                    #[cfg(test)]
+                    eprintln!(
+                        "    block {bi}: top_diff=Some(({},{})) → mna_node=Some(({left_idx},{right_idx})), scattering_port={port_idx}",
+                        rung_ports.top_left, rung_ports.top_right
+                    );
+                }
                 continue;
             }
 
@@ -2077,35 +2077,6 @@ pub(super) fn try_build_blockwise(
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=None (no unique coupling node)");
             }
-        }
-
-        for (bi, block) in plan.blocks.iter().enumerate() {
-            let Some(rung_ports) = differential_rung_ports(block, graph) else {
-                continue;
-            };
-            let Some(&left_idx) = node_to_mna.get(&rung_ports.top_left) else {
-                continue;
-            };
-            let Some(&right_idx) = node_to_mna.get(&rung_ports.top_right) else {
-                continue;
-            };
-            let rp = if bi < k_blocks.len() {
-                k_blocks[bi].nominal_vs_rp
-            } else {
-                1000.0
-            };
-            let port_idx = ports.len();
-            ports.push(pedalkernel_rt::tree::WdfPort {
-                node_pos: Some(left_idx),
-                node_neg: Some(right_idx),
-                resistance: rp,
-            });
-            block_port_indices[bi].push(port_idx);
-            #[cfg(test)]
-            eprintln!(
-                "    block {bi}: top_port_node=Some(({},{})) → mna_node=Some(({left_idx},{right_idx})), scattering_port={port_idx}",
-                rung_ports.top_left, rung_ports.top_right
-            );
         }
 
         let use_coupled_solve = plan
