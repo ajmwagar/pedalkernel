@@ -1905,9 +1905,53 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     let htb_fc = best_fit_fc(&serial);
     let h_ref = stinchcombe_htb_magnitude(freqs[0], htb_fc);
     let full_10_ref = stinchcombe_10pole_magnitude(freqs[0], htb_fc, 0.0);
+    let best_10pole_fit = |gains: &[f64], norm_idx: usize| -> (f64, f64) {
+        let target: Vec<f64> = gains
+            .iter()
+            .map(|gain| db_norm(*gain, gains[norm_idx]))
+            .collect();
+        let mut best_fc = 100.0;
+        let mut best_err = f64::INFINITY;
+
+        for step in 0..320 {
+            let t = step as f64 / 319.0;
+            let fc = 100.0 * (100.0f64).powf(t);
+            let ref_norm = stinchcombe_10pole_magnitude(freqs[norm_idx], fc, 0.0);
+            if ref_norm <= 1.0e-12 {
+                continue;
+            }
+            let mut err = 0.0;
+            for (i, &freq) in freqs.iter().enumerate() {
+                let ref_db = db_norm(stinchcombe_10pole_magnitude(freq, fc, 0.0), ref_norm);
+                let diff = target[i] - ref_db;
+                err += diff * diff;
+            }
+            if err < best_err {
+                best_err = err;
+                best_fc = fc;
+            }
+        }
+
+        let ref_norm = stinchcombe_10pole_magnitude(freqs[norm_idx], best_fc, 0.0);
+        let max_abs_err = freqs
+            .iter()
+            .enumerate()
+            .map(|(i, &freq)| {
+                let ref_db = db_norm(stinchcombe_10pole_magnitude(freq, best_fc, 0.0), ref_norm);
+                (target[i] - ref_db).abs()
+            })
+            .fold(0.0, f64::max);
+        (best_fc, max_abs_err)
+    };
+    let (bkm_10pole_fc_100, bkm_10pole_err_100) = best_10pole_fit(&bkm, 0);
+    let (bkm_10pole_fc_10k, bkm_10pole_err_10k) = best_10pole_fit(&bkm, freqs.len() - 1);
 
     eprintln!("  TB303 normalized response comparison, Cutoff=0.5 Resonance=0");
     eprintln!("  H_tb best-fit fc to forced-serial WDF: {htb_fc:.1} Hz");
+    eprintln!(
+        "  10-pole k=0 best fit to BKM: fc={bkm_10pole_fc_100:.1}Hz err={bkm_10pole_err_100:.2}dB (norm 100Hz), \
+         fc={bkm_10pole_fc_10k:.1}Hz err={bkm_10pole_err_10k:.2}dB (norm 10kHz)"
+    );
     eprintln!(
         "  {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}",
         "Freq", "BKM dB", "Serial dB", "H_tb dB", "10pole dB", "BKM-10p"
@@ -1932,7 +1976,6 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     eprintln!(
         "  5k->10k slope: BKM={bkm_oct:+.1} dB/oct, serial={serial_oct:+.1} dB/oct, H_tb={htb_oct:+.1} dB/oct"
     );
-
     let bkm_5k_db = db_norm(bkm[5], bkm[0]);
     let htb_5k_db = db_norm(stinchcombe_htb_magnitude(freqs[5], htb_fc), h_ref);
     assert!(
