@@ -6474,6 +6474,81 @@ impl BlockwiseKMethodStage {
         }
     }
 
+    fn coupled_fill_sparse_db_da(&mut self, a: &[f64], serial_input: f64, db_da: &mut [f64]) {
+        let n = self.n_ports;
+        db_da.fill(0.0);
+
+        // Voltage-source, open, and delayed-feedback ports all reflect their
+        // own incident wave as b = const - a unless a live block-output
+        // feedback dependency below overwrites/adds a cross derivative.
+        for port_idx in 0..n {
+            if !self.port_is_block_owned(port_idx) {
+                db_da[port_idx * n + port_idx] = -1.0;
+            }
+        }
+
+        let mut output_derivative_by_block = alloc::vec![0.0; self.blocks.len()];
+        for block_idx in 0..self.blocks.len() {
+            let Some(primary_port) = self.primary_port_for_block(block_idx) else {
+                continue;
+            };
+            if primary_port >= n {
+                continue;
+            }
+
+            let incident = a.get(primary_port).copied().unwrap_or(0.0)
+                + if block_idx == 0 { serial_input } else { 0.0 };
+            let h = 1.0e-5 * incident.abs().max(1.0);
+            let (out_hi, refl_hi) =
+                Self::solve_block_port(&mut self.blocks[block_idx], incident + h, false);
+            let (out_lo, refl_lo) =
+                Self::solve_block_port(&mut self.blocks[block_idx], incident - h, false);
+            let d_out = ((out_hi - out_lo) / (2.0 * h)).clamp(-1.0e6, 1.0e6);
+            let d_refl = ((refl_hi - refl_lo) / (2.0 * h)).clamp(-1.0e6, 1.0e6);
+            let d_out = if d_out.is_finite() { d_out } else { 0.0 };
+            let d_refl = if d_refl.is_finite() { d_refl } else { 0.0 };
+            output_derivative_by_block[block_idx] = d_out;
+
+            if let Some(port_indices) = self.block_port_indices.get(block_idx) {
+                let is_multiport_block = port_indices.len() > 1;
+                db_da[primary_port * n + primary_port] = if is_multiport_block {
+                    // Multiport block primary ports currently reflect the
+                    // imposed physical incident voltage: b = 2*incident - a.
+                    1.0
+                } else {
+                    d_refl
+                };
+                for &port_idx in port_indices.iter().skip(1) {
+                    if port_idx < n {
+                        db_da[port_idx * n + primary_port] = 2.0 * d_out;
+                        db_da[port_idx * n + port_idx] = -1.0;
+                    }
+                }
+            } else {
+                db_da[primary_port * n + primary_port] = d_refl;
+            }
+        }
+
+        for &(block_idx, port_idx) in &self.feedback_port_map {
+            if port_idx >= n || block_idx >= self.blocks.len() {
+                continue;
+            }
+            if !self.feedback_port_is_active(port_idx) {
+                db_da[port_idx * n + port_idx] = 0.0;
+                continue;
+            }
+            db_da[port_idx * n + port_idx] = -1.0;
+            if block_idx == self.output_block {
+                if let Some(primary_port) = self.primary_port_for_block(block_idx) {
+                    if primary_port < n {
+                        db_da[port_idx * n + primary_port] +=
+                            2.0 * output_derivative_by_block[block_idx];
+                    }
+                }
+            }
+        }
+    }
+
     fn coupled_solve_newton(&mut self, vs_signals: &[f64], serial_input: f64) -> (f64, bool) {
         let n = self.n_ports;
         if n == 0 {
@@ -6492,7 +6567,6 @@ impl BlockwiseKMethodStage {
         let mut rhs = vec![0.0; n];
         let mut db_da = vec![0.0; n * n];
         let mut output = 0.0;
-        let eps = 1.0e-5;
 
         for _ in 0..Self::MAX_ITER {
             output = self.coupled_eval_b_for_a(&a, vs_signals, serial_input, false, &mut b);
@@ -6509,27 +6583,7 @@ impl BlockwiseKMethodStage {
                 return (output, true);
             }
 
-            for col in 0..n {
-                let h = eps * a[col].abs().max(1.0);
-                let mut a_hi = a.clone();
-                let mut a_lo = a.clone();
-                a_hi[col] += h;
-                a_lo[col] -= h;
-
-                let mut b_hi = vec![0.0; n];
-                let mut b_lo = vec![0.0; n];
-                self.coupled_eval_b_for_a(&a_hi, vs_signals, serial_input, false, &mut b_hi);
-                self.coupled_eval_b_for_a(&a_lo, vs_signals, serial_input, false, &mut b_lo);
-
-                for row in 0..n {
-                    let derivative = (b_hi[row] - b_lo[row]) / (2.0 * h);
-                    db_da[row * n + col] = if derivative.is_finite() {
-                        derivative
-                    } else {
-                        0.0
-                    };
-                }
-            }
+            self.coupled_fill_sparse_db_da(&a, serial_input, &mut db_da);
 
             for row in 0..n {
                 for col in 0..n {
@@ -7467,6 +7521,100 @@ mod blockwise_k_method_tests {
             (stage.work_b[0] - 1.25).abs() < 1e-12,
             "active BKM feedback ports are ideal voltage sources and must write b=2V-a"
         );
+    }
+
+    #[test]
+    fn bkm_sparse_coupled_jacobian_matches_dense_finite_difference() {
+        let mut stage = BlockwiseKMethodStage {
+            blocks: vec![{
+                let mut block = test_block(1.0);
+                block.k_table = one_dimensional_table();
+                block
+            }],
+            coupling_s: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            coupling_rp: vec![1.0, 1.0, 1.0],
+            coupling_n_mna: 1,
+            coupling_ports: vec![
+                crate::tree::WdfPort {
+                    node_pos: Some(0),
+                    node_neg: None,
+                    resistance: 1.0,
+                },
+                crate::tree::WdfPort {
+                    node_pos: Some(0),
+                    node_neg: None,
+                    resistance: 1.0,
+                },
+                crate::tree::WdfPort {
+                    node_pos: Some(0),
+                    node_neg: None,
+                    resistance: 1.0,
+                },
+            ],
+            block_port_indices: vec![vec![0, 1]],
+            coupling_elements: vec![CouplingElement {
+                comp_id: alloc::string::String::from("Resonance"),
+                node_a: Some(0),
+                node_b: None,
+                resistance: 10_000.0,
+                pot_max_resistance: Some(100_000.0),
+                taper: crate::pot_taper::PotTaper::B,
+                invert_control: true,
+            }],
+            n_ports: 3,
+            output_block: 0,
+            supply_voltage: 9.0,
+            vs_port_map: vec![(alloc::string::String::from("audio_in"), 2)],
+            cutoff_cv_port: None,
+            shared_diode_cutoff_pot: None,
+            feedback_port_map: vec![(0, 2)],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::CoupledNewton,
+            diode_ladder_core: None,
+            b_warm: vec![0.0; 3],
+            work_b: vec![0.0; 3],
+            work_a: vec![0.0; 3],
+            port_index_cache: vec![],
+        };
+        let a = vec![0.25, -0.125, 0.5];
+        let vs = vec![0.75];
+        let n = stage.n_ports;
+        let mut sparse = vec![0.0; n * n];
+        stage.coupled_fill_sparse_db_da(&a, 0.0, &mut sparse);
+
+        let mut dense = vec![0.0; n * n];
+        for col in 0..n {
+            let h = 1.0e-5 * a[col].abs().max(1.0);
+            let mut a_hi = a.clone();
+            let mut a_lo = a.clone();
+            a_hi[col] += h;
+            a_lo[col] -= h;
+
+            let mut hi_stage = stage.clone();
+            let mut lo_stage = stage.clone();
+            let mut b_hi = vec![0.0; n];
+            let mut b_lo = vec![0.0; n];
+            hi_stage.coupled_eval_b_for_a(&a_hi, &vs, 0.0, false, &mut b_hi);
+            lo_stage.coupled_eval_b_for_a(&a_lo, &vs, 0.0, false, &mut b_lo);
+
+            for row in 0..n {
+                dense[row * n + col] = (b_hi[row] - b_lo[row]) / (2.0 * h);
+            }
+        }
+
+        for idx in 0..n * n {
+            assert!(
+                (sparse[idx] - dense[idx]).abs() < 1.0e-6,
+                "sparse db/da[{idx}] = {}, dense = {}",
+                sparse[idx],
+                dense[idx]
+            );
+        }
     }
 
     #[test]
