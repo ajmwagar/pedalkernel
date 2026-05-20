@@ -115,7 +115,11 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
                 if !a.is_finite() {
                     nan_count += 1;
                 }
-                entries.push(if a.is_finite() { a } else { 0.0 });
+                entries.push(if a.is_finite() {
+                    a as pedalkernel_rt::Wave
+                } else {
+                    0.0 as pedalkernel_rt::Wave
+                });
             }
         }
         eprintln!(
@@ -165,6 +169,17 @@ pub(super) fn generate_biased_single_diode_k_table(model: DiodeModel, rp: f64) -
         DEFAULT_STEPS_2D,
         CTRL_MIN_BIAS,
         CTRL_MAX_BIAS,
+    )
+}
+
+pub(super) fn generate_differential_ladder_tanh_table(n_vt: f64) -> KTable {
+    let n_vt = n_vt.max(1.0e-6);
+    sweep_1d(
+        |v_dm| {
+            let x = (v_dm / (2.0 * n_vt)).clamp(-80.0, 80.0);
+            x.tanh()
+        },
+        DEFAULT_STEPS_1D,
     )
 }
 
@@ -218,7 +233,11 @@ fn sweep_1d<F: FnMut(f64) -> f64>(mut f: F, steps: usize) -> KTable {
         let t = i as f64 / (steps - 1) as f64;
         let b = b_min + t * (b_max - b_min);
         let a = f(b);
-        entries.push(if a.is_finite() { a } else { 0.0 });
+        entries.push(if a.is_finite() {
+            a as pedalkernel_rt::Wave
+        } else {
+            0.0 as pedalkernel_rt::Wave
+        });
     }
 
     let mut t = KTable {
@@ -254,7 +273,11 @@ fn sweep_2d<F: FnMut(f64, f64) -> f64>(
             let tb = ib as f64 / (steps - 1) as f64;
             let b = b_min + tb * (b_max - b_min);
             let a = f(b, ctrl);
-            entries.push(if a.is_finite() { a } else { 0.0 });
+            entries.push(if a.is_finite() {
+                a as pedalkernel_rt::Wave
+            } else {
+                0.0 as pedalkernel_rt::Wave
+            });
         }
     }
 

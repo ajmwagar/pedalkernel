@@ -9,7 +9,7 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::math;
+use crate::{math, Wave};
 
 /// One-pole lowpass glide on pitch CV.
 ///
@@ -18,9 +18,9 @@ use crate::math;
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Glide {
-    current: f64,
-    target: f64,
-    glide_coeff: f64, // per-sample smoothing coefficient (0..1, higher = slower)
+    current: Wave,
+    target: Wave,
+    glide_coeff: Wave, // per-sample smoothing coefficient (0..1, higher = slower)
     active: bool,
     sample_rate: f64,
 }
@@ -28,9 +28,9 @@ pub struct Glide {
 impl Glide {
     pub fn new(sample_rate: f64) -> Self {
         Self {
-            current: 0.0,
-            target: 0.0,
-            glide_coeff: 0.0,
+            current: 0.0 as Wave,
+            target: 0.0 as Wave,
+            glide_coeff: 0.0 as Wave,
             active: false,
             sample_rate,
         }
@@ -45,17 +45,17 @@ impl Glide {
     pub fn set_time_from_knob(&mut self, knob: f64) {
         let clamped = knob.clamp(0.0, 1.0);
         if clamped < 1e-4 {
-            self.glide_coeff = 0.0; // instant
+            self.glide_coeff = 0.0 as Wave; // instant
         } else {
             let time_ms = 5.0 * math::powf(360.0 / 5.0, clamped);
             let time_samples = time_ms * 0.001 * self.sample_rate;
-            self.glide_coeff = math::exp(-1.0 / time_samples);
+            self.glide_coeff = math::exp(-1.0 / time_samples) as Wave;
         }
     }
 
     /// Set target pitch (V/oct).
     pub fn set_target(&mut self, voct: f64) {
-        self.target = voct;
+        self.target = voct as Wave;
     }
 
     /// Activate glide (legato: gate held, new pitch).
@@ -77,10 +77,11 @@ impl Glide {
 
     /// Process one sample. Returns the current (possibly gliding) pitch.
     #[inline]
-    pub fn process(&mut self) -> f64 {
-        if self.active && self.glide_coeff > 0.0 {
+    pub fn process(&mut self) -> Wave {
+        if self.active && self.glide_coeff > 0.0 as Wave {
             // One-pole lowpass: current = coeff * current + (1-coeff) * target
-            self.current = self.glide_coeff * self.current + (1.0 - self.glide_coeff) * self.target;
+            self.current =
+                self.glide_coeff * self.current + (1.0 as Wave - self.glide_coeff) * self.target;
         } else {
             self.current = self.target;
         }
@@ -88,7 +89,7 @@ impl Glide {
     }
 
     /// Current pitch value (without advancing).
-    pub fn value(&self) -> f64 {
+    pub fn value(&self) -> Wave {
         self.current
     }
 

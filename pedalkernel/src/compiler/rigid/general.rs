@@ -707,17 +707,33 @@ fn compute_dc_bias(
 }
 
 /// Step 7: Create NL device kinds or grouped BJT two-port models.
+fn is_diode_connected_bjt(kind: &NonlinearKind) -> bool {
+    match kind {
+        NonlinearKind::BjtNpn {
+            base_node,
+            collector_node,
+            ..
+        }
+        | NonlinearKind::BjtPnp {
+            base_node,
+            collector_node,
+            ..
+        } => base_node == collector_node,
+        _ => false,
+    }
+}
+
 fn create_nl_devices(
     nl_kinds: &[NonlinearKind],
 ) -> Result<(Vec<NlDeviceKind>, Option<MultiNlDeviceGroups>), String> {
-    let all_bjt = nl_kinds.iter().all(|k| {
+    let all_bjt_two_port = nl_kinds.iter().all(|k| {
         matches!(
             k,
             NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
-        )
+        ) && !is_diode_connected_bjt(k)
     });
 
-    if all_bjt && !nl_kinds.is_empty() {
+    if all_bjt_two_port && !nl_kinds.is_empty() {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
         let mut offset = 0usize;

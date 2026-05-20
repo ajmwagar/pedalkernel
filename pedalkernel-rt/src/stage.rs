@@ -6,7 +6,7 @@ use alloc::{format, string::String, vec, vec::Vec};
 use crate::elements::*;
 use crate::oversampling::Oversampler;
 use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
-use crate::PedalProcessor;
+use crate::{PedalProcessor, Wave};
 
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -306,7 +306,7 @@ pub struct KTable {
     /// Flat table entries: a_root values.
     /// 1D: [steps] entries.
     /// 2D: [steps × steps] entries, row-major (b varies fastest).
-    pub entries: alloc::vec::Vec<f64>,
+    pub entries: alloc::vec::Vec<Wave>,
     /// Precomputed (steps-1) / (b_max - b_min). Eliminates per-sample division.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub inv_b_scale: f64,
@@ -342,10 +342,14 @@ impl KTable {
         }
         // inv_b_scale = (steps-1) / (b_max - b_min), precomputed.
         // p = (b_tree - b_min) * inv_b_scale, clamped to [0, steps-1].
-        let p = ((b_tree - self.b_min) * self.inv_b_scale).clamp(0.0, (self.steps - 1) as f64);
+        let n_max = (self.steps - 1) as Wave;
+        let p = (((b_tree as Wave) - self.b_min as Wave) * self.inv_b_scale as Wave)
+            .clamp(0.0 as Wave, n_max);
         let i = (p as usize).min(self.steps - 2);
-        let frac = p - i as f64;
-        self.entries[i] + frac * (self.entries[i + 1] - self.entries[i])
+        let frac = p - i as Wave;
+        let y0 = self.entries[i];
+        let y1 = self.entries[i + 1];
+        (y0 + frac * (y1 - y0)) as f64
     }
 
     /// 2D lookup: interpolate a_root from (b_tree, control_voltage).
@@ -360,13 +364,15 @@ impl KTable {
         }
         // Precomputed: inv_b_scale = (steps-1)/(b_max-b_min), same for ctrl.
         // Eliminates 2 divisions per sample (div ~10 cycles vs mul ~3 cycles).
-        let n_max = (self.steps - 1) as f64;
-        let pb = ((b_tree - self.b_min) * self.inv_b_scale).clamp(0.0, n_max);
-        let pc = ((ctrl - self.ctrl_min) * self.inv_c_scale).clamp(0.0, n_max);
+        let n_max = (self.steps - 1) as Wave;
+        let pb = (((b_tree as Wave) - self.b_min as Wave) * self.inv_b_scale as Wave)
+            .clamp(0.0 as Wave, n_max);
+        let pc = (((ctrl as Wave) - self.ctrl_min as Wave) * self.inv_c_scale as Wave)
+            .clamp(0.0 as Wave, n_max);
         let ib = (pb as usize).min(self.steps - 2);
         let ic = (pc as usize).min(self.steps - 2);
-        let fb = pb - ib as f64;
-        let fc = pc - ic as f64;
+        let fb = pb - ib as Wave;
+        let fc = pc - ic as Wave;
         let s = self.steps;
         let v00 = self.entries[ib + ic * s];
         let v10 = self.entries[ib + 1 + ic * s];
@@ -375,7 +381,7 @@ impl KTable {
         // Bilinear interpolation (4 muls + 3 adds)
         let t0 = v00 + fb * (v10 - v00);
         let t1 = v01 + fb * (v11 - v01);
-        t0 + fc * (t1 - t0)
+        (t0 + fc * (t1 - t0)) as f64
     }
 }
 
@@ -403,7 +409,8 @@ impl KTable {
             let mut ad = vec![0.0; s];
             for i in 1..s {
                 // Trapezoidal: A[i] = A[i-1] + (f[i-1] + f[i]) / 2 * db
-                ad[i] = ad[i - 1] + (self.entries[i - 1] + self.entries[i]) * 0.5 * db;
+                ad[i] =
+                    ad[i - 1] + (self.entries[i - 1] as f64 + self.entries[i] as f64) * 0.5 * db;
             }
             ad
         } else {
@@ -413,7 +420,8 @@ impl KTable {
                 for ib in 1..s {
                     let idx = ib + ic * s;
                     let prev = ib - 1 + ic * s;
-                    ad[idx] = ad[prev] + (self.entries[prev] + self.entries[idx]) * 0.5 * db;
+                    ad[idx] = ad[prev]
+                        + (self.entries[prev] as f64 + self.entries[idx] as f64) * 0.5 * db;
                 }
             }
             ad
@@ -5651,7 +5659,7 @@ impl SidechainProcessor {
     /// Process one sample through the sidechain sub-circuit.
     #[inline]
     pub fn process(&mut self, tapped_signal: f64) -> f64 {
-        self.circuit.process(tapped_signal)
+        self.circuit.process(tapped_signal as Wave) as f64
     }
 
     /// Forward a control change to the sidechain sub-circuit.
@@ -5703,7 +5711,7 @@ impl SubcircuitProcessor {
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
         if self.rate_divisor <= 1 {
-            self.held_output = self.circuit.process(input);
+            self.held_output = self.circuit.process(input as Wave) as f64;
             return self.held_output;
         }
 
@@ -5711,7 +5719,7 @@ impl SubcircuitProcessor {
         if self.rate_counter == 0 {
             self.rate_counter = self.rate_divisor;
             self.prev_output = self.held_output;
-            self.held_output = self.circuit.process(input);
+            self.held_output = self.circuit.process(input as Wave) as f64;
         }
 
         // Linear interpolation between prev_output and held_output.
@@ -5795,11 +5803,40 @@ pub struct KMethodBlock {
     /// axis instead of the block's local coupling voltage.
     #[cfg_attr(feature = "serde", serde(default))]
     pub shared_diode_bias_voltage: Option<f64>,
+    /// Whether the K-table control axis should be driven from this block's
+    /// physical input voltage.
+    ///
+    /// Ordinary 2D roots such as BJT/triode use the driven terminal voltage as
+    /// their device-control coordinate. Differential ladder rungs do not: their
+    /// second table axis is shared tail-current modulation, which comes from
+    /// the cutoff network rather than the audio/bias drive at the rung port.
+    #[cfg_attr(feature = "serde", serde(default = "default_control_from_drive"))]
+    pub control_from_drive: bool,
 }
 
 #[cfg(feature = "serde")]
 fn default_k_table_control_polarity() -> f64 {
     1.0
+}
+
+#[cfg(feature = "serde")]
+fn default_control_from_drive() -> bool {
+    true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BlockwiseSolveMode {
+    Cascade,
+    CoupledFixedPoint,
+    CoupledNewton,
+    DiodeLadderCore,
+}
+
+impl Default for BlockwiseSolveMode {
+    fn default() -> Self {
+        Self::Cascade
+    }
 }
 
 /// Circuit data needed to map cutoff CV to diode small-signal resistance.
@@ -5834,6 +5871,157 @@ fn diode_bias_voltage_from_current(model: DiodeModel, current: f64) -> f64 {
     let i = current.max(1.0e-12);
     let junction = model.n_vt * crate::math::ln(i / model.is + 1.0);
     junction + i * model.rs
+}
+
+/// Table-backed differential diode ladder core.
+///
+/// The TB-303 ladder is not a cascade of independent one-port nonlinear
+/// blocks. One tail current sets the operating point for every rung, while
+/// the four capacitors provide the audio-rate state. This primitive keeps the
+/// runtime cheap by using a single 1D table for the nonlinear differential
+/// `tanh(v_dm / 2Vt)` shape and owning the four ladder states locally.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DiodeLadderCore {
+    pub tanh_table: KTable,
+    pub cap_values: Vec<f64>,
+    pub states: Vec<Wave>,
+    pub rung_alphas: Vec<Wave>,
+    pub sample_rate: f64,
+    pub alpha_bjt: f64,
+    pub n_vt: f64,
+    pub tail_current_table: KTable,
+    pub i_tail_bias: f64,
+    pub i_tail_min: f64,
+    pub i_tail_max: f64,
+    pub cutoff_bias_resistance: f64,
+    pub last_alpha_i_tail: f64,
+}
+
+impl DiodeLadderCore {
+    pub fn new(
+        tanh_table: KTable,
+        cap_values: Vec<f64>,
+        sample_rate: f64,
+        alpha_bjt: f64,
+        n_vt: f64,
+        tail_current_table: KTable,
+        i_tail_bias: f64,
+        i_tail_max: f64,
+        cutoff_bias_resistance: f64,
+    ) -> Self {
+        let mut core = Self {
+            tanh_table,
+            states: vec![0.0 as Wave; cap_values.len()],
+            rung_alphas: vec![0.0 as Wave; cap_values.len()],
+            cap_values,
+            sample_rate,
+            alpha_bjt: alpha_bjt.clamp(0.0, 1.0),
+            n_vt,
+            tail_current_table,
+            i_tail_bias,
+            i_tail_min: (i_tail_bias * 0.01).max(1.0e-9),
+            i_tail_max: i_tail_max.max(i_tail_bias * 1.01).max(1.0e-9),
+            cutoff_bias_resistance: cutoff_bias_resistance.max(1.0),
+            last_alpha_i_tail: f64::NAN,
+        };
+        core.tanh_table.precompute_scales();
+        core.tail_current_table.precompute_scales();
+        core
+    }
+
+    pub fn init(&mut self) {
+        self.tanh_table.precompute_scales();
+        self.tail_current_table.precompute_scales();
+        if self.states.len() != self.cap_values.len() {
+            self.states = vec![0.0 as Wave; self.cap_values.len()];
+        }
+        if self.rung_alphas.len() != self.cap_values.len() {
+            self.rung_alphas = vec![0.0 as Wave; self.cap_values.len()];
+            self.last_alpha_i_tail = f64::NAN;
+        }
+    }
+
+    pub fn tail_current(
+        &self,
+        supply_voltage: f64,
+        cutoff_cv_voltage: f64,
+        cutoff_series_resistance: Option<f64>,
+    ) -> f64 {
+        if let Some(r_cutoff) = cutoff_series_resistance {
+            let total_r = (self.cutoff_bias_resistance + r_cutoff).max(1.0);
+            return self
+                .tail_current_table
+                .lookup_2d(total_r, supply_voltage + cutoff_cv_voltage)
+                .clamp(self.i_tail_min, self.i_tail_max);
+        }
+
+        let octave_span = 5.0;
+        let norm = (0.5 + cutoff_cv_voltage / 5.0).clamp(0.0, 1.0);
+        let ratio = crate::math::exp((norm - 0.5) * octave_span * core::f64::consts::LN_2);
+        (self.i_tail_bias * ratio).clamp(self.i_tail_min, self.i_tail_max)
+    }
+
+    fn update_rung_alphas(&mut self, i_tail: f64) {
+        if (i_tail - self.last_alpha_i_tail).abs()
+            <= self.last_alpha_i_tail.abs().max(1.0e-12) * 1.0e-6
+        {
+            return;
+        }
+        let sample_rate = self.sample_rate.max(1.0);
+        let n_vt = self.n_vt.max(1.0e-6);
+        let side_current = 0.5 * i_tail;
+        for (idx, alpha) in self.rung_alphas.iter_mut().enumerate() {
+            let c = self
+                .cap_values
+                .get(idx)
+                .copied()
+                .unwrap_or(33.0e-9)
+                .max(1.0e-12);
+            // Local small-signal differential-pair physics:
+            // the shared tail current splits through the two diode chains, so
+            // each rung side is biased by I_tail/2. Stinchcombe fc belongs to
+            // validation of the composed ladder, not this per-rung state update.
+            let fc = (self.alpha_bjt * side_current / (4.0 * core::f64::consts::PI * c * n_vt))
+                .clamp(1.0, sample_rate * 0.45);
+            *alpha = (1.0 - crate::math::exp(-2.0 * core::f64::consts::PI * fc / sample_rate))
+                .clamp(0.0, 1.0) as Wave;
+        }
+        self.last_alpha_i_tail = i_tail;
+    }
+
+    pub fn process(
+        &mut self,
+        input: Wave,
+        supply_voltage: f64,
+        cutoff_cv_voltage: f64,
+        cutoff_series_resistance: Option<f64>,
+    ) -> Wave {
+        self.init();
+        let i_tail = self.tail_current(supply_voltage, cutoff_cv_voltage, cutoff_series_resistance);
+        self.update_rung_alphas(i_tail);
+        let mut x = input;
+        let n_vt = self.n_vt.max(1.0e-6);
+
+        for (idx, state) in self.states.iter_mut().enumerate() {
+            let drive = (x as f64).clamp(self.tanh_table.b_min, self.tanh_table.b_max);
+            let tanh_v = self.tanh_table.lookup_1d(drive);
+            let target =
+                (2.0 * n_vt * self.alpha_bjt * tanh_v).clamp(-2.0 * n_vt, 2.0 * n_vt) as Wave;
+            let alpha = self.rung_alphas.get(idx).copied().unwrap_or(0.0 as Wave);
+            *state += alpha * (target - *state);
+            if !state.is_finite() {
+                *state = 0.0 as Wave;
+            }
+            x = *state;
+        }
+
+        if x.is_finite() {
+            x * 100.0 as Wave
+        } else {
+            0.0 as Wave
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -5877,6 +6065,15 @@ pub struct BlockwiseKMethodStage {
     pub coupling_n_mna: usize,
     /// Ports used to derive the coupling scattering matrix.
     pub coupling_ports: Vec<crate::tree::WdfPort>,
+    /// Coupling port indices owned by each nonlinear block.
+    ///
+    /// Legacy BKM stages use one port per block: `[[0], [1], ...]`.
+    /// Multiport blocks, such as differential diode rungs, list every
+    /// external boundary port the block owns. The first entry is the primary
+    /// nonlinear drive port used by the current one-root K-method block
+    /// evaluator; additional ports participate in the coupling adaptor.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub block_port_indices: Vec<Vec<usize>>,
     /// Linear elements stamped into the coupling MNA. Pot entries keep enough
     /// metadata to recompute `coupling_s` when a coupling control moves.
     pub coupling_elements: Vec<CouplingElement>,
@@ -5914,6 +6111,16 @@ pub struct BlockwiseKMethodStage {
     pub signal_flow_distance: usize,
     /// When true, output does not overwrite the serial chain.
     pub bypass_serial: bool,
+    /// Composition mode for block ports. `Cascade` preserves the legacy
+    /// serial blockwise path for true chains; `CoupledFixedPoint` solves all
+    /// block ports simultaneously against the coupling adaptor.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub solve_mode: BlockwiseSolveMode,
+    /// Optional whole-ladder primitive for differential diode ladders. This
+    /// replaces the one-port-per-rung BKM solve when the compiler recognizes a
+    /// shared-current four-rung ladder.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub diode_ladder_core: Option<DiodeLadderCore>,
 
     // ── Work buffers (pre-allocated, not serialized) ────────────────────
     /// Previous sample's reflected waves (warm-start for Newton).
@@ -5966,7 +6173,75 @@ impl BlockwiseKMethodStage {
         if let Some(v_bias) = block.shared_diode_bias_voltage {
             return v_bias;
         }
+        if !block.control_from_drive {
+            return 0.0;
+        }
         block.k_table_control_polarity * physical_voltage
+    }
+
+    fn ensure_block_port_indices(&mut self) {
+        if self.block_port_indices.len() == self.blocks.len()
+            && self
+                .block_port_indices
+                .iter()
+                .all(|ports| !ports.is_empty())
+        {
+            return;
+        }
+        self.block_port_indices = (0..self.blocks.len()).map(|idx| vec![idx]).collect();
+    }
+
+    fn primary_port_for_block(&self, block_idx: usize) -> Option<usize> {
+        self.block_port_indices
+            .get(block_idx)
+            .and_then(|ports| ports.first().copied())
+            .or_else(|| (block_idx < self.n_ports).then_some(block_idx))
+    }
+
+    fn port_is_block_owned(&self, port_idx: usize) -> bool {
+        self.block_port_indices
+            .iter()
+            .any(|ports| ports.contains(&port_idx))
+            || port_idx < self.blocks.len()
+    }
+
+    fn scatter_owned_block_ports(
+        &mut self,
+        block_idx: usize,
+        a: &[f64],
+        serial_input: f64,
+        update_state: bool,
+        b_out: &mut [f64],
+    ) -> f64 {
+        let Some(primary_port) = self.primary_port_for_block(block_idx) else {
+            return 0.0;
+        };
+        let incident = a.get(primary_port).copied().unwrap_or(0.0)
+            + if block_idx == 0 { serial_input } else { 0.0 };
+        let (output_voltage, primary_reflected) =
+            Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
+
+        if let Some(port_indices) = self.block_port_indices.get(block_idx) {
+            let is_multiport_block = port_indices.len() > 1;
+            if primary_port < b_out.len() {
+                b_out[primary_port] = if is_multiport_block {
+                    2.0 * incident - a.get(primary_port).copied().unwrap_or(0.0)
+                } else {
+                    primary_reflected
+                };
+            }
+
+            for &port_idx in port_indices.iter().skip(1) {
+                if port_idx < b_out.len() {
+                    b_out[port_idx] =
+                        2.0 * output_voltage - a.get(port_idx).copied().unwrap_or(0.0);
+                }
+            }
+        } else if primary_port < b_out.len() {
+            b_out[primary_port] = primary_reflected;
+        }
+
+        output_voltage
     }
 
     fn block_root_incident(block: &mut KMethodBlock, b_tree: f64, ctrl: f64) -> f64 {
@@ -6074,34 +6349,242 @@ impl BlockwiseKMethodStage {
         &mut self,
         include_cascade: bool,
         update_state: bool,
+        serial_input: f64,
         mut block_outputs: Option<&mut alloc::vec::Vec<f64>>,
     ) -> f64 {
         let mut cascade_drive = 0.0;
         let mut cascade_out = 0.0;
         for i in 0..self.blocks.len() {
             let v_coupling = (self.work_a[i] + self.work_b[i]) / 2.0;
-            let v_block = if include_cascade && i > 0 {
-                v_coupling + cascade_drive
+            let v_block = if include_cascade {
+                v_coupling + if i == 0 { serial_input } else { cascade_drive }
             } else {
                 v_coupling
             };
-            let (a_root, _, raw_cascade, ac_cascade) = if update_state {
+            let (a_root, _, _raw_cascade, ac_cascade) = if update_state {
                 Self::solve_block_and_update_state(&mut self.blocks[i], v_block)
             } else {
                 Self::solve_block_without_state_update(&mut self.blocks[i], v_block)
             };
-            cascade_drive = raw_cascade;
+            cascade_drive = ac_cascade;
             cascade_out = ac_cascade;
-            self.work_b[i] = if include_cascade && i > 0 {
-                0.0
-            } else {
-                a_root
-            };
+            let _ = a_root;
+            self.work_b[i] = 2.0 * v_coupling - self.work_a[i];
             if let Some(outputs) = block_outputs.as_deref_mut() {
                 outputs.push(ac_cascade);
             }
         }
         cascade_out
+    }
+
+    fn solve_block_port(block: &mut KMethodBlock, incident: f64, update_state: bool) -> (f64, f64) {
+        if !incident.is_finite() {
+            return (0.0, 0.0);
+        }
+        let (_, _, _, port_voltage) = if update_state {
+            Self::solve_block_and_update_state(block, incident)
+        } else {
+            Self::solve_block_without_state_update(block, incident)
+        };
+        if !port_voltage.is_finite() {
+            return (0.0, -incident);
+        }
+        let reflected = 2.0 * port_voltage - incident;
+        if reflected.is_finite() {
+            (port_voltage, reflected)
+        } else {
+            (0.0, -incident)
+        }
+    }
+
+    fn vs_voltage_for_port(&self, port_idx: usize, vs_signals: &[f64]) -> Option<f64> {
+        self.vs_port_map
+            .iter()
+            .enumerate()
+            .find_map(|(signal_idx, (name, idx))| {
+                if *idx != port_idx {
+                    return None;
+                }
+                Some(if name.starts_with("_supply_") {
+                    self.supply_voltage
+                } else {
+                    vs_signals.get(signal_idx).copied().unwrap_or(0.0)
+                })
+            })
+    }
+
+    fn coupled_eval_b_for_a(
+        &mut self,
+        a: &[f64],
+        vs_signals: &[f64],
+        serial_input: f64,
+        update_state: bool,
+        b_out: &mut [f64],
+    ) -> f64 {
+        let mut output = 0.0;
+        for v in b_out.iter_mut() {
+            *v = 0.0;
+        }
+        for block_idx in 0..self.blocks.len() {
+            let block_output =
+                self.scatter_owned_block_ports(block_idx, a, serial_input, update_state, b_out);
+            if block_idx == self.output_block {
+                output = block_output;
+            }
+        }
+        for i in 0..self.n_ports {
+            if self.port_is_block_owned(i) {
+                continue;
+            } else if let Some(v) = self.vs_voltage_for_port(i, vs_signals) {
+                b_out[i] = 2.0 * v - a.get(i).copied().unwrap_or(0.0);
+            } else {
+                b_out[i] = -a.get(i).copied().unwrap_or(0.0);
+            }
+
+            if !b_out[i].is_finite() {
+                b_out[i] = -a.get(i).copied().unwrap_or(0.0);
+            }
+        }
+        output
+    }
+
+    fn coupled_scatter_from_b(&self, b: &[f64], a_out: &mut [f64]) {
+        let n = self.n_ports;
+        for i in 0..n {
+            let mut sum = 0.0;
+            for j in 0..n {
+                sum += self.coupling_s[i * n + j] * b[j];
+            }
+            a_out[i] = if sum.is_finite() { sum } else { 0.0 };
+        }
+    }
+
+    fn coupled_solve_newton(&mut self, vs_signals: &[f64], serial_input: f64) -> (f64, bool) {
+        let n = self.n_ports;
+        if n == 0 {
+            return (0.0, true);
+        }
+
+        let mut a = if self.work_a.len() == n {
+            self.work_a.clone()
+        } else {
+            vec![0.0; n]
+        };
+        let mut b = vec![0.0; n];
+        let mut f = vec![0.0; n];
+        let mut g = vec![0.0; n];
+        let mut j = vec![0.0; n * n];
+        let mut rhs = vec![0.0; n];
+        let mut db_da = vec![0.0; n * n];
+        let mut output = 0.0;
+        let eps = 1.0e-5;
+
+        for _ in 0..Self::MAX_ITER {
+            output = self.coupled_eval_b_for_a(&a, vs_signals, serial_input, false, &mut b);
+            self.coupled_scatter_from_b(&b, &mut f);
+
+            let mut max_err: f64 = 0.0;
+            for i in 0..n {
+                g[i] = a[i] - f[i];
+                max_err = max_err.max(g[i].abs());
+            }
+            if max_err < Self::TOL {
+                self.work_a.copy_from_slice(&a);
+                self.work_b.copy_from_slice(&b);
+                return (output, true);
+            }
+
+            for col in 0..n {
+                let h = eps * a[col].abs().max(1.0);
+                let mut a_hi = a.clone();
+                let mut a_lo = a.clone();
+                a_hi[col] += h;
+                a_lo[col] -= h;
+
+                let mut b_hi = vec![0.0; n];
+                let mut b_lo = vec![0.0; n];
+                self.coupled_eval_b_for_a(&a_hi, vs_signals, serial_input, false, &mut b_hi);
+                self.coupled_eval_b_for_a(&a_lo, vs_signals, serial_input, false, &mut b_lo);
+
+                for row in 0..n {
+                    let derivative = (b_hi[row] - b_lo[row]) / (2.0 * h);
+                    db_da[row * n + col] = if derivative.is_finite() {
+                        derivative
+                    } else {
+                        0.0
+                    };
+                }
+            }
+
+            for row in 0..n {
+                for col in 0..n {
+                    let mut coupling_derivative = 0.0;
+                    for k in 0..n {
+                        coupling_derivative += self.coupling_s[row * n + k] * db_da[k * n + col];
+                    }
+                    j[row * n + col] = if row == col { 1.0 } else { 0.0 } - coupling_derivative;
+                }
+                rhs[row] = -g[row];
+            }
+
+            if !crate::elements::nonlinear::solver::solve_small_linear(n, &mut j, &mut rhs) {
+                break;
+            }
+
+            let mut max_step: f64 = 0.0;
+            for i in 0..n {
+                let step = rhs[i].clamp(-1.0, 1.0);
+                a[i] += step;
+                if !a[i].is_finite() {
+                    a[i] = 0.0;
+                }
+                max_step = max_step.max(step.abs());
+            }
+            if max_step < Self::TOL {
+                self.work_a.copy_from_slice(&a);
+                self.work_b.copy_from_slice(&b);
+                return (output, true);
+            }
+        }
+
+        output = self.coupled_eval_b_for_a(&a, vs_signals, serial_input, false, &mut b);
+        self.work_a.copy_from_slice(&a);
+        self.work_b.copy_from_slice(&b);
+        (output, false)
+    }
+
+    fn run_coupled_blocks(
+        &mut self,
+        update_state: bool,
+        serial_input: f64,
+        mut block_outputs: Option<&mut alloc::vec::Vec<f64>>,
+    ) -> f64 {
+        let n_blocks = self.blocks.len();
+        let a = self.work_a.clone();
+        let mut b = self.work_b.clone();
+        let mut output = 0.0;
+        for i in 0..n_blocks {
+            let port_voltage =
+                self.scatter_owned_block_ports(i, &a, serial_input, update_state, &mut b);
+            if i == self.output_block {
+                output = port_voltage;
+            }
+            if let Some(outputs) = block_outputs.as_deref_mut() {
+                outputs.push(port_voltage);
+            }
+        }
+        for block_ports in &self.block_port_indices {
+            for &port_idx in block_ports {
+                if port_idx < self.work_b.len() && port_idx < b.len() {
+                    self.work_b[port_idx] = if update_state {
+                        b[port_idx]
+                    } else {
+                        0.5 * self.work_b[port_idx] + 0.5 * b[port_idx]
+                    };
+                }
+            }
+        }
+        output
     }
 
     pub fn debug_process_with_block_outputs(
@@ -6112,12 +6595,24 @@ impl BlockwiseKMethodStage {
             self.init_buffers();
         }
 
-        self.write_vs_ports(vs_signals);
-        self.scatter_coupling();
-
         let mut outputs = alloc::vec::Vec::with_capacity(self.blocks.len());
-        let cascade = self.run_block_cascade(true, true, Some(&mut outputs));
-        (cascade, outputs)
+        let output = if matches!(
+            self.solve_mode,
+            BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
+        ) {
+            if self.solve_mode == BlockwiseSolveMode::CoupledNewton {
+                let _ = self.coupled_solve_newton(vs_signals, 0.0);
+            } else {
+                self.write_vs_ports(vs_signals);
+                self.scatter_coupling();
+            }
+            self.run_coupled_blocks(true, 0.0, Some(&mut outputs))
+        } else {
+            self.write_vs_ports(vs_signals);
+            self.scatter_coupling();
+            self.run_block_cascade(true, true, 0.0, Some(&mut outputs))
+        };
+        (output, outputs)
     }
 
     fn block_output_voltage(block: &KMethodBlock, a_root: f64, b_tree: f64) -> f64 {
@@ -6284,14 +6779,14 @@ impl BlockwiseKMethodStage {
         // Run 2000 samples of silence — enough for caps to reach DC equilibrium
         let zeros = vec![0.0; self.vs_port_map.len()];
         for _ in 0..2000 {
-            self.process_inner(&zeros, false);
+            self.process_inner(&zeros, false, 0.0);
         }
         // Record the converged DC state — use the same extraction method
         // as the cascade (cap voltage for cascade_from_passive, root port otherwise).
         // This ensures the DC offset matches what process() subtracts.
         //
         // Run one more sample at DC to get the final voltages.
-        self.process_inner(&zeros, false);
+        self.process_inner(&zeros, false, 0.0);
         let n_blocks = self.blocks.len();
         for i in 0..n_blocks {
             // Re-extract at the current converged state
@@ -6334,6 +6829,7 @@ impl BlockwiseKMethodStage {
 
     /// Allocate work buffers after deserialization.
     pub fn init_buffers(&mut self) {
+        self.ensure_block_port_indices();
         let n = self.n_ports;
         if self.work_b.len() != n {
             self.work_b = vec![0.0; n];
@@ -6343,6 +6839,9 @@ impl BlockwiseKMethodStage {
         // Ensure K-table scales are precomputed
         for block in &mut self.blocks {
             block.k_table.precompute_scales();
+        }
+        if let Some(core) = &mut self.diode_ladder_core {
+            core.init();
         }
     }
 
@@ -6363,7 +6862,18 @@ impl BlockwiseKMethodStage {
     /// in scattering order (matching `vs_port_map`). These are the input
     /// signals (audio, VCO, CV) that drive the coupling network.
     pub fn process(&mut self, vs_signals: &[f64]) -> f64 {
-        self.process_inner(vs_signals, true)
+        self.process_with_serial_input(0.0, vs_signals)
+    }
+
+    /// Process one sample with a serial audio drive plus named control/source
+    /// voltages.
+    ///
+    /// Some compiler splits put the input resistor in an earlier stage, leaving
+    /// BKM with only CV and supply VS ports. In that case the processor feeds
+    /// the current serial audio sample here instead of requiring a synthetic
+    /// `audio_in` coupling port.
+    pub fn process_with_serial_input(&mut self, serial_input: f64, vs_signals: &[f64]) -> f64 {
+        self.process_inner(vs_signals, true, serial_input)
     }
 
     pub fn debug_process_without_feedback_ports(&mut self, vs_signals: &[f64]) -> f64 {
@@ -6378,12 +6888,35 @@ impl BlockwiseKMethodStage {
             }
         }
         self.scatter_coupling();
-        self.run_block_cascade(true, true, None)
+        if matches!(
+            self.solve_mode,
+            BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
+        ) {
+            self.run_coupled_blocks(true, 0.0, None)
+        } else {
+            self.run_block_cascade(true, true, 0.0, None)
+        }
     }
 
-    fn process_inner(&mut self, vs_signals: &[f64], include_cascade: bool) -> f64 {
+    fn process_inner(
+        &mut self,
+        vs_signals: &[f64],
+        include_cascade: bool,
+        serial_input: f64,
+    ) -> f64 {
         if self.work_b.len() != self.n_ports {
             self.init_buffers();
+        }
+
+        if matches!(self.solve_mode, BlockwiseSolveMode::DiodeLadderCore) {
+            return self.process_diode_ladder_core(vs_signals, serial_input);
+        }
+
+        if matches!(
+            self.solve_mode,
+            BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
+        ) {
+            return self.process_coupled_fixed_point(vs_signals, serial_input);
         }
 
         self.update_shared_diode_cutoff_bias_from_ports(vs_signals);
@@ -6409,7 +6942,7 @@ impl BlockwiseKMethodStage {
             //    coupling contribution (bias from supply, feedback, etc.).
             //    Block 0: VS from coupling only (input + feedback + bias).
             //    Blocks 1+: VS = previous output + coupling bias.
-            let output = self.run_block_cascade(include_cascade, false, None);
+            let output = self.run_block_cascade(include_cascade, false, serial_input, None);
 
             // 3. Feed current cascade output back into coupling ports for the
             // next Newton iteration.
@@ -6425,12 +6958,96 @@ impl BlockwiseKMethodStage {
         // Backward sweep: update cap states with converged cascade. The
         // observable output must come from this pass because reactive WDF
         // state is committed here.
-        let output = self.run_block_cascade(include_cascade, true, None);
+        let output = self.run_block_cascade(include_cascade, true, serial_input, None);
 
         // Save warm-start for next sample
         self.b_warm[0] = output;
 
         // Guard against NaN
+        if output.is_finite() {
+            output
+        } else {
+            0.0
+        }
+    }
+
+    fn process_diode_ladder_core(&mut self, vs_signals: &[f64], serial_input: f64) -> f64 {
+        let cutoff_cv = self
+            .cutoff_cv_port
+            .as_ref()
+            .and_then(|cutoff_name| self.signal_voltage_by_name(cutoff_name, vs_signals))
+            .unwrap_or(0.0);
+        let cutoff_series_resistance = self.shared_diode_cutoff_pot.as_ref().and_then(|comp_id| {
+            self.coupling_elements
+                .iter()
+                .find(|element| &element.comp_id == comp_id)
+                .map(|element| element.resistance)
+        });
+
+        let mut input = serial_input;
+        for name in ["audio_in", "vco_in"] {
+            if let Some(v) = self.signal_voltage_by_name(name, vs_signals) {
+                input += v;
+            }
+        }
+
+        let Some(core) = &mut self.diode_ladder_core else {
+            return 0.0;
+        };
+        let output = core.process(
+            input as Wave,
+            self.supply_voltage,
+            cutoff_cv,
+            cutoff_series_resistance,
+        ) as f64;
+        self.b_warm[0] = output;
+        output
+    }
+
+    fn signal_voltage_by_name(&self, needle: &str, vs_signals: &[f64]) -> Option<f64> {
+        self.vs_port_map
+            .iter()
+            .enumerate()
+            .find_map(|(idx, (name, _))| {
+                if name == needle {
+                    Some(vs_signals.get(idx).copied().unwrap_or(0.0))
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn process_coupled_fixed_point(&mut self, vs_signals: &[f64], serial_input: f64) -> f64 {
+        self.update_shared_diode_cutoff_bias_from_ports(vs_signals);
+
+        if self.solve_mode == BlockwiseSolveMode::CoupledNewton {
+            let (_output, _converged) = self.coupled_solve_newton(vs_signals, serial_input);
+            let mut b = vec![0.0; self.n_ports];
+            let a = self.work_a.clone();
+            let output = self.coupled_eval_b_for_a(&a, vs_signals, serial_input, true, &mut b);
+            self.work_b.copy_from_slice(&b);
+            self.b_warm[0] = output;
+            return if output.is_finite() { output } else { 0.0 };
+        }
+
+        let mut last_output = self.b_warm[0];
+
+        for _iter in 0..Self::MAX_ITER {
+            self.write_vs_ports(vs_signals);
+            self.scatter_coupling();
+            let output = self.run_coupled_blocks(false, serial_input, None);
+
+            if (output - last_output).abs() < Self::TOL {
+                break;
+            }
+            last_output = output;
+        }
+
+        self.write_vs_ports(vs_signals);
+        self.scatter_coupling();
+        let output = self.run_coupled_blocks(true, serial_input, None);
+        self.b_warm[0] = output;
+
         if output.is_finite() {
             output
         } else {
@@ -6510,6 +7127,7 @@ mod blockwise_k_method_tests {
             source_polarity: 1.0,
             k_table_control_polarity: 1.0,
             shared_diode_bias_voltage: None,
+            control_from_drive: true,
         }
     }
 
@@ -6537,6 +7155,70 @@ mod blockwise_k_method_tests {
         assert!(
             (drive + 0.25).abs() < 1e-9 && (control - 0.25).abs() < 1e-9,
             "BKM must allow WDF source orientation to differ from K-table bias/control orientation"
+        );
+    }
+
+    #[test]
+    fn bkm_can_decouple_k_table_control_from_drive_voltage() {
+        let mut block = test_block(1.0);
+        block.control_from_drive = false;
+
+        let drive = BlockwiseKMethodStage::block_drive_voltage(&block, 0.75);
+        let control = BlockwiseKMethodStage::block_control_voltage(&block, 0.75);
+
+        assert!((drive - 0.75).abs() < 1e-12);
+        assert!(
+            control.abs() < 1e-12,
+            "differential ladder rung K-table control is shared tail current, not local drive voltage"
+        );
+    }
+
+    #[test]
+    fn bkm_serial_input_drives_first_block_when_audio_port_is_split_out() {
+        let mut stage = BlockwiseKMethodStage {
+            blocks: vec![{
+                let mut block = test_block(1.0);
+                block.k_table = one_dimensional_table();
+                block
+            }],
+            coupling_s: vec![0.0],
+            coupling_rp: vec![1.0],
+            coupling_n_mna: 0,
+            coupling_ports: vec![crate::tree::WdfPort {
+                node_pos: None,
+                node_neg: None,
+                resistance: 1.0,
+            }],
+            block_port_indices: vec![vec![0]],
+            coupling_elements: vec![],
+            n_ports: 1,
+            output_block: 0,
+            supply_voltage: 9.0,
+            vs_port_map: vec![],
+            cutoff_cv_port: None,
+            shared_diode_cutoff_pot: None,
+            feedback_port_map: vec![],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::Cascade,
+            diode_ladder_core: None,
+            b_warm: vec![0.0],
+            work_b: vec![0.0],
+            work_a: vec![0.0],
+            port_index_cache: vec![],
+        };
+
+        let silent = stage.process(&[]);
+        let driven = stage.process_with_serial_input(0.5, &[]);
+
+        assert!(silent.abs() < 1e-12);
+        assert!(
+            driven.abs() > 1e-6,
+            "BKM must accept serial audio input when the compiler split the named audio port into an earlier stage"
         );
     }
 
@@ -6586,6 +7268,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
             n_ports: 1,
             output_block: 0,
@@ -6600,6 +7283,8 @@ mod blockwise_k_method_tests {
             ),
             signal_flow_distance: 0,
             bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::Cascade,
+            diode_ladder_core: None,
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![0.0],
@@ -6628,6 +7313,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
             n_ports: 1,
             output_block: 0,
@@ -6642,6 +7328,8 @@ mod blockwise_k_method_tests {
             ),
             signal_flow_distance: 0,
             bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::Cascade,
+            diode_ladder_core: None,
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![1.25],
@@ -6675,6 +7363,7 @@ mod blockwise_k_method_tests {
                     resistance: 1.0,
                 },
             ],
+            block_port_indices: vec![vec![0]],
             coupling_elements: vec![CouplingElement {
                 comp_id: alloc::string::String::from("Resonance"),
                 node_a: Some(0),
@@ -6697,6 +7386,8 @@ mod blockwise_k_method_tests {
             ),
             signal_flow_distance: 0,
             bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::Cascade,
+            diode_ladder_core: None,
             b_warm: vec![0.0, 0.0],
             work_b: vec![0.0, 123.0],
             work_a: vec![0.0, 5.0],
@@ -6724,6 +7415,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            block_port_indices: vec![vec![0]],
             coupling_elements: vec![CouplingElement {
                 comp_id: alloc::string::String::from("Resonance"),
                 node_a: Some(0),
@@ -6746,6 +7438,8 @@ mod blockwise_k_method_tests {
             ),
             signal_flow_distance: 0,
             bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::Cascade,
+            diode_ladder_core: None,
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![0.25],
@@ -6809,6 +7503,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            block_port_indices: vec![vec![0], vec![0]],
             coupling_elements: vec![CouplingElement {
                 comp_id: alloc::string::String::from("Cutoff"),
                 node_a: Some(0),
@@ -6831,6 +7526,8 @@ mod blockwise_k_method_tests {
             ),
             signal_flow_distance: 0,
             bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::Cascade,
+            diode_ladder_core: None,
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![0.0],
@@ -6871,6 +7568,77 @@ mod blockwise_k_method_tests {
             ratio > 0.35 && ratio < 0.85,
             "3V cutoff CV should follow diode dynamic resistance from R_bias/R_cv, \
              not the old 2^-3 octave heuristic: r0={r_0v:.3}, r3={r_3v:.3}, ratio={ratio:.3}"
+        );
+    }
+
+    #[test]
+    fn diode_ladder_core_adds_four_lowpass_poles() {
+        let steps = 64;
+        let mut entries = Vec::with_capacity(steps);
+        for ib in 0..steps {
+            let v = -1.0 + (ib as f64 / (steps - 1) as f64) * 2.0;
+            entries.push((v / (2.0 * 0.026)).tanh() as Wave);
+        }
+        let mut table = KTable {
+            dims: 1,
+            b_min: -1.0,
+            b_max: 1.0,
+            ctrl_min: 0.0,
+            ctrl_max: 0.0,
+            steps,
+            entries,
+            inv_b_scale: 0.0,
+            inv_c_scale: 0.0,
+        };
+        table.precompute_scales();
+        let mut current_table = KTable {
+            dims: 2,
+            b_min: 100_000.0,
+            b_max: 1_100_000.0,
+            ctrl_min: 0.0,
+            ctrl_max: 14.0,
+            steps: 2,
+            entries: vec![
+                5.0e-6 as Wave,
+                5.0e-6 as Wave,
+                5.0e-6 as Wave,
+                5.0e-6 as Wave,
+            ],
+            inv_b_scale: 0.0,
+            inv_c_scale: 0.0,
+        };
+        current_table.precompute_scales();
+        let mut low = DiodeLadderCore::new(
+            table.clone(),
+            vec![33.0e-9; 4],
+            48_000.0,
+            1.0,
+            0.026,
+            current_table,
+            5.0e-6,
+            10.0e-6,
+            100_000.0,
+        );
+        let mut high = low.clone();
+        let measure = |core: &mut DiodeLadderCore, freq: f64| {
+            for i in 0..9600 {
+                let x = 0.01 * (2.0 * core::f64::consts::PI * freq * i as f64 / 48_000.0).sin();
+                let _ = core.process(x as Wave, 9.0, 0.0, Some(1_000_000.0));
+            }
+            let mut sum = 0.0 as Wave;
+            for i in 0..9600 {
+                let x = 0.01 * (2.0 * core::f64::consts::PI * freq * i as f64 / 48_000.0).sin();
+                let y = core.process(x as Wave, 9.0, 0.0, Some(1_000_000.0));
+                sum += y * y;
+            }
+            crate::math::sqrt((sum / 9600.0 as Wave) as f64)
+        };
+
+        let y_low = measure(&mut low, 100.0);
+        let y_high = measure(&mut high, 10_000.0);
+        assert!(
+            y_low > y_high * 20.0,
+            "ladder core should be a strong four-pole lowpass: low={y_low}, high={y_high}"
         );
     }
 }

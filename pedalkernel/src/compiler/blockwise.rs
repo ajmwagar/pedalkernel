@@ -15,6 +15,21 @@ use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Compiler-recognized topology for a blockwise nonlinear unit.
+///
+/// Keep these generic graph shapes rather than pedal-specific names. The
+/// builder can then choose a specialized realtime primitive without baking
+/// TB303/EMS/etc. knowledge into the compiler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum BlockTopology {
+    Generic,
+    DifferentialDiodeRung {
+        left_comp_idx: usize,
+        right_comp_idx: usize,
+        reactive_edge: usize,
+    },
+}
+
 /// A block in the blockwise decomposition — one NL device + its local state.
 #[derive(Debug)]
 pub struct Block {
@@ -26,6 +41,21 @@ pub struct Block {
     pub reactive_edges: Vec<usize>,
     /// Port nodes — where this block connects to the coupling network.
     pub port_nodes: Vec<NodeId>,
+    /// Recognized block topology.
+    pub topology: BlockTopology,
+}
+
+/// External electrical boundary of a compiler-recognized differential rung.
+///
+/// A diode-connected BJT rung is not a one-port element. The top pair is the
+/// two shorted base/collector nodes, and the bottom pair is the two emitter
+/// nodes bridged by the rung capacitor. Adjacent rungs share these boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DifferentialRungPorts {
+    pub top_left: NodeId,
+    pub top_right: NodeId,
+    pub bottom_left: NodeId,
+    pub bottom_right: NodeId,
 }
 
 impl Block {
@@ -64,6 +94,7 @@ impl BlockwisePlan {
 
 /// An NL block found in the SPQR tree: a P-node whose children are
 /// NL Q-leaves from the same component.
+#[derive(Clone)]
 struct NlBlock {
     /// The NL edge indices (from Q-leaf children of the P-node).
     nl_edges: Vec<usize>,
@@ -71,6 +102,118 @@ struct NlBlock {
     nodes: Vec<NodeId>,
     /// Component index of the NL device.
     comp_idx: usize,
+}
+
+fn find_root(parent: &mut [usize], idx: usize) -> usize {
+    if parent[idx] != idx {
+        let root = find_root(parent, parent[idx]);
+        parent[idx] = root;
+    }
+    parent[idx]
+}
+
+fn union_roots(parent: &mut [usize], a: usize, b: usize) {
+    let ra = find_root(parent, a);
+    let rb = find_root(parent, b);
+    if ra != rb {
+        parent[rb] = ra;
+    }
+}
+
+fn merge_differential_reactive_rungs(
+    nl_blocks: Vec<NlBlock>,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+) -> (Vec<NlBlock>, Vec<Vec<usize>>, HashSet<usize>) {
+    if nl_blocks.len() < 2 {
+        return (nl_blocks, Vec::new(), HashSet::new());
+    }
+
+    let mut output_node_to_block: HashMap<NodeId, usize> = HashMap::new();
+    for (bi, block) in nl_blocks.iter().enumerate() {
+        if let Some((_, emitter)) = diode_connected_bjt_nodes(block.comp_idx, graph) {
+            output_node_to_block.insert(emitter, bi);
+        } else if let Some((_, output)) = nl_block_direction_nodes(block, graph) {
+            output_node_to_block.insert(output, bi);
+        }
+    }
+
+    let mut parent: Vec<usize> = (0..nl_blocks.len()).collect();
+    let mut rung_reactive_edges = Vec::new();
+
+    for &eidx in edge_indices {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Reactive {
+            continue;
+        }
+        let edge = &graph.edges[eidx];
+        let Some(&a_block) = output_node_to_block.get(&edge.node_a) else {
+            continue;
+        };
+        let Some(&b_block) = output_node_to_block.get(&edge.node_b) else {
+            continue;
+        };
+        if a_block == b_block {
+            continue;
+        }
+        union_roots(&mut parent, a_block, b_block);
+        rung_reactive_edges.push((eidx, a_block, b_block));
+    }
+
+    if rung_reactive_edges.is_empty() {
+        let preassigned = vec![Vec::new(); nl_blocks.len()];
+        return (nl_blocks, preassigned, HashSet::new());
+    }
+
+    let mut root_to_new: HashMap<usize, usize> = HashMap::new();
+    let mut merged = Vec::<NlBlock>::new();
+    let mut old_to_new = vec![0usize; nl_blocks.len()];
+
+    for (old_idx, block) in nl_blocks.iter().enumerate() {
+        let root = find_root(&mut parent, old_idx);
+        let new_idx = *root_to_new.entry(root).or_insert_with(|| {
+            let idx = merged.len();
+            merged.push(NlBlock {
+                nl_edges: Vec::new(),
+                nodes: Vec::new(),
+                comp_idx: block.comp_idx,
+            });
+            idx
+        });
+        old_to_new[old_idx] = new_idx;
+        merged[new_idx]
+            .nl_edges
+            .extend(block.nl_edges.iter().copied());
+        for &node in &block.nodes {
+            if !merged[new_idx].nodes.contains(&node) {
+                merged[new_idx].nodes.push(node);
+            }
+        }
+    }
+
+    let mut preassigned_reactive = vec![Vec::new(); merged.len()];
+    let mut preassigned_set = HashSet::new();
+    for (eidx, a_block, _) in rung_reactive_edges {
+        let new_idx = old_to_new[a_block];
+        preassigned_reactive[new_idx].push(eidx);
+        preassigned_set.insert(eidx);
+        let edge = &graph.edges[eidx];
+        for node in [edge.node_a, edge.node_b] {
+            if !merged[new_idx].nodes.contains(&node) {
+                merged[new_idx].nodes.push(node);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    if merged.len() != nl_blocks.len() {
+        eprintln!(
+            "  [blockwise] merged differential reactive rungs: {} NL blocks → {} rung blocks",
+            nl_blocks.len(),
+            merged.len()
+        );
+    }
+
+    (merged, preassigned_reactive, preassigned_set)
 }
 
 fn component_pin_node(graph: &CircuitGraph, comp_id: &str, pin: &str) -> Option<NodeId> {
@@ -91,13 +234,16 @@ fn nl_block_direction_nodes(block: &NlBlock, graph: &CircuitGraph) -> Option<(No
                 .find(|&&p| p != input && p != output)
                 .and_then(|&pin| component_pin_node(graph, &comp.id, pin));
 
-            // Diode-connected transistor ladders short the declared input/output
-            // pins and take the stage output from the common terminal. This makes
-            // each block directional as base/collector -> emitter.
+            // Diode-connected transistor ladder rungs short the declared
+            // amplifier input/output pins. In a differential diode ladder the
+            // signal current enters at the common terminal and propagates to
+            // the shorted base/collector node of the next rung, so the
+            // compiler must order these as emitter -> base/collector. This is
+            // a topology rule, not a TB303 naming rule.
             if input_node == output_node {
                 let common_node = common_node?;
                 if block.nodes.contains(&input_node) && block.nodes.contains(&common_node) {
-                    return Some((input_node, common_node));
+                    return Some((common_node, input_node));
                 }
             }
 
@@ -118,6 +264,352 @@ fn nl_block_direction_nodes(block: &NlBlock, graph: &CircuitGraph) -> Option<(No
         }
         super::component::SignalTerminals::Passive => None,
     }
+}
+
+fn diode_connected_bjt_nodes(comp_idx: usize, graph: &CircuitGraph) -> Option<(NodeId, NodeId)> {
+    let comp = &graph.components[comp_idx];
+    let eidx = graph
+        .edges
+        .iter()
+        .position(|edge| edge.comp_idx == comp_idx)?;
+    let edge = &graph.edges[eidx];
+    let (kind, _) = comp.kind.classify_nonlinear(
+        &comp.id,
+        edge.node_a,
+        edge.node_b,
+        graph.gnd_node,
+        &graph.node_names,
+    )?;
+
+    match kind {
+        super::classify::NonlinearKind::BjtNpn {
+            base_node,
+            collector_node,
+            emitter_node,
+            ..
+        }
+        | super::classify::NonlinearKind::BjtPnp {
+            base_node,
+            collector_node,
+            emitter_node,
+            ..
+        } if base_node == collector_node => Some((base_node, emitter_node)),
+        _ => None,
+    }
+}
+
+fn classify_block_topology(
+    nl_edges: &[usize],
+    reactive_edges: &[usize],
+    graph: &CircuitGraph,
+) -> BlockTopology {
+    let mut comp_indices: Vec<usize> = nl_edges
+        .iter()
+        .map(|&eidx| graph.edges[eidx].comp_idx)
+        .collect();
+    comp_indices.sort_unstable();
+    comp_indices.dedup();
+
+    if comp_indices.len() != 2 {
+        return BlockTopology::Generic;
+    }
+
+    let Some((_, left_emitter)) = diode_connected_bjt_nodes(comp_indices[0], graph) else {
+        return BlockTopology::Generic;
+    };
+    let Some((_, right_emitter)) = diode_connected_bjt_nodes(comp_indices[1], graph) else {
+        return BlockTopology::Generic;
+    };
+
+    for &eidx in reactive_edges {
+        let edge = &graph.edges[eidx];
+        let connects_emitters = (edge.node_a == left_emitter && edge.node_b == right_emitter)
+            || (edge.node_a == right_emitter && edge.node_b == left_emitter);
+        if connects_emitters {
+            return BlockTopology::DifferentialDiodeRung {
+                left_comp_idx: comp_indices[0],
+                right_comp_idx: comp_indices[1],
+                reactive_edge: eidx,
+            };
+        }
+    }
+
+    BlockTopology::Generic
+}
+
+pub(super) fn differential_rung_ports(
+    block: &Block,
+    graph: &CircuitGraph,
+) -> Option<DifferentialRungPorts> {
+    let BlockTopology::DifferentialDiodeRung {
+        left_comp_idx,
+        right_comp_idx,
+        ..
+    } = block.topology
+    else {
+        return None;
+    };
+
+    let (left_top, left_emitter) = diode_connected_bjt_nodes(left_comp_idx, graph)?;
+    let (right_top, right_emitter) = diode_connected_bjt_nodes(right_comp_idx, graph)?;
+    Some(DifferentialRungPorts {
+        top_left: left_top,
+        top_right: right_top,
+        bottom_left: left_emitter,
+        bottom_right: right_emitter,
+    })
+}
+
+fn differential_rung_port_nodes(block: &Block, graph: &CircuitGraph) -> Option<(NodeId, NodeId)> {
+    let ports = differential_rung_ports(block, graph)?;
+    Some((ports.bottom_left, ports.bottom_right))
+}
+
+fn bjt_model_name_for_comp(comp_idx: usize, graph: &CircuitGraph) -> Option<String> {
+    let comp = &graph.components[comp_idx];
+    let eidx = graph
+        .edges
+        .iter()
+        .position(|edge| edge.comp_idx == comp_idx)?;
+    let edge = &graph.edges[eidx];
+    let (kind, _) = comp.kind.classify_nonlinear(
+        &comp.id,
+        edge.node_a,
+        edge.node_b,
+        graph.gnd_node,
+        &graph.node_names,
+    )?;
+
+    match kind {
+        super::classify::NonlinearKind::BjtNpn { model_name, .. }
+        | super::classify::NonlinearKind::BjtPnp { model_name, .. } => Some(model_name),
+        _ => None,
+    }
+}
+
+fn build_differential_diode_rung_stage(
+    block: &Block,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    supply_voltage: f64,
+) -> Option<pedalkernel_rt::stage::WdfStage> {
+    let BlockTopology::DifferentialDiodeRung {
+        left_comp_idx,
+        reactive_edge,
+        ..
+    } = block.topology
+    else {
+        return None;
+    };
+
+    let cap_comp = &graph.components[graph.edges[reactive_edge].comp_idx];
+    let capacitance = cap_comp.kind.capacitance()?;
+    let cap_rp = 1.0 / (2.0 * sample_rate * capacitance);
+    let cap = super::dyn_node::DynNode::Capacitor(Some(cap_comp.id.clone()), capacitance, cap_rp);
+    let tree = super::spqr_build::with_voltage_source_rp(cap, 1_000.0);
+
+    let model_name = bjt_model_name_for_comp(left_comp_idx, graph)?;
+    let model = super::helpers::gummel_poon_model(&model_name);
+
+    let bias_resistance = block
+        .linear_edges
+        .iter()
+        .filter_map(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx]
+                .kind
+                .resistance()
+        })
+        .find(|r| *r > 0.0)
+        .unwrap_or(100_000.0);
+    let i_tail = ((supply_voltage - 0.6).max(0.1) / bias_resistance).max(1.0e-9);
+    let root = pedalkernel_rt::stage::RootKind::DiffPair(
+        pedalkernel_rt::elements::DiffPairRoot::from_gummel_poon(&model, i_tail),
+    );
+    let oversampler = pedalkernel_rt::oversampling::Oversampler::new(
+        pedalkernel_rt::oversampling::OversamplingFactor::X1,
+    );
+
+    let mut stage = pedalkernel_rt::stage::WdfStage::new(tree, root, oversampler);
+    stage.output_probe = Some(cap_comp.id.clone());
+    stage.root_comp_id = graph.components[left_comp_idx].id.clone();
+    Some(stage)
+}
+
+fn build_diode_ladder_core(
+    blocks: &[Block],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    supply_voltage: f64,
+) -> Option<pedalkernel_rt::stage::DiodeLadderCore> {
+    if blocks.is_empty()
+        || !blocks
+            .iter()
+            .all(|block| matches!(block.topology, BlockTopology::DifferentialDiodeRung { .. }))
+    {
+        return None;
+    }
+
+    let mut cap_values = Vec::with_capacity(blocks.len());
+    let mut first_left_comp_idx = None;
+    let mut first_bias_resistance = None;
+    for block in blocks {
+        let BlockTopology::DifferentialDiodeRung {
+            left_comp_idx,
+            reactive_edge,
+            ..
+        } = block.topology
+        else {
+            return None;
+        };
+        first_left_comp_idx.get_or_insert(left_comp_idx);
+        let cap_comp = &graph.components[graph.edges[reactive_edge].comp_idx];
+        cap_values.push(cap_comp.kind.capacitance()?);
+        if first_bias_resistance.is_none() {
+            first_bias_resistance = block
+                .linear_edges
+                .iter()
+                .filter_map(|&eidx| {
+                    graph.components[graph.edges[eidx].comp_idx]
+                        .kind
+                        .resistance()
+                })
+                .find(|r| *r > 0.0);
+        }
+    }
+
+    let model_name = bjt_model_name_for_comp(first_left_comp_idx?, graph)?;
+    let model = super::helpers::gummel_poon_model(&model_name);
+    let alpha = model.bf / (model.bf + 1.0);
+    let n_vt = model.nf * model.vt;
+    let cutoff_bias_resistance = first_bias_resistance.unwrap_or(100_000.0);
+    let cutoff_max_resistance = graph
+        .components
+        .iter()
+        .find_map(|comp| {
+            let lower = comp.id.to_ascii_lowercase();
+            if !lower.contains("cutoff") {
+                return None;
+            }
+            comp.kind
+                .as_any()
+                .downcast_ref::<super::components::Potentiometer>()
+                .map(|pot| pot.max_r)
+        })
+        .unwrap_or(100_000.0);
+    let r_min = cutoff_bias_resistance.max(1.0);
+    let r_max = (cutoff_bias_resistance + cutoff_max_resistance)
+        .max(r_min * 1.01)
+        .max(1.0);
+    let v_min = 0.0;
+    let v_max = (supply_voltage + 5.0).max(supply_voltage * 1.01).max(1.0);
+    let tail_current_table = generate_diode_ladder_tail_current_table(
+        blocks.len(),
+        n_vt,
+        model.is,
+        r_min,
+        r_max,
+        v_min,
+        v_max,
+    );
+    let i_tail_bias = tail_current_table.lookup_2d(
+        (cutoff_bias_resistance + cutoff_max_resistance * 0.5).clamp(r_min, r_max),
+        supply_voltage.clamp(v_min, v_max),
+    );
+    let i_tail_max = tail_current_table
+        .lookup_2d(r_min, v_max)
+        .max(i_tail_bias * 1.01);
+    let tanh_table = super::k_method::generate_differential_ladder_tanh_table(n_vt);
+
+    Some(pedalkernel_rt::stage::DiodeLadderCore::new(
+        tanh_table,
+        cap_values,
+        sample_rate,
+        alpha,
+        n_vt,
+        tail_current_table,
+        i_tail_bias,
+        i_tail_max,
+        cutoff_bias_resistance,
+    ))
+}
+
+fn generate_diode_ladder_tail_current_table(
+    diode_count: usize,
+    n_vt: f64,
+    diode_is: f64,
+    r_min: f64,
+    r_max: f64,
+    v_min: f64,
+    v_max: f64,
+) -> pedalkernel_rt::stage::KTable {
+    let steps = 64;
+    let diode_count = diode_count.max(1) as f64;
+    let n_vt = n_vt.max(1.0e-6);
+    let diode_is = diode_is.max(1.0e-18);
+    let mut entries = Vec::with_capacity(steps * steps);
+
+    for iv in 0..steps {
+        let v_t = iv as f64 / (steps - 1) as f64;
+        let available_voltage = v_min + v_t * (v_max - v_min);
+        for ir in 0..steps {
+            let r_t = ir as f64 / (steps - 1) as f64;
+            let series_resistance = r_min + r_t * (r_max - r_min);
+            entries.push(solve_diode_ladder_tail_current(
+                diode_count,
+                n_vt,
+                diode_is,
+                available_voltage,
+                series_resistance,
+            ) as pedalkernel_rt::Wave);
+        }
+    }
+
+    let mut table = pedalkernel_rt::stage::KTable {
+        dims: 2,
+        b_min: r_min,
+        b_max: r_max,
+        ctrl_min: v_min,
+        ctrl_max: v_max,
+        steps,
+        entries,
+        inv_b_scale: 0.0,
+        inv_c_scale: 0.0,
+    };
+    table.precompute_scales();
+    table
+}
+
+fn solve_diode_ladder_tail_current(
+    diode_count: f64,
+    n_vt: f64,
+    diode_is: f64,
+    available_voltage: f64,
+    series_resistance: f64,
+) -> f64 {
+    if available_voltage <= 0.0 {
+        return 1.0e-9;
+    }
+
+    let r = series_resistance.max(1.0);
+    let max_ohmic_current = (available_voltage / r).max(1.0e-9);
+    let mut lo = 1.0e-9_f64.min(max_ohmic_current);
+    let mut hi = max_ohmic_current.max(lo * 1.01);
+
+    // Compile-time DC operating-point analysis for the shared-current ladder.
+    // Runtime receives this as a table and only interpolates it.
+    for _ in 0..64 {
+        let mid = 0.5 * (lo + hi);
+        let diode_current = (mid * 0.5).max(1.0e-18);
+        let diode_drop = diode_count * n_vt * (1.0 + diode_current / diode_is).ln();
+        let used_voltage = mid * r + diode_drop;
+        if used_voltage > available_voltage {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+
+    (0.5 * (lo + hi)).max(1.0e-9)
 }
 
 pub(super) fn block_coupling_port_node(
@@ -520,6 +1012,9 @@ pub(super) fn analyze_blockwise(
         return None;
     }
 
+    let (nl_blocks, preassigned_reactive, preassigned_reactive_set) =
+        merge_differential_reactive_rungs(nl_blocks, edge_indices, graph);
+
     // Build NL edge set and port node map
     let nl_edge_set: HashSet<usize> = nl_blocks
         .iter()
@@ -544,11 +1039,19 @@ pub(super) fn analyze_blockwise(
         }
         s
     };
+    let external_terminal_nodes: HashSet<NodeId> = graph
+        .node_names
+        .iter()
+        .filter_map(|(name, &node)| {
+            let is_reserved = matches!(name.as_str(), "in" | "out" | "gnd" | "vcc");
+            (!is_reserved && !name.contains('.')).then_some(node)
+        })
+        .collect();
 
     // Step 2: collect non-NL edges — everything that isn't in an NL block
     let sibling_edges: Vec<usize> = edge_indices
         .iter()
-        .filter(|e| !nl_edge_set.contains(e))
+        .filter(|e| !nl_edge_set.contains(e) && !preassigned_reactive_set.contains(e))
         .copied()
         .collect();
 
@@ -599,7 +1102,11 @@ pub(super) fn analyze_blockwise(
     }
 
     let mut block_linear: Vec<Vec<usize>> = vec![Vec::new(); nl_blocks.len()];
-    let mut block_reactive: Vec<Vec<usize>> = vec![Vec::new(); nl_blocks.len()];
+    let mut block_reactive: Vec<Vec<usize>> = if preassigned_reactive.len() == nl_blocks.len() {
+        preassigned_reactive
+    } else {
+        vec![Vec::new(); nl_blocks.len()]
+    };
     #[cfg(test)]
     eprintln!("  node_to_block seed: {:?}", node_to_block);
 
@@ -789,7 +1296,9 @@ pub(super) fn analyze_blockwise(
                     let next_owned_by_other = node_owner
                         .get(&next)
                         .map_or(false, |owners| owners.iter().any(|&o| o != bi));
-                    let next_is_terminal = next == graph.in_node || next == graph.out_node;
+                    let next_is_terminal = next == graph.in_node
+                        || next == graph.out_node
+                        || external_terminal_nodes.contains(&next);
                     let is_boundary =
                         boundary_nodes.contains(&next) || next_owned_by_other || next_is_terminal;
 
@@ -880,11 +1389,15 @@ pub(super) fn analyze_blockwise(
     let mut blocks = Vec::new();
     for i in block_order {
         let nl_block = &nl_blocks[i];
+        let linear_edges = std::mem::take(&mut block_linear[i]);
+        let reactive_edges = std::mem::take(&mut block_reactive[i]);
+        let topology = classify_block_topology(&nl_block.nl_edges, &reactive_edges, graph);
         blocks.push(Block {
             nl_edges: nl_block.nl_edges.clone(),
-            linear_edges: std::mem::take(&mut block_linear[i]),
-            reactive_edges: std::mem::take(&mut block_reactive[i]),
+            linear_edges,
+            reactive_edges,
             port_nodes: nl_block.nodes.clone(),
+            topology,
         });
     }
 
@@ -952,6 +1465,22 @@ pub(super) fn try_build_blockwise(
         let block_edges = block.all_edges();
         if block_edges.is_empty() {
             continue;
+        }
+
+        if matches!(block.topology, BlockTopology::DifferentialDiodeRung { .. }) {
+            if let Some(mut wdf) =
+                build_differential_diode_rung_stage(block, graph, sample_rate, supply_voltage)
+            {
+                #[cfg(test)]
+                eprintln!(
+                    "  Block {bi}: {} edges → 1 stage, topology={:?}",
+                    block_edges.len(),
+                    block.topology
+                );
+                wdf.k_table = super::k_method::generate_k_table(&mut wdf);
+                all_stages.push(BuiltStage::Wdf(wdf));
+                continue;
+            }
         }
 
         let block_terminals =
@@ -1114,6 +1643,15 @@ pub(super) fn try_build_blockwise(
                 // own DC bias current.
                 let block_source_r = if bi == 0 {
                     first_block_source_r
+                } else if matches!(
+                    plan.blocks.get(bi).map(|block| &block.topology),
+                    Some(BlockTopology::DifferentialDiodeRung { .. })
+                ) {
+                    // Differential diode rungs are not emitter followers in a
+                    // buffered cascade. Their local cross-capacitor WDF was
+                    // built with the rung primitive's own source impedance;
+                    // do not replace it with the old single-ended 1/gm guess.
+                    1_000.0
                 } else {
                     match &wdf.root {
                         pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => root
@@ -1210,6 +1748,8 @@ pub(super) fn try_build_blockwise(
                         pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_) => 1.0,
                         _ => source_polarity,
                     };
+                    let control_from_drive =
+                        !matches!(&wdf.root, pedalkernel_rt::stage::RootKind::DiffPair(_));
                     // The cascade tap is at the passive subtree (cap voltage),
                     // not the root port (diode residual). This is determined
                     // by the circuit: the cascade node (Q.emitter) is where
@@ -1234,6 +1774,7 @@ pub(super) fn try_build_blockwise(
                         source_polarity,
                         k_table_control_polarity,
                         shared_diode_bias_voltage: None,
+                        control_from_drive,
                     });
                 }
             }
@@ -1268,12 +1809,13 @@ pub(super) fn try_build_blockwise(
 
         let n_blocks = k_blocks.len();
         if n_blocks < 2 {
-            // Not enough K-table blocks — fall back to separate stages
+            // Not enough K-table blocks to preserve the coupling network.
+            // Returning separate stages here is only valid for true cascades;
+            // for coupled ladders it drops the residual network entirely.
             eprintln!(
-                "  [blockwise] only {n_blocks} K-table blocks, falling back to separate stages"
+                "  [blockwise] only {n_blocks} K-table blocks, falling back to monolithic compile"
             );
-            eprintln!("  [blockwise] done: {} total stages", all_stages.len());
-            return Some(all_stages);
+            return None;
         }
 
         // ── Build MNA for coupling network ──────────────────────────────
@@ -1310,6 +1852,51 @@ pub(super) fn try_build_blockwise(
                 }
             }
         }
+        let coupling_touch_count = |node: NodeId| -> usize {
+            plan.coupling_edges
+                .iter()
+                .filter(|&&eidx| {
+                    let e = &graph.edges[eidx];
+                    e.node_a == node || e.node_b == node
+                })
+                .count()
+        };
+
+        for block in &plan.blocks {
+            if let Some(ports) = differential_rung_ports(block, graph) {
+                for node in [
+                    ports.top_left,
+                    ports.top_right,
+                    ports.bottom_left,
+                    ports.bottom_right,
+                ] {
+                    if ground_rails.contains(&node) {
+                        continue;
+                    }
+                    if node == graph.vcc_node || graph.supply_nodes.contains(&node) {
+                        continue;
+                    }
+                    if !node_set.contains(&node) {
+                        node_set.push(node);
+                    }
+                }
+                continue;
+            }
+            for &node in &block.port_nodes {
+                if ground_rails.contains(&node) {
+                    continue;
+                }
+                if node == graph.vcc_node || graph.supply_nodes.contains(&node) {
+                    continue;
+                }
+                if coupling_touch_count(node) == 0 {
+                    continue;
+                }
+                if !node_set.contains(&node) {
+                    node_set.push(node);
+                }
+            }
+        }
         let node_to_mna: HashMap<NodeId, usize> =
             node_set.iter().enumerate().map(|(i, &n)| (n, i)).collect();
         let n_mna = node_set.len();
@@ -1327,7 +1914,23 @@ pub(super) fn try_build_blockwise(
         for &eidx in &plan.coupling_edges {
             let e = &graph.edges[eidx];
             let comp = &graph.components[e.comp_idx];
-            let r = comp.kind.resistance().unwrap_or(10_000.0);
+            if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+                #[cfg(test)]
+                eprintln!(
+                    "    skip non-resistive coupling edge {eidx} {}({:?})",
+                    comp.id,
+                    graph.effective_edge_kind(eidx)
+                );
+                continue;
+            }
+            let Some(r) = comp.kind.resistance() else {
+                #[cfg(test)]
+                eprintln!(
+                    "    skip coupling edge {eidx} {} without resistance",
+                    comp.id
+                );
+                continue;
+            };
             let n1 = if ground_rails.contains(&e.node_a) {
                 None
             } else {
@@ -1370,6 +1973,7 @@ pub(super) fn try_build_blockwise(
         // ── Define WDF ports ────────────────────────────────────────────
         // One port per block (at the block's coupling node) + one adapted VS port
         let mut ports = Vec::new();
+        let mut block_port_indices: Vec<Vec<usize>> = vec![Vec::new(); n_blocks];
 
         // Block ports: find each block's UNIQUE coupling node.
         //
@@ -1383,24 +1987,66 @@ pub(super) fn try_build_blockwise(
         // rather than the cascade junction.
         let mut used_ports: HashSet<NodeId> = HashSet::new();
         for (bi, block) in plan.blocks.iter().enumerate() {
+            if let Some(rung_ports) = differential_rung_ports(block, graph) {
+                let left = rung_ports.bottom_left;
+                let right = rung_ports.bottom_right;
+                let Some(&left_idx) = node_to_mna.get(&left) else {
+                    block_port_indices[bi].push(ports.len());
+                    ports.push(pedalkernel_rt::tree::WdfPort {
+                        node_pos: None,
+                        node_neg: None,
+                        resistance: 1000.0,
+                    });
+                    #[cfg(test)]
+                    eprintln!("    block {bi}: port_node=None (missing differential left node)");
+                    continue;
+                };
+                let Some(&right_idx) = node_to_mna.get(&right) else {
+                    block_port_indices[bi].push(ports.len());
+                    ports.push(pedalkernel_rt::tree::WdfPort {
+                        node_pos: None,
+                        node_neg: None,
+                        resistance: 1000.0,
+                    });
+                    #[cfg(test)]
+                    eprintln!("    block {bi}: port_node=None (missing differential right node)");
+                    continue;
+                };
+                let rp = if bi < k_blocks.len() {
+                    k_blocks[bi].nominal_vs_rp
+                } else {
+                    1000.0
+                };
+                block_port_indices[bi].push(ports.len());
+                ports.push(pedalkernel_rt::tree::WdfPort {
+                    node_pos: Some(left_idx),
+                    node_neg: Some(right_idx),
+                    resistance: rp,
+                });
+                #[cfg(test)]
+                eprintln!(
+                    "    block {bi}: port_node=Some(({left},{right})) → mna_node=Some(({left_idx},{right_idx}))"
+                );
+                continue;
+            }
+
             let preferred_node =
-                block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph)
-                    .filter(|pn| node_to_mna.contains_key(pn) && !used_ports.contains(pn));
+                block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph).filter(|pn| {
+                    node_to_mna.contains_key(pn)
+                        && !used_ports.contains(pn)
+                        && coupling_touch_count(*pn) > 0
+                });
 
             let best_node = preferred_node.or_else(|| {
                 block
                     .port_nodes
                     .iter()
-                    .filter(|pn| node_to_mna.contains_key(pn) && !used_ports.contains(pn))
-                    .max_by_key(|&&pn| {
-                        plan.coupling_edges
-                            .iter()
-                            .filter(|&&eidx| {
-                                let e = &graph.edges[eidx];
-                                e.node_a == pn || e.node_b == pn
-                            })
-                            .count()
+                    .filter(|pn| {
+                        node_to_mna.contains_key(pn)
+                            && !used_ports.contains(pn)
+                            && coupling_touch_count(**pn) > 0
                     })
+                    .max_by_key(|&&pn| coupling_touch_count(pn))
                     .copied()
             });
 
@@ -1416,6 +2062,7 @@ pub(super) fn try_build_blockwise(
                     node_neg: None,
                     resistance: rp,
                 });
+                block_port_indices[bi].push(ports.len() - 1);
                 used_ports.insert(pn);
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=Some({pn}) → mna_node=Some({mna_idx})");
@@ -1426,13 +2073,54 @@ pub(super) fn try_build_blockwise(
                     node_neg: None,
                     resistance: 1000.0,
                 });
+                block_port_indices[bi].push(ports.len() - 1);
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=None (no unique coupling node)");
             }
         }
 
-        let mut feedback_port_map: Vec<(usize, usize)> = Vec::new();
         for (bi, block) in plan.blocks.iter().enumerate() {
+            let Some(rung_ports) = differential_rung_ports(block, graph) else {
+                continue;
+            };
+            let Some(&left_idx) = node_to_mna.get(&rung_ports.top_left) else {
+                continue;
+            };
+            let Some(&right_idx) = node_to_mna.get(&rung_ports.top_right) else {
+                continue;
+            };
+            let rp = if bi < k_blocks.len() {
+                k_blocks[bi].nominal_vs_rp
+            } else {
+                1000.0
+            };
+            let port_idx = ports.len();
+            ports.push(pedalkernel_rt::tree::WdfPort {
+                node_pos: Some(left_idx),
+                node_neg: Some(right_idx),
+                resistance: rp,
+            });
+            block_port_indices[bi].push(port_idx);
+            #[cfg(test)]
+            eprintln!(
+                "    block {bi}: top_port_node=Some(({},{})) → mna_node=Some(({left_idx},{right_idx})), scattering_port={port_idx}",
+                rung_ports.top_left, rung_ports.top_right
+            );
+        }
+
+        let use_coupled_solve = plan
+            .blocks
+            .iter()
+            .all(|block| matches!(block.topology, BlockTopology::DifferentialDiodeRung { .. }));
+        let mut feedback_port_map: Vec<(usize, usize)> = Vec::new();
+        let output_block_idx = n_blocks.saturating_sub(1);
+        for (bi, block) in plan.blocks.iter().enumerate() {
+            if use_coupled_solve {
+                break;
+            }
+            if bi != output_block_idx {
+                continue;
+            }
             let Some(output_node) =
                 block_cascade_output_node(&block.nl_edges, &block.port_nodes, graph)
             else {
@@ -1588,54 +2276,83 @@ pub(super) fn try_build_blockwise(
             .and_then(|block| block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph));
         let all_explicit_diode_blocks =
             k_blocks.len() >= 2 && k_blocks.iter().all(|b| b.explicit_diode_root.is_some());
-        let shared_diode_cutoff_pot = if all_explicit_diode_blocks {
-            first_block_port_node.and_then(|port_node| {
-                plan.coupling_edges.iter().find_map(|&eidx| {
-                    let e = &graph.edges[eidx];
-                    let comp = &graph.components[e.comp_idx];
-                    let is_pot = comp
-                        .kind
-                        .as_any()
-                        .downcast_ref::<super::components::Potentiometer>()
-                        .is_some();
-                    let touches_first_port = e.node_a == port_node || e.node_b == port_node;
-                    let touches_feedback_output = output_feedback_node
-                        .map(|node| e.node_a == node || e.node_b == node)
-                        .unwrap_or(false);
+        let shared_current_ladder = all_explicit_diode_blocks || use_coupled_solve;
+        let shared_diode_cutoff_pot = if shared_current_ladder {
+            first_block_port_node
+                .and_then(|port_node| {
+                    plan.coupling_edges.iter().find_map(|&eidx| {
+                        let e = &graph.edges[eidx];
+                        let comp = &graph.components[e.comp_idx];
+                        let is_pot = comp
+                            .kind
+                            .as_any()
+                            .downcast_ref::<super::components::Potentiometer>()
+                            .is_some();
+                        let touches_first_port = e.node_a == port_node || e.node_b == port_node;
+                        let touches_feedback_output = output_feedback_node
+                            .map(|node| e.node_a == node || e.node_b == node)
+                            .unwrap_or(false);
 
-                    if is_pot && touches_first_port && !touches_feedback_output {
-                        Some(comp.id.clone())
-                    } else {
-                        None
-                    }
+                        if is_pot && touches_first_port && !touches_feedback_output {
+                            Some(comp.id.clone())
+                        } else {
+                            None
+                        }
+                    })
                 })
-            })
+                .or_else(|| {
+                    plan.coupling_edges.iter().find_map(|&eidx| {
+                        let comp = &graph.components[graph.edges[eidx].comp_idx];
+                        let is_pot = comp
+                            .kind
+                            .as_any()
+                            .downcast_ref::<super::components::Potentiometer>()
+                            .is_some();
+                        if is_pot && comp.id.to_ascii_lowercase().contains("cutoff") {
+                            Some(comp.id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                })
         } else {
             None
         };
-        let cutoff_cv_port = if all_explicit_diode_blocks {
-            first_block_port_node.and_then(|port_node| {
-                port_defs.iter().find_map(|port_def| {
-                    if port_def.direction != pedalkernel_rt::PortDirection::Input {
-                        return None;
-                    }
-                    let lower_name = port_def.name.to_ascii_lowercase();
-                    if !lower_name.contains("cv") || lower_name.contains("resonance") {
-                        return None;
-                    }
-                    let external_port_node = graph.node_names.get(&port_def.name).copied()?;
-                    let drives_first_port = plan.coupling_edges.iter().any(|&eidx| {
-                        let e = &graph.edges[eidx];
-                        (e.node_a == external_port_node && e.node_b == port_node)
-                            || (e.node_b == external_port_node && e.node_a == port_node)
-                    });
-                    if drives_first_port {
-                        Some(port_def.name.clone())
-                    } else {
-                        None
-                    }
+        let cutoff_cv_port = if shared_current_ladder {
+            first_block_port_node
+                .and_then(|port_node| {
+                    port_defs.iter().find_map(|port_def| {
+                        if port_def.direction != pedalkernel_rt::PortDirection::Input {
+                            return None;
+                        }
+                        let lower_name = port_def.name.to_ascii_lowercase();
+                        if !lower_name.contains("cv") || lower_name.contains("resonance") {
+                            return None;
+                        }
+                        let external_port_node = graph.node_names.get(&port_def.name).copied()?;
+                        let drives_first_port = plan.coupling_edges.iter().any(|&eidx| {
+                            let e = &graph.edges[eidx];
+                            (e.node_a == external_port_node && e.node_b == port_node)
+                                || (e.node_b == external_port_node && e.node_a == port_node)
+                        });
+                        if drives_first_port {
+                            Some(port_def.name.clone())
+                        } else {
+                            None
+                        }
+                    })
                 })
-            })
+                .or_else(|| {
+                    port_defs.iter().find_map(|port_def| {
+                        if port_def.direction == pedalkernel_rt::PortDirection::Input {
+                            let lower_name = port_def.name.to_ascii_lowercase();
+                            if lower_name.contains("cutoff") && lower_name.contains("cv") {
+                                return Some(port_def.name.clone());
+                            }
+                        }
+                        None
+                    })
+                })
         } else {
             None
         };
@@ -1658,12 +2375,18 @@ pub(super) fn try_build_blockwise(
 
         // ── Package as BlockwiseKMethodStage ─────────────────────────────
         let output_block = n_blocks - 1; // Last block is the output
+                                         // Keep the specialized diode ladder core disabled by default. The real
+                                         // BKM path must use the coupled block solve and coupling matrix; the
+                                         // core shortcut bypasses resonance/feedback coupling and is only a
+                                         // future explicit optimization target.
+        let diode_ladder_core = None;
         let bkm = pedalkernel_rt::stage::BlockwiseKMethodStage {
             blocks: k_blocks,
             coupling_s: scattering,
             coupling_rp,
             coupling_n_mna: n_mna,
             coupling_ports: ports,
+            block_port_indices,
             coupling_elements,
             n_ports,
             output_block,
@@ -1676,12 +2399,18 @@ pub(super) fn try_build_blockwise(
             oversampler: pedalkernel_rt::oversampling::Oversampler::new(
                 pedalkernel_rt::oversampling::OversamplingFactor::X1,
             ),
-            // BKM stage should process BEFORE output coupling (C_out).
-            // The feedback flow distance formula inflates distance for
-            // op-amp cascades, but for ladders the feedback group IS the
-            // primary signal path and should process first.
-            signal_flow_distance: 0, // always first
+            // BKM stage should process after input/source impedance groups
+            // but before output coupling (C_out). The feedback flow distance
+            // formula inflates distance for ladders, so keep this near the
+            // front without outrunning the input port conditioning stage.
+            signal_flow_distance: 1,
             bypass_serial: false,
+            solve_mode: if use_coupled_solve {
+                pedalkernel_rt::stage::BlockwiseSolveMode::CoupledNewton
+            } else {
+                pedalkernel_rt::stage::BlockwiseSolveMode::Cascade
+            },
+            diode_ladder_core,
             b_warm: vec![0.0; n_ports],
             work_b: vec![0.0; n_ports],
             work_a: vec![0.0; n_ports],

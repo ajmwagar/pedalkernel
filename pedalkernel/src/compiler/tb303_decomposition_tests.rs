@@ -347,6 +347,74 @@ fn load_pro_pedal(filename: &str) -> Option<String> {
     }
 }
 
+fn tb303_bkm_vs_signals(
+    bkm: &pedalkernel_rt::stage::BlockwiseKMethodStage,
+    cutoff_cv: f64,
+    resonance_cv: f64,
+) -> Vec<f64> {
+    bkm.vs_port_map
+        .iter()
+        .map(|(name, _)| {
+            if name == "cv_cutoff" {
+                cutoff_cv
+            } else if name == "cv_resonance" {
+                resonance_cv
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+fn tb303_bkm_vs_signals_with_vco(
+    bkm: &pedalkernel_rt::stage::BlockwiseKMethodStage,
+    vco_in: f64,
+    cutoff_cv: f64,
+    resonance_cv: f64,
+) -> Vec<f64> {
+    bkm.vs_port_map
+        .iter()
+        .map(|(name, _)| {
+            if name == "vco_in" {
+                vco_in
+            } else if name == "cv_cutoff" {
+                cutoff_cv
+            } else if name == "cv_resonance" {
+                resonance_cv
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+fn bkm_block_row_coupling_summary(
+    bkm: &pedalkernel_rt::stage::BlockwiseKMethodStage,
+) -> Vec<(usize, f64, f64)> {
+    let block_rows = bkm.blocks.len().min(bkm.n_ports);
+    (0..block_rows)
+        .map(|row| {
+            let diag = bkm.coupling_s[row * bkm.n_ports + row];
+            let offdiag_max = (0..bkm.n_ports)
+                .filter(|&col| col != row)
+                .map(|col| bkm.coupling_s[row * bkm.n_ports + col].abs())
+                .fold(0.0_f64, f64::max);
+            (row, diag, offdiag_max)
+        })
+        .collect()
+}
+
+fn bkm_identity_isolated_block_rows(
+    bkm: &pedalkernel_rt::stage::BlockwiseKMethodStage,
+) -> Vec<usize> {
+    bkm_block_row_coupling_summary(bkm)
+        .into_iter()
+        .filter_map(|(row, diag, offdiag_max)| {
+            ((diag - 1.0).abs() < 1e-4 && offdiag_max < 1e-5).then_some(row)
+        })
+        .collect()
+}
+
 macro_rules! skip_if_missing {
     ($source:expr, $name:expr) => {
         match $source {
@@ -397,6 +465,557 @@ fn tb303_filter_compiles() {
                 eprintln!("    stage {i}: other");
             }
         }
+    }
+}
+
+#[test]
+fn tb303_filter_uses_coupled_ladder_not_grounded_cascade() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+
+    for cap in ["C1", "C2", "C3", "C4"] {
+        assert!(
+            !source.contains(&format!("{cap}.b -> gnd")),
+            "{cap} must be a cross-ladder capacitor, not a shunt-to-ground cascade pole"
+        );
+    }
+
+    for link in [
+        "Q1.emitter -> Q2.base",
+        "Q2.emitter -> Q3.base",
+        "Q3.emitter -> Q4.base",
+    ] {
+        assert!(
+            !source.contains(link),
+            "TB303 ladder must not contain serial cascade link `{link}`"
+        );
+    }
+
+    for (left, right) in [
+        ("QL1.emitter -> C1.a", "QR1.emitter -> C1.b"),
+        ("QL2.emitter -> C2.a", "QR2.emitter -> C2.b"),
+        ("QL3.emitter -> C3.a", "QR3.emitter -> C3.b"),
+        ("QL4.emitter -> C4.a", "QR4.emitter -> C4.b"),
+    ] {
+        assert!(
+            source.contains(left) && source.contains(right),
+            "TB303 ladder should couple differential rung nodes through `{left}` / `{right}`"
+        );
+    }
+}
+
+#[test]
+fn tb303_filter_uses_one_shared_cutoff_tail_current() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+
+    for independent_bias in ["R_bias2", "R_bias3", "R_bias4", "R_ref_bottom"] {
+        assert!(
+            !source.contains(independent_bias),
+            "TB303 cutoff must not be set by independent rung bias element `{independent_bias}`"
+        );
+    }
+
+    assert!(
+        source.contains("R_bias_floor.b -> R_top_l.a, R_top_r.a"),
+        "top ladder feed should be fixed and shared across both diode chains"
+    );
+    assert!(
+        !source.contains("R_bias_floor.b -> Cutoff.a"),
+        "Cutoff pot should not sit in the top feed as a per-rung voltage bias"
+    );
+
+    for shared_tail_link in [
+        "QL1.emitter -> R_tail_l.a",
+        "QR1.emitter -> R_tail_r.a",
+        "R_tail_l.b -> Cutoff.a",
+        "R_tail_r.b -> Cutoff.a",
+        "Cutoff.b -> gnd",
+        "R_cv.b -> Cutoff.a",
+    ] {
+        assert!(
+            source.contains(shared_tail_link),
+            "TB303 cutoff current path should contain `{shared_tail_link}`"
+        );
+    }
+}
+
+#[test]
+fn tb303_diode_connected_bjts_reduce_to_diode_roots_in_multinl_fallback() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let mut options = super::compile::CompileOptions::default();
+    options.skip_blockwise = true;
+    let compiled = super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
+
+    let ladder = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::MultiNl(mnl) = stage {
+                (mnl.n_nl >= 8).then_some(mnl)
+            } else {
+                None
+            }
+        })
+        .expect("skip_blockwise fallback should compile diode-connected BJTs through MultiNL");
+
+    assert!(
+        ladder.device_groups.is_none(),
+        "diode-connected BJT ladder fallback must not use BjtTwoPort grouped MNA; \
+         base=collector devices should reduce to diode roots before any MultiNL fallback"
+    );
+    assert_eq!(
+        ladder.nl_devices.len(),
+        8,
+        "the coupled TB303 ladder has eight diode-connected BJT junctions"
+    );
+    assert!(
+        ladder
+            .nl_devices
+            .iter()
+            .all(|device| matches!(device, pedalkernel_rt::stage::NlDeviceKind::Diode(_))),
+        "all diode-connected BJT junctions should be represented as diode roots"
+    );
+}
+
+#[test]
+fn tb303_blockwise_classifies_differential_diode_rungs_generically() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let plan = blockwise::analyze_blockwise(&all_edges, &graph)
+        .expect("TB303 coupled ladder should produce a blockwise plan");
+
+    assert_eq!(plan.blocks.len(), 4);
+    for (i, block) in plan.blocks.iter().enumerate() {
+        assert!(
+            matches!(
+                block.topology,
+                blockwise::BlockTopology::DifferentialDiodeRung { .. }
+            ),
+            "block {i} should be classified as a generic differential diode rung, got {:?}",
+            block.topology
+        );
+    }
+}
+
+#[test]
+fn tb303_coupled_differential_ladder_compiles_to_bkm_not_monolithic_mna() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+
+    let bkm = compiled.stages.iter().find_map(|stage| {
+        if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            Some(bkm)
+        } else {
+            None
+        }
+    });
+    assert!(
+        bkm.is_some(),
+        "coupled differential diode ladders should compile to BKM, not monolithic MultiNL"
+    );
+    assert!(
+        !compiled
+            .stages
+            .iter()
+            .any(|stage| matches!(stage, super::compiled::Stage::MultiNl(mnl) if mnl.n_nl >= 8)),
+        "TB303 ladder should not fall back to monolithic MultiNL"
+    );
+
+    let bkm = bkm.unwrap();
+    assert_eq!(bkm.blocks.len(), 4);
+    assert!(
+        bkm.blocks.iter().all(|block| block.k_table.dims == 2),
+        "differential diode rung BKM blocks should use 2D K-tables"
+    );
+}
+
+#[test]
+fn tb303_bkm_output_and_feedback_tap_top_rung() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+
+    assert!(
+        source.contains("QL4.emitter -> C_out.a"),
+        "TB303 filter output coupling must tap the top dynamic rung node"
+    );
+    assert!(
+        source.contains("QL4.emitter -> Resonance.b"),
+        "TB303 resonance send must tap the same top dynamic rung node as output"
+    );
+    assert!(
+        source.contains("R_fb_limit.b -> QL1.emitter"),
+        "TB303 resonance return must enter the bottom input/tail side, not the output tap"
+    );
+
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    let plan = blockwise::analyze_blockwise(&all_edges, &graph)
+        .expect("TB303 coupled ladder should produce a blockwise plan");
+
+    let block_comp_ids = |block: &blockwise::Block| -> Vec<&str> {
+        let mut ids: Vec<&str> = block
+            .nl_edges
+            .iter()
+            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+
+    assert_eq!(plan.blocks.len(), 4);
+    assert_eq!(
+        block_comp_ids(&plan.blocks[0]),
+        vec!["QL1", "QR1"],
+        "first BKM block should be the bottom/input rung"
+    );
+    assert_eq!(
+        block_comp_ids(&plan.blocks[3]),
+        vec!["QL4", "QR4"],
+        "last BKM block should be the top/output rung"
+    );
+
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    assert_eq!(
+        bkm.output_block, 3,
+        "compiled BKM output must tap the top rung block"
+    );
+    assert!(
+        bkm.feedback_port_map
+            .iter()
+            .all(|(block_idx, _)| *block_idx == bkm.output_block),
+        "feedback send ports must be driven from the selected output/top block"
+    );
+}
+
+#[test]
+fn tb303_bkm_vco_drive_is_external_coupling_port() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    let feedback_group = groups
+        .iter()
+        .find(|group| group.has_feedback())
+        .expect("TB303 ladder feedback group should exist");
+    let plan = blockwise::analyze_blockwise(&feedback_group.all_edges(), &graph)
+        .expect("TB303 coupled ladder should produce a blockwise plan");
+
+    let edge_ids = |edges: &[usize]| -> Vec<&str> {
+        edges
+            .iter()
+            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+            .collect()
+    };
+    let local_r_vco_blocks: Vec<usize> = plan
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(bi, block)| {
+            edge_ids(&block.linear_edges)
+                .contains(&"R_vco")
+                .then_some(bi)
+        })
+        .collect();
+    let coupling_ids = edge_ids(&plan.coupling_edges);
+
+    assert!(
+        local_r_vco_blocks.is_empty(),
+        "R_vco must not be absorbed into a local rung block; it is an external drive boundary, local blocks={local_r_vco_blocks:?}"
+    );
+    assert!(
+        coupling_ids.contains(&"R_vco"),
+        "R_vco must remain in the BKM coupling network so vco_in can become a VS port, coupling={coupling_ids:?}"
+    );
+
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    assert!(
+        bkm.vs_port_map.iter().any(|(name, _)| name == "vco_in"),
+        "vco_in must be represented as a BKM VS port; ports={:?}",
+        bkm.vs_port_map
+    );
+}
+
+#[test]
+fn tb303_bkm_does_not_stamp_reactive_coupling_as_resistor() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    let reactive_coupling: Vec<_> = bkm
+        .coupling_elements
+        .iter()
+        .filter(|element| matches!(element.comp_id.as_str(), "C_out"))
+        .map(|element| (element.comp_id.as_str(), element.resistance))
+        .collect();
+
+    assert!(
+        reactive_coupling.is_empty(),
+        "reactive BKM boundary edges cannot be represented as fallback resistors; got {reactive_coupling:?}"
+    );
+}
+
+#[test]
+fn tb303_bkm_differential_rungs_have_floating_block_ports() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    assert_eq!(bkm.blocks.len(), 4);
+    assert_eq!(
+        bkm.solve_mode,
+        pedalkernel_rt::stage::BlockwiseSolveMode::CoupledNewton,
+        "default TB303 BKM must use the coupled K-method solve; the diode ladder core shortcut bypasses resonance coupling"
+    );
+    assert!(
+        bkm.diode_ladder_core.is_none(),
+        "optimized diode ladder core must be opt-in until it participates in the coupled BKM feedback solve"
+    );
+    assert!(
+        bkm.feedback_port_map.is_empty(),
+        "coupled BKM should keep feedback in the coupling matrix instead of adding a synthetic feedback drive port"
+    );
+    assert!(
+        bkm.coupling_ports.len() >= bkm.blocks.len(),
+        "BKM should expose one coupling port per rung"
+    );
+    assert_eq!(
+        bkm.block_port_indices.len(),
+        bkm.blocks.len(),
+        "BKM must track which coupling ports are owned by each block"
+    );
+
+    for (block_idx, port) in bkm.coupling_ports.iter().take(bkm.blocks.len()).enumerate() {
+        assert!(
+            port.node_pos.is_some() && port.node_neg.is_some(),
+            "differential rung block {block_idx} should use a floating port across the rung, got {port:?}"
+        );
+    }
+}
+
+#[test]
+fn tb303_bkm_differential_rungs_own_multiple_coupling_ports() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    eprintln!(
+        "  TB303 BKM block_port_indices: {:?}",
+        bkm.block_port_indices
+    );
+
+    assert_eq!(bkm.blocks.len(), 4);
+    assert!(
+        bkm.block_port_indices.iter().all(|ports| ports.len() >= 2),
+        "each differential rung must own at least bottom and top differential ports"
+    );
+    assert!(
+        bkm.n_ports >= bkm.blocks.len() * 2,
+        "differential BKM should include block boundary ports in addition to source ports"
+    );
+}
+
+#[test]
+fn tb303_blockwise_differential_rungs_expose_top_and_bottom_ports() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    let plan = blockwise::analyze_blockwise(&all_edges, &graph)
+        .expect("TB303 coupled ladder should produce a blockwise plan");
+
+    assert_eq!(plan.blocks.len(), 4);
+    let ports: Vec<_> = plan
+        .blocks
+        .iter()
+        .map(|block| blockwise::differential_rung_ports(block, &graph).expect("rung ports"))
+        .collect();
+
+    eprintln!("  TB303 differential rung ports: {ports:?}");
+
+    for (idx, port) in ports.iter().enumerate() {
+        assert_ne!(
+            (port.top_left, port.top_right),
+            (port.bottom_left, port.bottom_right),
+            "differential rung {idx} must expose distinct top and bottom differential boundaries"
+        );
+    }
+
+    for idx in 0..ports.len() - 1 {
+        assert_eq!(
+            (ports[idx].top_left, ports[idx].top_right),
+            (ports[idx + 1].bottom_left, ports[idx + 1].bottom_right),
+            "adjacent differential rungs must share the same electrical boundary: \
+             lower rung {idx} top should equal upper rung {} bottom",
+            idx + 1
+        );
+    }
+}
+
+#[test]
+fn tb303_bkm_coupling_matrix_connects_ladder_block_ports() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    let rows = bkm_block_row_coupling_summary(bkm);
+    let isolated = bkm_identity_isolated_block_rows(bkm);
+    eprintln!("  TB303 BKM block-row coupling summary: {rows:?}");
+
+    assert!(
+        isolated.is_empty(),
+        "BKM coupling MNA isolated ladder block rows {isolated:?}; \
+         these rows are identity reflections, so the solver cannot couple those rungs electrically"
+    );
+}
+
+#[test]
+fn tb303_coupled_bkm_stays_finite_on_silence() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter_mut()
+        .find_map(|stage| {
+            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    assert!(
+        bkm.blocks.iter().all(|block| block.dc_offset.is_finite()),
+        "BKM DC operating-point solve must leave finite block DC offsets: {:?}",
+        bkm.blocks
+            .iter()
+            .map(|block| block.dc_offset)
+            .collect::<Vec<_>>()
+    );
+
+    let vs = tb303_bkm_vs_signals(bkm, 0.0, 0.0);
+    for sample in 0..2048 {
+        let y = bkm.process_with_serial_input(0.0, &vs);
+        assert!(
+            y.is_finite(),
+            "BKM output went non-finite at sample {sample}: {y}"
+        );
+        assert!(
+            bkm.work_a.iter().all(|v| v.is_finite()) && bkm.work_b.iter().all(|v| v.is_finite()),
+            "BKM coupling work buffers went non-finite at sample {sample}"
+        );
     }
 }
 
@@ -837,6 +1456,34 @@ fn two_rung_feedback_diode_ladder_compiles_to_bkm() {
     assert_eq!(
         bkm_count, 1,
         "feedback diode ladder should compile as one BKM stage"
+    );
+}
+
+#[test]
+fn two_rung_feedback_bkm_coupling_matrix_connects_block_ports() {
+    let def =
+        crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK).expect("parse failed");
+    let proc = super::compile_pedal(&def, SR).expect("compile failed");
+    let bkm = proc
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("two-rung feedback ladder should compile to BKM");
+
+    let rows = bkm_block_row_coupling_summary(bkm);
+    let isolated = bkm_identity_isolated_block_rows(bkm);
+    eprintln!("  two-rung BKM block-row coupling summary: {rows:?}");
+
+    assert!(
+        isolated.is_empty(),
+        "BKM coupling MNA isolated simple ladder block rows {isolated:?}; \
+         the compiler must derive connected block ports from the parsed .pedal graph"
     );
 }
 
@@ -1363,10 +2010,14 @@ fn tb303_bkm_direct_path_is_lowpass() {
 
         for i in 0..9600 {
             let input = 0.03 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let _ = bkm.process(&[input, 0.0, 0.5, 0.0]);
+            let vs = tb303_bkm_vs_signals(bkm, 0.0, 0.0);
+            let _ = bkm.process_with_serial_input(input, &vs);
         }
 
-        settled_sine_ac_rms(freq, 0.03, |input| bkm.process(&[input, 0.0, 0.5, 0.0]))
+        settled_sine_ac_rms(freq, 0.03, |input| {
+            let vs = tb303_bkm_vs_signals(bkm, 0.0, 0.0);
+            bkm.process_with_serial_input(input, &vs)
+        })
     };
 
     let gain_100 = measure(100.0);
@@ -1524,7 +2175,7 @@ fn tb303_bkm_full_processor_vco_port_path_is_not_flat() {
             &mut proc,
             freq,
             0.03,
-            &[("audio_in", 1.0), ("vco_in", 1.0)],
+            &[("audio_in", 1.0)],
             &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
             "audio_out",
         )
@@ -1541,12 +2192,12 @@ fn tb303_bkm_full_processor_vco_port_path_is_not_flat() {
         "  BKM full processor process(input): 100Hz={process_low:.6}, 10kHz={process_high:.6}, ratio={process_ratio_db:+.1} dB"
     );
     eprintln!(
-        "  BKM full processor process_ports(audio+vco): 100Hz={ports_low:.6}, 10kHz={ports_high:.6}, ratio={ports_ratio_db:+.1} dB"
+        "  BKM full processor process_ports(audio): 100Hz={ports_low:.6}, 10kHz={ports_high:.6}, ratio={ports_ratio_db:+.1} dB"
     );
 
     assert!(
-        ports_ratio_db > process_ratio_db + 6.0,
-        "Driving the explicit VCO port should expose the BKM lowpass path; \
+        ports_ratio_db > 24.0,
+        "Driving the explicit audio port should expose the BKM lowpass path; \
          process(input) ratio={process_ratio_db:+.1} dB, process_ports ratio={ports_ratio_db:+.1} dB"
     );
 }
@@ -1691,13 +2342,15 @@ fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
 
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let _ = bkm.debug_process_with_block_outputs(&[input, input, 0.0, 0.0]);
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, input, 0.0, 0.0);
+            let _ = bkm.debug_process_with_block_outputs(&vs);
         }
 
         let mut values = vec![Vec::new(); bkm.blocks.len()];
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let (_, blocks) = bkm.debug_process_with_block_outputs(&[input, input, 0.0, 0.0]);
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, input, 0.0, 0.0);
+            let (_, blocks) = bkm.debug_process_with_block_outputs(&vs);
             for (block_values, value) in values.iter_mut().zip(blocks.iter()) {
                 block_values.push(*value);
             }
@@ -1724,8 +2377,8 @@ fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
         high[3]
     );
     assert!(
-        final_ratio < 3.0,
-        "BKM block-output diagnostic should keep exposing the missing late-pole rolloff until the coupling/cascade bug is fixed: ratio={final_ratio:.3}"
+        final_ratio > 100.0,
+        "BKM block-output diagnostic should show the corrected multi-rung lowpass slope: ratio={final_ratio:.3}"
     );
 }
 
@@ -1792,13 +2445,15 @@ fn tb303_bkm_rung_response_exposes_missing_cascaded_poles() {
 
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let _ = bkm.debug_process_with_block_outputs(&[input, input, 0.0, 0.0]);
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, input, 0.0, 0.0);
+            let _ = bkm.debug_process_with_block_outputs(&vs);
         }
 
         let mut values = vec![Vec::new(); bkm.blocks.len()];
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let (_, outputs) = bkm.debug_process_with_block_outputs(&[input, input, 0.0, 0.0]);
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, input, 0.0, 0.0);
+            let (_, outputs) = bkm.debug_process_with_block_outputs(&vs);
             for (block_values, value) in values.iter_mut().zip(outputs.iter()) {
                 block_values.push(*value);
             }
@@ -1863,7 +2518,7 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
             &mut proc,
             freq,
             0.03,
-            &[("audio_in", 1.0), ("vco_in", 1.0)],
+            &[("audio_in", 1.0)],
             &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
             "audio_out",
         )

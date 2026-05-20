@@ -13,7 +13,7 @@ use crate::loading::{ImpedanceModel, InterstageLoading};
 use crate::metering::{MetricsAccumulator, MetricsRingBuffer, UiMetrics};
 use crate::oversampling::OversamplingFactor;
 use crate::thermal::ThermalModel;
-use crate::PedalProcessor;
+use crate::{PedalProcessor, Wave};
 use hashbrown::HashMap;
 
 use crate::stage::{
@@ -2140,7 +2140,8 @@ impl CompiledPedal {
 }
 
 impl PedalProcessor for CompiledPedal {
-    fn process(&mut self, input: f64) -> f64 {
+    fn process(&mut self, input: Wave) -> Wave {
+        let input = input as f64;
         // Auto-init on first call.
         if !self.initialized {
             self.cache_all_vs_pointers();
@@ -2164,7 +2165,7 @@ impl PedalProcessor for CompiledPedal {
         // Subcircuit routing mode: process inter-subcircuit signal graph.
         // When subcircuits are present, the normal WDF stage pipeline is bypassed.
         if !self.subcircuit_processors.is_empty() {
-            return self.process_subcircuits(input);
+            return self.process_subcircuits(input) as Wave;
         }
 
         // Fire any pending triggers.
@@ -2851,7 +2852,16 @@ impl PedalProcessor for CompiledPedal {
                         0.0
                     };
                 }
-                signal = bkm_stage.process(&vs_signals);
+                let serial_input = if bkm_stage
+                    .vs_port_map
+                    .iter()
+                    .any(|(name, _)| first_input_name.as_ref() == Some(name))
+                {
+                    0.0
+                } else {
+                    signal
+                };
+                signal = bkm_stage.process_with_serial_input(serial_input, &vs_signals);
                 if stage_idx < crate::metering::MAX_STAGES {
                     stage_levels[stage_idx] = signal;
                 }
@@ -2958,9 +2968,11 @@ impl PedalProcessor for CompiledPedal {
             signal = output;
         }
 
-        // If VCOs exist but no VCA consumed their output, sum VCO contributions
-        // directly into the signal chain. This handles VCO→out circuits without a VCA.
-        if !self.vcos.is_empty() && self.vcas.is_empty() {
+        // If VCOs exist but no VCA or compiled audio stage consumed their output,
+        // sum VCO contributions directly into the signal chain. Do not do this
+        // for VCO→filter circuits: their stages already read the VCO through
+        // named source ports, and summing here creates a dry bypass path.
+        if !self.vcos.is_empty() && self.vcas.is_empty() && self.stages.is_empty() {
             for vco_binding in &self.vcos {
                 if let Some((_, val)) = self
                     .node_signals
@@ -3204,7 +3216,7 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
-        output
+        output as Wave
     }
 
     fn set_sample_rate(&mut self, rate: f64) {
@@ -3432,11 +3444,11 @@ impl PedalProcessor for CompiledPedal {
         self.ports.len()
     }
 
-    fn process_ports(&mut self, ports: &mut [f64]) {
+    fn process_ports(&mut self, ports: &mut [Wave]) {
         // Copy input port values from caller's slice
         for port in &self.ports {
             if port.direction == crate::PortDirection::Input && port.index < ports.len() {
-                self.port_values[port.index] = ports[port.index];
+                self.port_values[port.index] = ports[port.index] as f64;
             }
         }
 
@@ -3445,14 +3457,14 @@ impl PedalProcessor for CompiledPedal {
             .ports
             .iter()
             .find(|p| p.direction == crate::PortDirection::Input)
-            .map(|p| ports.get(p.index).copied().unwrap_or(0.0))
-            .unwrap_or(0.0);
+            .map(|p| ports.get(p.index).copied().unwrap_or(0.0 as Wave))
+            .unwrap_or(0.0 as Wave);
         let output = self.process(input);
 
         // Copy output port values to caller's slice
         for port in &self.ports {
             if port.direction == crate::PortDirection::Output && port.index < ports.len() {
-                ports[port.index] = self.port_values[port.index];
+                ports[port.index] = self.port_values[port.index] as Wave;
             }
         }
         // Also write the serial chain output to the first output port
@@ -3463,6 +3475,15 @@ impl PedalProcessor for CompiledPedal {
         {
             if out_port.index < ports.len() {
                 ports[out_port.index] = output;
+            }
+        }
+        if let Some(audio_out) = self
+            .ports
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case("audio_out"))
+        {
+            if audio_out.index < ports.len() {
+                ports[audio_out.index] = output;
             }
         }
     }

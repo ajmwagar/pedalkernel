@@ -37,7 +37,7 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::math;
+use crate::{math, Wave};
 
 // ── DecayEnvelope ───────────────────────────────────────────────────────
 
@@ -49,8 +49,8 @@ use crate::math;
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct DecayEnvelope {
-    value: f64,
-    decay_coeff: f64,
+    value: Wave,
+    decay_coeff: Wave,
     sample_rate: f64,
 }
 
@@ -58,8 +58,8 @@ impl DecayEnvelope {
     /// Create a new envelope with a default 200ms decay time.
     pub fn new(sample_rate: f64) -> Self {
         let mut env = Self {
-            value: 0.0,
-            decay_coeff: 0.0,
+            value: 0.0 as Wave,
+            decay_coeff: 0.0 as Wave,
             sample_rate,
         };
         env.set_decay_time_ms(200.0);
@@ -69,8 +69,8 @@ impl DecayEnvelope {
     /// Update sample rate, preserving the current decay time.
     pub fn set_sample_rate(&mut self, sr: f64) {
         // Recover the current time constant, then recompute for new SR
-        let old_time_samples = if self.decay_coeff > 0.0 && self.decay_coeff < 1.0 {
-            -1.0 / math::ln(self.decay_coeff)
+        let old_time_samples = if self.decay_coeff > 0.0 as Wave && self.decay_coeff < 1.0 as Wave {
+            -1.0 / math::ln(self.decay_coeff as f64)
         } else {
             0.01 * self.sample_rate // fallback: 10ms
         };
@@ -87,7 +87,7 @@ impl DecayEnvelope {
     /// initial value. Typical 303 range: 5ms (fast) to 2000ms (slow).
     pub fn set_decay_time_ms(&mut self, ms: f64) {
         let time_samples = ms.max(0.1) * 0.001 * self.sample_rate;
-        self.decay_coeff = math::exp(-1.0 / time_samples);
+        self.decay_coeff = math::exp(-1.0 / time_samples) as Wave;
     }
 
     /// Set decay time from a 0..1 knob value.
@@ -106,12 +106,12 @@ impl DecayEnvelope {
     /// (~30ms) regardless of the Decay knob. Compute the coefficient
     /// externally and set it here.
     pub fn set_decay_coeff(&mut self, coeff: f64) {
-        self.decay_coeff = coeff.clamp(0.0, 1.0 - 1e-12);
+        self.decay_coeff = coeff.clamp(0.0, 1.0 - 1e-12) as Wave;
     }
 
     /// Get the current decay coefficient (for save/restore).
     pub fn decay_coeff(&self) -> f64 {
-        self.decay_coeff
+        self.decay_coeff as f64
     }
 
     // ── Triggering ──────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ impl DecayEnvelope {
     /// Use on normal (non-slide) note gate rising edges.
     #[inline]
     pub fn trigger(&mut self) {
-        self.value = 1.0;
+        self.value = 1.0 as Wave;
     }
 
     /// Conditional trigger: only retrigger if `should_trigger` is true.
@@ -132,7 +132,7 @@ impl DecayEnvelope {
     #[inline]
     pub fn trigger_if(&mut self, should_trigger: bool) {
         if should_trigger {
-            self.value = 1.0;
+            self.value = 1.0 as Wave;
         }
     }
 
@@ -142,20 +142,20 @@ impl DecayEnvelope {
     ///
     /// One multiply per sample. Returns value in [0.0, 1.0].
     #[inline]
-    pub fn process(&mut self) -> f64 {
+    pub fn process(&mut self) -> Wave {
         self.value *= self.decay_coeff;
         self.value
     }
 
     /// Read the current envelope value without advancing.
     #[inline]
-    pub fn value(&self) -> f64 {
+    pub fn value(&self) -> Wave {
         self.value
     }
 
     /// Reset envelope to zero (silence).
     pub fn reset(&mut self) {
-        self.value = 0.0;
+        self.value = 0.0 as Wave;
     }
 
     /// Set the envelope value directly (for attack ramp injection).
@@ -164,13 +164,13 @@ impl DecayEnvelope {
     /// before handing off to the normal exponential decay. Does not
     /// affect the decay coefficient.
     pub fn set_value(&mut self, v: f64) {
-        self.value = v;
+        self.value = v as Wave;
     }
 
     /// Check if the envelope has decayed below a threshold.
     #[inline]
     pub fn is_silent(&self, threshold: f64) -> bool {
-        self.value < threshold
+        self.value < threshold as Wave
     }
 }
 

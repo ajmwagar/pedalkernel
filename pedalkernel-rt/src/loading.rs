@@ -12,7 +12,7 @@
 //!   loading between two cascaded pedals
 //! - [`CableModel`] — guitar cable capacitance (RC low-pass with pickup L)
 
-use crate::math;
+use crate::{math, Wave};
 
 /// Impedance characteristics for a pedal's input or output.
 ///
@@ -103,9 +103,9 @@ pub struct InterstageLoading {
     /// Load (input) impedance model.
     load: ImpedanceModel,
     /// One-pole low-pass filter state for the combined RC loading.
-    lpf_state: f64,
+    lpf_state: Wave,
     /// Filter coefficient (computed from combined impedance).
-    lpf_coef: f64,
+    lpf_coef: Wave,
     /// DC attenuation factor: R_load / (R_src + R_load).
     dc_gain: f64,
     /// Sample rate.
@@ -118,8 +118,8 @@ impl InterstageLoading {
         let mut s = Self {
             source,
             load,
-            lpf_state: 0.0,
-            lpf_coef: 0.0,
+            lpf_state: 0.0 as Wave,
+            lpf_coef: 0.0 as Wave,
             dc_gain: 1.0,
             sample_rate,
         };
@@ -150,9 +150,9 @@ impl InterstageLoading {
 
         if c_total > 0.0 {
             let fc = 1.0 / (2.0 * math::PI * r_parallel * c_total);
-            self.lpf_coef = math::exp(-2.0 * math::PI * fc / self.sample_rate);
+            self.lpf_coef = math::exp(-2.0 * math::PI * fc / self.sample_rate) as Wave;
         } else {
-            self.lpf_coef = 0.0;
+            self.lpf_coef = 0.0 as Wave;
         }
     }
 
@@ -161,14 +161,15 @@ impl InterstageLoading {
     /// Applies DC attenuation and frequency-dependent rolloff.
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
-        let attenuated = input * self.dc_gain;
+        let attenuated = input as Wave * self.dc_gain as Wave;
 
-        if self.lpf_coef > 0.0 {
+        if self.lpf_coef > 0.0 as Wave {
             // One-pole LPF for RC loading
-            self.lpf_state = self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * attenuated;
-            self.lpf_state
+            self.lpf_state =
+                self.lpf_coef * self.lpf_state + (1.0 as Wave - self.lpf_coef) * attenuated;
+            self.lpf_state as f64
         } else {
-            attenuated
+            attenuated as f64
         }
     }
 
@@ -185,7 +186,7 @@ impl InterstageLoading {
 
     /// Reset filter state.
     pub fn reset(&mut self) {
-        self.lpf_state = 0.0;
+        self.lpf_state = 0.0 as Wave;
     }
 }
 
@@ -210,9 +211,9 @@ pub struct CableModel {
     /// Source resistance (pickup or buffer output impedance).
     source_resistance: f64,
     /// One-pole filter state.
-    lpf_state: f64,
+    lpf_state: Wave,
     /// Filter coefficient.
-    lpf_coef: f64,
+    lpf_coef: Wave,
     /// Sample rate.
     sample_rate: f64,
 }
@@ -234,8 +235,8 @@ impl CableModel {
         let mut s = Self {
             capacitance,
             source_resistance,
-            lpf_state: 0.0,
-            lpf_coef: 0.0,
+            lpf_state: 0.0 as Wave,
+            lpf_coef: 0.0 as Wave,
             sample_rate,
         };
         s.recompute();
@@ -261,20 +262,21 @@ impl CableModel {
         let tau = self.source_resistance * self.capacitance;
         if tau > 0.0 {
             let fc = 1.0 / (2.0 * math::PI * tau);
-            self.lpf_coef = math::exp(-2.0 * math::PI * fc / self.sample_rate);
+            self.lpf_coef = math::exp(-2.0 * math::PI * fc / self.sample_rate) as Wave;
         } else {
-            self.lpf_coef = 0.0;
+            self.lpf_coef = 0.0 as Wave;
         }
     }
 
     /// Process one sample.
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
-        if self.lpf_coef > 0.0 {
-            self.lpf_state = self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * input;
-            self.lpf_state
+        let input = input as Wave;
+        if self.lpf_coef > 0.0 as Wave {
+            self.lpf_state = self.lpf_coef * self.lpf_state + (1.0 as Wave - self.lpf_coef) * input;
+            self.lpf_state as f64
         } else {
-            input
+            input as f64
         }
     }
 
@@ -296,7 +298,7 @@ impl CableModel {
 
     /// Reset filter state.
     pub fn reset(&mut self) {
-        self.lpf_state = 0.0;
+        self.lpf_state = 0.0 as Wave;
     }
 }
 

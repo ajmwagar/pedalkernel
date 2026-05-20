@@ -12,7 +12,7 @@
 //! The filters use half-band IIR designs (Butterworth) for minimal latency
 //! and CPU cost while providing strong alias rejection (~80 dB).
 
-use crate::math;
+use crate::{math, Wave};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -46,9 +46,9 @@ impl OversamplingFactor {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct HalfBandFilter {
     /// Biquad coefficients [b0, b1, b2, a1, a2] for each section.
-    sections: Vec<[f64; 5]>,
+    sections: Vec<[Wave; 5]>,
     /// State [x1, x2, y1, y2] for each section.
-    state: Vec<[f64; 4]>,
+    state: Vec<[Wave; 4]>,
 }
 
 impl HalfBandFilter {
@@ -79,7 +79,7 @@ impl HalfBandFilter {
     ///
     /// `order` must be even. `fc_normalized` is fc/fs (0 to 0.5).
     /// Returns vec of [b0, b1, b2, a1, a2] sections.
-    fn design_butterworth(order: usize, fc_normalized: f64) -> Vec<[f64; 5]> {
+    fn design_butterworth(order: usize, fc_normalized: f64) -> Vec<[Wave; 5]> {
         let num_sections = order / 2;
         let wc = math::tan(math::PI * fc_normalized);
         let wc2 = wc * wc;
@@ -101,7 +101,13 @@ impl HalfBandFilter {
             let b1 = 2.0 * wc2 / a0;
             let b2 = wc2 / a0;
 
-            sections.push([b0, b1, b2, a1_coef, a2_coef]);
+            sections.push([
+                b0 as Wave,
+                b1 as Wave,
+                b2 as Wave,
+                a1_coef as Wave,
+                a2_coef as Wave,
+            ]);
         }
         sections
     }
@@ -109,6 +115,7 @@ impl HalfBandFilter {
     /// Process one sample through the cascade.
     #[inline]
     fn process(&mut self, input: f64) -> f64 {
+        let input = input as Wave;
         let mut x = input;
         for (i, coef) in self.sections.iter().enumerate() {
             let [b0, b1, b2, a1, a2] = *coef;
@@ -119,7 +126,7 @@ impl HalfBandFilter {
             self.state[i] = [x, x1, y, y1];
             x = y;
         }
-        x
+        x as f64
     }
 
     /// Reset filter state.

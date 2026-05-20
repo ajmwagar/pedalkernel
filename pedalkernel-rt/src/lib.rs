@@ -21,6 +21,15 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+/// Runtime audio/wave scalar.
+///
+/// Desktop builds use `f64` to preserve regression-test precision and analysis
+/// output. Embedded Cortex-M builds use `f32`, matching the M7 FPU.
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub type Wave = f32;
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub type Wave = f64;
+
 // ── Runtime math ─────────────────────────────────────────────────────────
 // On std targets, f64 inherent methods (sin, cos, exp, etc.) are available.
 // On no_std targets, we use libm. This module provides a uniform interface.
@@ -93,7 +102,7 @@ pub enum PortDirection {
 /// Audio processor trait for pedals.
 pub trait PedalProcessor {
     /// Process a single sample.
-    fn process(&mut self, input: f64) -> f64;
+    fn process(&mut self, input: Wave) -> Wave;
 
     /// Set sample rate (call before processing).
     fn set_sample_rate(&mut self, rate: f64);
@@ -133,7 +142,7 @@ pub trait PedalProcessor {
     /// filter.process_ports(&mut ports);
     /// let output = ports[audio_out];
     /// ```
-    fn process_ports(&mut self, _ports: &mut [f64]) {}
+    fn process_ports(&mut self, _ports: &mut [Wave]) {}
 
     // ── Component introspection ─────────────────────────────────────
 
