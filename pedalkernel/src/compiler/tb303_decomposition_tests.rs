@@ -124,6 +124,86 @@ fn stinchcombe_htb_magnitude(freq_hz: f64, fc_hz: f64) -> f64 {
     1.0 / (re * re + im * im).sqrt()
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Complex {
+    re: f64,
+    im: f64,
+}
+
+impl Complex {
+    const fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
+    }
+
+    const fn real(re: f64) -> Self {
+        Self { re, im: 0.0 }
+    }
+
+    fn add(self, rhs: Self) -> Self {
+        Self::new(self.re + rhs.re, self.im + rhs.im)
+    }
+
+    fn mul(self, rhs: Self) -> Self {
+        Self::new(
+            self.re * rhs.re - self.im * rhs.im,
+            self.re * rhs.im + self.im * rhs.re,
+        )
+    }
+
+    fn scale(self, rhs: f64) -> Self {
+        Self::new(self.re * rhs, self.im * rhs)
+    }
+
+    fn div_scalar(self, rhs: f64) -> Self {
+        Self::new(self.re / rhs, self.im / rhs)
+    }
+
+    fn mag(self) -> f64 {
+        self.re.hypot(self.im)
+    }
+}
+
+fn stinchcombe_10pole_magnitude(freq_hz: f64, fc_hz: f64, resonance_k: f64) -> f64 {
+    let omega = 2.0 * std::f64::consts::PI * freq_hz;
+    let omega_c = (2.0 * std::f64::consts::PI * fc_hz).max(1.0e-9);
+    let s = Complex::new(0.0, omega);
+    let s2 = s.mul(s);
+    let s3 = s2.mul(s);
+    let s4 = s2.mul(s2);
+
+    let pole = |p: f64| s.add(Complex::real(p));
+
+    let numerator = s3
+        .mul(pole(109.9))
+        .mul(pole(34.0))
+        .mul(pole(7.41))
+        .scale(1.06);
+
+    let core = s4
+        .div_scalar(omega_c.powi(4))
+        .add(
+            s3.div_scalar(omega_c.powi(3))
+                .scale(2.0f64.powf(11.0 / 4.0)),
+        )
+        .add(s2.div_scalar(omega_c.powi(2)).scale(10.0 * 2.0f64.sqrt()))
+        .add(s.div_scalar(omega_c).scale(2.0f64.powf(13.0 / 4.0)))
+        .add(Complex::real(1.0));
+
+    let coupling = pole(38.5)
+        .mul(pole(4.45))
+        .mul(pole(578.1))
+        .mul(pole(20.0))
+        .mul(pole(7.41));
+    let resonance = s4.mul(pole(46.5)).mul(pole(4.40)).scale(18.7 * resonance_k);
+    let denominator = core.mul(coupling).add(resonance);
+    let den_mag = denominator.mag();
+    if den_mag <= 1.0e-30 {
+        0.0
+    } else {
+        numerator.mag() / den_mag
+    }
+}
+
 fn db_norm(value: f64, reference: f64) -> f64 {
     20.0 * (value / reference.max(1e-12)).max(1e-12).log10()
 }
@@ -1824,20 +1904,22 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
 
     let htb_fc = best_fit_fc(&serial);
     let h_ref = stinchcombe_htb_magnitude(freqs[0], htb_fc);
+    let full_10_ref = stinchcombe_10pole_magnitude(freqs[0], htb_fc, 0.0);
 
     eprintln!("  TB303 normalized response comparison, Cutoff=0.5 Resonance=0");
     eprintln!("  H_tb best-fit fc to forced-serial WDF: {htb_fc:.1} Hz");
     eprintln!(
-        "  {:>8} {:>10} {:>10} {:>10} {:>10}",
-        "Freq", "BKM dB", "Serial dB", "H_tb dB", "BKM-HTB"
+        "  {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "Freq", "BKM dB", "Serial dB", "H_tb dB", "10pole dB", "BKM-10p"
     );
     for (i, &freq) in freqs.iter().enumerate() {
         let bkm_db = db_norm(bkm[i], bkm[0]);
         let serial_db = db_norm(serial[i], serial[0]);
         let htb_db = db_norm(stinchcombe_htb_magnitude(freq, htb_fc), h_ref);
+        let full_10_db = db_norm(stinchcombe_10pole_magnitude(freq, htb_fc, 0.0), full_10_ref);
         eprintln!(
-            "  {freq:>8.0} {bkm_db:>+10.1} {serial_db:>+10.1} {htb_db:>+10.1} {:>+10.1}",
-            bkm_db - htb_db
+            "  {freq:>8.0} {bkm_db:>+10.1} {serial_db:>+10.1} {htb_db:>+10.1} {full_10_db:>+10.1} {:>+10.1}",
+            bkm_db - full_10_db
         );
     }
 
@@ -1858,6 +1940,20 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
         "BKM should stay in the same transition-band family as H_tb when all TB303 source ports are driven: \
          BKM 5k={bkm_5k_db:+.1} dB, H_tb 5k={htb_5k_db:+.1} dB"
     );
+}
+
+#[test]
+fn stinchcombe_10pole_reference_blocks_dc_and_stays_finite() {
+    let dc = stinchcombe_10pole_magnitude(0.0, 1_000.0, 0.0);
+    let low = stinchcombe_10pole_magnitude(100.0, 1_000.0, 0.0);
+    let resonant = stinchcombe_10pole_magnitude(1_000.0, 1_000.0, 0.8);
+
+    assert_eq!(
+        dc, 0.0,
+        "full 10-pole reference should include DC-blocking zeros"
+    );
+    assert!(low.is_finite() && low > 0.0);
+    assert!(resonant.is_finite() && resonant > 0.0);
 }
 
 #[test]
