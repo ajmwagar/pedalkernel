@@ -842,7 +842,7 @@ fn tb303_bkm_differential_rungs_have_side_aware_block_ports() {
     assert_eq!(
         bkm.solve_mode,
         pedalkernel_rt::stage::BlockwiseSolveMode::CoupledNewton,
-        "default TB303 BKM must use the coupled K-method solve; the diode ladder core shortcut bypasses resonance coupling"
+        "default TB303 BKM must use the delay-free coupled K-method solve"
     );
     assert!(
         bkm.diode_ladder_core.is_none(),
@@ -883,6 +883,37 @@ fn tb303_bkm_differential_rungs_have_side_aware_block_ports() {
             "top rung port should stay floating/differential for symmetric inter-rung coupling, got {top_diff:?}"
         );
     }
+}
+
+#[test]
+fn tb303_coupled_fixed_point_is_diagnostic_opt_out() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled = super::compile_pedal_with_options(
+        &def,
+        SR,
+        super::compile::CompileOptions {
+            coupled_blockwise_newton: false,
+            ..Default::default()
+        },
+    )
+    .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    assert_eq!(
+        bkm.solve_mode,
+        pedalkernel_rt::stage::BlockwiseSolveMode::CoupledFixedPoint
+    );
 }
 
 #[test]

@@ -136,6 +136,19 @@ fn projected_leaf_voltage(leaf: &LeafKind, incident: f64) -> f64 {
     }
 }
 
+fn projected_leaf_voltage_incident_gain(leaf: &LeafKind) -> f64 {
+    match leaf {
+        LeafKind::Resistor(_)
+        | LeafKind::Pot(_)
+        | LeafKind::Inductor(_)
+        | LeafKind::SwitchedResistor(_)
+        | LeafKind::Capacitor(_) => 0.5,
+        LeafKind::LeakyCapacitor(cap) => cap.leakage_decay,
+        LeafKind::VoltageSource(_) | LeafKind::Photocoupler(_) | LeafKind::JfetVr(_) => 0.0,
+        LeafKind::UnitDelay(_) => 0.0,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Constructors — backward-compatible factory methods
 // ═══════════════════════════════════════════════════════════════════════════
@@ -452,6 +465,44 @@ impl DynNode {
             Self::RType { adaptor, children } => {
                 let b_children: Vec<f64> = children.iter_mut().map(|c| c.reflected()).collect();
                 adaptor.scatter_up(&b_children)
+            }
+        }
+    }
+
+    /// Derivative of this node's reflected wave with respect to a global
+    /// `set_voltage()` call on the tree's unnamed voltage source. This lets
+    /// coupled BKM build a Jacobian without finite-differencing each block.
+    pub fn reflected_voltage_gain(&self) -> f64 {
+        match self {
+            Self::Leaf(leaf) => match leaf {
+                LeafKind::VoltageSource(vs) if vs.port_name.is_none() && !vs.is_cathode_bias => 2.0,
+                _ => 0.0,
+            },
+            Self::Binary {
+                kind,
+                left,
+                right,
+                gamma,
+                ..
+            } => {
+                let g1 = left.reflected_voltage_gain();
+                let g2 = right.reflected_voltage_gain();
+                match kind {
+                    BinaryKind::Series => -(g1 + g2),
+                    BinaryKind::Parallel => (1.0 - *gamma) * g1 + *gamma * g2,
+                }
+            }
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                ..
+            } => *turns_ratio * secondary.reflected_voltage_gain(),
+            Self::RType { adaptor, children } => {
+                let gains: Vec<f64> = children
+                    .iter()
+                    .map(|child| child.reflected_voltage_gain())
+                    .collect();
+                adaptor.scatter_up_gain(&gains)
             }
         }
     }
@@ -814,6 +865,14 @@ impl DynNode {
         best.get().map(|(v, _)| v)
     }
 
+    /// Derivative of `leaf_voltage_for_incident(target_id, a_root)` with
+    /// respect to `a_root`, holding cached reflected waves constant.
+    pub fn leaf_voltage_for_incident_gain(&self, target_id: &str) -> Option<f64> {
+        let best: Cell<Option<(f64, bool)>> = Cell::new(None);
+        self.visit_leaf_voltage_for_incident_gain(target_id, 1.0, &best);
+        best.get().map(|(v, _)| v)
+    }
+
     fn visit_leaf_voltage_for_incident(
         &self,
         target_id: &str,
@@ -867,6 +926,64 @@ impl DynNode {
                 let a_children = adaptor.scatter_down(a);
                 for (child, &a_i) in children.iter().zip(a_children.iter()) {
                     child.visit_leaf_voltage_for_incident(target_id, a_i, best);
+                }
+            }
+        }
+    }
+
+    fn visit_leaf_voltage_for_incident_gain(
+        &self,
+        target_id: &str,
+        a_gain: f64,
+        best: &Cell<Option<(f64, bool)>>,
+    ) {
+        match self {
+            Self::Leaf(leaf) => {
+                if leaf_matches_id(leaf, target_id) {
+                    let gain = projected_leaf_voltage_incident_gain(leaf) * a_gain;
+                    let is_preferred = leaf.type_tag() == "pot" && !leaf.is_complement();
+                    match best.get() {
+                        None => best.set(Some((gain, is_preferred))),
+                        Some((_, false)) if is_preferred => best.set(Some((gain, true))),
+                        _ => {}
+                    }
+                }
+            }
+            Self::Binary {
+                kind,
+                left,
+                right,
+                gamma,
+                ..
+            } => match kind {
+                BinaryKind::Series => {
+                    left.visit_leaf_voltage_for_incident_gain(target_id, -*gamma * a_gain, best);
+                    right.visit_leaf_voltage_for_incident_gain(
+                        target_id,
+                        -(1.0 - *gamma) * a_gain,
+                        best,
+                    );
+                }
+                BinaryKind::Parallel => {
+                    left.visit_leaf_voltage_for_incident_gain(target_id, a_gain, best);
+                    right.visit_leaf_voltage_for_incident_gain(target_id, a_gain, best);
+                }
+            },
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                ..
+            } => {
+                secondary.visit_leaf_voltage_for_incident_gain(
+                    target_id,
+                    a_gain / *turns_ratio,
+                    best,
+                );
+            }
+            Self::RType { adaptor, children } => {
+                let child_gains = adaptor.scatter_down_parent_gains();
+                for (child, gain) in children.iter().zip(child_gains.iter()) {
+                    child.visit_leaf_voltage_for_incident_gain(target_id, a_gain * *gain, best);
                 }
             }
         }

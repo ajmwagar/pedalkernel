@@ -1449,6 +1449,7 @@ pub(super) fn try_build_blockwise(
     force_serial: bool,
     force_serial_feedback_gain: f64,
     disable_iir: bool,
+    coupled_newton: bool,
 ) -> Option<Vec<BuiltStage>> {
     let plan = analyze_blockwise(edge_indices, graph)?;
 
@@ -2469,8 +2470,10 @@ pub(super) fn try_build_blockwise(
             // front without outrunning the input port conditioning stage.
             signal_flow_distance: 1,
             bypass_serial: false,
-            solve_mode: if use_coupled_solve {
+            solve_mode: if use_coupled_solve && coupled_newton {
                 pedalkernel_rt::stage::BlockwiseSolveMode::CoupledNewton
+            } else if use_coupled_solve {
+                pedalkernel_rt::stage::BlockwiseSolveMode::CoupledFixedPoint
             } else {
                 pedalkernel_rt::stage::BlockwiseSolveMode::Cascade
             },

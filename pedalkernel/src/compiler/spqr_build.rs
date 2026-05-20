@@ -388,6 +388,7 @@ pub fn compile_via_spqr_with_options(
                     options.force_serial_blockwise,
                     options.force_serial_blockwise_feedback_gain,
                     options.disable_iir,
+                    options.coupled_blockwise_newton,
                 ) {
                     for built in built_stages {
                         push_stage!(
@@ -916,6 +917,7 @@ pub fn compile_via_spqr_with_options(
                     options.force_serial_blockwise,
                     options.force_serial_blockwise_feedback_gain,
                     options.disable_iir,
+                    options.coupled_blockwise_newton,
                 ) {
                     for built in built_stages {
                         push_stage!(

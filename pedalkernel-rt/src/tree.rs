@@ -386,6 +386,20 @@ impl RTypeAdaptor {
         sum_power * self.sqrt_r[n - 1]
     }
 
+    /// Linear gain from child reflected-wave gains to the parent reflected
+    /// wave. This mirrors `scatter_up` without mutating cached child waves.
+    #[inline]
+    pub fn scatter_up_gain(&self, child_gains: &[f64]) -> f64 {
+        debug_assert_eq!(child_gains.len(), self.num_ports - 1);
+        let n = self.num_ports;
+        let mut sum_power = 0.0;
+        for j in 0..(n - 1) {
+            sum_power +=
+                self.power_scattering[(n - 1) * n + j] * child_gains[j] * self.inv_sqrt_r[j];
+        }
+        sum_power * self.sqrt_r[n - 1]
+    }
+
     /// scatter_down: given parent incident wave, produce child incident waves.
     ///
     /// Parent sends a_n. We compute a₁, a₂, ..., a_{n-1} for children.
@@ -407,6 +421,18 @@ impl RTypeAdaptor {
         }
 
         a_children
+    }
+
+    /// Linear gains from parent incident wave to child incident waves. This is
+    /// the `a_parent` part of `scatter_down`; cached child waves are constants.
+    pub fn scatter_down_parent_gains(&self) -> Vec<f64> {
+        let n = self.num_ports;
+        let mut gains = vec![0.0; n - 1];
+        for i in 0..(n - 1) {
+            gains[i] =
+                self.power_scattering[i * n + n - 1] * self.inv_sqrt_r[n - 1] * self.sqrt_r[i];
+        }
+        gains
     }
 
     /// Perform full N×N scatter: `a = S · b_all` using power-normalized waves.

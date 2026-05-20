@@ -45,6 +45,11 @@ pub struct CompileOptions {
     /// Rigid passive networks fall through to StateSpace where possible, and
     /// active feedback networks fall through to the existing WDF adaptors.
     pub disable_iir: bool,
+    /// Diagnostic mode: solve coupled blockwise K-method stages with a full
+    /// Newton/Jacobian iteration. This is useful for compiler validation but
+    /// too expensive for default realtime builds; the default coupled path is
+    /// fixed-point/table driven.
+    pub coupled_blockwise_newton: bool,
 }
 
 impl Default for CompileOptions {
@@ -59,6 +64,7 @@ impl Default for CompileOptions {
             force_serial_blockwise: false,
             force_serial_blockwise_feedback_gain: 0.0,
             disable_iir: false,
+            coupled_blockwise_newton: true,
         }
     }
 }
@@ -144,6 +150,7 @@ pub fn compile_cache_key(source: &str, sample_rate: f64, options: &CompileOption
         .to_bits()
         .hash(&mut hasher);
     options.disable_iir.hash(&mut hasher);
+    options.coupled_blockwise_newton.hash(&mut hasher);
     (options.oversampling as u8).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }

@@ -352,6 +352,23 @@ impl KTable {
         (y0 + frac * (y1 - y0)) as f64
     }
 
+    /// 1D lookup plus local derivative da_root/db_tree.
+    #[inline(always)]
+    pub fn lookup_1d_with_derivative(&self, b_tree: f64) -> (f64, f64) {
+        if self.steps < 2 || self.entries.is_empty() {
+            return (0.0, 0.0);
+        }
+        let n_max = (self.steps - 1) as Wave;
+        let p = (((b_tree as Wave) - self.b_min as Wave) * self.inv_b_scale as Wave)
+            .clamp(0.0 as Wave, n_max);
+        let i = (p as usize).min(self.steps - 2);
+        let frac = p - i as Wave;
+        let y0 = self.entries[i];
+        let y1 = self.entries[i + 1];
+        let slope = (y1 - y0) as f64 * self.inv_b_scale;
+        ((y0 + frac * (y1 - y0)) as f64, slope)
+    }
+
     /// 2D lookup: interpolate a_root from (b_tree, control_voltage).
     #[inline(always)]
     pub fn lookup_2d(&self, b_tree: f64, ctrl: f64) -> f64 {
@@ -382,6 +399,38 @@ impl KTable {
         let t0 = v00 + fb * (v10 - v00);
         let t1 = v01 + fb * (v11 - v01);
         (t0 + fc * (t1 - t0)) as f64
+    }
+
+    /// 2D lookup plus local derivatives `(value, d/db_tree, d/dctrl)`.
+    #[inline(always)]
+    pub fn lookup_2d_with_derivatives(&self, b_tree: f64, ctrl: f64) -> (f64, f64, f64) {
+        if self.steps < 2 || self.entries.is_empty() {
+            return (0.0, 0.0, 0.0);
+        }
+        if self.dims == 1 {
+            let (value, db) = self.lookup_1d_with_derivative(b_tree);
+            return (value, db, 0.0);
+        }
+        let n_max = (self.steps - 1) as Wave;
+        let pb = (((b_tree as Wave) - self.b_min as Wave) * self.inv_b_scale as Wave)
+            .clamp(0.0 as Wave, n_max);
+        let pc = (((ctrl as Wave) - self.ctrl_min as Wave) * self.inv_c_scale as Wave)
+            .clamp(0.0 as Wave, n_max);
+        let ib = (pb as usize).min(self.steps - 2);
+        let ic = (pc as usize).min(self.steps - 2);
+        let fb = pb - ib as Wave;
+        let fc = pc - ic as Wave;
+        let s = self.steps;
+        let v00 = self.entries[ib + ic * s];
+        let v10 = self.entries[ib + 1 + ic * s];
+        let v01 = self.entries[ib + (ic + 1) * s];
+        let v11 = self.entries[ib + 1 + (ic + 1) * s];
+        let t0 = v00 + fb * (v10 - v00);
+        let t1 = v01 + fb * (v11 - v01);
+        let value = t0 + fc * (t1 - t0);
+        let d_db = ((1.0 as Wave - fc) * (v10 - v00) + fc * (v11 - v01)) as f64 * self.inv_b_scale;
+        let d_dc = ((1.0 as Wave - fb) * (v01 - v00) + fb * (v11 - v10)) as f64 * self.inv_c_scale;
+        (value as f64, d_db, d_dc)
     }
 }
 
@@ -6364,6 +6413,19 @@ impl BlockwiseKMethodStage {
         }
     }
 
+    fn block_root_incident_with_derivatives(
+        block: &KMethodBlock,
+        b_tree: f64,
+        ctrl: f64,
+    ) -> (f64, f64, f64) {
+        if block.k_table.dims == 1 {
+            let (value, d_b) = block.k_table.lookup_1d_with_derivative(b_tree);
+            (value, d_b, 0.0)
+        } else {
+            block.k_table.lookup_2d_with_derivatives(b_tree, ctrl)
+        }
+    }
+
     fn solve_block_without_state_update(
         block: &mut KMethodBlock,
         physical_voltage: f64,
@@ -6375,6 +6437,34 @@ impl BlockwiseKMethodStage {
         let a_root = Self::block_root_incident(block, b_tree, control_voltage);
         let raw_cascade = Self::block_output_voltage(block, a_root, b_tree);
         (a_root, b_tree, raw_cascade, raw_cascade - block.dc_offset)
+    }
+
+    fn solve_block_without_state_update_with_derivative(
+        block: &mut KMethodBlock,
+        physical_voltage: f64,
+    ) -> (f64, f64, f64) {
+        let drive_voltage = Self::block_drive_voltage(block, physical_voltage);
+        let control_voltage = Self::block_control_voltage(block, physical_voltage);
+        block.tree.set_voltage(drive_voltage);
+        let b_tree = block.tree.reflected();
+        let (a_root, da_db_tree, da_dctrl) =
+            Self::block_root_incident_with_derivatives(block, b_tree, control_voltage);
+        let raw_cascade = Self::block_output_voltage(block, a_root, b_tree);
+
+        let db_tree_dv = block.source_polarity * block.tree.reflected_voltage_gain();
+        let dctrl_dv = if block.shared_diode_bias_voltage.is_some() || !block.control_from_drive {
+            0.0
+        } else {
+            block.k_table_control_polarity
+        };
+        let da_root_dv = da_db_tree * db_tree_dv + da_dctrl * dctrl_dv;
+        let output_gain = Self::block_output_voltage_gain(block, da_root_dv, db_tree_dv);
+
+        (
+            raw_cascade - block.dc_offset,
+            2.0 * output_gain - 1.0,
+            output_gain,
+        )
     }
 
     fn solve_block_and_update_state(
@@ -6610,13 +6700,12 @@ impl BlockwiseKMethodStage {
 
             let incident = a.get(primary_port).copied().unwrap_or(0.0)
                 + if block_idx == 0 { serial_input } else { 0.0 };
-            let h = 1.0e-5 * incident.abs().max(1.0);
-            let (out_hi, refl_hi) =
-                Self::solve_block_port(&mut self.blocks[block_idx], incident + h, false);
-            let (out_lo, refl_lo) =
-                Self::solve_block_port(&mut self.blocks[block_idx], incident - h, false);
-            let d_out = ((out_hi - out_lo) / (2.0 * h)).clamp(-1.0e6, 1.0e6);
-            let d_refl = ((refl_hi - refl_lo) / (2.0 * h)).clamp(-1.0e6, 1.0e6);
+            let (_, d_refl, d_out) = Self::solve_block_without_state_update_with_derivative(
+                &mut self.blocks[block_idx],
+                incident,
+            );
+            let d_out = d_out.clamp(-1.0e6, 1.0e6);
+            let d_refl = d_refl.clamp(-1.0e6, 1.0e6);
             let d_out = if d_out.is_finite() { d_out } else { 0.0 };
             let d_refl = if d_refl.is_finite() { d_refl } else { 0.0 };
             output_derivative_by_block[block_idx] = d_out;
@@ -6630,18 +6719,11 @@ impl BlockwiseKMethodStage {
                     let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0);
                     let differential_incident = a_bottom_left - a_bottom_right
                         + if block_idx == 0 { serial_input } else { 0.0 };
-                    let h = 1.0e-5 * differential_incident.abs().max(1.0);
-                    let (out_hi, _) = Self::solve_block_port(
+                    let (_, _, d_out) = Self::solve_block_without_state_update_with_derivative(
                         &mut self.blocks[block_idx],
-                        differential_incident + h,
-                        false,
+                        differential_incident,
                     );
-                    let (out_lo, _) = Self::solve_block_port(
-                        &mut self.blocks[block_idx],
-                        differential_incident - h,
-                        false,
-                    );
-                    let d_out = ((out_hi - out_lo) / (2.0 * h)).clamp(-1.0e6, 1.0e6);
+                    let d_out = d_out.clamp(-1.0e6, 1.0e6);
                     let d_out = if d_out.is_finite() { d_out } else { 0.0 };
                     output_derivative_by_block[block_idx] = d_out;
 
@@ -6880,6 +6962,31 @@ impl BlockwiseKMethodStage {
         } else {
             (a_root + b_tree) / 2.0
         }
+    }
+
+    fn block_output_voltage_gain(block: &KMethodBlock, da_root_dv: f64, db_tree_dv: f64) -> f64 {
+        if let Some(ref probe_id) = block.cascade_probe_id {
+            if let Some(gain) = block.tree.leaf_voltage_for_incident_gain(probe_id) {
+                return gain * da_root_dv;
+            }
+        }
+
+        if block.cascade_from_passive {
+            if let DynNode::Binary {
+                kind: crate::dyn_node::BinaryKind::Series,
+                gamma,
+                left,
+                right,
+                ..
+            } = &block.tree
+            {
+                let g1 = left.reflected_voltage_gain() * block.source_polarity;
+                let g2 = right.reflected_voltage_gain() * block.source_polarity;
+                return g2 - 0.5 * (1.0 - *gamma) * (g1 + g2 + da_root_dv);
+            }
+        }
+
+        0.5 * (da_root_dv + db_tree_dv)
     }
 
     /// Set a pot position in any block-local passive tree.
