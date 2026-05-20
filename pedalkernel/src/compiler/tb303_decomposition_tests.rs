@@ -1515,6 +1515,68 @@ fn tb303_bkm_resonance_control_changes_cutoff_band() {
 }
 
 #[test]
+fn tb303_bkm_max_resonance_remains_finite() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut proc =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    proc.set_control("Cutoff", 0.5);
+    proc.set_control("Resonance", 0.95);
+    proc.cache_all_vs_pointers();
+
+    let audio_in = proc.resolve_port("audio_in").expect("audio_in port");
+    let vco_in = proc.resolve_port("vco_in").expect("vco_in port");
+    let cv_cutoff = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
+    let cv_resonance = proc
+        .resolve_port("cv_resonance")
+        .expect("cv_resonance port");
+    let audio_out = proc.resolve_port("audio_out").expect("audio_out port");
+    let mut ports = vec![0.0; proc.port_count()];
+
+    let mut max_abs = 0.0f64;
+    for i in 0..48_000 {
+        let input = 0.05 * (2.0 * std::f64::consts::PI * 220.0 * i as f64 / SR).sin();
+        ports[audio_in] = input;
+        ports[vco_in] = input;
+        ports[cv_cutoff] = 0.0;
+        ports[cv_resonance] = 0.0;
+        proc.process_ports(&mut ports);
+        let out = ports[audio_out];
+        assert!(
+            out.is_finite(),
+            "max resonance must not emit NaN/Inf at sample {i}: {out}"
+        );
+        max_abs = max_abs.max(out.abs());
+    }
+
+    for stage in &proc.stages {
+        if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+            assert!(
+                bkm.work_a
+                    .iter()
+                    .chain(bkm.work_b.iter())
+                    .all(|v| v.is_finite()),
+                "BKM work buffers must remain finite at max resonance"
+            );
+            assert!(
+                bkm.blocks.iter().all(|block| {
+                    block.dc_offset.is_finite()
+                        && block.rp.is_finite()
+                        && block.k_table.entries.iter().all(|v| v.is_finite())
+                }),
+                "BKM block state and K-tables must remain finite at max resonance"
+            );
+        }
+    }
+
+    assert!(
+        max_abs < 100.0,
+        "max resonance should stay bounded enough for host/plugin output: peak={max_abs:.6}"
+    );
+}
+
+#[test]
 fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

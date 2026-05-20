@@ -1233,6 +1233,7 @@ pub(super) fn try_build_blockwise(
                         cascade_probe_id: wdf.output_probe.clone(),
                         source_polarity,
                         k_table_control_polarity,
+                        shared_diode_bias_voltage: None,
                     });
                 }
             }
@@ -1581,6 +1582,64 @@ pub(super) fn try_build_blockwise(
 
         let coupling_rp: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
 
+        let first_block_port_node = plan
+            .blocks
+            .first()
+            .and_then(|block| block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph));
+        let all_explicit_diode_blocks =
+            k_blocks.len() >= 2 && k_blocks.iter().all(|b| b.explicit_diode_root.is_some());
+        let shared_diode_cutoff_pot = if all_explicit_diode_blocks {
+            first_block_port_node.and_then(|port_node| {
+                plan.coupling_edges.iter().find_map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    let comp = &graph.components[e.comp_idx];
+                    let is_pot = comp
+                        .kind
+                        .as_any()
+                        .downcast_ref::<super::components::Potentiometer>()
+                        .is_some();
+                    let touches_first_port = e.node_a == port_node || e.node_b == port_node;
+                    let touches_feedback_output = output_feedback_node
+                        .map(|node| e.node_a == node || e.node_b == node)
+                        .unwrap_or(false);
+
+                    if is_pot && touches_first_port && !touches_feedback_output {
+                        Some(comp.id.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        } else {
+            None
+        };
+        let cutoff_cv_port = if all_explicit_diode_blocks {
+            first_block_port_node.and_then(|port_node| {
+                port_defs.iter().find_map(|port_def| {
+                    if port_def.direction != pedalkernel_rt::PortDirection::Input {
+                        return None;
+                    }
+                    let lower_name = port_def.name.to_ascii_lowercase();
+                    if !lower_name.contains("cv") || lower_name.contains("resonance") {
+                        return None;
+                    }
+                    let external_port_node = graph.node_names.get(&port_def.name).copied()?;
+                    let drives_first_port = plan.coupling_edges.iter().any(|&eidx| {
+                        let e = &graph.edges[eidx];
+                        (e.node_a == external_port_node && e.node_b == port_node)
+                            || (e.node_b == external_port_node && e.node_a == port_node)
+                    });
+                    if drives_first_port {
+                        Some(port_def.name.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
         // TODO: Compute per-block source impedance from circuit topology.
         //
         // The VS Rp = 1Ω (default) makes the source near-ideal, which
@@ -1610,7 +1669,8 @@ pub(super) fn try_build_blockwise(
             output_block,
             supply_voltage,
             vs_port_map,
-            cutoff_cv_port: None,
+            cutoff_cv_port,
+            shared_diode_cutoff_pot,
             feedback_port_map,
             compensation: 1.0,
             oversampler: pedalkernel_rt::oversampling::Oversampler::new(

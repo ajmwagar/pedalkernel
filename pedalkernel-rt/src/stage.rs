@@ -4459,9 +4459,19 @@ impl SerialDelayedFeedbackStage {
     }
 
     pub fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
+        let aw_id = format!("{comp_id}__aw");
+        let wb_id = format!("{comp_id}__wb");
         let mut changed = false;
         for stage in &mut self.stages {
             if stage.set_pot(comp_id, value) {
+                stage.flush_recompute();
+                changed = true;
+            }
+            if stage.set_pot(&aw_id, value) {
+                stage.flush_recompute();
+                changed = true;
+            }
+            if stage.set_pot(&wb_id, 1.0 - value) {
                 stage.flush_recompute();
                 changed = true;
             }
@@ -5778,6 +5788,13 @@ pub struct KMethodBlock {
     /// bias axis is defined in the physical device voltage convention.
     #[cfg_attr(feature = "serde", serde(default = "default_k_table_control_polarity"))]
     pub k_table_control_polarity: f64,
+    /// Optional shared diode bias voltage for current-controlled diode ladders.
+    ///
+    /// TB-303-style ladders use one cutoff current to set all rung operating
+    /// points coherently. When present, this voltage drives the K-table control
+    /// axis instead of the block's local coupling voltage.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shared_diode_bias_voltage: Option<f64>,
 }
 
 #[cfg(feature = "serde")]
@@ -5811,6 +5828,12 @@ impl DiodeCutoffCalibration {
                 .clamp(self.min_rp, self.max_rp)
         }
     }
+}
+
+fn diode_bias_voltage_from_current(model: DiodeModel, current: f64) -> f64 {
+    let i = current.max(1.0e-12);
+    let junction = model.n_vt * crate::math::ln(i / model.is + 1.0);
+    junction + i * model.rs
 }
 
 #[derive(Clone)]
@@ -5873,6 +5896,12 @@ pub struct BlockwiseKMethodStage {
     /// Set by the compiler for blockwise explicit-diode ladders with a cutoff
     /// CV/input port in the coupling network.
     pub cutoff_cv_port: Option<String>,
+    /// Coupling pot that controls one shared diode-ladder cutoff current.
+    ///
+    /// The pot is discovered by the compiler when a multi-rung explicit diode
+    /// BKM ladder has a supply-side coupling pot on the first rung bias path.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shared_diode_cutoff_pot: Option<String>,
     /// Internal feedback drives: (block_index, scattering_port_index).
     /// These inject the latest cascade output into coupling nodes such as the
     /// TB-303 resonance path from the final emitter back to the first base.
@@ -5934,6 +5963,9 @@ impl BlockwiseKMethodStage {
     }
 
     fn block_control_voltage(block: &KMethodBlock, physical_voltage: f64) -> f64 {
+        if let Some(v_bias) = block.shared_diode_bias_voltage {
+            return v_bias;
+        }
         block.k_table_control_polarity * physical_voltage
     }
 
@@ -6058,11 +6090,7 @@ impl BlockwiseKMethodStage {
             } else {
                 Self::solve_block_without_state_update(&mut self.blocks[i], v_block)
             };
-            cascade_drive = if include_cascade {
-                ac_cascade
-            } else {
-                raw_cascade
-            };
+            cascade_drive = raw_cascade;
             cascade_out = ac_cascade;
             self.work_b[i] = if include_cascade && i > 0 {
                 0.0
@@ -6161,10 +6189,60 @@ impl BlockwiseKMethodStage {
 
         if coupling_found {
             self.recompute_coupling_scattering();
+            if self.shared_diode_cutoff_pot.as_deref() == Some(comp_id) {
+                self.update_shared_diode_cutoff_bias(0.0);
+            }
             found = true;
         }
 
         found
+    }
+
+    fn update_shared_diode_cutoff_bias_from_ports(&mut self, vs_signals: &[f64]) {
+        let cutoff_cv = self
+            .cutoff_cv_port
+            .as_ref()
+            .and_then(|cutoff_name| {
+                self.vs_port_map
+                    .iter()
+                    .position(|(name, _)| name == cutoff_name)
+                    .and_then(|idx| vs_signals.get(idx).copied())
+            })
+            .unwrap_or(0.0);
+        self.update_shared_diode_cutoff_bias(cutoff_cv);
+    }
+
+    fn update_shared_diode_cutoff_bias(&mut self, cutoff_cv_voltage: f64) {
+        let Some(comp_id) = self.shared_diode_cutoff_pot.as_deref() else {
+            return;
+        };
+        let Some(first_block) = self.blocks.first() else {
+            return;
+        };
+        let Some(calibration) = first_block.diode_cutoff.as_ref() else {
+            return;
+        };
+        let Some(model) = first_block.explicit_diode_root.map(|root| root.model) else {
+            return;
+        };
+        let Some(cutoff_resistance) = self
+            .coupling_elements
+            .iter()
+            .find(|element| element.comp_id == comp_id)
+            .map(|element| element.resistance)
+        else {
+            return;
+        };
+
+        let total_r = (calibration.bias_resistance + cutoff_resistance).max(1.0);
+        let i_f = (self.supply_voltage + cutoff_cv_voltage - 0.6).max(0.0) / total_r;
+        let v_bias = diode_bias_voltage_from_current(model, i_f);
+
+        for block in &mut self.blocks {
+            if block.explicit_diode_root.is_some() {
+                block.shared_diode_bias_voltage = Some(v_bias);
+            }
+        }
     }
 
     pub fn has_coupling_pot(&self, comp_id: &str) -> bool {
@@ -6308,6 +6386,8 @@ impl BlockwiseKMethodStage {
             self.init_buffers();
         }
 
+        self.update_shared_diode_cutoff_bias_from_ports(vs_signals);
+
         // Write VS signals into the coupling scattering ports.
         // b = 2·V (WDF voltage source reflected wave).
         // External ports (audio, CV) come from vs_signals.
@@ -6429,6 +6509,7 @@ mod blockwise_k_method_tests {
             cascade_probe_id: None,
             source_polarity: 1.0,
             k_table_control_polarity: 1.0,
+            shared_diode_bias_voltage: None,
         }
     }
 
@@ -6511,6 +6592,7 @@ mod blockwise_k_method_tests {
             supply_voltage: 9.0,
             vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
+            shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
@@ -6552,6 +6634,7 @@ mod blockwise_k_method_tests {
             supply_voltage: 9.0,
             vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
+            shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
@@ -6606,6 +6689,7 @@ mod blockwise_k_method_tests {
             supply_voltage: 9.0,
             vs_port_map: vec![],
             cutoff_cv_port: None,
+            shared_diode_cutoff_pot: None,
             feedback_port_map: vec![(0, 1)],
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
@@ -6654,6 +6738,7 @@ mod blockwise_k_method_tests {
             supply_voltage: 9.0,
             vs_port_map: vec![],
             cutoff_cv_port: None,
+            shared_diode_cutoff_pot: None,
             feedback_port_map: vec![(0, 0)],
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
@@ -6688,6 +6773,82 @@ mod blockwise_k_method_tests {
             (raw - ac - 0.75).abs() < 1e-12,
             "BKM should keep raw cascade voltage available for driving downstream nonlinear blocks \
              while exposing AC output separately"
+        );
+    }
+
+    #[test]
+    fn bkm_shared_diode_cutoff_current_updates_all_rungs_from_pot_and_cv() {
+        let diode_root = ExplicitDiodeRoot::new(DiodeModel::silicon());
+        let calibration = DiodeCutoffCalibration {
+            bias_voltage: 9.0,
+            bias_resistance: 10_000.0,
+            cv_resistance: Some(47_000.0),
+            min_rp: 10.0,
+            max_rp: 100_000.0,
+        };
+        let mut stage = BlockwiseKMethodStage {
+            blocks: vec![
+                {
+                    let mut block = test_block(1.0);
+                    block.explicit_diode_root = Some(diode_root);
+                    block.diode_cutoff = Some(calibration.clone());
+                    block
+                },
+                {
+                    let mut block = test_block(1.0);
+                    block.explicit_diode_root = Some(diode_root);
+                    block.diode_cutoff = Some(calibration);
+                    block
+                },
+            ],
+            coupling_s: vec![1.0],
+            coupling_rp: vec![1.0],
+            coupling_n_mna: 0,
+            coupling_ports: vec![crate::tree::WdfPort {
+                node_pos: None,
+                node_neg: None,
+                resistance: 1.0,
+            }],
+            coupling_elements: vec![CouplingElement {
+                comp_id: alloc::string::String::from("Cutoff"),
+                node_a: Some(0),
+                node_b: None,
+                resistance: 50_000.0,
+                pot_max_resistance: Some(100_000.0),
+                taper: crate::pot_taper::PotTaper::B,
+                invert_control: false,
+            }],
+            n_ports: 1,
+            output_block: 1,
+            supply_voltage: 9.0,
+            vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
+            cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
+            shared_diode_cutoff_pot: Some(alloc::string::String::from("Cutoff")),
+            feedback_port_map: vec![],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            b_warm: vec![0.0],
+            work_b: vec![0.0],
+            work_a: vec![0.0],
+            port_index_cache: vec![],
+        };
+
+        stage.update_shared_diode_cutoff_bias_from_ports(&[0.0]);
+        let base_bias = stage.blocks[0].shared_diode_bias_voltage.unwrap();
+        assert_eq!(
+            stage.blocks[0].shared_diode_bias_voltage, stage.blocks[1].shared_diode_bias_voltage,
+            "one cutoff current must set every explicit diode rung coherently"
+        );
+
+        stage.update_shared_diode_cutoff_bias_from_ports(&[2.0]);
+        let cv_bias = stage.blocks[0].shared_diode_bias_voltage.unwrap();
+        assert!(
+            cv_bias > base_bias,
+            "positive cutoff CV must raise the shared diode operating bias"
         );
     }
 
