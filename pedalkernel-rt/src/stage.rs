@@ -6039,6 +6039,57 @@ pub struct CouplingElement {
     pub invert_control: bool,
 }
 
+/// Reusable scratch space for coupled blockwise solves.
+///
+/// This keeps the realtime Newton path allocation-free without spreading a
+/// set of parallel temporary vectors across `BlockwiseKMethodStage` itself.
+#[derive(Clone, Default)]
+pub struct CoupledSolveScratch {
+    pub a: Vec<f64>,
+    pub b: Vec<f64>,
+    pub f: Vec<f64>,
+    pub g: Vec<f64>,
+    pub j: Vec<f64>,
+    pub rhs: Vec<f64>,
+    pub db_da: Vec<f64>,
+}
+
+impl CoupledSolveScratch {
+    pub fn new(n_ports: usize) -> Self {
+        let mut scratch = Self::default();
+        scratch.resize(n_ports);
+        scratch
+    }
+
+    pub fn resize(&mut self, n_ports: usize) {
+        self.a.resize(n_ports, 0.0);
+        self.b.resize(n_ports, 0.0);
+        self.f.resize(n_ports, 0.0);
+        self.g.resize(n_ports, 0.0);
+        self.rhs.resize(n_ports, 0.0);
+        self.j.resize(n_ports * n_ports, 0.0);
+        self.db_da.resize(n_ports * n_ports, 0.0);
+    }
+
+    fn load_a_from(&mut self, source: &[f64], n_ports: usize) {
+        self.a.resize(n_ports, 0.0);
+        if source.len() == n_ports {
+            self.a.copy_from_slice(source);
+        } else {
+            self.a.fill(0.0);
+        }
+    }
+
+    fn load_b_from(&mut self, source: &[f64], n_ports: usize) {
+        self.b.resize(n_ports, 0.0);
+        if source.len() == n_ports {
+            self.b.copy_from_slice(source);
+        } else {
+            self.b.fill(0.0);
+        }
+    }
+}
+
 /// Blockwise K-method stage: N coupled NL blocks with linear coupling.
 ///
 /// Each block is a WDF tree + K-table (composite NL device).
@@ -6132,6 +6183,9 @@ pub struct BlockwiseKMethodStage {
     /// Work buffer: incident waves from coupling scatter (a_coupling).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub work_a: Vec<f64>,
+    /// Coupled solver scratch buffers.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub coupled_scratch: CoupledSolveScratch,
     /// Cached port indices: maps vs_port_map entries to port_values indices.
     /// Resolved once at init (cache_all_vs_pointers), no per-sample string compare.
     #[cfg_attr(feature = "serde", serde(skip))]
@@ -6555,71 +6609,85 @@ impl BlockwiseKMethodStage {
             return (0.0, true);
         }
 
-        let mut a = if self.work_a.len() == n {
-            self.work_a.clone()
-        } else {
-            vec![0.0; n]
-        };
-        let mut b = vec![0.0; n];
-        let mut f = vec![0.0; n];
-        let mut g = vec![0.0; n];
-        let mut j = vec![0.0; n * n];
-        let mut rhs = vec![0.0; n];
-        let mut db_da = vec![0.0; n * n];
+        let mut scratch = core::mem::take(&mut self.coupled_scratch);
+        scratch.resize(n);
+        scratch.load_a_from(&self.work_a, n);
         let mut output = 0.0;
+        let mut converged = false;
 
         for _ in 0..Self::MAX_ITER {
-            output = self.coupled_eval_b_for_a(&a, vs_signals, serial_input, false, &mut b);
-            self.coupled_scatter_from_b(&b, &mut f);
+            output = self.coupled_eval_b_for_a(
+                &scratch.a,
+                vs_signals,
+                serial_input,
+                false,
+                &mut scratch.b,
+            );
+            self.coupled_scatter_from_b(&scratch.b, &mut scratch.f);
 
             let mut max_err: f64 = 0.0;
             for i in 0..n {
-                g[i] = a[i] - f[i];
-                max_err = max_err.max(g[i].abs());
+                scratch.g[i] = scratch.a[i] - scratch.f[i];
+                max_err = max_err.max(scratch.g[i].abs());
             }
             if max_err < Self::TOL {
-                self.work_a.copy_from_slice(&a);
-                self.work_b.copy_from_slice(&b);
-                return (output, true);
+                converged = true;
+                break;
             }
 
-            self.coupled_fill_sparse_db_da(&a, serial_input, &mut db_da);
+            self.coupled_fill_sparse_db_da(&scratch.a, serial_input, &mut scratch.db_da);
 
             for row in 0..n {
                 for col in 0..n {
                     let mut coupling_derivative = 0.0;
                     for k in 0..n {
-                        coupling_derivative += self.coupling_s[row * n + k] * db_da[k * n + col];
+                        coupling_derivative +=
+                            self.coupling_s[row * n + k] * scratch.db_da[k * n + col];
                     }
-                    j[row * n + col] = if row == col { 1.0 } else { 0.0 } - coupling_derivative;
+                    scratch.j[row * n + col] =
+                        if row == col { 1.0 } else { 0.0 } - coupling_derivative;
                 }
-                rhs[row] = -g[row];
+                scratch.rhs[row] = -scratch.g[row];
             }
 
-            if !crate::elements::nonlinear::solver::solve_small_linear(n, &mut j, &mut rhs) {
+            if !crate::elements::nonlinear::solver::solve_small_linear(
+                n,
+                &mut scratch.j,
+                &mut scratch.rhs,
+            ) {
                 break;
             }
 
             let mut max_step: f64 = 0.0;
             for i in 0..n {
-                let step = rhs[i].clamp(-1.0, 1.0);
-                a[i] += step;
-                if !a[i].is_finite() {
-                    a[i] = 0.0;
+                let step = scratch.rhs[i].clamp(-1.0, 1.0);
+                scratch.a[i] += step;
+                if !scratch.a[i].is_finite() {
+                    scratch.a[i] = 0.0;
                 }
                 max_step = max_step.max(step.abs());
             }
             if max_step < Self::TOL {
-                self.work_a.copy_from_slice(&a);
-                self.work_b.copy_from_slice(&b);
-                return (output, true);
+                converged = true;
+                break;
             }
         }
 
-        output = self.coupled_eval_b_for_a(&a, vs_signals, serial_input, false, &mut b);
-        self.work_a.copy_from_slice(&a);
-        self.work_b.copy_from_slice(&b);
-        (output, false)
+        if !converged {
+            output = self.coupled_eval_b_for_a(
+                &scratch.a,
+                vs_signals,
+                serial_input,
+                false,
+                &mut scratch.b,
+            );
+        }
+        self.work_a.copy_from_slice(&scratch.a);
+        self.work_b.copy_from_slice(&scratch.b);
+
+        self.coupled_scratch = scratch;
+
+        (output, converged)
     }
 
     fn run_coupled_blocks(
@@ -6629,12 +6697,19 @@ impl BlockwiseKMethodStage {
         mut block_outputs: Option<&mut alloc::vec::Vec<f64>>,
     ) -> f64 {
         let n_blocks = self.blocks.len();
-        let a = self.work_a.clone();
-        let mut b = self.work_b.clone();
+        let n_ports = self.n_ports;
+        let mut scratch = core::mem::take(&mut self.coupled_scratch);
+        scratch.load_a_from(&self.work_a, n_ports);
+        scratch.load_b_from(&self.work_b, n_ports);
         let mut output = 0.0;
         for i in 0..n_blocks {
-            let port_voltage =
-                self.scatter_owned_block_ports(i, &a, serial_input, update_state, &mut b);
+            let port_voltage = self.scatter_owned_block_ports(
+                i,
+                &scratch.a,
+                serial_input,
+                update_state,
+                &mut scratch.b,
+            );
             if i == self.output_block {
                 output = port_voltage;
             }
@@ -6644,15 +6719,16 @@ impl BlockwiseKMethodStage {
         }
         for block_ports in &self.block_port_indices {
             for &port_idx in block_ports {
-                if port_idx < self.work_b.len() && port_idx < b.len() {
+                if port_idx < self.work_b.len() && port_idx < scratch.b.len() {
                     self.work_b[port_idx] = if update_state {
-                        b[port_idx]
+                        scratch.b[port_idx]
                     } else {
-                        0.5 * self.work_b[port_idx] + 0.5 * b[port_idx]
+                        0.5 * self.work_b[port_idx] + 0.5 * scratch.b[port_idx]
                     };
                 }
             }
         }
+        self.coupled_scratch = scratch;
         output
     }
 
@@ -6905,6 +6981,7 @@ impl BlockwiseKMethodStage {
             self.work_a = vec![0.0; n];
             self.b_warm = vec![0.0; n];
         }
+        self.coupled_scratch.resize(n);
         // Ensure K-table scales are precomputed
         for block in &mut self.blocks {
             block.k_table.precompute_scales();
@@ -7091,10 +7168,18 @@ impl BlockwiseKMethodStage {
 
         if self.solve_mode == BlockwiseSolveMode::CoupledNewton {
             let (_output, _converged) = self.coupled_solve_newton(vs_signals, serial_input);
-            let mut b = vec![0.0; self.n_ports];
-            let a = self.work_a.clone();
-            let output = self.coupled_eval_b_for_a(&a, vs_signals, serial_input, true, &mut b);
-            self.work_b.copy_from_slice(&b);
+            let mut scratch = core::mem::take(&mut self.coupled_scratch);
+            scratch.load_a_from(&self.work_a, self.n_ports);
+            scratch.b.resize(self.n_ports, 0.0);
+            let output = self.coupled_eval_b_for_a(
+                &scratch.a,
+                vs_signals,
+                serial_input,
+                true,
+                &mut scratch.b,
+            );
+            self.work_b.copy_from_slice(&scratch.b);
+            self.coupled_scratch = scratch;
             self.b_warm[0] = output;
             return if output.is_finite() { output } else { 0.0 };
         }
@@ -7278,6 +7363,7 @@ mod blockwise_k_method_tests {
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![0.0],
+            coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         };
 
@@ -7357,6 +7443,7 @@ mod blockwise_k_method_tests {
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![0.0],
+            coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         };
         let rp_before = stage.blocks[0].tree.port_resistance();
@@ -7402,6 +7489,7 @@ mod blockwise_k_method_tests {
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![1.25],
+            coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         };
 
@@ -7460,6 +7548,7 @@ mod blockwise_k_method_tests {
             b_warm: vec![0.0, 0.0],
             work_b: vec![0.0, 123.0],
             work_a: vec![0.0, 5.0],
+            coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         };
 
@@ -7512,6 +7601,7 @@ mod blockwise_k_method_tests {
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![0.25],
+            coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         };
 
@@ -7579,6 +7669,7 @@ mod blockwise_k_method_tests {
             b_warm: vec![0.0; 3],
             work_b: vec![0.0; 3],
             work_a: vec![0.0; 3],
+            coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         };
         let a = vec![0.25, -0.125, 0.5];
@@ -7694,6 +7785,7 @@ mod blockwise_k_method_tests {
             b_warm: vec![0.0],
             work_b: vec![0.0],
             work_a: vec![0.0],
+            coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         };
 

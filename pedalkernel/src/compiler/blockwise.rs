@@ -2415,6 +2415,7 @@ pub(super) fn try_build_blockwise(
             b_warm: vec![0.0; n_ports],
             work_b: vec![0.0; n_ports],
             work_a: vec![0.0; n_ports],
+            coupled_scratch: pedalkernel_rt::stage::CoupledSolveScratch::new(n_ports),
             port_index_cache: Vec::new(),
         };
 
