@@ -1852,6 +1852,32 @@ pub(super) fn try_build_blockwise(
                 }
             }
         }
+        let mut coupling_vcvs_comps: Vec<usize> = Vec::new();
+        for &eidx in &plan.coupling_edges {
+            if graph.effective_edge_kind(eidx) != EdgeKind::Vcvs {
+                continue;
+            }
+            let comp_idx = graph.edges[eidx].comp_idx;
+            if !coupling_vcvs_comps.contains(&comp_idx) {
+                coupling_vcvs_comps.push(comp_idx);
+            }
+        }
+        for &comp_idx in &coupling_vcvs_comps {
+            if let Some(pins) = graph
+                .nullor_pins
+                .iter()
+                .find(|pins| pins.comp_idx == comp_idx)
+            {
+                for node in [pins.pos_node, pins.neg_node, pins.out_node] {
+                    if ground_rails.contains(&node) {
+                        continue;
+                    }
+                    if !node_set.contains(&node) {
+                        node_set.push(node);
+                    }
+                }
+            }
+        }
         let coupling_touch_count = |node: NodeId| -> usize {
             plan.coupling_edges
                 .iter()
@@ -1903,17 +1929,79 @@ pub(super) fn try_build_blockwise(
 
         eprintln!("  [blockwise] coupling MNA: {n_mna} nodes, {n_blocks} block ports");
 
-        // Create MNA system and stamp coupling resistors
-        let mut mna = pedalkernel_rt::tree::MnaSystem::new(n_mna, 0);
+        let mut vcvs_vsource_base: HashMap<usize, usize> = HashMap::new();
+        let mut n_vcvs_sources = 0usize;
+        for &comp_idx in &coupling_vcvs_comps {
+            let count = graph.components[comp_idx].kind.mna_vsource_count();
+            if count > 0 {
+                vcvs_vsource_base.insert(comp_idx, n_vcvs_sources);
+                n_vcvs_sources += count;
+            }
+        }
+
+        // Create MNA system and stamp coupling linear elements.
+        let mut mna = pedalkernel_rt::tree::MnaSystem::new(n_mna, n_vcvs_sources);
         let output_feedback_node = plan
             .blocks
             .last()
             .and_then(|block| block_cascade_output_node(&block.nl_edges, &block.port_nodes, graph));
 
         let mut coupling_elements = Vec::new();
+        let mut coupling_vcvss = Vec::new();
+        for &comp_idx in &coupling_vcvs_comps {
+            let comp = &graph.components[comp_idx];
+            let Some(pins) = graph
+                .nullor_pins
+                .iter()
+                .find(|pins| pins.comp_idx == comp_idx)
+            else {
+                continue;
+            };
+            let pin_to_mna = |pin: &str| -> Option<usize> {
+                let node = match pin {
+                    "pos" => pins.pos_node,
+                    "neg" => pins.neg_node,
+                    "out" => pins.out_node,
+                    _ => return None,
+                };
+                if ground_rails.contains(&node) {
+                    None
+                } else {
+                    node_to_mna.get(&node).copied()
+                }
+            };
+            let vsource_index = *vcvs_vsource_base.get(&comp_idx).unwrap_or(&0);
+            let mut ctx = super::component::StampContext {
+                pin_to_mna: &pin_to_mna,
+                vsrc_base: vsource_index,
+                internal_node_base: 0,
+                sample_rate,
+                cap_stamps: None,
+            };
+            comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
+
+            let model = comp
+                .kind
+                .op_amp_type()
+                .map(|op_type| crate::model_lookup::opamp_model_from_type(&op_type));
+            if let Some(model) = model {
+                coupling_vcvss.push(pedalkernel_rt::stage::CouplingVcvs {
+                    pos: pin_to_mna("pos"),
+                    neg: pin_to_mna("neg"),
+                    out_pos: pin_to_mna("out"),
+                    out_neg: None,
+                    gain: model.open_loop_gain,
+                    output_resistance: model.output_impedance,
+                    vsource_index,
+                });
+            }
+        }
         for &eidx in &plan.coupling_edges {
             let e = &graph.edges[eidx];
             let comp = &graph.components[e.comp_idx];
+            if graph.effective_edge_kind(eidx) == EdgeKind::Vcvs {
+                continue;
+            }
             if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
                 #[cfg(test)]
                 eprintln!(
@@ -2363,6 +2451,7 @@ pub(super) fn try_build_blockwise(
             coupling_ports: ports,
             block_port_indices,
             coupling_elements,
+            coupling_vcvss,
             n_ports,
             output_block,
             supply_voltage,

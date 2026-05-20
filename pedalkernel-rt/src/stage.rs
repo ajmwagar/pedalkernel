@@ -6039,6 +6039,18 @@ pub struct CouplingElement {
     pub invert_control: bool,
 }
 
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CouplingVcvs {
+    pub pos: Option<usize>,
+    pub neg: Option<usize>,
+    pub out_pos: Option<usize>,
+    pub out_neg: Option<usize>,
+    pub gain: f64,
+    pub output_resistance: f64,
+    pub vsource_index: usize,
+}
+
 /// Reusable scratch space for coupled blockwise solves.
 ///
 /// This keeps the realtime Newton path allocation-free without spreading a
@@ -6128,6 +6140,13 @@ pub struct BlockwiseKMethodStage {
     /// Linear elements stamped into the coupling MNA. Pot entries keep enough
     /// metadata to recompute `coupling_s` when a coupling control moves.
     pub coupling_elements: Vec<CouplingElement>,
+    /// Active linear controlled sources stamped into the coupling MNA.
+    ///
+    /// These are static for a compiled circuit, but must be retained so pot
+    /// updates can rebuild `coupling_s` without dropping op-amp/VCVS polarity
+    /// stages from the adaptor.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub coupling_vcvss: Vec<CouplingVcvs>,
     /// Number of coupling ports (blocks.len() + 1 for VS input).
     pub n_ports: usize,
     /// Which block index to tap for output.
@@ -6972,7 +6991,24 @@ impl BlockwiseKMethodStage {
             return;
         }
 
-        let mut mna = crate::tree::MnaSystem::new(self.coupling_n_mna, 0);
+        let n_vsources = self
+            .coupling_vcvss
+            .iter()
+            .map(|vcvs| vcvs.vsource_index + 1)
+            .max()
+            .unwrap_or(0);
+        let mut mna = crate::tree::MnaSystem::new(self.coupling_n_mna, n_vsources);
+        for vcvs in &self.coupling_vcvss {
+            mna.stamp_vcvs(
+                vcvs.pos,
+                vcvs.neg,
+                vcvs.out_pos,
+                vcvs.out_neg,
+                vcvs.gain,
+                vcvs.output_resistance,
+                vcvs.vsource_index,
+            );
+        }
         for element in &self.coupling_elements {
             mna.stamp_resistor(
                 element.node_a,
@@ -7421,6 +7457,7 @@ mod blockwise_k_method_tests {
             }],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
+            coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
             supply_voltage: 9.0,
@@ -7501,6 +7538,7 @@ mod blockwise_k_method_tests {
             }],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
+            coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
             supply_voltage: 9.0,
@@ -7547,6 +7585,7 @@ mod blockwise_k_method_tests {
             }],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
+            coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
             supply_voltage: 9.0,
@@ -7606,6 +7645,7 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: true,
             }],
+            coupling_vcvss: vec![],
             n_ports: 2,
             output_block: 0,
             supply_voltage: 9.0,
@@ -7659,6 +7699,7 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: true,
             }],
+            coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
             supply_voltage: 9.0,
@@ -7686,6 +7727,81 @@ mod blockwise_k_method_tests {
         assert!(
             (stage.work_b[0] - 1.25).abs() < 1e-12,
             "active BKM feedback ports are ideal voltage sources and must write b=2V-a"
+        );
+    }
+
+    #[test]
+    fn bkm_coupling_recompute_preserves_static_vcvs_stamps() {
+        let base = BlockwiseKMethodStage {
+            blocks: vec![],
+            coupling_s: vec![0.0; 4],
+            coupling_rp: vec![1.0, 1.0],
+            coupling_n_mna: 2,
+            coupling_ports: vec![
+                crate::tree::WdfPort {
+                    node_pos: Some(0),
+                    node_neg: None,
+                    resistance: 1.0,
+                },
+                crate::tree::WdfPort {
+                    node_pos: Some(1),
+                    node_neg: None,
+                    resistance: 1.0,
+                },
+            ],
+            block_port_indices: vec![],
+            coupling_elements: vec![CouplingElement {
+                comp_id: alloc::string::String::from("Rload"),
+                node_a: Some(1),
+                node_b: None,
+                resistance: 10_000.0,
+                pot_max_resistance: None,
+                taper: crate::pot_taper::PotTaper::B,
+                invert_control: false,
+            }],
+            coupling_vcvss: vec![],
+            n_ports: 2,
+            output_block: 0,
+            supply_voltage: 9.0,
+            vs_port_map: vec![],
+            cutoff_cv_port: None,
+            shared_diode_cutoff_pot: None,
+            feedback_port_map: vec![],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::CoupledNewton,
+            diode_ladder_core: None,
+            b_warm: vec![0.0; 2],
+            work_b: vec![0.0; 2],
+            work_a: vec![0.0; 2],
+            coupled_scratch: CoupledSolveScratch::default(),
+            port_index_cache: vec![],
+        };
+
+        let mut passive = base.clone();
+        passive.recompute_coupling_scattering();
+
+        let mut active = base;
+        active.coupling_vcvss.push(CouplingVcvs {
+            pos: Some(0),
+            neg: None,
+            out_pos: Some(1),
+            out_neg: None,
+            gain: -10.0,
+            output_resistance: 75.0,
+            vsource_index: 0,
+        });
+        active.recompute_coupling_scattering();
+
+        let feedthrough_without_vcvs = passive.coupling_s[2];
+        let feedthrough_with_vcvs = active.coupling_s[2];
+        assert!(
+            (feedthrough_with_vcvs - feedthrough_without_vcvs).abs() > 0.1,
+            "BKM coupling recompute must retain active VCVS stamps; passive={feedthrough_without_vcvs}, active={feedthrough_with_vcvs}"
         );
     }
 
@@ -7727,6 +7843,7 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: true,
             }],
+            coupling_vcvss: vec![],
             n_ports: 3,
             output_block: 0,
             supply_voltage: 9.0,
@@ -7843,6 +7960,7 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: false,
             }],
+            coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 1,
             supply_voltage: 9.0,

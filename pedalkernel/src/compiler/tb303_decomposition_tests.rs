@@ -3675,6 +3675,44 @@ fn tb303_resonance_pot_compiles_as_split_feedback_divider() {
     );
 }
 
+#[test]
+fn tb303_active_resonance_feedback_compiles_into_bkm_coupling_vcvs() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let source = source
+        .replace(
+            "    R_fb_limit: resistor(10k)\n",
+            "    R_fb_limit: resistor(10k)\n    Ufb: opamp(tl072)\n    R_fb_drive: resistor(10k)\n    R_fb_return: resistor(100k)\n",
+        )
+        .replace(
+            "    QL4.emitter -> Resonance.b\n",
+            "    QL4.emitter -> R_fb_drive.a\n    R_fb_drive.b -> Ufb.neg\n    gnd -> Ufb.pos\n    Ufb.neg -> R_fb_return.a\n    R_fb_return.b -> Ufb.out\n    Ufb.out -> Resonance.b\n",
+        );
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("active resonance ladder should still compile to BKM");
+
+    assert!(
+        !bkm.coupling_vcvss.is_empty(),
+        "active resonance polarity stage must be stamped into the BKM coupling MNA, not dropped or forced monolithic"
+    );
+    assert!(
+        bkm.feedback_port_map.is_empty(),
+        "active resonance must still use coupling-network elements, not synthetic feedback source ports"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 8. Resonance creates a gain peak
 // ═══════════════════════════════════════════════════════════════════════════
