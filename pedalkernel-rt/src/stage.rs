@@ -6368,11 +6368,7 @@ impl BlockwiseKMethodStage {
                     b_out[top_diff] =
                         2.0 * output_voltage - a.get(top_diff).copied().unwrap_or(0.0);
                 }
-                return if block_idx == self.output_block {
-                    differential_incident
-                } else {
-                    output_voltage
-                };
+                return output_voltage;
             }
 
             let (output_voltage, primary_reflected) =

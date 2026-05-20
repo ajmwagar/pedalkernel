@@ -45,10 +45,11 @@ pub struct CompileOptions {
     /// Rigid passive networks fall through to StateSpace where possible, and
     /// active feedback networks fall through to the existing WDF adaptors.
     pub disable_iir: bool,
-    /// Diagnostic mode: solve coupled blockwise K-method stages with a full
-    /// Newton/Jacobian iteration. This is useful for compiler validation but
-    /// too expensive for default realtime builds; the default coupled path is
-    /// fixed-point/table driven.
+    /// Solve coupled blockwise K-method stages with the full delay-free
+    /// Newton/Jacobian iteration. This is useful for compiler validation and
+    /// offline reference renders, but too expensive for some realtime targets.
+    /// When false, coupled blockwise stages use table-driven fixed-point
+    /// iteration without building/solving the full Jacobian.
     pub coupled_blockwise_newton: bool,
 }
 

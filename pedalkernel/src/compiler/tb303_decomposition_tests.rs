@@ -886,7 +886,7 @@ fn tb303_bkm_differential_rungs_have_side_aware_block_ports() {
 }
 
 #[test]
-fn tb303_coupled_fixed_point_is_diagnostic_opt_out() {
+fn tb303_coupled_fixed_point_is_realtime_opt_out() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
     let compiled = super::compile_pedal_with_options(
