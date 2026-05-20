@@ -6435,6 +6435,21 @@ impl BlockwiseKMethodStage {
         for i in 0..self.n_ports {
             if self.port_is_block_owned(i) {
                 continue;
+            } else if let Some(&(block_idx, _)) = self
+                .feedback_port_map
+                .iter()
+                .find(|(_, port_idx)| *port_idx == i)
+            {
+                if !self.feedback_port_is_active(i) {
+                    b_out[i] = 0.0;
+                    continue;
+                }
+                let v = if block_idx == self.output_block {
+                    output
+                } else {
+                    self.b_warm.get(block_idx).copied().unwrap_or(0.0)
+                };
+                b_out[i] = 2.0 * v - a.get(i).copied().unwrap_or(0.0);
             } else if let Some(v) = self.vs_voltage_for_port(i, vs_signals) {
                 b_out[i] = 2.0 * v - a.get(i).copied().unwrap_or(0.0);
             } else {

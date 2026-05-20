@@ -2115,9 +2115,6 @@ pub(super) fn try_build_blockwise(
         let mut feedback_port_map: Vec<(usize, usize)> = Vec::new();
         let output_block_idx = n_blocks.saturating_sub(1);
         for (bi, block) in plan.blocks.iter().enumerate() {
-            if use_coupled_solve {
-                break;
-            }
             if bi != output_block_idx {
                 continue;
             }
@@ -2139,10 +2136,14 @@ pub(super) fn try_build_blockwise(
                 continue;
             };
             let scattering_idx = ports.len();
+            let rp = k_blocks
+                .get(bi)
+                .map(|block| block.rp)
+                .unwrap_or(r_source_cascade);
             ports.push(pedalkernel_rt::tree::WdfPort {
                 node_pos: Some(mna_idx),
                 node_neg: None,
-                resistance: r_source_cascade,
+                resistance: rp,
             });
             feedback_port_map.push((bi, scattering_idx));
             used_ports.insert(output_node);

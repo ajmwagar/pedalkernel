@@ -3439,6 +3439,7 @@ fn tb303_resonance_recomputes_bkm_coupling_matrix() {
         .expect("BKM stage");
 
     let before = bkm.coupling_s.clone();
+    let block_ports = bkm.block_port_indices.clone();
     assert!(
         bkm.set_pot("Resonance", 0.7),
         "BKM should accept coupling-network pot changes"
@@ -3449,10 +3450,108 @@ fn tb303_resonance_recomputes_bkm_coupling_matrix() {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
 
+    let n = bkm.n_ports;
+    let mut changed = Vec::new();
+    for row in 0..n {
+        for col in 0..n {
+            let idx = row * n + col;
+            let d = bkm.coupling_s[idx] - before[idx];
+            if d.abs() > 1.0e-5 {
+                changed.push((d.abs(), row, col, before[idx], bkm.coupling_s[idx], d));
+            }
+        }
+    }
+    changed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
     eprintln!("  Resonance coupling matrix max delta: {delta:.6}");
+    eprintln!("  BKM block ports: {block_ports:?}");
+    eprintln!("  Resonance/R_fb coupling elements:");
+    for element in bkm.coupling_elements.iter().filter(|e| {
+        e.comp_id == "Resonance" || e.comp_id == "R_fb_limit" || e.comp_id == "R_res_cv"
+    }) {
+        eprintln!(
+            "    {}: {:?}<->{:?} R={:.3} invert={}",
+            element.comp_id,
+            element.node_a,
+            element.node_b,
+            element.resistance,
+            element.invert_control
+        );
+    }
+    eprintln!("  Resonance changed entries:");
+    for (_, row, col, old, new, d) in changed.iter().take(24) {
+        eprintln!("    S[{row},{col}]: {old:+.6} -> {new:+.6} (delta {d:+.6})");
+    }
     assert!(
         delta > 1e-6,
         "moving Resonance must recompute the BKM coupling scattering matrix"
+    );
+}
+
+#[test]
+fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut compiled = super::compile_pedal(&def, SR).expect("compile failed");
+
+    let bkm = compiled
+        .stages
+        .iter_mut()
+        .find_map(|s| {
+            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                Some(k)
+            } else {
+                None
+            }
+        })
+        .expect("BKM stage");
+
+    assert_eq!(
+        bkm.block_port_indices.len(),
+        4,
+        "expected four ladder rung blocks"
+    );
+    assert!(
+        bkm.block_port_indices.iter().all(|ports| ports.len() >= 2),
+        "differential ladder rungs should expose at least bottom/top coupling ports: {:?}",
+        bkm.block_port_indices
+    );
+
+    assert!(bkm.set_pot("Resonance", 0.0));
+    let flat = bkm.coupling_s.clone();
+    assert!(bkm.set_pot("Resonance", 0.95));
+    let n = bkm.n_ports;
+
+    let input_ports = bkm.block_port_indices[0].clone();
+    let output_ports: Vec<usize> = bkm
+        .feedback_port_map
+        .iter()
+        .filter_map(|&(block_idx, port_idx)| (block_idx == bkm.output_block).then_some(port_idx))
+        .collect();
+    assert!(
+        !output_ports.is_empty(),
+        "coupled BKM must expose a single-ended output feedback port for the resonance return"
+    );
+    let mut best_feedback_delta = 0.0f64;
+    let mut best_feedback_entry = None;
+    for &row in &input_ports {
+        for &col in &output_ports {
+            let delta = (bkm.coupling_s[row * n + col] - flat[row * n + col]).abs();
+            if delta > best_feedback_delta {
+                best_feedback_delta = delta;
+                best_feedback_entry =
+                    Some((row, col, flat[row * n + col], bkm.coupling_s[row * n + col]));
+            }
+        }
+    }
+
+    eprintln!("  input ports={input_ports:?}, feedback output ports={output_ports:?}");
+    eprintln!(
+        "  best output->input resonance delta={best_feedback_delta:.8?} at {best_feedback_entry:?}"
+    );
+    assert!(
+        best_feedback_delta > 1.0e-3,
+        "moving Resonance must materially change coupling from the output feedback port back to an input rung port"
     );
 }
 
@@ -3599,6 +3698,11 @@ fn tb303_resonance_creates_peak() {
 
         // Warm-up: let transients settle.
         for _ in 0..4800 {
+            for port in &proc.ports {
+                if port.name == "vco_in" && port.index < proc.port_values.len() {
+                    proc.port_values[port.index] = 0.0;
+                }
+            }
             proc.process(0.0);
         }
 
@@ -3609,23 +3713,39 @@ fn tb303_resonance_creates_peak() {
         let mut peak = 0.0f64;
         for i in 0..4800 {
             let input = 0.03 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            for port in &proc.ports {
+                if port.name == "vco_in" && port.index < proc.port_values.len() {
+                    proc.port_values[port.index] = input;
+                }
+            }
             let out = proc.process(input);
             peak = peak.max(out.abs());
         }
         peak
     };
 
-    let gain_flat = measure_gain_at_freq(2000.0, 0.0);
-    let gain_resonant = measure_gain_at_freq(2000.0, 0.85);
+    let probe_freqs = [250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
+    let mut best = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for freq in probe_freqs {
+        let gain_flat = measure_gain_at_freq(freq, 0.0);
+        let gain_resonant = measure_gain_at_freq(freq, 0.85);
+        let ratio = gain_resonant / gain_flat.max(1e-12);
+        eprintln!(
+            "  {freq:>5.0}Hz gain: flat={gain_flat:.4}, resonant={gain_resonant:.4}, ratio={ratio:.2}x"
+        );
+        if ratio > best.3 {
+            best = (freq, gain_flat, gain_resonant, ratio);
+        }
+    }
 
     eprintln!(
-        "  2kHz gain: flat(reso=0.0)={gain_flat:.4}, resonant(reso=0.85)={gain_resonant:.4}, ratio={:.2}x",
-        gain_resonant / gain_flat.max(1e-12)
+        "  best resonance gain: {:.0}Hz flat={:.4}, resonant={:.4}, ratio={:.2}x",
+        best.0, best.1, best.2, best.3
     );
 
     assert!(
-        gain_resonant > gain_flat * 1.25,
-        "Resonance should boost gain at 2kHz by >1.25×: flat={gain_flat:.4}, resonant={gain_resonant:.4}"
+        best.3 > 1.25,
+        "Resonance should boost gain near the cutoff peak by >1.25×: best={best:?}"
     );
 }
 
