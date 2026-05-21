@@ -1558,14 +1558,60 @@ pub(super) fn try_build_blockwise(
     // wave-domain Newton iteration to solve the algebraic feedback loop
     // each sample — no unit delay, correct resonance tracking.
     if !plan.coupling_edges.is_empty() && !all_stages.is_empty() {
-        let coupling_names: Vec<&str> = plan
-            .coupling_edges
+        let mut coupling_edges = plan.coupling_edges.clone();
+        let mut block_boundary_nodes: HashSet<NodeId> = HashSet::new();
+        for block in &plan.blocks {
+            if let Some(ports) = differential_rung_ports(block, graph) {
+                block_boundary_nodes.extend([
+                    ports.top_left,
+                    ports.top_right,
+                    ports.bottom_left,
+                    ports.bottom_right,
+                ]);
+            } else {
+                block_boundary_nodes.extend(block.port_nodes.iter().copied());
+            }
+        }
+
+        for port_def in port_defs {
+            if port_def.direction != pedalkernel_rt::PortDirection::Input {
+                continue;
+            }
+            let Some(&port_node) = graph.node_names.get(&port_def.name) else {
+                continue;
+            };
+            for (eidx, edge) in graph.edges.iter().enumerate() {
+                if coupling_edges.contains(&eidx) {
+                    continue;
+                }
+                if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+                    continue;
+                }
+                let other_node = if edge.node_a == port_node {
+                    edge.node_b
+                } else if edge.node_b == port_node {
+                    edge.node_a
+                } else {
+                    continue;
+                };
+                if block_boundary_nodes.contains(&other_node) {
+                    coupling_edges.push(eidx);
+                    #[cfg(test)]
+                    eprintln!(
+                        "  [blockwise] pulled input boundary edge {} into coupling for port {}",
+                        graph.components[edge.comp_idx].id, port_def.name
+                    );
+                }
+            }
+        }
+
+        let coupling_names: Vec<&str> = coupling_edges
             .iter()
             .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
             .collect();
         eprintln!(
             "  [blockwise] coupling: {} edges {:?}",
-            plan.coupling_edges.len(),
+            coupling_edges.len(),
             coupling_names
         );
 
@@ -1586,8 +1632,7 @@ pub(super) fn try_build_blockwise(
         let vt = 0.02585; // thermal voltage at 25°C
         let v_be = 0.6; // typical forward bias
                         // Find the typical R_bias value from coupling edges
-        let r_bias_value = plan
-            .coupling_edges
+        let r_bias_value = coupling_edges
             .iter()
             .find_map(|&eidx| {
                 let comp = &graph.components[graph.edges[eidx].comp_idx];
@@ -1622,7 +1667,7 @@ pub(super) fn try_build_blockwise(
                 });
                 let block_bias_resistance = block_port_node
                     .and_then(|port_node| {
-                        plan.coupling_edges.iter().find_map(|&eidx| {
+                        coupling_edges.iter().find_map(|&eidx| {
                             let e = &graph.edges[eidx];
                             let comp = &graph.components[e.comp_idx];
                             let touches_port = e.node_a == port_node || e.node_b == port_node;
@@ -1839,7 +1884,7 @@ pub(super) fn try_build_blockwise(
         // Track which supply nodes appear in the coupling (need VS ports)
         let mut supply_nodes_in_coupling: Vec<(NodeId, f64)> = Vec::new();
 
-        for &eidx in &plan.coupling_edges {
+        for &eidx in &coupling_edges {
             let e = &graph.edges[eidx];
             for &node in &[e.node_a, e.node_b] {
                 if ground_rails.contains(&node) {
@@ -1857,7 +1902,7 @@ pub(super) fn try_build_blockwise(
             }
         }
         let mut coupling_vcvs_comps: Vec<usize> = Vec::new();
-        for &eidx in &plan.coupling_edges {
+        for &eidx in &coupling_edges {
             if graph.effective_edge_kind(eidx) != EdgeKind::Vcvs {
                 continue;
             }
@@ -1883,7 +1928,7 @@ pub(super) fn try_build_blockwise(
             }
         }
         let coupling_touch_count = |node: NodeId| -> usize {
-            plan.coupling_edges
+            coupling_edges
                 .iter()
                 .filter(|&&eidx| {
                     let e = &graph.edges[eidx];
@@ -2000,7 +2045,7 @@ pub(super) fn try_build_blockwise(
                 });
             }
         }
-        for &eidx in &plan.coupling_edges {
+        for &eidx in &coupling_edges {
             let e = &graph.edges[eidx];
             let comp = &graph.components[e.comp_idx];
             if graph.effective_edge_kind(eidx) == EdgeKind::Vcvs {
@@ -2193,7 +2238,7 @@ pub(super) fn try_build_blockwise(
             if used_ports.contains(&output_node) {
                 continue;
             }
-            if !plan.coupling_edges.iter().any(|&eidx| {
+            if !coupling_edges.iter().any(|&eidx| {
                 let e = &graph.edges[eidx];
                 e.node_a == output_node || e.node_b == output_node
             }) {
@@ -2231,7 +2276,7 @@ pub(super) fn try_build_blockwise(
         let mut vs_port_map: Vec<(String, usize)> = Vec::new(); // (port_name, scattering_port_idx)
 
         // Collect all coupling edge nodes for quick lookup
-        let coupling_edge_set: HashSet<usize> = plan.coupling_edges.iter().copied().collect();
+        let coupling_edge_set: HashSet<usize> = coupling_edges.iter().copied().collect();
 
         for port_def in port_defs {
             if port_def.direction != pedalkernel_rt::PortDirection::Input {
@@ -2247,7 +2292,7 @@ pub(super) fn try_build_blockwise(
             // Find the coupling edge connected to this port node.
             // The VS goes at the port node's end of the edge (the "external"
             // side that faces outside the coupling network).
-            let edge_and_node = plan.coupling_edges.iter().find_map(|&eidx| {
+            let edge_and_node = coupling_edges.iter().find_map(|&eidx| {
                 let e = &graph.edges[eidx];
                 // The port node connects to one end of a coupling edge.
                 // The VS port goes at the port node itself (the external side).
@@ -2348,7 +2393,7 @@ pub(super) fn try_build_blockwise(
         let shared_diode_cutoff_pot = if shared_current_ladder {
             first_block_port_node
                 .and_then(|port_node| {
-                    plan.coupling_edges.iter().find_map(|&eidx| {
+                    coupling_edges.iter().find_map(|&eidx| {
                         let e = &graph.edges[eidx];
                         let comp = &graph.components[e.comp_idx];
                         let is_pot = comp
@@ -2369,8 +2414,22 @@ pub(super) fn try_build_blockwise(
                     })
                 })
                 .or_else(|| {
-                    plan.coupling_edges.iter().find_map(|&eidx| {
+                    coupling_edges.iter().find_map(|&eidx| {
                         let comp = &graph.components[graph.edges[eidx].comp_idx];
+                        let is_pot = comp
+                            .kind
+                            .as_any()
+                            .downcast_ref::<super::components::Potentiometer>()
+                            .is_some();
+                        if is_pot && comp.id.to_ascii_lowercase().contains("cutoff") {
+                            Some(comp.id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .or_else(|| {
+                    graph.components.iter().find_map(|comp| {
                         let is_pot = comp
                             .kind
                             .as_any()
@@ -2398,7 +2457,7 @@ pub(super) fn try_build_blockwise(
                             return None;
                         }
                         let external_port_node = graph.node_names.get(&port_def.name).copied()?;
-                        let drives_first_port = plan.coupling_edges.iter().any(|&eidx| {
+                        let drives_first_port = coupling_edges.iter().any(|&eidx| {
                             let e = &graph.edges[eidx];
                             (e.node_a == external_port_node && e.node_b == port_node)
                                 || (e.node_b == external_port_node && e.node_a == port_node)
@@ -2424,6 +2483,42 @@ pub(super) fn try_build_blockwise(
         } else {
             None
         };
+
+        if let Some(ref comp_id) = shared_diode_cutoff_pot {
+            let already_tracked = coupling_elements
+                .iter()
+                .any(|element| element.comp_id == *comp_id);
+            if !already_tracked {
+                if let Some(comp) = graph.components.iter().find(|comp| comp.id == *comp_id) {
+                    if let Some(pot) = comp
+                        .kind
+                        .as_any()
+                        .downcast_ref::<super::components::Potentiometer>()
+                    {
+                        coupling_elements.push(pedalkernel_rt::stage::CouplingElement {
+                            comp_id: comp.id.clone(),
+                            node_a: None,
+                            node_b: None,
+                            resistance: (pot.max_r * 0.5).max(1.0e-3),
+                            pot_max_resistance: Some(pot.max_r),
+                            taper: pot.taper,
+                            invert_control: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(ref cutoff_name) = cutoff_cv_port {
+            if !vs_port_map.iter().any(|(name, _)| name == cutoff_name) {
+                // The TB-303 cutoff CV can enter through an exponential
+                // converter outside the ladder coupling network. Keep it in
+                // the BKM source map as a control-only input so the shared
+                // tail-current axis updates without stamping a synthetic
+                // voltage source into the ladder scattering matrix.
+                vs_port_map.push((cutoff_name.clone(), n_ports));
+            }
+        }
 
         // TODO: Compute per-block source impedance from circuit topology.
         //

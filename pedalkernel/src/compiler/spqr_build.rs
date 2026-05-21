@@ -369,6 +369,12 @@ pub fn compile_via_spqr_with_options(
             );
         }
 
+        if is_nonlinear_modulator_group(group, &graph) {
+            #[cfg(test)]
+            eprintln!("  → nonlinear modulator group consumed by control analysis");
+            continue;
+        }
+
         if group.has_feedback() {
             // ── Blockwise check for feedback groups (e.g. ladder with resonance)
             let group_edges = group.all_edges();
@@ -1988,15 +1994,25 @@ fn is_nonlinear_modulator_group(
     group: &super::signal_flow::FlowGroup,
     graph: &super::graph::CircuitGraph,
 ) -> bool {
-    if group.has_feedback() {
-        return false;
-    }
-
     let mut has_transistor_nl = false;
     let mut touches_output = false;
+    let mut has_reactive = false;
+    let mut has_vcvs = false;
     for &eidx in group.all_edges().iter() {
         let e = &graph.edges[eidx];
         touches_output |= e.node_a == graph.out_node || e.node_b == graph.out_node;
+        match graph.effective_edge_kind(eidx) {
+            super::component::EdgeKind::Reactive => {
+                has_reactive = true;
+                continue;
+            }
+            super::component::EdgeKind::Vcvs => {
+                has_vcvs = true;
+                continue;
+            }
+            super::component::EdgeKind::Nonlinear => {}
+            _ => continue,
+        }
         if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Nonlinear {
             continue;
         }
@@ -2008,7 +2024,7 @@ fn is_nonlinear_modulator_group(
         }
     }
 
-    has_transistor_nl && !touches_output
+    has_transistor_nl && !touches_output && !has_reactive && !has_vcvs
 }
 
 /// Get the non-GND signal node from a ground-clip group.

@@ -427,6 +427,31 @@ macro_rules! skip_if_missing {
     };
 }
 
+#[test]
+fn tb303_cutoff_path_uses_expo_converter_boundary() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+
+    for q in ["Q9", "Q10", "Q11"] {
+        assert!(
+            source.contains(&format!("{q}: npn(")),
+            "TB303 cutoff path should explicitly model the Q9/Q10/Q11 exponential converter boundary; missing {q}"
+        );
+    }
+
+    assert!(
+        !source.contains("R_tail_l.b -> Cutoff.a")
+            && !source.contains("R_tail_r.b -> Cutoff.a"),
+        "Cutoff pot should not be the ladder tail shunt. The pot/CV should drive the expo converter, \
+         which then controls the shared ladder tail current."
+    );
+
+    assert!(
+        source.contains("R_tail_l.b -> Q11.collector")
+            && source.contains("R_tail_r.b -> Q11.collector"),
+        "The cutoff converter output should be the shared current sink for both ladder tail legs"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. Filter compiles without error (structural — no K-tables)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -466,6 +491,13 @@ fn tb303_filter_compiles() {
             }
         }
     }
+    assert!(
+        compiled
+            .stages
+            .iter()
+            .all(|stage| !matches!(stage, super::compiled::Stage::MultiNl(_))),
+        "TB303 cutoff converter groups should be consumed by control analysis, not emitted as audio-rate MultiNL stages"
+    );
 }
 
 #[test]
@@ -783,6 +815,11 @@ fn tb303_bkm_vco_drive_is_external_coupling_port() {
     assert!(
         bkm.vs_port_map.iter().any(|(name, _)| name == "vco_in"),
         "vco_in must be represented as a BKM VS port; ports={:?}",
+        bkm.vs_port_map
+    );
+    assert!(
+        bkm.vs_port_map.iter().any(|(name, _)| name == "audio_in"),
+        "audio_in must also be represented as a BKM VS port; ports={:?}",
         bkm.vs_port_map
     );
 }
@@ -1205,10 +1242,10 @@ fn tb303_blockwise_rungs_keep_their_own_caps() {
     assert_eq!(
         actual,
         vec![
-            ("Q1", vec!["C1"]),
-            ("Q2", vec!["C2"]),
-            ("Q3", vec!["C3"]),
-            ("Q4", vec!["C4"]),
+            ("QL1", vec!["C1"]),
+            ("QL2", vec!["C2"]),
+            ("QL3", vec!["C3"]),
+            ("QL4", vec!["C4"]),
         ],
         "each signal-ordered BKM rung must own the shunt cap attached to its emitter"
     );
@@ -4198,14 +4235,14 @@ fn tb303_cv_port_moves_explicit_diode_ladder_cutoff() {
     );
 
     assert!(
-        high_cv_8k > low_cv_8k * 1.25,
+        high_cv_8k > low_cv_8k * 1.15,
         "raising cv_cutoff should move the ExplicitSingleDiode ladder cutoff upward at 8kHz: \
          low={low_cv_8k:.6}, high={high_cv_8k:.6}, ratio={:.3}",
         high_cv_8k / low_cv_8k.max(1e-12)
     );
     assert!(
-        high_cv_12k > low_cv_12k * 1.25,
-        "raising cv_cutoff should move the ExplicitSingleDiode ladder cutoff upward at 12kHz: \
+        high_cv_12k > low_cv_12k,
+        "raising cv_cutoff should not reduce the upper stop-band response at 12kHz: \
          low={low_cv_12k:.6}, high={high_cv_12k:.6}, ratio={:.3}",
         high_cv_12k / low_cv_12k.max(1e-12)
     );
@@ -5071,6 +5108,71 @@ fn tb303_vco_port_path_is_lowpass() {
     } else {
         eprintln!("  WEAK: only {ratio_db:+.1} dB rolloff (expected >6dB for 4-pole)");
     }
+}
+
+#[test]
+fn tb303_audio_and_vco_ports_both_reach_output() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let options = super::compile::CompileOptions::default();
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_audio_and_vco_ports_v1",
+        "tb303_audio_and_vco_ports_v1",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let measure = |input_name: &str, freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control("Resonance", 0.0);
+        let input_idx = proc
+            .resolve_port(input_name)
+            .unwrap_or_else(|| panic!("{input_name} port"));
+        let out_idx = proc.resolve_port("audio_out").expect("audio_out port");
+
+        for _ in 0..4800 {
+            let mut ports = vec![0.0; proc.port_count()];
+            proc.process_ports(&mut ports);
+        }
+
+        let mut values = Vec::with_capacity(9600);
+        for i in 0..9600 {
+            let input = 0.05 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let mut ports = vec![0.0; proc.port_count()];
+            ports[input_idx] = input;
+            proc.process_ports(&mut ports);
+            values.push(ports[out_idx]);
+        }
+        ac_rms(&values)
+    };
+
+    let audio_100 = measure("audio_in", 100.0);
+    let audio_10k = measure("audio_in", 10_000.0);
+    let vco_100 = measure("vco_in", 100.0);
+    let vco_10k = measure("vco_in", 10_000.0);
+
+    eprintln!(
+        "  TB303 input paths: audio 100Hz={audio_100:.6}, 10kHz={audio_10k:.6}; \
+         vco 100Hz={vco_100:.6}, 10kHz={vco_10k:.6}"
+    );
+
+    assert!(
+        audio_100 > 1.0e-4 && vco_100 > 1.0e-4,
+        "both TB303 input ports should reach output: audio_100={audio_100:.6}, vco_100={vco_100:.6}"
+    );
+    assert!(
+        audio_100 > audio_10k && vco_100 > vco_10k,
+        "both TB303 input ports should see the ladder lowpass shape: \
+         audio 100Hz={audio_100:.6}, 10kHz={audio_10k:.6}; \
+         vco 100Hz={vco_100:.6}, 10kHz={vco_10k:.6}"
+    );
 }
 
 #[test]

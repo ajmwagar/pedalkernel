@@ -2547,8 +2547,11 @@ impl PedalProcessor for CompiledPedal {
                     Stage::Wdf(w) => {
                         let _ = w.process(0.0);
                     }
-                    Stage::MultiNl(m) => {
-                        let _ = m.process(0.0);
+                    Stage::MultiNl(_) => {
+                        // Control/bias nonlinear groups can be split out of
+                        // the audio path. Do not run them as independent
+                        // audio-rate solvers; their derived effect is owned by
+                        // the target stage (for example BKM cutoff current).
                     }
                     Stage::Iir(i) => {
                         let _ = i.process(0.0);
