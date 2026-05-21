@@ -4212,7 +4212,7 @@ fn tb303_cv_port_moves_explicit_diode_ladder_cutoff() {
 }
 
 #[test]
-fn tb303_cutoff_cv_uses_circuit_calibrated_diode_resistance() {
+fn tb303_cutoff_cv_updates_shared_diffpair_tail_current_axis() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
 
     let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -4223,8 +4223,8 @@ fn tb303_cutoff_cv_uses_circuit_calibrated_diode_resistance() {
     let options = super::compile::CompileOptions::default();
     let blob = super::compile::compile_pedal_cached(
         &source,
-        "tb303_cv_rp_calibration_test_v1",
-        "tb303_cv_rp_calibration_test_v1",
+        "tb303_cv_tail_current_axis_test_v1",
+        "tb303_cv_tail_current_axis_test_v1",
         SR,
         &options,
         &cache_dir,
@@ -4235,7 +4235,7 @@ fn tb303_cutoff_cv_uses_circuit_calibrated_diode_resistance() {
         postcard::from_bytes(&blob).expect("deserialize failed");
     let cv_idx = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
 
-    let measure_rp = |proc: &mut super::compiled::CompiledPedal, cv_voltage: f64| -> f64 {
+    let measure_ctrl = |proc: &mut super::compiled::CompiledPedal, cv_voltage: f64| -> f64 {
         let mut ports = vec![0.0; proc.port_count()];
         ports[cv_idx] = cv_voltage;
         proc.process_ports(&mut ports);
@@ -4243,7 +4243,11 @@ fn tb303_cutoff_cv_uses_circuit_calibrated_diode_resistance() {
             .iter()
             .find_map(|stage| {
                 if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
-                    Some(bkm.blocks[1].rp)
+                    Some(
+                        bkm.blocks[1]
+                            .shared_diode_bias_voltage
+                            .expect("shared cutoff control should update all diffpair rungs"),
+                    )
                 } else {
                     None
                 }
@@ -4251,18 +4255,18 @@ fn tb303_cutoff_cv_uses_circuit_calibrated_diode_resistance() {
             .expect("tb303 filter should compile to BKM")
     };
 
-    let rp_0v = measure_rp(&mut proc, 0.0);
-    let rp_3v = measure_rp(&mut proc, 3.0);
-    let ratio = rp_3v / rp_0v;
+    let ctrl_neg1v = measure_ctrl(&mut proc, -1.0);
+    let ctrl_0v = measure_ctrl(&mut proc, 0.0);
+    let ctrl_3v = measure_ctrl(&mut proc, 3.0);
 
     eprintln!(
-        "  circuit-calibrated TB303 cutoff Rp: 0V={rp_0v:.3}, +3V={rp_3v:.3}, ratio={ratio:.3}"
+        "  circuit-derived TB303 cutoff ctrl: -1V={ctrl_neg1v:.3}, 0V={ctrl_0v:.3}, +3V={ctrl_3v:.3}"
     );
 
     assert!(
-        ratio > 0.35 && ratio < 0.85,
-        "TB303 cutoff CV should use diode dynamic resistance from R_bias/R_cv, not 2^CV scaling: \
-         rp_0v={rp_0v:.3}, rp_3v={rp_3v:.3}, ratio={ratio:.3}"
+        ctrl_neg1v < ctrl_0v && ctrl_0v < ctrl_3v,
+        "TB303 cutoff CV should modulate the shared DiffPair K-table tail-current axis, not mutate block Rp: \
+         -1V={ctrl_neg1v:.3}, 0V={ctrl_0v:.3}, +3V={ctrl_3v:.3}"
     );
 }
 

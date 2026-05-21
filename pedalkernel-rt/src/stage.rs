@@ -7060,9 +7060,6 @@ impl BlockwiseKMethodStage {
         let Some(calibration) = first_block.diode_cutoff.as_ref() else {
             return;
         };
-        let Some(model) = first_block.explicit_diode_root.map(|root| root.model) else {
-            return;
-        };
         let Some(cutoff_resistance) = self
             .coupling_elements
             .iter()
@@ -7073,12 +7070,35 @@ impl BlockwiseKMethodStage {
         };
 
         let total_r = (calibration.bias_resistance + cutoff_resistance).max(1.0);
-        let i_f = (self.supply_voltage + cutoff_cv_voltage - 0.6).max(0.0) / total_r;
-        let v_bias = diode_bias_voltage_from_current(model, i_f);
+        let cv_resistance = calibration.cv_resistance.or_else(|| {
+            self.coupling_elements
+                .iter()
+                .find(|element| {
+                    let id = element.comp_id.to_ascii_lowercase();
+                    id.contains("cv") && !id.contains("res")
+                })
+                .map(|element| element.resistance.max(1.0))
+        });
+        let bias_current = (self.supply_voltage + cutoff_cv_voltage - 0.6).max(0.0) / total_r;
+        let cv_current = cv_resistance
+            .map(|r_cv| cutoff_cv_voltage / r_cv)
+            .unwrap_or(cutoff_cv_voltage / total_r);
+        let i_f = (bias_current + cv_current).max(0.0);
 
-        for block in &mut self.blocks {
-            if block.explicit_diode_root.is_some() {
-                block.shared_diode_bias_voltage = Some(v_bias);
+        if let Some(model) = first_block.explicit_diode_root.map(|root| root.model) {
+            let v_bias = diode_bias_voltage_from_current(model, i_f);
+            for block in &mut self.blocks {
+                if block.explicit_diode_root.is_some() {
+                    block.shared_diode_bias_voltage = Some(v_bias);
+                }
+            }
+        } else {
+            for block in &mut self.blocks {
+                if block.diode_cutoff.is_some() {
+                    let i_bias = block.vbe_bias.max(1.0e-9);
+                    let ctrl = (i_f / i_bias - 1.0).clamp(-0.9, 4.0);
+                    block.shared_diode_bias_voltage = Some(ctrl);
+                }
             }
         }
     }

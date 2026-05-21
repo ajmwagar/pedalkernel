@@ -1670,16 +1670,18 @@ pub(super) fn try_build_blockwise(
                     }
                 };
                 wdf.tree.set_vs_port_resistance(block_source_r);
-                let diode_cutoff = match &wdf.root {
-                    pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_) => {
-                        Some(pedalkernel_rt::stage::DiodeCutoffCalibration {
-                            bias_voltage: supply_voltage,
-                            bias_resistance: block_bias_resistance,
-                            cv_resistance: None,
-                            min_rp: 10.0,
-                            max_rp: 100_000.0,
-                        })
-                    }
+                let diode_cutoff = match (&wdf.root, plan.blocks.get(bi).map(|b| &b.topology)) {
+                    (pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(_), _)
+                    | (
+                        pedalkernel_rt::stage::RootKind::DiffPair(_),
+                        Some(BlockTopology::DifferentialDiodeRung { .. }),
+                    ) => Some(pedalkernel_rt::stage::DiodeCutoffCalibration {
+                        bias_voltage: supply_voltage,
+                        bias_resistance: block_bias_resistance,
+                        cv_resistance: None,
+                        min_rp: 10.0,
+                        max_rp: 100_000.0,
+                    }),
                     _ => None,
                 };
 
@@ -1701,6 +1703,7 @@ pub(super) fn try_build_blockwise(
                 if let Some(ref k_table) = wdf.k_table {
                     let vbe_bias = match &wdf.root {
                         pedalkernel_rt::stage::RootKind::Bjt(bjt) => bjt.vbe_bias(),
+                        pedalkernel_rt::stage::RootKind::DiffPair(dp) => dp.i_tail_bias(),
                         _ => 0.6,
                     };
                     // dc_offset initialized to the quiescent cascade voltage.
@@ -2038,9 +2041,10 @@ pub(super) fn try_build_blockwise(
                 .downcast_ref::<super::components::Potentiometer>()
                 .map(|p| (p.max_r, p.taper));
             let invert_control = pot_meta.is_some()
-                && output_feedback_node
+                && (output_feedback_node
                     .map(|node| e.node_a == node || e.node_b == node)
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                    || (n1.is_some() && n2.is_some()));
             coupling_elements.push(pedalkernel_rt::stage::CouplingElement {
                 comp_id: comp.id.clone(),
                 node_a: n1,
