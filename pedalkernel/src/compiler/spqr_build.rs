@@ -223,13 +223,16 @@ pub fn compile_via_spqr_with_options(
     // Step 2: SPQR decompose each group independently.
     let terminals = vec![graph.in_node, graph.out_node];
     let mut stages: Vec<Stage> = Vec::new();
+    let mut stage_comp_ids: Vec<Vec<String>> = Vec::new();
+    let mut bkm_consumed_comp_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // Helper: push a BuiltStage into the unified stages vec.
     // `flow_distance` comes from BFS-computed signal flow distance.
     // `label` is the debug component names (zero cost in release).
     // `bypass` is true for static bias groups (not on audio path).
     macro_rules! push_stage {
-        ($built:expr, $flow_distance:expr, $label:expr, $bypass:expr) => {
+        ($built:expr, $flow_distance:expr, $label:expr, $bypass:expr, $comp_ids:expr) => {
             match $built {
                 BuiltStage::Wdf(mut wdf) => {
                     wdf.signal_flow_distance = $flow_distance;
@@ -256,6 +259,7 @@ pub fn compile_via_spqr_with_options(
                         }
                     }
                     stages.push(Stage::Wdf(wdf));
+                    stage_comp_ids.push($comp_ids.clone());
                 }
                 BuiltStage::Iir(mut iir) => {
                     iir.signal_flow_distance = $flow_distance;
@@ -265,6 +269,7 @@ pub fn compile_via_spqr_with_options(
                         iir.debug_label = $label;
                     }
                     stages.push(Stage::Iir(iir));
+                    stage_comp_ids.push($comp_ids.clone());
                 }
                 BuiltStage::StateSpace(mut ss) => {
                     ss.signal_flow_distance = $flow_distance;
@@ -274,6 +279,7 @@ pub fn compile_via_spqr_with_options(
                         ss.debug_label = $label;
                     }
                     stages.push(Stage::StateSpace(ss));
+                    stage_comp_ids.push($comp_ids.clone());
                 }
                 BuiltStage::MultiNl(mut mnl) => {
                     mnl.signal_flow_distance = $flow_distance;
@@ -283,6 +289,7 @@ pub fn compile_via_spqr_with_options(
                         mnl.debug_label = $label;
                     }
                     stages.push(Stage::MultiNl(mnl));
+                    stage_comp_ids.push($comp_ids.clone());
                 }
                 BuiltStage::BlackFeedback(mut bf) => {
                     bf.signal_flow_distance = $flow_distance;
@@ -292,14 +299,37 @@ pub fn compile_via_spqr_with_options(
                         bf.debug_label = $label;
                     }
                     stages.push(Stage::BlackFeedback(bf));
+                    stage_comp_ids.push($comp_ids.clone());
                 }
                 BuiltStage::BlockwiseKMethod(mut bkm) => {
+                    let mut consumed: std::collections::HashSet<String> = bkm
+                        .coupling_elements
+                        .iter()
+                        .map(|element| element.comp_id.clone())
+                        .chain(
+                            bkm.coupling_passives
+                                .iter()
+                                .map(|passive| passive.comp_id.clone()),
+                        )
+                        .collect();
+                    consumed.remove("");
+                    if !consumed.is_empty() {
+                        for idx in (0..stages.len()).rev() {
+                            let ids = &stage_comp_ids[idx];
+                            if !ids.is_empty() && ids.iter().all(|id| consumed.contains(id)) {
+                                stages.remove(idx);
+                                stage_comp_ids.remove(idx);
+                            }
+                        }
+                        bkm_consumed_comp_ids.extend(consumed);
+                    }
                     // BKM stages set their own flow distance (0 = primary
                     // signal path, processes before output coupling stages).
                     // Don't override with the feedback group's inflated distance.
                     bkm.bypass_serial = $bypass;
                     bkm.init_buffers();
                     stages.push(Stage::BlockwiseKMethod(bkm));
+                    stage_comp_ids.push($comp_ids.clone());
                 }
                 BuiltStage::SerialDelayedFeedback(mut serial) => {
                     serial.signal_flow_distance = $flow_distance;
@@ -309,6 +339,7 @@ pub fn compile_via_spqr_with_options(
                         serial.debug_label = $label;
                     }
                     stages.push(Stage::SerialDelayedFeedback(serial));
+                    stage_comp_ids.push($comp_ids.clone());
                 }
             }
         };
@@ -329,17 +360,29 @@ pub fn compile_via_spqr_with_options(
             continue;
         }
 
-        // Build debug label from component names (zero cost in release)
-        #[cfg(debug_assertions)]
-        let group_label = {
-            let mut names: Vec<&str> = group
+        let group_comp_ids: Vec<String> = {
+            let mut names: Vec<String> = group
                 .all_edges()
                 .iter()
-                .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+                .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
                 .collect();
+            names.sort();
             names.dedup();
-            names.join(",")
+            names
         };
+        if !group_comp_ids.is_empty()
+            && group_comp_ids
+                .iter()
+                .all(|id| bkm_consumed_comp_ids.contains(id))
+        {
+            #[cfg(test)]
+            eprintln!("  → group {gi} already consumed by BKM coupling");
+            continue;
+        }
+
+        // Build debug label from component names (zero cost in release)
+        #[cfg(debug_assertions)]
+        let group_label = group_comp_ids.join(",");
         #[cfg(not(debug_assertions))]
         let group_label = String::new();
 
@@ -401,7 +444,8 @@ pub fn compile_via_spqr_with_options(
                             built,
                             group_flow_distances[gi],
                             group_label.clone(),
-                            is_bypass
+                            is_bypass,
+                            group_comp_ids.clone()
                         );
                     }
                     continue;
@@ -670,7 +714,8 @@ pub fn compile_via_spqr_with_options(
                 built,
                 group_flow_distances[gi],
                 group_label.clone(),
-                is_bypass
+                is_bypass,
+                group_comp_ids.clone()
             );
         } else if is_pot_divider_group(group, &graph) {
             #[cfg(test)]
@@ -684,7 +729,8 @@ pub fn compile_via_spqr_with_options(
                         built_stage,
                         group_flow_distances[gi],
                         group_label.clone(),
-                        is_bypass
+                        is_bypass,
+                        group_comp_ids.clone()
                     );
                 }
                 Err(e) => return Err(format!("Group {gi} (pot): {e}")),
@@ -722,12 +768,27 @@ pub fn compile_via_spqr_with_options(
                 #[cfg(not(debug_assertions))]
                 let merged_label = String::new();
                 if let Some(built) = build_ground_clip_stage(&merged_edges, &graph, sample_rate) {
+                    let merged_comp_ids: Vec<String> = {
+                        let mut names: Vec<String> = merged_edges
+                            .iter()
+                            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                            .collect();
+                        names.sort();
+                        names.dedup();
+                        names
+                    };
                     #[cfg(test)]
                     eprintln!(
                         "  Ground-clip stage built: {:?}",
                         std::mem::discriminant(&built)
                     );
-                    push_stage!(built, group_flow_distances[gi], merged_label, is_bypass);
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        merged_label,
+                        is_bypass,
+                        merged_comp_ids
+                    );
                 }
             }
         } else {
@@ -799,6 +860,15 @@ pub fn compile_via_spqr_with_options(
                     ground_shunt_edges: Vec::new(),
                 };
                 if let Ok(built) = build_pot_divider(&pot_group, &graph, sample_rate) {
+                    let pot_comp_ids: Vec<String> = {
+                        let mut names: Vec<String> = pot_edges
+                            .iter()
+                            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                            .collect();
+                        names.sort();
+                        names.dedup();
+                        names
+                    };
                     #[cfg(debug_assertions)]
                     let pot_label = {
                         let comp = &graph.components[graph.edges[pot_edges[0]].comp_idx];
@@ -806,7 +876,13 @@ pub fn compile_via_spqr_with_options(
                     };
                     #[cfg(not(debug_assertions))]
                     let pot_label = String::new();
-                    push_stage!(built, group_flow_distances[gi], pot_label, is_bypass);
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        pot_label,
+                        is_bypass,
+                        pot_comp_ids
+                    );
                     // Remove pot edges from remaining
                     for &eidx in pot_edges {
                         remaining_edges.retain(|&e| e != eidx);
@@ -843,7 +919,8 @@ pub fn compile_via_spqr_with_options(
                     built,
                     group_flow_distances[gi],
                     group_label.clone(),
-                    is_bypass
+                    is_bypass,
+                    group_comp_ids.clone()
                 );
                 continue;
             }
@@ -902,6 +979,7 @@ pub fn compile_via_spqr_with_options(
                         wdf.debug_label = comp.id.clone();
                     }
                     stages.push(Stage::Wdf(wdf));
+                    stage_comp_ids.push(vec![comp.id.clone()]);
                     built_feedforward = true;
                 }
 
@@ -930,7 +1008,8 @@ pub fn compile_via_spqr_with_options(
                             built,
                             group_flow_distances[gi],
                             group_label.clone(),
-                            is_bypass
+                            is_bypass,
+                            group_comp_ids.clone()
                         );
                     }
                     continue; // Skip normal SPQR path
@@ -975,7 +1054,8 @@ pub fn compile_via_spqr_with_options(
                         built,
                         group_flow_distances[gi],
                         group_label.clone(),
-                        is_bypass
+                        is_bypass,
+                        group_comp_ids.clone()
                     );
                 }
             }

@@ -6090,6 +6090,14 @@ pub struct CouplingElement {
 
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CouplingPassive {
+    pub comp_id: String,
+    pub port_idx: usize,
+    pub node: DynNode,
+}
+
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CouplingVcvs {
     pub pos: Option<usize>,
     pub neg: Option<usize>,
@@ -6113,6 +6121,10 @@ pub struct CoupledSolveScratch {
     pub j: Vec<f64>,
     pub rhs: Vec<f64>,
     pub db_da: Vec<f64>,
+    pub last_iterations: u32,
+    pub last_residual: f64,
+    pub last_converged: bool,
+    pub last_linear_solve_failed: bool,
 }
 
 impl CoupledSolveScratch {
@@ -6149,6 +6161,14 @@ impl CoupledSolveScratch {
             self.b.fill(0.0);
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SolveDiagnostics {
+    pub iterations: u32,
+    pub residual: f64,
+    pub converged: bool,
+    pub linear_solve_failed: bool,
 }
 
 /// Blockwise K-method stage: N coupled NL blocks with linear coupling.
@@ -6189,6 +6209,10 @@ pub struct BlockwiseKMethodStage {
     /// Linear elements stamped into the coupling MNA. Pot entries keep enough
     /// metadata to recompute `coupling_s` when a coupling control moves.
     pub coupling_elements: Vec<CouplingElement>,
+    /// Reactive elements represented as passive WDF ports in the coupling
+    /// adaptor. These carry coupling-cap state such as TB303 C_out.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub coupling_passives: Vec<CouplingPassive>,
     /// Active linear controlled sources stamped into the coupling MNA.
     ///
     /// These are static for a compiled circuit, but must be retained so pot
@@ -6200,6 +6224,10 @@ pub struct BlockwiseKMethodStage {
     pub n_ports: usize,
     /// Which block index to tap for output.
     pub output_block: usize,
+    /// Optional high-impedance coupling port used to read the circuit output
+    /// node after post-ladder coupling networks.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub output_port_index: Option<usize>,
     /// Supply voltage (V) for supply VS ports in the coupling.
     pub supply_voltage: f64,
     /// VS port mapping: (port_name, scattering_port_index).
@@ -6532,6 +6560,43 @@ impl BlockwiseKMethodStage {
         !saw_gated_feedback
     }
 
+    fn coupling_passive_index(&self, port_idx: usize) -> Option<usize> {
+        self.coupling_passives
+            .iter()
+            .position(|passive| passive.port_idx == port_idx)
+    }
+
+    fn write_passive_coupling_ports(&mut self) {
+        for passive in &mut self.coupling_passives {
+            if passive.port_idx < self.work_b.len() {
+                self.work_b[passive.port_idx] = passive.node.reflected();
+            }
+        }
+    }
+
+    fn update_passive_coupling_ports(&mut self) {
+        for passive in &mut self.coupling_passives {
+            if passive.port_idx < self.work_a.len() {
+                passive.node.set_incident(self.work_a[passive.port_idx]);
+            }
+        }
+    }
+
+    fn output_probe_voltage(&self, fallback: f64) -> f64 {
+        let Some(port_idx) = self.output_port_index else {
+            return fallback;
+        };
+        if port_idx >= self.work_a.len() || port_idx >= self.work_b.len() {
+            return fallback;
+        }
+        let v = (self.work_a[port_idx] + self.work_b[port_idx]) * 0.5;
+        if v.is_finite() {
+            v
+        } else {
+            fallback
+        }
+    }
+
     fn scatter_coupling(&mut self) {
         let n = self.n_ports;
         for i in 0..n {
@@ -6633,6 +6698,15 @@ impl BlockwiseKMethodStage {
         for i in 0..self.n_ports {
             if self.port_is_block_owned(i) {
                 continue;
+            } else if let Some(passive_idx) = self.coupling_passive_index(i) {
+                b_out[i] = self.coupling_passives[passive_idx].node.reflected();
+                if update_state {
+                    self.coupling_passives[passive_idx]
+                        .node
+                        .set_incident(a.get(i).copied().unwrap_or(0.0));
+                }
+            } else if self.output_port_index == Some(i) {
+                b_out[i] = a.get(i).copied().unwrap_or(0.0);
             } else if let Some(&(block_idx, _)) = self
                 .feedback_port_map
                 .iter()
@@ -6681,7 +6755,14 @@ impl BlockwiseKMethodStage {
         // feedback dependency below overwrites/adds a cross derivative.
         for port_idx in 0..n {
             if !self.port_is_block_owned(port_idx) {
-                db_da[port_idx * n + port_idx] = -1.0;
+                db_da[port_idx * n + port_idx] =
+                    if self.coupling_passive_index(port_idx).is_some() {
+                        0.0
+                    } else if self.output_port_index == Some(port_idx) {
+                        1.0
+                    } else {
+                        -1.0
+                    };
             }
         }
 
@@ -6787,8 +6868,12 @@ impl BlockwiseKMethodStage {
         scratch.load_a_from(&self.work_a, n);
         let mut output = 0.0;
         let mut converged = false;
+        let mut iterations = 0u32;
+        let mut last_residual = f64::INFINITY;
+        let mut linear_solve_failed = false;
 
         for _ in 0..Self::MAX_ITER {
+            iterations = iterations.saturating_add(1);
             output = self.coupled_eval_b_for_a(
                 &scratch.a,
                 vs_signals,
@@ -6803,6 +6888,7 @@ impl BlockwiseKMethodStage {
                 scratch.g[i] = scratch.a[i] - scratch.f[i];
                 max_err = max_err.max(scratch.g[i].abs());
             }
+            last_residual = max_err;
             if max_err < Self::TOL {
                 converged = true;
                 break;
@@ -6828,6 +6914,7 @@ impl BlockwiseKMethodStage {
                 &mut scratch.j,
                 &mut scratch.rhs,
             ) {
+                linear_solve_failed = true;
                 break;
             }
 
@@ -6857,6 +6944,10 @@ impl BlockwiseKMethodStage {
         }
         self.work_a.copy_from_slice(&scratch.a);
         self.work_b.copy_from_slice(&scratch.b);
+        scratch.last_iterations = iterations;
+        scratch.last_residual = last_residual;
+        scratch.last_converged = converged;
+        scratch.last_linear_solve_failed = linear_solve_failed;
 
         self.coupled_scratch = scratch;
 
@@ -7156,6 +7247,33 @@ impl BlockwiseKMethodStage {
     /// Must be called once at init (after deserialization) before audio.
     pub fn solve_dc_operating_point(&mut self) {
         self.init_buffers();
+        if matches!(
+            self.solve_mode,
+            BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
+        ) && !self.coupling_passives.is_empty()
+        {
+            // Coupling passives are AC storage ports inside the R-type adaptor.
+            // A DC operating-point solve should open those capacitors; iterating
+            // the audio WDF with floating AC-coupled boundary nodes can converge
+            // to arbitrary huge offsets. Keep the small-signal BKM state centered
+            // until we have a true static open-cap MNA operating-point pass.
+            for block in &mut self.blocks {
+                block.dc_offset = 0.0;
+            }
+            for passive in &mut self.coupling_passives {
+                passive.node.set_incident(0.0);
+            }
+            for v in &mut self.work_a {
+                *v = 0.0;
+            }
+            for v in &mut self.work_b {
+                *v = 0.0;
+            }
+            for v in &mut self.b_warm {
+                *v = 0.0;
+            }
+            return;
+        }
         // Run 2000 samples of silence — enough for caps to reach DC equilibrium
         let zeros = vec![0.0; self.vs_port_map.len()];
         for _ in 0..2000 {
@@ -7406,7 +7524,7 @@ impl BlockwiseKMethodStage {
             let mut scratch = core::mem::take(&mut self.coupled_scratch);
             scratch.load_a_from(&self.work_a, self.n_ports);
             scratch.b.resize(self.n_ports, 0.0);
-            let output = self.coupled_eval_b_for_a(
+            let block_output = self.coupled_eval_b_for_a(
                 &scratch.a,
                 vs_signals,
                 serial_input,
@@ -7415,32 +7533,56 @@ impl BlockwiseKMethodStage {
             );
             self.work_b.copy_from_slice(&scratch.b);
             self.coupled_scratch = scratch;
+            let output = self.output_probe_voltage(block_output);
             self.b_warm[0] = output;
             return if output.is_finite() { output } else { 0.0 };
         }
 
         let mut last_output = self.b_warm[0];
+        let mut iterations = 0u32;
+        let mut residual = f64::INFINITY;
+        let mut converged = false;
 
         for _iter in 0..Self::MAX_ITER {
+            iterations = iterations.saturating_add(1);
             self.write_vs_ports(vs_signals);
+            self.write_passive_coupling_ports();
             self.scatter_coupling();
             let output = self.run_coupled_blocks(false, serial_input, None);
 
-            if (output - last_output).abs() < Self::TOL {
+            residual = (output - last_output).abs();
+            if residual < Self::TOL {
+                converged = true;
                 break;
             }
             last_output = output;
         }
 
         self.write_vs_ports(vs_signals);
+        self.write_passive_coupling_ports();
         self.scatter_coupling();
-        let output = self.run_coupled_blocks(true, serial_input, None);
+        let block_output = self.run_coupled_blocks(true, serial_input, None);
+        self.update_passive_coupling_ports();
+        let output = self.output_probe_voltage(block_output);
         self.b_warm[0] = output;
+        self.coupled_scratch.last_iterations = iterations;
+        self.coupled_scratch.last_residual = residual;
+        self.coupled_scratch.last_converged = converged;
+        self.coupled_scratch.last_linear_solve_failed = false;
 
         if output.is_finite() {
             output
         } else {
             0.0
+        }
+    }
+
+    pub fn solve_diagnostics(&self) -> SolveDiagnostics {
+        SolveDiagnostics {
+            iterations: self.coupled_scratch.last_iterations,
+            residual: self.coupled_scratch.last_residual,
+            converged: self.coupled_scratch.last_converged,
+            linear_solve_failed: self.coupled_scratch.last_linear_solve_failed,
         }
     }
 
@@ -7580,9 +7722,11 @@ mod blockwise_k_method_tests {
             }],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
+            coupling_passives: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
+            output_port_index: None,
             supply_voltage: 9.0,
             vs_port_map: vec![],
             cutoff_cv_port: None,
@@ -7661,9 +7805,11 @@ mod blockwise_k_method_tests {
             }],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
+            coupling_passives: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
+            output_port_index: None,
             supply_voltage: 9.0,
             vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
@@ -7708,9 +7854,11 @@ mod blockwise_k_method_tests {
             }],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
+            coupling_passives: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
+            output_port_index: None,
             supply_voltage: 9.0,
             vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
@@ -7768,9 +7916,11 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: true,
             }],
+            coupling_passives: vec![],
             coupling_vcvss: vec![],
             n_ports: 2,
             output_block: 0,
+            output_port_index: None,
             supply_voltage: 9.0,
             vs_port_map: vec![],
             cutoff_cv_port: None,
@@ -7822,9 +7972,11 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: true,
             }],
+            coupling_passives: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
+            output_port_index: None,
             supply_voltage: 9.0,
             vs_port_map: vec![],
             cutoff_cv_port: None,
@@ -7850,6 +8002,68 @@ mod blockwise_k_method_tests {
         assert!(
             (stage.work_b[0] - 1.25).abs() < 1e-12,
             "active BKM feedback ports are ideal voltage sources and must write b=2V-a"
+        );
+    }
+
+    #[test]
+    fn bkm_coupling_cap_uses_wdf_passive_port_state() {
+        let mut stage = BlockwiseKMethodStage {
+            blocks: vec![],
+            coupling_s: vec![1.0],
+            coupling_rp: vec![104.1666666667],
+            coupling_n_mna: 1,
+            coupling_ports: vec![crate::tree::WdfPort {
+                node_pos: Some(0),
+                node_neg: None,
+                resistance: 104.1666666667,
+            }],
+            block_port_indices: vec![],
+            coupling_elements: vec![],
+            coupling_passives: vec![CouplingPassive {
+                comp_id: alloc::string::String::from("C_out"),
+                port_idx: 0,
+                node: DynNode::Capacitor(
+                    Some(alloc::string::String::from("C_out")),
+                    100e-9,
+                    104.1666666667,
+                ),
+            }],
+            coupling_vcvss: vec![],
+            n_ports: 1,
+            output_block: 0,
+            output_port_index: None,
+            supply_voltage: 9.0,
+            vs_port_map: vec![],
+            cutoff_cv_port: None,
+            shared_diode_cutoff_pot: None,
+            feedback_port_map: vec![],
+            compensation: 1.0,
+            oversampler: crate::oversampling::Oversampler::new(
+                crate::oversampling::OversamplingFactor::X1,
+            ),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::CoupledNewton,
+            diode_ladder_core: None,
+            b_warm: vec![0.0],
+            work_b: vec![0.0],
+            work_a: vec![0.0],
+            coupled_scratch: CoupledSolveScratch::default(),
+            port_index_cache: vec![],
+        };
+
+        let mut b = vec![0.0];
+        let output = stage.coupled_eval_b_for_a(&[1.25], &[], 0.0, true, &mut b);
+        assert_eq!(output, 0.0);
+        assert!(
+            b[0].abs() < 1.0e-12,
+            "a WDF capacitor reflects its previous state before accepting the new incident wave"
+        );
+
+        stage.coupled_eval_b_for_a(&[0.0], &[], 0.0, false, &mut b);
+        assert!(
+            (b[0] - 1.25).abs() < 1.0e-12,
+            "BKM coupling caps must behave as passive WDF ports: b_C[n+1] = a_C[n]"
         );
     }
 
@@ -7882,9 +8096,11 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: false,
             }],
+            coupling_passives: vec![],
             coupling_vcvss: vec![],
             n_ports: 2,
             output_block: 0,
+            output_port_index: None,
             supply_voltage: 9.0,
             vs_port_map: vec![],
             cutoff_cv_port: None,
@@ -7966,9 +8182,11 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: true,
             }],
+            coupling_passives: vec![],
             coupling_vcvss: vec![],
             n_ports: 3,
             output_block: 0,
+            output_port_index: None,
             supply_voltage: 9.0,
             vs_port_map: vec![(alloc::string::String::from("audio_in"), 2)],
             cutoff_cv_port: None,
@@ -8083,9 +8301,11 @@ mod blockwise_k_method_tests {
                 taper: crate::pot_taper::PotTaper::B,
                 invert_control: false,
             }],
+            coupling_passives: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 1,
+            output_port_index: None,
             supply_voltage: 9.0,
             vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),

@@ -13,7 +13,7 @@ use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Compiler-recognized topology for a blockwise nonlinear unit.
 ///
@@ -1451,7 +1451,7 @@ pub(super) fn try_build_blockwise(
     disable_iir: bool,
     coupled_newton: bool,
 ) -> Option<Vec<BuiltStage>> {
-    let plan = analyze_blockwise(edge_indices, graph)?;
+    let mut plan = analyze_blockwise(edge_indices, graph)?;
 
     #[cfg(test)]
     eprintln!(
@@ -1459,6 +1459,136 @@ pub(super) fn try_build_blockwise(
         plan.num_blocks(),
         plan.coupling_edges.len()
     );
+
+    let mut early_block_boundary_nodes: HashSet<NodeId> = HashSet::new();
+    for block in &plan.blocks {
+        if let Some(ports) = differential_rung_ports(block, graph) {
+            early_block_boundary_nodes.extend([
+                ports.top_left,
+                ports.top_right,
+                ports.bottom_left,
+                ports.bottom_right,
+            ]);
+        } else {
+            early_block_boundary_nodes.extend(block.port_nodes.iter().copied());
+        }
+    }
+    let early_external_terminal_nodes: HashSet<NodeId> = port_defs
+        .iter()
+        .filter_map(|port_def| graph.node_names.get(&port_def.name).copied())
+        .collect();
+    let mut early_extra_coupling = Vec::new();
+    for port_def in port_defs {
+        if port_def.direction != pedalkernel_rt::PortDirection::Input {
+            continue;
+        }
+        let Some(&port_node) = graph.node_names.get(&port_def.name) else {
+            continue;
+        };
+
+        let mut queue: VecDeque<(NodeId, Vec<usize>)> = VecDeque::new();
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        queue.push_back((port_node, Vec::new()));
+        visited.insert(port_node);
+        while let Some((node, path)) = queue.pop_front() {
+            if path.len() >= 4 {
+                continue;
+            }
+            for (eidx, edge) in graph.edges.iter().enumerate() {
+                if early_extra_coupling.contains(&eidx) || path.contains(&eidx) {
+                    continue;
+                }
+                if !matches!(
+                    graph.effective_edge_kind(eidx),
+                    EdgeKind::Linear | EdgeKind::Reactive
+                ) {
+                    continue;
+                }
+                let next = if edge.node_a == node {
+                    edge.node_b
+                } else if edge.node_b == node {
+                    edge.node_a
+                } else {
+                    continue;
+                };
+
+                let mut next_path = path.clone();
+                next_path.push(eidx);
+                if early_block_boundary_nodes.contains(&next) {
+                    for path_eidx in next_path {
+                        if !plan.coupling_edges.contains(&path_eidx)
+                            && !early_extra_coupling.contains(&path_eidx)
+                        {
+                            early_extra_coupling.push(path_eidx);
+                        }
+                    }
+                    continue;
+                }
+
+                let next_is_external = next == graph.out_node
+                    || early_external_terminal_nodes.contains(&next)
+                    || next == graph.gnd_node
+                    || graph.ac_ground_nodes.contains(&next)
+                    || next == graph.vcc_node
+                    || graph.supply_nodes.contains(&next);
+                if !next_is_external && visited.insert(next) {
+                    queue.push_back((next, next_path));
+                }
+            }
+        }
+    }
+
+    let mut early_output_boundary_nodes: HashSet<NodeId> = HashSet::new();
+    early_output_boundary_nodes.insert(graph.out_node);
+    for port_def in port_defs {
+        if port_def.direction != pedalkernel_rt::PortDirection::Output {
+            continue;
+        }
+        if let Some(&port_node) = graph.node_names.get(&port_def.name) {
+            early_output_boundary_nodes.insert(port_node);
+        }
+    }
+    for (eidx, edge) in graph.edges.iter().enumerate() {
+        if plan.coupling_edges.contains(&eidx) || early_extra_coupling.contains(&eidx) {
+            continue;
+        }
+        if !matches!(
+            graph.effective_edge_kind(eidx),
+            EdgeKind::Linear | EdgeKind::Reactive
+        ) {
+            continue;
+        }
+        let Some(other_node) = (if early_output_boundary_nodes.contains(&edge.node_a) {
+            Some(edge.node_b)
+        } else if early_output_boundary_nodes.contains(&edge.node_b) {
+            Some(edge.node_a)
+        } else {
+            None
+        }) else {
+            continue;
+        };
+        if other_node == graph.gnd_node || graph.ac_ground_nodes.contains(&other_node) {
+            early_extra_coupling.push(eidx);
+        }
+    }
+
+    if !early_extra_coupling.is_empty() {
+        let early_set: HashSet<usize> = early_extra_coupling.iter().copied().collect();
+        for block in &mut plan.blocks {
+            block.linear_edges.retain(|eidx| !early_set.contains(eidx));
+            block.reactive_edges.retain(|eidx| !early_set.contains(eidx));
+        }
+        for eidx in early_extra_coupling {
+            if !plan.coupling_edges.contains(&eidx) {
+                #[cfg(test)]
+                eprintln!(
+                    "  [blockwise] preclaimed boundary edge {} into coupling",
+                    graph.components[graph.edges[eidx].comp_idx].id
+                );
+                plan.coupling_edges.push(eidx);
+            }
+        }
+    }
 
     let mut all_stages = Vec::new();
 
@@ -1572,6 +1702,10 @@ pub(super) fn try_build_blockwise(
                 block_boundary_nodes.extend(block.port_nodes.iter().copied());
             }
         }
+        let external_terminal_nodes: HashSet<NodeId> = port_defs
+            .iter()
+            .filter_map(|port_def| graph.node_names.get(&port_def.name).copied())
+            .collect();
 
         for port_def in port_defs {
             if port_def.direction != pedalkernel_rt::PortDirection::Input {
@@ -1584,7 +1718,10 @@ pub(super) fn try_build_blockwise(
                 if coupling_edges.contains(&eidx) {
                     continue;
                 }
-                if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+                if !matches!(
+                    graph.effective_edge_kind(eidx),
+                    EdgeKind::Linear | EdgeKind::Reactive
+                ) {
                     continue;
                 }
                 let other_node = if edge.node_a == port_node {
@@ -1602,6 +1739,101 @@ pub(super) fn try_build_blockwise(
                         graph.components[edge.comp_idx].id, port_def.name
                     );
                 }
+            }
+
+            let mut queue: VecDeque<(NodeId, Vec<usize>)> = VecDeque::new();
+            let mut visited: HashSet<NodeId> = HashSet::new();
+            queue.push_back((port_node, Vec::new()));
+            visited.insert(port_node);
+
+            while let Some((node, path)) = queue.pop_front() {
+                if path.len() >= 4 {
+                    continue;
+                }
+                for (eidx, edge) in graph.edges.iter().enumerate() {
+                    if path.contains(&eidx) {
+                        continue;
+                    }
+                    if !matches!(
+                        graph.effective_edge_kind(eidx),
+                        EdgeKind::Linear | EdgeKind::Reactive
+                    ) {
+                        continue;
+                    }
+                    let next = if edge.node_a == node {
+                        edge.node_b
+                    } else if edge.node_b == node {
+                        edge.node_a
+                    } else {
+                        continue;
+                    };
+
+                    let mut next_path = path.clone();
+                    next_path.push(eidx);
+                    if block_boundary_nodes.contains(&next) {
+                        for path_eidx in next_path {
+                            if !coupling_edges.contains(&path_eidx) {
+                                coupling_edges.push(path_eidx);
+                                #[cfg(test)]
+                                eprintln!(
+                                    "  [blockwise] pulled input boundary chain edge {} into coupling for port {}",
+                                    graph.components[graph.edges[path_eidx].comp_idx].id,
+                                    port_def.name
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
+                    let next_is_external = next == graph.out_node
+                        || external_terminal_nodes.contains(&next)
+                        || next == graph.gnd_node
+                        || graph.ac_ground_nodes.contains(&next)
+                        || next == graph.vcc_node
+                        || graph.supply_nodes.contains(&next);
+                    if !next_is_external && visited.insert(next) {
+                        queue.push_back((next, next_path));
+                    }
+                }
+            }
+        }
+
+        let mut output_boundary_nodes: HashSet<NodeId> = HashSet::new();
+        output_boundary_nodes.insert(graph.out_node);
+        for port_def in port_defs {
+            if port_def.direction != pedalkernel_rt::PortDirection::Output {
+                continue;
+            }
+            if let Some(&port_node) = graph.node_names.get(&port_def.name) {
+                output_boundary_nodes.insert(port_node);
+            }
+        }
+        for (eidx, edge) in graph.edges.iter().enumerate() {
+            if coupling_edges.contains(&eidx) {
+                continue;
+            }
+            if !matches!(
+                graph.effective_edge_kind(eidx),
+                EdgeKind::Linear | EdgeKind::Reactive
+            ) {
+                continue;
+            }
+            let Some(other_node) = (if output_boundary_nodes.contains(&edge.node_a) {
+                Some(edge.node_b)
+            } else if output_boundary_nodes.contains(&edge.node_b) {
+                Some(edge.node_a)
+            } else {
+                None
+            }) else {
+                continue;
+            };
+            if other_node == graph.gnd_node || graph.ac_ground_nodes.contains(&other_node) {
+                coupling_edges.push(eidx);
+                #[cfg(test)]
+                eprintln!(
+                    "  [blockwise] pulled output boundary load {} into coupling",
+                    graph.components[edge.comp_idx].id
+                );
             }
         }
 
@@ -1996,6 +2228,12 @@ pub(super) fn try_build_blockwise(
             .and_then(|block| block_cascade_output_node(&block.nl_edges, &block.port_nodes, graph));
 
         let mut coupling_elements = Vec::new();
+        let mut coupling_passive_specs: Vec<(
+            String,
+            Option<usize>,
+            Option<usize>,
+            f64,
+        )> = Vec::new();
         let mut coupling_vcvss = Vec::new();
         for &comp_idx in &coupling_vcvs_comps {
             let comp = &graph.components[comp_idx];
@@ -2045,6 +2283,21 @@ pub(super) fn try_build_blockwise(
                 });
             }
         }
+        let mut node_incidence: HashMap<NodeId, usize> = HashMap::new();
+        for edge in &graph.edges {
+            *node_incidence.entry(edge.node_a).or_default() += 1;
+            *node_incidence.entry(edge.node_b).or_default() += 1;
+        }
+        let is_floating_terminal = |node: NodeId| -> bool {
+            !ground_rails.contains(&node)
+                && node != graph.in_node
+                && node != graph.out_node
+                && node != graph.vcc_node
+                && !graph.supply_nodes.contains(&node)
+                && !graph.ac_ground_nodes.contains(&node)
+                && node_incidence.get(&node).copied().unwrap_or(0) <= 1
+        };
+
         for &eidx in &coupling_edges {
             let e = &graph.edges[eidx];
             let comp = &graph.components[e.comp_idx];
@@ -2052,6 +2305,22 @@ pub(super) fn try_build_blockwise(
                 continue;
             }
             if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+                if graph.effective_edge_kind(eidx) == EdgeKind::Reactive {
+                    if let Some(capacitance) = comp.kind.capacitance() {
+                        let n1 = if ground_rails.contains(&e.node_a) {
+                            None
+                        } else {
+                            node_to_mna.get(&e.node_a).copied()
+                        };
+                        let n2 = if ground_rails.contains(&e.node_b) {
+                            None
+                        } else {
+                            node_to_mna.get(&e.node_b).copied()
+                        };
+                        coupling_passive_specs.push((comp.id.clone(), n1, n2, capacitance));
+                        continue;
+                    }
+                }
                 #[cfg(test)]
                 eprintln!(
                     "    skip non-resistive coupling edge {eidx} {}({:?})",
@@ -2068,6 +2337,16 @@ pub(super) fn try_build_blockwise(
                 );
                 continue;
             };
+            if comp.kind.is_pot()
+                && (is_floating_terminal(e.node_a) || is_floating_terminal(e.node_b))
+            {
+                #[cfg(test)]
+                eprintln!(
+                    "    skip floating pot coupling edge {eidx} {} node {:?}->{:?}",
+                    comp.id, e.node_a, e.node_b
+                );
+                continue;
+            }
             let n1 = if ground_rails.contains(&e.node_a) {
                 None
             } else {
@@ -2358,6 +2637,48 @@ pub(super) fn try_build_blockwise(
             }
         }
 
+        let mut coupling_passives = Vec::new();
+        for (comp_id, node_a, node_b, capacitance) in coupling_passive_specs {
+            let rp = 1.0 / (2.0 * sample_rate * capacitance);
+            let scattering_idx = ports.len();
+            ports.push(pedalkernel_rt::tree::WdfPort {
+                node_pos: node_a,
+                node_neg: node_b,
+                resistance: rp,
+            });
+            coupling_passives.push(pedalkernel_rt::stage::CouplingPassive {
+                comp_id: comp_id.clone(),
+                port_idx: scattering_idx,
+                node: pedalkernel_rt::dyn_node::DynNode::Capacitor(
+                    Some(comp_id.clone()),
+                    capacitance,
+                    rp,
+                ),
+            });
+            #[cfg(test)]
+            eprintln!(
+                "    passive coupling cap {comp_id}: node={node_a:?}->{node_b:?}, C={capacitance:.3e}, Rp={rp:.1}Ω, scattering_port={scattering_idx}"
+            );
+        }
+
+        let output_port_index = node_to_mna.get(&graph.out_node).copied().map(|mna_idx| {
+            let scattering_idx = ports.len();
+            ports.push(pedalkernel_rt::tree::WdfPort {
+                node_pos: Some(mna_idx),
+                node_neg: None,
+                // Observation ports are electrically open because runtime uses
+                // b=a, but a finite port resistance keeps the scattering solve
+                // conditioned. A 1G probe made output waves explode.
+                resistance: 100_000.0,
+            });
+            #[cfg(test)]
+            eprintln!(
+                "    output probe: graph.out_node={} → mna_node=Some({mna_idx}), scattering_port={scattering_idx}",
+                graph.out_node
+            );
+            scattering_idx
+        });
+
         let n_ports = ports.len();
         eprintln!("  [blockwise] coupling scattering: {n_ports} ports");
 
@@ -2551,9 +2872,11 @@ pub(super) fn try_build_blockwise(
             coupling_ports: ports,
             block_port_indices,
             coupling_elements,
+            coupling_passives,
             coupling_vcvss,
             n_ports,
             output_block,
+            output_port_index,
             supply_voltage,
             vs_port_map,
             cutoff_cv_port,

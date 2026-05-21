@@ -98,6 +98,26 @@ pub struct UiMetrics {
     pub stage_count: u8,
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Nonlinear solver diagnostics — for compiler/runtime regression harnesses
+    // ═══════════════════════════════════════════════════════════════════════════
+    /// Total nonlinear/coupled solve calls observed in this metrics block.
+    pub nr_solve_count: u32,
+    /// Total Newton/fixed-point iterations across solve calls in this block.
+    pub nr_total_iterations: u32,
+    /// Maximum iterations used by any solve in this block.
+    pub nr_max_iterations: u16,
+    /// Number of solves that did not converge in this block.
+    pub nr_nonconverged_count: u16,
+    /// Maximum final residual observed in this block.
+    pub nr_max_residual: f32,
+    /// Per-stage maximum iterations observed in this block.
+    pub stage_nr_iterations: [u16; MAX_STAGES],
+    /// Per-stage maximum final residual observed in this block.
+    pub stage_nr_residual: [f32; MAX_STAGES],
+    /// Per-stage non-convergence counts, saturated at u8::MAX.
+    pub stage_nr_nonconverged: [u8; MAX_STAGES],
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Timing
     // ═══════════════════════════════════════════════════════════════════════════
     /// Block counter (monotonic, wraps at u32::MAX).
@@ -140,6 +160,16 @@ pub struct MetricsAccumulator {
     stage_sum_sq: [f64; MAX_STAGES],
     stage_count: usize,
 
+    // Solver diagnostics
+    nr_solve_count: u32,
+    nr_total_iterations: u32,
+    nr_max_iterations: u16,
+    nr_nonconverged_count: u16,
+    nr_max_residual: f32,
+    stage_nr_iterations: [u16; MAX_STAGES],
+    stage_nr_residual: [f32; MAX_STAGES],
+    stage_nr_nonconverged: [u8; MAX_STAGES],
+
     // Tube state (sampled, not accumulated)
     tube_plate_current: [f32; MAX_TUBES],
     tube_dissipation: [f32; MAX_TUBES],
@@ -171,6 +201,14 @@ impl MetricsAccumulator {
             signal_max: 0.0,
             stage_sum_sq: [0.0; MAX_STAGES],
             stage_count: 0,
+            nr_solve_count: 0,
+            nr_total_iterations: 0,
+            nr_max_iterations: 0,
+            nr_nonconverged_count: 0,
+            nr_max_residual: 0.0,
+            stage_nr_iterations: [0; MAX_STAGES],
+            stage_nr_residual: [0.0; MAX_STAGES],
+            stage_nr_nonconverged: [0; MAX_STAGES],
             tube_plate_current: [0.0; MAX_TUBES],
             tube_dissipation: [0.0; MAX_TUBES],
             tube_count: 0,
@@ -217,6 +255,42 @@ impl MetricsAccumulator {
     pub fn accumulate_stage(&mut self, stage_idx: usize, level: f64) {
         if stage_idx < MAX_STAGES {
             self.stage_sum_sq[stage_idx] += level * level;
+            if stage_idx >= self.stage_count {
+                self.stage_count = stage_idx + 1;
+            }
+        }
+    }
+
+    /// Record one nonlinear/coupled solver call for a stage.
+    #[inline]
+    pub fn record_stage_solver(
+        &mut self,
+        stage_idx: usize,
+        iterations: u32,
+        residual: f64,
+        converged: bool,
+    ) {
+        self.nr_solve_count = self.nr_solve_count.saturating_add(1);
+        self.nr_total_iterations = self.nr_total_iterations.saturating_add(iterations);
+        self.nr_max_iterations = self.nr_max_iterations.max(iterations.min(u16::MAX as u32) as u16);
+        if !converged {
+            self.nr_nonconverged_count = self.nr_nonconverged_count.saturating_add(1);
+        }
+        if residual.is_finite() {
+            self.nr_max_residual = self.nr_max_residual.max(residual as f32);
+        }
+
+        if stage_idx < MAX_STAGES {
+            self.stage_nr_iterations[stage_idx] =
+                self.stage_nr_iterations[stage_idx].max(iterations.min(u16::MAX as u32) as u16);
+            if residual.is_finite() {
+                self.stage_nr_residual[stage_idx] =
+                    self.stage_nr_residual[stage_idx].max(residual as f32);
+            }
+            if !converged {
+                self.stage_nr_nonconverged[stage_idx] =
+                    self.stage_nr_nonconverged[stage_idx].saturating_add(1);
+            }
             if stage_idx >= self.stage_count {
                 self.stage_count = stage_idx + 1;
             }
@@ -310,6 +384,14 @@ impl MetricsAccumulator {
             supply_sag,
             stage_levels,
             stage_count: self.stage_count as u8,
+            nr_solve_count: self.nr_solve_count,
+            nr_total_iterations: self.nr_total_iterations,
+            nr_max_iterations: self.nr_max_iterations,
+            nr_nonconverged_count: self.nr_nonconverged_count,
+            nr_max_residual: self.nr_max_residual,
+            stage_nr_iterations: self.stage_nr_iterations,
+            stage_nr_residual: self.stage_nr_residual,
+            stage_nr_nonconverged: self.stage_nr_nonconverged,
             block_counter: self.block_counter,
         };
 
@@ -325,6 +407,14 @@ impl MetricsAccumulator {
         for i in 0..MAX_STAGES {
             self.stage_sum_sq[i] = 0.0;
         }
+        self.nr_solve_count = 0;
+        self.nr_total_iterations = 0;
+        self.nr_max_iterations = 0;
+        self.nr_nonconverged_count = 0;
+        self.nr_max_residual = 0.0;
+        self.stage_nr_iterations = [0; MAX_STAGES];
+        self.stage_nr_residual = [0.0; MAX_STAGES];
+        self.stage_nr_nonconverged = [0; MAX_STAGES];
 
         metrics
     }
@@ -446,6 +536,24 @@ mod tests {
 
         let latest = buffer.read_latest();
         assert_eq!(latest.block_counter, 9);
+    }
+
+    #[test]
+    fn test_solver_diagnostics_reduce() {
+        let mut acc = MetricsAccumulator::new(2);
+        acc.accumulate_levels(0.0, 0.0);
+        acc.record_stage_solver(1, 3, 2.0e-5, true);
+        acc.accumulate_levels(0.0, 0.0);
+        acc.record_stage_solver(1, 8, 4.0e-4, false);
+
+        let metrics = acc.reduce();
+        assert_eq!(metrics.nr_solve_count, 2);
+        assert_eq!(metrics.nr_total_iterations, 11);
+        assert_eq!(metrics.nr_max_iterations, 8);
+        assert_eq!(metrics.nr_nonconverged_count, 1);
+        assert_eq!(metrics.stage_nr_iterations[1], 8);
+        assert_eq!(metrics.stage_nr_nonconverged[1], 1);
+        assert!(metrics.nr_max_residual >= 4.0e-4);
     }
 
     #[test]

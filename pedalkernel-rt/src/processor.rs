@@ -2515,6 +2515,10 @@ impl PedalProcessor for CompiledPedal {
         let mut prev_was_clipping = false;
         let num_stages = self.stages.len();
         let mut stage_levels = [0.0f64; crate::metering::MAX_STAGES];
+        let mut stage_solver_iterations = [0u32; crate::metering::MAX_STAGES];
+        let mut stage_solver_residual = [0.0f64; crate::metering::MAX_STAGES];
+        let mut stage_solver_converged = [true; crate::metering::MAX_STAGES];
+        let mut stage_solver_active = [false; crate::metering::MAX_STAGES];
         let mut wdf_stage_counter = 0usize;
 
         // Node routing: trigger impulses were already pushed to node_signals above.
@@ -2866,6 +2870,14 @@ impl PedalProcessor for CompiledPedal {
                 };
                 signal = bkm_stage.process_with_serial_input(serial_input, &vs_signals);
                 if stage_idx < crate::metering::MAX_STAGES {
+                    let diag = bkm_stage.solve_diagnostics();
+                    stage_solver_iterations[stage_idx] = diag.iterations;
+                    stage_solver_residual[stage_idx] = diag.residual;
+                    stage_solver_converged[stage_idx] =
+                        diag.converged && !diag.linear_solve_failed;
+                    stage_solver_active[stage_idx] = diag.iterations > 0;
+                }
+                if stage_idx < crate::metering::MAX_STAGES {
                     stage_levels[stage_idx] = signal;
                 }
             } else if is_serial_fb {
@@ -3153,6 +3165,14 @@ impl PedalProcessor for CompiledPedal {
             // Accumulate per-stage signal levels for circuit view visualization
             for i in 0..num_stages.min(crate::metering::MAX_STAGES) {
                 acc.accumulate_stage(i, stage_levels[i]);
+                if stage_solver_active[i] {
+                    acc.record_stage_solver(
+                        i,
+                        stage_solver_iterations[i],
+                        stage_solver_residual[i],
+                        stage_solver_converged[i],
+                    );
+                }
             }
 
             // Record tube state from WDF stages (plate current for glow shaders)

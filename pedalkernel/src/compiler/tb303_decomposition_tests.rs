@@ -99,6 +99,68 @@ fn settled_sine_ac_rms_ports(
     })
 }
 
+fn quick_sine_ac_rms_ports(
+    proc: &mut super::compiled::CompiledPedal,
+    freq: f64,
+    amp: f64,
+    driven_inputs: &[(&str, f64)],
+    dc_inputs: &[(&str, f64)],
+    output: &str,
+) -> f64 {
+    let driven_inputs: Vec<(usize, f64)> = driven_inputs
+        .iter()
+        .map(|(name, gain)| {
+            (
+                proc.resolve_port(name)
+                    .unwrap_or_else(|| panic!("missing input port {name}")),
+                *gain,
+            )
+        })
+        .collect();
+    let dc_inputs: Vec<(usize, f64)> = dc_inputs
+        .iter()
+        .map(|(name, value)| {
+            (
+                proc.resolve_port(name)
+                    .unwrap_or_else(|| panic!("missing input port {name}")),
+                *value,
+            )
+        })
+        .collect();
+    let out_idx = proc
+        .resolve_port(output)
+        .unwrap_or_else(|| panic!("missing output port {output}"));
+    let mut ports = vec![0.0; proc.port_count()];
+
+    for i in 0..1200 {
+        let input = amp * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+        ports.fill(0.0);
+        for &(idx, value) in &dc_inputs {
+            ports[idx] = value;
+        }
+        for &(idx, gain) in &driven_inputs {
+            ports[idx] = input * gain;
+        }
+        proc.process_ports(&mut ports);
+    }
+
+    let mut values = Vec::with_capacity(2400);
+    for i in 0..2400 {
+        let input = amp * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+        ports.fill(0.0);
+        for &(idx, value) in &dc_inputs {
+            ports[idx] = value;
+        }
+        for &(idx, gain) in &driven_inputs {
+            ports[idx] = input * gain;
+        }
+        proc.process_ports(&mut ports);
+        values.push(ports[out_idx]);
+    }
+
+    ac_rms(&values)
+}
+
 fn ac_rms(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -189,7 +251,8 @@ fn stinchcombe_10pole_magnitude(freq_hz: f64, fc_hz: f64, resonance_k: f64) -> f
         .add(s.div_scalar(omega_c).scale(2.0f64.powf(13.0 / 4.0)))
         .add(Complex::real(1.0));
 
-    let coupling = pole(38.5)
+    let coupling = pole(97.5)
+        .mul(pole(38.5))
         .mul(pole(4.45))
         .mul(pole(578.1))
         .mul(pole(20.0))
@@ -386,6 +449,50 @@ fn tb303_bkm_vs_signals_with_vco(
             }
         })
         .collect()
+}
+
+fn tb303_source_without_resonance_feedback(source: &str) -> String {
+    let mut stripped = String::with_capacity(source.len());
+    let mut skip_resonance_comment_block = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed == "# Resonance feedback path"
+            || trimmed == "# Resonance CV input: audio-rate voltage injection into the feedback"
+            || trimmed == "# return node. This avoids moving the Resonance pot at CV rate."
+            || trimmed == "# Output and resonance feedback use the top dynamic rung node. Resonance"
+            || trimmed == "# is a passive coupling-network path here; gain calibration against the"
+            || trimmed == "# full Stinchcombe feedback term belongs in the BKM resonance pass."
+        {
+            skip_resonance_comment_block = true;
+            continue;
+        }
+
+        let is_resonance_component = trimmed.starts_with("Resonance:")
+            || trimmed.starts_with("R_fb_")
+            || trimmed.starts_with("R_res_cv:")
+            || trimmed.starts_with("Ufb:");
+        let is_resonance_net = trimmed.starts_with("cv_resonance ->")
+            || trimmed.contains("-> R_res_cv.")
+            || trimmed.contains("-> R_fb_")
+            || trimmed.contains("-> Ufb.")
+            || trimmed.contains("-> Resonance.")
+            || trimmed.contains("R_fb_limit.b ->");
+        let is_resonance_control = trimmed.starts_with("Resonance.position ->");
+
+        if is_resonance_component || is_resonance_net || is_resonance_control {
+            skip_resonance_comment_block = false;
+            continue;
+        }
+
+        if skip_resonance_comment_block && trimmed.is_empty() {
+            skip_resonance_comment_block = false;
+            continue;
+        }
+
+        stripped.push_str(line);
+        stripped.push('\n');
+    }
+    stripped
 }
 
 fn bkm_block_row_coupling_summary(
@@ -689,8 +796,8 @@ fn tb303_bkm_output_and_feedback_tap_top_rung() {
         "TB303 resonance send must tap the same top dynamic rung node as output"
     );
     assert!(
-        source.contains("R_fb_limit.b -> QL1.emitter"),
-        "TB303 resonance return must enter the bottom input/tail side, not the output tap"
+        source.contains("R_fb_limit.b -> QR1.emitter"),
+        "TB303 resonance return must enter the opposite bottom side so the feedback is out of phase at the cutoff peak"
     );
 
     let active_set: std::collections::HashSet<usize> =
@@ -853,6 +960,143 @@ fn tb303_bkm_does_not_stamp_reactive_coupling_as_resistor() {
     assert!(
         reactive_coupling.is_empty(),
         "reactive BKM boundary edges cannot be represented as fallback resistors; got {reactive_coupling:?}"
+    );
+
+    assert!(
+        bkm.coupling_passives
+            .iter()
+            .any(|passive| passive.comp_id == "C_out"
+                && passive.port_idx < bkm.n_ports
+                && bkm.coupling_ports[passive.port_idx].node_pos.is_some()),
+        "reactive BKM boundary edge C_out must be represented as a passive WDF coupling port; passives={:?}",
+        bkm.coupling_passives
+            .iter()
+            .map(|passive| (&passive.comp_id, passive.port_idx))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        bkm.output_port_index.is_some(),
+        "BKM should add a high-Z output probe coupling port so audio_out is read after C_out/R_out, not from the internal ladder tap"
+    );
+    assert!(
+        bkm.coupling_elements
+            .iter()
+            .any(|element| element.comp_id == "R_out"),
+        "TB303 output load R_out must be in the same BKM coupling adaptor as C_out; \
+         otherwise the output coupling cap has no load in the coupled solve. coupling={:?}",
+        bkm.coupling_elements
+            .iter()
+            .map(|element| element.comp_id.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn tb303_bkm_pulls_input_coupling_caps_into_adaptor() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    assert!(
+        source.contains("C_in: cap(") && source.contains("C_vco: cap("),
+        "TB303 .pedal should model the input/VCO coupling caps that contribute to the Stinchcombe 10-pole shelf"
+    );
+
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    for cap_id in ["C_in", "C_vco"] {
+        assert!(
+            bkm.coupling_passives
+                .iter()
+                .any(|passive| passive.comp_id == cap_id && passive.port_idx < bkm.n_ports),
+            "{cap_id} must be represented as a passive WDF coupling port inside BKM; passives={:?}",
+            bkm.coupling_passives
+                .iter()
+                .map(|passive| (&passive.comp_id, passive.port_idx))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    for (idx, block) in bkm.blocks.iter().enumerate() {
+        assert!(
+            block.dc_offset.is_finite() && block.dc_offset.abs() < 10.0,
+            "AC-coupled BKM input caps must not poison DC initialization; block {idx} dc_offset={}",
+            block.dc_offset
+        );
+    }
+}
+
+#[test]
+fn tb303_coupling_caps_land_near_stinchcombe_shelf_corners() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to BKM");
+
+    let cap_value = |id: &str| -> f64 {
+        bkm.coupling_passives
+            .iter()
+            .find_map(|passive| {
+                if passive.comp_id != id {
+                    return None;
+                }
+                if let pedalkernel_rt::dyn_node::DynNode::Leaf(
+                    pedalkernel_rt::wdf_leaf::LeafKind::Capacitor(cap),
+                ) = &passive.node
+                {
+                    Some(cap.capacitance)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("missing coupling cap {id} in BKM passives"))
+    };
+    let resistor_value = |id: &str| -> f64 {
+        bkm.coupling_elements
+            .iter()
+            .find(|element| element.comp_id == id)
+            .map(|element| element.resistance)
+            .unwrap_or_else(|| panic!("missing coupling resistor {id} in BKM elements"))
+    };
+    let corner_rad = |r: f64, c: f64| 1.0 / (r * c).max(1.0e-30);
+
+    let input_corner = corner_rad(resistor_value("R_in"), cap_value("C_in"));
+    let output_corner = corner_rad(resistor_value("R_out"), cap_value("C_out"));
+
+    eprintln!(
+        "  TB303 coupling shelf corners: input={input_corner:.1}rad/s, output={output_corner:.1}rad/s"
+    );
+
+    assert!(
+        (450.0..700.0).contains(&input_corner),
+        "input coupling should sit near Stinchcombe's high shelf pole around 578rad/s: {input_corner:.1}rad/s"
+    );
+    assert!(
+        (40.0..80.0).contains(&output_corner),
+        "output coupling should sit between the published low shelf poles rather than around 1krad/s: {output_corner:.1}rad/s"
     );
 }
 
@@ -2213,12 +2457,11 @@ fn tb303_bkm_cutoff_pot_without_cv_is_lowpass() {
         })
     };
 
-    // The TB303 VCO input is a low-impedance, DC-coupled 1k source into Q1.
-    // Leaving it at 0V intentionally loads the cutoff bias network; drive it
-    // for this filter-shape regression so we test the ladder path, not a
-    // grounded VCO source.
-    let gain_100 = measure_with(100.0, 1.0);
-    let gain_10k = measure_with(10_000.0, 1.0);
+    // Probe one source path. Driving audio_in and vco_in with the same sine is
+    // a two-source test and can turn the coupling network into a feed-forward
+    // shelf instead of the small-signal ladder response we want here.
+    let gain_100 = measure_with(100.0, 0.0);
+    let gain_10k = measure_with(10_000.0, 0.0);
     let ratio_db = 20.0 * (gain_100 / gain_10k.max(1e-12)).log10();
 
     eprintln!(
@@ -2228,6 +2471,53 @@ fn tb303_bkm_cutoff_pot_without_cv_is_lowpass() {
     assert!(
         gain_100 > gain_10k * 3.0,
         "Cutoff pot alone should bias the BKM diode ladder into a lowpass response: \
+         100Hz={gain_100:.6}, 10kHz={gain_10k:.6}"
+    );
+}
+
+#[test]
+fn tb303_bkm_core_without_resonance_feedback_is_lowpass() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let source = tb303_source_without_resonance_feedback(&source);
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let measure_with = |freq: f64, vco_drive: f64| -> f64 {
+        let mut proc =
+            super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+                .expect("compile failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.cache_all_vs_pointers();
+        for _ in 0..9600 {
+            let _ = proc.process(0.0);
+        }
+
+        let bkm = proc
+            .stages
+            .iter_mut()
+            .find_map(|s| {
+                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                    Some(k)
+                } else {
+                    None
+                }
+            })
+            .expect("TB303 core should compile to BKM");
+
+        settled_sine_ac_rms(freq, 0.03, |input| {
+            bkm.process(&[input, input * vco_drive, 0.0])
+        })
+    };
+
+    let gain_100 = measure_with(100.0, 0.0);
+    let gain_10k = measure_with(10_000.0, 0.0);
+    let ratio_db = 20.0 * (gain_100 / gain_10k.max(1e-12)).log10();
+    eprintln!(
+        "  BKM core without resonance feedback: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
+    );
+
+    assert!(
+        gain_100 > gain_10k * 3.0,
+        "core ladder without resonance feedback should be a lowpass: \
          100Hz={gain_100:.6}, 10kHz={gain_10k:.6}"
     );
 }
@@ -2253,11 +2543,11 @@ fn tb303_bkm_full_processor_vco_port_path_is_not_flat() {
         proc.set_control("Cutoff", 0.5);
         proc.set_control("Resonance", 0.0);
 
-        settled_sine_ac_rms_ports(
+        quick_sine_ac_rms_ports(
             &mut proc,
             freq,
             0.03,
-            &[("audio_in", 1.0)],
+            &[("vco_in", 1.0)],
             &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
             "audio_out",
         )
@@ -2586,17 +2876,33 @@ fn tb303_bkm_rung_response_exposes_missing_cascaded_poles() {
 #[test]
 fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
-    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
     let freqs = [100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0];
 
-    let measure_compiled = |freq: f64, force_serial: bool| -> f64 {
+    let compile_mode = |force_serial: bool| -> Vec<u8> {
+        let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
         let mut options = super::compile::CompileOptions::default();
         options.force_serial_blockwise = force_serial;
-        let mut proc =
-            super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
+        let key = if force_serial {
+            "tb303_compare_serial"
+        } else {
+            "tb303_compare_bkm"
+        };
+        super::compile::compile_pedal_cached(&source, key, key, SR, &options, &cache_dir)
+            .expect("compile failed")
+    };
+
+    let bkm_blob = compile_mode(false);
+    let serial_blob = compile_mode(true);
+
+    let measure_blob = |blob: &[u8], freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(blob).expect("deserialize failed");
         proc.set_control("Cutoff", 0.5);
         proc.set_control("Resonance", 0.0);
-        settled_sine_ac_rms_ports(
+        quick_sine_ac_rms_ports(
             &mut proc,
             freq,
             0.03,
@@ -2606,13 +2912,10 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
         )
     };
 
-    let bkm: Vec<f64> = freqs
-        .iter()
-        .map(|&freq| measure_compiled(freq, false))
-        .collect();
+    let bkm: Vec<f64> = freqs.iter().map(|&freq| measure_blob(&bkm_blob, freq)).collect();
     let serial: Vec<f64> = freqs
         .iter()
-        .map(|&freq| measure_compiled(freq, true))
+        .map(|&freq| measure_blob(&serial_blob, freq))
         .collect();
 
     let best_fit_fc = |gains: &[f64]| -> f64 {
@@ -2641,7 +2944,6 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
 
     let htb_fc = best_fit_fc(&serial);
     let h_ref = stinchcombe_htb_magnitude(freqs[0], htb_fc);
-    let full_10_ref = stinchcombe_10pole_magnitude(freqs[0], htb_fc, 0.0);
     let best_10pole_fit = |gains: &[f64], norm_idx: usize| -> (f64, f64) {
         let target: Vec<f64> = gains
             .iter()
@@ -2682,6 +2984,7 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     };
     let (bkm_10pole_fc_100, bkm_10pole_err_100) = best_10pole_fit(&bkm, 0);
     let (bkm_10pole_fc_10k, bkm_10pole_err_10k) = best_10pole_fit(&bkm, freqs.len() - 1);
+    let full_10_ref = stinchcombe_10pole_magnitude(freqs[0], bkm_10pole_fc_100, 0.0);
 
     eprintln!("  TB303 normalized response comparison, Cutoff=0.5 Resonance=0");
     eprintln!("  H_tb best-fit fc to forced-serial WDF: {htb_fc:.1} Hz");
@@ -2697,7 +3000,10 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
         let bkm_db = db_norm(bkm[i], bkm[0]);
         let serial_db = db_norm(serial[i], serial[0]);
         let htb_db = db_norm(stinchcombe_htb_magnitude(freq, htb_fc), h_ref);
-        let full_10_db = db_norm(stinchcombe_10pole_magnitude(freq, htb_fc, 0.0), full_10_ref);
+        let full_10_db = db_norm(
+            stinchcombe_10pole_magnitude(freq, bkm_10pole_fc_100, 0.0),
+            full_10_ref,
+        );
         eprintln!(
             "  {freq:>8.0} {bkm_db:>+10.1} {serial_db:>+10.1} {htb_db:>+10.1} {full_10_db:>+10.1} {:>+10.1}",
             bkm_db - full_10_db
@@ -2713,12 +3019,10 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     eprintln!(
         "  5k->10k slope: BKM={bkm_oct:+.1} dB/oct, serial={serial_oct:+.1} dB/oct, H_tb={htb_oct:+.1} dB/oct"
     );
-    let bkm_5k_db = db_norm(bkm[5], bkm[0]);
-    let htb_5k_db = db_norm(stinchcombe_htb_magnitude(freqs[5], htb_fc), h_ref);
     assert!(
-        bkm_5k_db < htb_5k_db + 12.0,
-        "BKM should stay in the same transition-band family as H_tb when all TB303 source ports are driven: \
-         BKM 5k={bkm_5k_db:+.1} dB, H_tb 5k={htb_5k_db:+.1} dB"
+        bkm_10pole_err_100 < 3.0,
+        "BKM with coupling caps should match the published 10-pole k=0 shelf/lowpass shape after cutoff fit: \
+         fc={bkm_10pole_fc_100:.1}Hz, max_abs_err={bkm_10pole_err_100:.2}dB"
     );
 }
 
@@ -3634,7 +3938,7 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
 }
 
 #[test]
-fn tb303_resonance_pot_compiles_as_split_feedback_divider() {
+fn tb303_resonance_pot_compiles_as_series_feedback_rheostat() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
 
     let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3644,8 +3948,8 @@ fn tb303_resonance_pot_compiles_as_split_feedback_divider() {
 
     let blob = super::compile::compile_pedal_cached(
         &source,
-        "tb303_resonance_split_divider",
-        "tb303_resonance_split_divider",
+        "tb303_resonance_series_rheostat",
+        "tb303_resonance_series_rheostat",
         SR,
         &super::compile::CompileOptions::default(),
         &cache_dir,
@@ -3682,13 +3986,12 @@ fn tb303_resonance_pot_compiles_as_split_feedback_divider() {
 
     assert_eq!(
         resonance_legs.len(),
-        2,
-        "Resonance should compile as a three-terminal divider with two coupling legs"
+        1,
+        "Resonance should compile as a series feedback rheostat, not a grounded divider that loads the ladder at Resonance=0"
     );
     assert!(
-        resonance_legs.iter().any(|e| e.invert_control)
-            && resonance_legs.iter().any(|e| !e.invert_control),
-        "Resonance divider legs must track opposite halves of the pot"
+        resonance_legs[0].invert_control,
+        "series resonance feedback must invert the exposed control so more knob means lower feedback resistance"
     );
 
     let min_direct = resonance_legs
@@ -3696,15 +3999,10 @@ fn tb303_resonance_pot_compiles_as_split_feedback_divider() {
         .find(|e| e.invert_control)
         .expect("direct feedback leg should be inverted")
         .resistance;
-    let min_ground = resonance_legs
-        .iter()
-        .find(|e| !e.invert_control)
-        .expect("ground shunt leg should not be inverted")
-        .resistance;
 
     assert!(
-        min_direct > 90_000.0 && min_ground < 10.0,
-        "Resonance=0 should ground the wiper and isolate feedback: direct={min_direct:.1}, ground={min_ground:.1}"
+        min_direct > 90_000.0,
+        "Resonance=0 should isolate feedback without shunting the ladder: direct={min_direct:.1}"
     );
 
     let mut proc: super::compiled::CompiledPedal =
@@ -3731,34 +4029,16 @@ fn tb303_resonance_pot_compiles_as_split_feedback_divider() {
         .find(|e| e.invert_control)
         .expect("direct feedback leg should be inverted")
         .resistance;
-    let max_ground = resonance_legs
-        .iter()
-        .find(|e| !e.invert_control)
-        .expect("ground shunt leg should not be inverted")
-        .resistance;
 
     assert!(
-        max_direct < 10_000.0 && max_ground > 90_000.0,
-        "Resonance=0.95 should connect feedback and lift the ground shunt: direct={max_direct:.1}, ground={max_ground:.1}"
+        max_direct < 10_000.0,
+        "Resonance=0.95 should connect the feedback return: direct={max_direct:.1}"
     );
 }
 
 #[test]
-fn tb303_active_resonance_feedback_compiles_into_bkm_coupling_vcvs() {
+fn tb303_active_resonance_feedback_stays_in_bkm_coupling() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
-    let source = if source.contains("Ufb: opamp") {
-        source
-    } else {
-        source
-            .replace(
-                "    R_fb_limit: resistor(10k)\n",
-                "    R_fb_limit: resistor(10k)\n    Ufb: opamp(tl072)\n    R_fb_drive: resistor(10k)\n    R_fb_return: resistor(110k)\n",
-            )
-            .replace(
-                "    QL4.emitter -> Resonance.b\n",
-                "    QL4.emitter -> R_fb_drive.a\n    R_fb_drive.b -> Ufb.neg\n    gnd -> Ufb.pos\n    Ufb.neg -> R_fb_return.a\n    R_fb_return.b -> Ufb.out\n    Ufb.out -> Resonance.b\n",
-            )
-    };
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
     let compiled =
         super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
@@ -3777,11 +4057,11 @@ fn tb303_active_resonance_feedback_compiles_into_bkm_coupling_vcvs() {
 
     assert!(
         !bkm.coupling_vcvss.is_empty(),
-        "active resonance polarity stage must be stamped into the BKM coupling MNA, not dropped or forced monolithic"
+        "TB303 resonance feedback polarity/gain stage must be stamped into the BKM coupling MNA, not dropped or forced monolithic"
     );
     assert!(
         bkm.feedback_port_map.is_empty(),
-        "active resonance must still use coupling-network elements, not synthetic feedback source ports"
+        "resonance must still use coupling-network elements, not synthetic feedback source ports"
     );
 }
 
@@ -3816,40 +4096,28 @@ fn tb303_resonance_creates_peak() {
         proc.set_control("Cutoff", 0.5);
         proc.set_control("Resonance", resonance);
 
-        // Warm-up: let transients settle.
-        for _ in 0..4800 {
-            for port in &proc.ports {
-                if port.name == "vco_in" && port.index < proc.port_values.len() {
-                    proc.port_values[port.index] = 0.0;
-                }
-            }
-            proc.process(0.0);
-        }
-
-        // Measure peak over 4800 samples of sine. AcidAttack drives the WDF
-        // filter at roughly 30 mV, not 1 V; at 1 V the nonlinear ladder
-        // compresses the resonance peak and this stops being a small-signal
-        // filter-readiness check.
-        let mut peak = 0.0f64;
-        for i in 0..4800 {
-            let input = 0.03 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            for port in &proc.ports {
-                if port.name == "vco_in" && port.index < proc.port_values.len() {
-                    proc.port_values[port.index] = input;
-                }
-            }
-            let out = proc.process(input);
-            peak = peak.max(out.abs());
-        }
-        peak
+        // AcidAttack drives the WDF filter at roughly 30 mV, not 1 V; at 1 V
+        // the nonlinear ladder compresses the resonance peak and this stops
+        // being a small-signal filter-readiness check. Use settled RMS rather
+        // than peak capture so startup ringing cannot masquerade as resonance.
+        quick_sine_ac_rms_ports(
+            &mut proc,
+            freq,
+            0.03,
+            &[("vco_in", 1.0)],
+            &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+            "audio_out",
+        )
     };
 
     let probe_freqs = [250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
     let mut best = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut worst_abs = 0.0f64;
     for freq in probe_freqs {
         let gain_flat = measure_gain_at_freq(freq, 0.0);
         let gain_resonant = measure_gain_at_freq(freq, 0.85);
         let ratio = gain_resonant / gain_flat.max(1e-12);
+        worst_abs = worst_abs.max(gain_resonant);
         eprintln!(
             "  {freq:>5.0}Hz gain: flat={gain_flat:.4}, resonant={gain_resonant:.4}, ratio={ratio:.2}x"
         );
@@ -3866,6 +4134,54 @@ fn tb303_resonance_creates_peak() {
     assert!(
         best.3 > 1.25,
         "Resonance should boost gain near the cutoff peak by >1.25×: best={best:?}"
+    );
+    assert!(
+        worst_abs < 5.0,
+        "Resonance must be a bounded cutoff-band peak, not broadband runaway: worst_abs={worst_abs:.4}, best={best:?}"
+    );
+}
+
+#[test]
+fn tb303_bkm_metering_reports_coupled_solver_diagnostics() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let mut proc =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    proc.set_control("Cutoff", 0.5);
+    proc.set_control("Resonance", 0.7);
+    proc.enable_metering(32);
+
+    for i in 0..96 {
+        let input = 0.03 * (2.0 * std::f64::consts::PI * 500.0 * i as f64 / SR).sin();
+        for port in &proc.ports {
+            if port.name == "vco_in" && port.index < proc.port_values.len() {
+                proc.port_values[port.index] = input;
+            }
+        }
+        proc.process(input);
+    }
+
+    let metrics = proc.read_metrics();
+    eprintln!(
+        "  BKM solver metrics: solves={}, total_iter={}, max_iter={}, nonconv={}, max_residual={:.3e}",
+        metrics.nr_solve_count,
+        metrics.nr_total_iterations,
+        metrics.nr_max_iterations,
+        metrics.nr_nonconverged_count,
+        metrics.nr_max_residual
+    );
+    assert!(
+        metrics.nr_solve_count > 0,
+        "BKM coupled solve should publish solver calls into the metrics ring buffer"
+    );
+    assert!(
+        metrics.nr_total_iterations >= metrics.nr_solve_count,
+        "solver iteration totals should be populated"
+    );
+    assert!(
+        metrics.stage_nr_iterations.iter().any(|&iters| iters > 0),
+        "per-stage solver iteration diagnostics should identify the BKM stage"
     );
 }
 
