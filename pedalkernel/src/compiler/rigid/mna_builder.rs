@@ -198,19 +198,19 @@ pub(super) fn build_mna(
     // Prefer graph.in_node if it's in this stage's MNA. Otherwise, fall
     // back to the VCVS neg node (for multi-stage pedals where the global
     // input is in a different stage).
-    let injection_mna = node_to_mna(graph.in_node).or_else(|| {
-        nearest_stage_input_node(&node_set, graph).and_then(node_to_mna)
-    }).or_else(|| {
-        graph
-            .nullor_pins
-            .iter()
-            .find(|rec| {
-                edge_indices
-                    .iter()
-                    .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
-            })
-            .and_then(|rec| node_to_mna(rec.neg_node))
-    });
+    let injection_mna = node_to_mna(graph.in_node)
+        .or_else(|| nearest_stage_input_node(&node_set, graph).and_then(node_to_mna))
+        .or_else(|| {
+            graph
+                .nullor_pins
+                .iter()
+                .find(|rec| {
+                    edge_indices
+                        .iter()
+                        .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+                })
+                .and_then(|rec| node_to_mna(rec.neg_node))
+        });
     mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
     // Output node: if this rigid group contains the circuit's named `out`

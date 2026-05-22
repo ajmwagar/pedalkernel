@@ -31,12 +31,11 @@ const MFB_ACTIVE_VREF: &str = r#"pedal "MFB Active Vref LPF" {
     vref -> U1.pos
     in -> R_in.a
     R_in.b -> Cutoff_R1.a
-    Cutoff_R1.b -> R_q_floor.a
-    R_q_floor.b -> Resonance.a
-    Resonance.b -> gnd
     Cutoff_R1.b -> C1.a
     C1.b -> gnd
-    Cutoff_R1.b -> U1.neg
+    Cutoff_R1.b -> R_q_floor.a
+    R_q_floor.b -> Resonance.a
+    Resonance.b -> U1.neg
     U1.neg -> Cutoff_R3.a
     Cutoff_R3.b -> U1.out
     U1.neg -> C2.a
@@ -115,7 +114,12 @@ fn active_mfb_with_decoupled_vref_emits_finite_controlled_linear_stage() {
     }
 }
 
-fn gain_db_at(compiled: &mut impl PedalProcessor, freq_hz: f64, cutoff: f64, resonance: f64) -> f64 {
+fn gain_db_at(
+    compiled: &mut impl PedalProcessor,
+    freq_hz: f64,
+    cutoff: f64,
+    resonance: f64,
+) -> f64 {
     compiled.set_control("Cutoff", cutoff);
     compiled.set_control("Resonance", resonance);
     for _ in 0..2048 {
@@ -137,8 +141,18 @@ fn gain_db_at(compiled: &mut impl PedalProcessor, freq_hz: f64, cutoff: f64, res
 #[test]
 fn active_mfb_with_decoupled_vref_cutoff_moves_response() {
     let pedal = parse_pedal_file(MFB_ACTIVE_VREF).unwrap();
-    let low_cutoff = gain_db_at(&mut compile_via_spqr(&pedal, SR).unwrap(), 5_000.0, 0.1, 0.0);
-    let high_cutoff = gain_db_at(&mut compile_via_spqr(&pedal, SR).unwrap(), 5_000.0, 0.9, 0.0);
+    let low_cutoff = gain_db_at(
+        &mut compile_via_spqr(&pedal, SR).unwrap(),
+        5_000.0,
+        0.1,
+        0.0,
+    );
+    let high_cutoff = gain_db_at(
+        &mut compile_via_spqr(&pedal, SR).unwrap(),
+        5_000.0,
+        0.9,
+        0.0,
+    );
 
     assert!(
         high_cutoff > low_cutoff + 12.0,
@@ -149,8 +163,18 @@ fn active_mfb_with_decoupled_vref_cutoff_moves_response() {
 #[test]
 fn active_mfb_with_decoupled_vref_resonance_moves_response() {
     let pedal = parse_pedal_file(MFB_ACTIVE_VREF).unwrap();
-    let low_res = gain_db_at(&mut compile_via_spqr(&pedal, SR).unwrap(), 1_000.0, 0.5, 0.0);
-    let high_res = gain_db_at(&mut compile_via_spqr(&pedal, SR).unwrap(), 1_000.0, 0.5, 0.9);
+    let low_res = gain_db_at(
+        &mut compile_via_spqr(&pedal, SR).unwrap(),
+        1_000.0,
+        0.5,
+        0.0,
+    );
+    let high_res = gain_db_at(
+        &mut compile_via_spqr(&pedal, SR).unwrap(),
+        1_000.0,
+        0.5,
+        0.9,
+    );
 
     assert!(
         (high_res - low_res).abs() > 3.0,
