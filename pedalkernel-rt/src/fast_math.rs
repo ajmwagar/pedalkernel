@@ -8,7 +8,7 @@
 //! # Usage
 //!
 //! ```rust
-//! use pedalkernel::fast_math::{fast_exp, fast_tanh};
+//! use pedalkernel_rt::fast_math::{fast_exp, fast_tanh};
 //!
 //! let y = fast_exp(2.0);   // ≈ e^2 = 7.389
 //! let t = fast_tanh(1.0);  // ≈ 0.7616
@@ -22,10 +22,12 @@
 //!   linear interpolation. ~5 ops per evaluation, deterministic cycle count.
 //!
 //! For compile-time switching between strategies:
-//! ```rust
+//! ```rust,ignore
 //! #[cfg(feature = "fast-math-lut")]
-//! use pedalkernel::fast_math::lut::fast_exp;
+//! use pedalkernel_rt::fast_math::lut::fast_exp;
 //! ```
+
+use crate::Wave;
 
 // ---------------------------------------------------------------------------
 // LUT-based fast exp
@@ -44,15 +46,15 @@ const EXP_LUT_INV_STEP: f64 = (EXP_LUT_SIZE - 1) as f64 / (EXP_X_MAX - EXP_X_MIN
 
 /// Precomputed exp(x) values at evenly-spaced points in [EXP_X_MIN, EXP_X_MAX].
 ///
-/// Using `const fn` + array init so this lives in `.rodata` (flash on MCU).
-const EXP_LUT: [f64; EXP_LUT_SIZE] = {
-    let mut table = [0.0_f64; EXP_LUT_SIZE];
+/// Generated in f64 for precision, stored as Wave for zero-cost lookup on target.
+const EXP_LUT: [Wave; EXP_LUT_SIZE] = {
+    let mut table = [0.0 as Wave; EXP_LUT_SIZE];
     let mut i = 0;
     while i < EXP_LUT_SIZE {
         let x = EXP_X_MIN + (i as f64) * EXP_LUT_STEP;
         // const-compatible exp approximation for table generation.
         // At compile time we can afford a high-precision series.
-        table[i] = const_exp(x);
+        table[i] = const_exp(x) as Wave;
         i += 1;
     }
     table
@@ -109,21 +111,21 @@ const fn const_exp(x: f64) -> f64 {
 ///
 /// Cost: ~5 ops (1 multiply for index, 1 floor, 1 lerp, 2 table lookups).
 /// Domain: [-40, 40]. Outside this range, returns 0 (underflow) or
-/// `f64::MAX` (overflow).
+/// `Wave::MAX` (overflow).
 ///
 /// Accuracy: < 0.1% relative error across the domain (linear interpolation
 /// between 512 uniformly-spaced points on a smooth exponential).
 #[inline(always)]
-pub fn fast_exp_lut(x: f64) -> f64 {
-    if x <= EXP_X_MIN {
-        return 0.0;
+pub fn fast_exp_lut(x: Wave) -> Wave {
+    if x <= EXP_X_MIN as Wave {
+        return 0.0 as Wave;
     }
-    if x >= EXP_X_MAX {
-        return f64::MAX;
+    if x >= EXP_X_MAX as Wave {
+        return Wave::MAX;
     }
-    let t = (x - EXP_X_MIN) * EXP_LUT_INV_STEP;
+    let t = (x - EXP_X_MIN as Wave) * EXP_LUT_INV_STEP as Wave;
     let idx = t as usize;
-    let frac = t - idx as f64;
+    let frac = t - idx as Wave;
     // Safety: idx is guaranteed < EXP_LUT_SIZE - 1 by the bounds checks.
     let y0 = EXP_LUT[idx];
     let y1 = EXP_LUT[idx + 1];
@@ -142,12 +144,12 @@ const TANH_LUT_SIZE: usize = 256;
 const TANH_LUT_STEP: f64 = (2.0 * TANH_X_MAX) / (TANH_LUT_SIZE - 1) as f64;
 const TANH_LUT_INV_STEP: f64 = (TANH_LUT_SIZE - 1) as f64 / (2.0 * TANH_X_MAX);
 
-const TANH_LUT: [f64; TANH_LUT_SIZE] = {
-    let mut table = [0.0_f64; TANH_LUT_SIZE];
+const TANH_LUT: [Wave; TANH_LUT_SIZE] = {
+    let mut table = [0.0 as Wave; TANH_LUT_SIZE];
     let mut i = 0;
     while i < TANH_LUT_SIZE {
         let x = -TANH_X_MAX + (i as f64) * TANH_LUT_STEP;
-        table[i] = const_tanh(x);
+        table[i] = const_tanh(x) as Wave;
         i += 1;
     }
     table
@@ -164,16 +166,16 @@ const fn const_tanh(x: f64) -> f64 {
 /// Cost: ~5 ops. Domain: [-6, 6]. Outside returns ±1.0.
 /// Accuracy: < 0.05% relative error (256 points on smooth tanh).
 #[inline(always)]
-pub fn fast_tanh_lut(x: f64) -> f64 {
-    if x <= -TANH_X_MAX {
-        return -1.0;
+pub fn fast_tanh_lut(x: Wave) -> Wave {
+    if x <= -(TANH_X_MAX as Wave) {
+        return -1.0 as Wave;
     }
-    if x >= TANH_X_MAX {
-        return 1.0;
+    if x >= TANH_X_MAX as Wave {
+        return 1.0 as Wave;
     }
-    let t = (x + TANH_X_MAX) * TANH_LUT_INV_STEP;
+    let t = (x + TANH_X_MAX as Wave) * TANH_LUT_INV_STEP as Wave;
     let idx = t as usize;
-    let frac = t - idx as f64;
+    let frac = t - idx as Wave;
     let y0 = TANH_LUT[idx];
     let y1 = TANH_LUT[idx + 1];
     y0 + frac * (y1 - y0)
@@ -185,15 +187,15 @@ pub fn fast_tanh_lut(x: f64) -> f64 {
 
 /// Fast exp(x) — platform-selected.
 ///
-/// On desktop: delegates to `f64::exp()` for full precision.
+/// On desktop: delegates to `Wave::exp()` for full precision.
 /// On ARM: uses 512-entry LUT with linear interpolation (~5 ops).
 #[inline(always)]
-pub fn fast_exp(x: f64) -> f64 {
-    #[cfg(target_arch = "arm")]
+pub fn fast_exp(x: Wave) -> Wave {
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
     {
         fast_exp_lut(x)
     }
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
     {
         crate::math::exp(x)
     }
@@ -201,15 +203,15 @@ pub fn fast_exp(x: f64) -> f64 {
 
 /// Fast tanh(x) — platform-selected.
 ///
-/// On desktop: delegates to `f64::tanh()` for full precision.
+/// On desktop: delegates to `Wave::tanh()` for full precision.
 /// On ARM: uses 256-entry LUT with linear interpolation (~5 ops).
 #[inline(always)]
-pub fn fast_tanh(x: f64) -> f64 {
-    #[cfg(target_arch = "arm")]
+pub fn fast_tanh(x: Wave) -> Wave {
+    #[cfg(all(target_arch = "arm", target_os = "none"))]
     {
         fast_tanh_lut(x)
     }
-    #[cfg(not(target_arch = "arm"))]
+    #[cfg(not(all(target_arch = "arm", target_os = "none")))]
     {
         crate::math::tanh(x)
     }
@@ -227,9 +229,9 @@ pub fn fast_tanh(x: f64) -> f64 {
 ///
 /// For exponents far from 1.0, use `fast_exp(exponent * fast_ln(x))` instead.
 #[inline(always)]
-pub fn fast_powf_unit(x: f64, exponent: f64) -> f64 {
-    let bend = 1.0 - exponent;
-    x - bend * x * (1.0 - x)
+pub fn fast_powf_unit(x: Wave, exponent: Wave) -> Wave {
+    let bend = 1.0 as Wave - exponent;
+    x - bend * x * (1.0 as Wave - x)
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +251,7 @@ mod tests {
     #[test]
     fn exp_lut_one() {
         let y = fast_exp_lut(1.0);
-        let expected = 1.0_f64.exp();
+        let expected = (1.0_f64).exp() as Wave;
         let rel_err = (y - expected).abs() / expected;
         assert!(
             rel_err < 0.005,
@@ -260,7 +262,7 @@ mod tests {
     #[test]
     fn exp_lut_negative() {
         let y = fast_exp_lut(-5.0);
-        let expected = (-5.0_f64).exp();
+        let expected = (-5.0_f64).exp() as Wave;
         let rel_err = (y - expected).abs() / expected;
         assert!(
             rel_err < 0.005,
@@ -271,7 +273,7 @@ mod tests {
     #[test]
     fn exp_lut_large_positive() {
         let y = fast_exp_lut(30.0);
-        let expected = 30.0_f64.exp();
+        let expected = (30.0_f64).exp() as Wave;
         let rel_err = (y - expected).abs() / expected;
         assert!(
             rel_err < 0.01,
@@ -281,22 +283,22 @@ mod tests {
 
     #[test]
     fn exp_lut_underflow() {
-        assert_eq!(fast_exp_lut(-50.0), 0.0);
+        assert_eq!(fast_exp_lut(-50.0), 0.0 as Wave);
     }
 
     #[test]
     fn exp_lut_overflow() {
-        assert_eq!(fast_exp_lut(50.0), f64::MAX);
+        assert_eq!(fast_exp_lut(50.0), Wave::MAX);
     }
 
     #[test]
     fn exp_lut_accuracy_sweep() {
         // Sweep [-20, 20] and check < 0.5% relative error
         for i in 0..1000 {
-            let x = -20.0 + 40.0 * (i as f64) / 999.0;
+            let x = (-20.0 + 40.0 * (i as f64) / 999.0) as Wave;
             let lut = fast_exp_lut(x);
-            let exact = x.exp();
-            if exact > 1e-15 {
+            let exact = (x as f64).exp() as Wave;
+            if exact > 1e-15 as Wave {
                 let rel_err = (lut - exact).abs() / exact;
                 assert!(
                     rel_err < 0.005,
@@ -315,7 +317,7 @@ mod tests {
     #[test]
     fn tanh_lut_one() {
         let y = fast_tanh_lut(1.0);
-        let expected = 1.0_f64.tanh();
+        let expected = (1.0_f64).tanh() as Wave;
         let abs_err = (y - expected).abs();
         assert!(
             abs_err < 0.01,
@@ -325,14 +327,14 @@ mod tests {
 
     #[test]
     fn tanh_lut_saturation() {
-        assert!((fast_tanh_lut(5.0) - 1.0).abs() < 0.001);
-        assert!((fast_tanh_lut(-5.0) + 1.0).abs() < 0.001);
+        assert!((fast_tanh_lut(5.0) - 1.0 as Wave).abs() < 0.001);
+        assert!((fast_tanh_lut(-5.0) + 1.0 as Wave).abs() < 0.001);
     }
 
     #[test]
     fn tanh_lut_symmetry() {
         for i in 0..100 {
-            let x = 5.0 * (i as f64) / 99.0;
+            let x = (5.0 * (i as f64) / 99.0) as Wave;
             let pos = fast_tanh_lut(x);
             let neg = fast_tanh_lut(-x);
             assert!(
@@ -345,9 +347,9 @@ mod tests {
     #[test]
     fn tanh_lut_accuracy_sweep() {
         for i in 0..1000 {
-            let x = -5.0 + 10.0 * (i as f64) / 999.0;
+            let x = (-5.0 + 10.0 * (i as f64) / 999.0) as Wave;
             let lut = fast_tanh_lut(x);
-            let exact = x.tanh();
+            let exact = (x as f64).tanh() as Wave;
             let abs_err = (lut - exact).abs();
             assert!(
                 abs_err < 0.005,
@@ -380,9 +382,9 @@ mod tests {
     fn fast_exp_delegates() {
         // On desktop this should be exact (delegates to std)
         let y = fast_exp(1.0);
-        let expected = 1.0_f64.exp();
+        let expected = (1.0_f64).exp() as Wave;
         assert!(
-            (y - expected).abs() < 1e-10,
+            (y - expected).abs() < 1e-10 as Wave,
             "fast_exp should match std::exp on desktop"
         );
     }
@@ -390,9 +392,9 @@ mod tests {
     #[test]
     fn fast_tanh_delegates() {
         let y = fast_tanh(1.0);
-        let expected = 1.0_f64.tanh();
+        let expected = (1.0_f64).tanh() as Wave;
         assert!(
-            (y - expected).abs() < 1e-10,
+            (y - expected).abs() < 1e-10 as Wave,
             "fast_tanh should match std::tanh on desktop"
         );
     }

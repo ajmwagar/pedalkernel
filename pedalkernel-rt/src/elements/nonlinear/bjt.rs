@@ -133,8 +133,8 @@ impl GummelPoonModel {
     /// ```
     #[inline]
     pub fn base_charge(&self, vbe: f64, vbc: f64) -> f64 {
-        let exp_vbe = crate::math::exp((vbe / (self.nf * self.vt)).min(40.0));
-        let exp_vbc = crate::math::exp((vbc / (self.nr * self.vt)).min(40.0));
+        let exp_vbe = crate::math::exp((vbe / (self.nf * self.vt)).min(40.0) as crate::Wave) as f64;
+        let exp_vbc = crate::math::exp((vbc / (self.nr * self.vt)).min(40.0) as crate::Wave) as f64;
         self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc)
     }
 
@@ -167,7 +167,7 @@ impl GummelPoonModel {
         let q2 = q2_f + q2_r;
 
         // Qb from quadratic formula (always >= 1)
-        (q1 / 2.0) * (1.0 + crate::math::sqrt((1.0 + 4.0 * q2).max(0.0)))
+        (q1 / 2.0) * (1.0 + crate::math::sqrt((1.0 + 4.0 * q2).max(0.0) as crate::Wave) as f64)
     }
 
     /// Compute collector current using Gummel-Poon transport equations.
@@ -176,8 +176,8 @@ impl GummelPoonModel {
     #[inline]
     pub fn currents(&self, vbe: f64, vbc: f64) -> (f64, f64) {
         // Compute all exponentials once — shared between base_charge and transport
-        let exp_vbe = crate::math::exp((vbe / (self.nf * self.vt)).min(40.0));
-        let exp_vbc = crate::math::exp((vbc / (self.nr * self.vt)).min(40.0));
+        let exp_vbe = crate::math::exp((vbe / (self.nf * self.vt)).min(40.0) as crate::Wave) as f64;
+        let exp_vbc = crate::math::exp((vbc / (self.nr * self.vt)).min(40.0) as crate::Wave) as f64;
 
         let qb = self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc);
 
@@ -192,12 +192,12 @@ impl GummelPoonModel {
         let ib_f = icc / self.bf; // Forward base current
         let ib_r = iec / self.br; // Reverse base current
         let ib_leak_e = if self.ise > 0.0 {
-            self.ise * (crate::math::exp((vbe / (self.ne * self.vt)).min(40.0)) - 1.0)
+            self.ise * (crate::math::exp((vbe / (self.ne * self.vt)).min(40.0) as crate::Wave) as f64 - 1.0)
         } else {
             0.0
         };
         let ib_leak_c = if self.isc > 0.0 {
-            self.isc * (crate::math::exp((vbc / (self.nc * self.vt)).min(40.0)) - 1.0)
+            self.isc * (crate::math::exp((vbc / (self.nc * self.vt)).min(40.0) as crate::Wave) as f64 - 1.0)
         } else {
             0.0
         };
@@ -218,8 +218,8 @@ impl GummelPoonModel {
         // Exponentials (shared with currents computation)
         let arg_vbe = (vbe / (self.nf * self.vt)).min(40.0);
         let arg_vbc = (vbc / (self.nr * self.vt)).min(40.0);
-        let exp_vbe = crate::math::exp(arg_vbe);
-        let exp_vbc = crate::math::exp(arg_vbc);
+        let exp_vbe = crate::math::exp(arg_vbe as crate::Wave) as f64;
+        let exp_vbc = crate::math::exp(arg_vbc as crate::Wave) as f64;
         let vbe_clamped = arg_vbe >= 40.0;
         let vbc_clamped = arg_vbc >= 40.0;
 
@@ -284,7 +284,7 @@ impl GummelPoonModel {
 
         // qb = (q1/2) * (1 + sqrt(1 + 4*q2))
         let inner = (1.0 + 4.0 * q2).max(0.0);
-        let sqrt_inner = crate::math::sqrt(inner);
+        let sqrt_inner = crate::math::sqrt(inner as crate::Wave) as f64;
         let qb = (q1 / 2.0) * (1.0 + sqrt_inner);
 
         // d(qb)/d(vbe) = (dq1/dvbe / 2) * (1 + sqrt_inner) + (q1/2) * (4 * dq2/dvbe) / (2 * sqrt_inner)
@@ -345,7 +345,7 @@ impl GummelPoonModel {
         // Leakage: ise * (exp(vbe/(ne*vt)) - 1)
         let (ib_leak_e, dleak_e_dvbe) = if self.ise > 0.0 {
             let arg = (vbe / (self.ne * self.vt)).min(40.0);
-            let e = crate::math::exp(arg);
+            let e = crate::math::exp(arg as crate::Wave) as f64;
             let clamped = arg >= 40.0;
             (
                 self.ise * (e - 1.0),
@@ -361,7 +361,7 @@ impl GummelPoonModel {
 
         let (ib_leak_c, dleak_c_dvbc) = if self.isc > 0.0 {
             let arg = (vbc / (self.nc * self.vt)).min(40.0);
-            let e = crate::math::exp(arg);
+            let e = crate::math::exp(arg as crate::Wave) as f64;
             let clamped = arg >= 40.0;
             (
                 self.isc * (e - 1.0),
@@ -410,12 +410,12 @@ impl GummelPoonModel {
             // Avoid singularity: linearize for Vbe > 0.8*Vje
             let fc = 0.8;
             if vbe < fc * self.vje {
-                self.cje / crate::math::powf(1.0 - vbe / self.vje, self.mje)
+                self.cje / crate::math::powf((1.0 - vbe / self.vje) as crate::Wave, self.mje as crate::Wave) as f64
             } else {
                 // Linear extrapolation for forward bias
-                let cje_fc = self.cje / crate::math::powf(1.0 - fc, self.mje);
+                let cje_fc = self.cje / crate::math::powf((1.0 - fc) as crate::Wave, self.mje as crate::Wave) as f64;
                 let dcje =
-                    self.cje * self.mje / (self.vje * crate::math::powf(1.0 - fc, self.mje + 1.0));
+                    self.cje * self.mje / (self.vje * crate::math::powf((1.0 - fc) as crate::Wave, (self.mje + 1.0) as crate::Wave) as f64);
                 cje_fc + dcje * (vbe - fc * self.vje)
             }
         } else {
@@ -445,11 +445,11 @@ impl GummelPoonModel {
         let c_depletion = if self.cjc > 0.0 {
             let fc = 0.8;
             if vbc < fc * self.vjc {
-                self.cjc / crate::math::powf(1.0 - vbc / self.vjc, self.mjc)
+                self.cjc / crate::math::powf((1.0 - vbc / self.vjc) as crate::Wave, self.mjc as crate::Wave) as f64
             } else {
-                let cjc_fc = self.cjc / crate::math::powf(1.0 - fc, self.mjc);
+                let cjc_fc = self.cjc / crate::math::powf((1.0 - fc) as crate::Wave, self.mjc as crate::Wave) as f64;
                 let dcjc =
-                    self.cjc * self.mjc / (self.vjc * crate::math::powf(1.0 - fc, self.mjc + 1.0));
+                    self.cjc * self.mjc / (self.vjc * crate::math::powf((1.0 - fc) as crate::Wave, (self.mjc + 1.0) as crate::Wave) as f64);
                 cjc_fc + dcjc * (vbc - fc * self.vjc)
             }
         } else {
@@ -752,7 +752,7 @@ impl BjtTwoPort {
     /// Compute IS-dependent Vbe clamp for max 100mA collector current.
     fn compute_vbe_max(model: &GummelPoonModel) -> f64 {
         let i_max = 0.1; // 100mA — generous bound for small-signal BJTs
-        let vbe_max = model.nf * model.vt * crate::math::ln(i_max / model.is);
+        let vbe_max = model.nf * model.vt * crate::math::ln((i_max / model.is) as crate::Wave) as f64;
         vbe_max.clamp(0.3, 1.0) // At least 0.3V, at most 1.0V
     }
 
@@ -1061,7 +1061,7 @@ impl EbersMollTwoPort {
     /// Compute the IS-dependent Vbe clamp (same logic as `BjtTwoPort`).
     fn compute_vbe_max(is: f64, nf: f64, vt: f64) -> f64 {
         let i_max = 0.1; // 100 mA generous bound
-        let vbe_max = nf * vt * crate::math::ln(i_max / is);
+        let vbe_max = nf * vt * crate::math::ln((i_max / is) as crate::Wave) as f64;
         vbe_max.clamp(0.3, 1.0)
     }
 
@@ -1130,8 +1130,8 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         // Clamp exponential arguments to prevent overflow (same limit as GP).
         let arg_be = (vbe / self.nf_vt).min(40.0);
         let arg_bc = (vbc / self.nr_vt).min(40.0);
-        let exp_be = crate::math::exp(arg_be);
-        let exp_bc = crate::math::exp(arg_bc);
+        let exp_be = crate::math::exp(arg_be as crate::Wave) as f64;
+        let exp_bc = crate::math::exp(arg_bc as crate::Wave) as f64;
         let be_clamped = arg_be >= 40.0;
         let bc_clamped = arg_bc >= 40.0;
 
@@ -1458,7 +1458,7 @@ impl DiffPairRoot {
     #[inline]
     pub fn current(&self, v: f64) -> f64 {
         let x = (v / (2.0 * self.n_vt)).clamp(-20.0, 20.0);
-        self.alpha * self.i_tail * crate::math::tanh(x)
+        self.alpha * self.i_tail * crate::math::tanh(x as crate::Wave) as f64
     }
 
     /// Derivative dI/dV = α · I_tail / (2 · n · Vt) · sech²(V / (2·n·Vt))
@@ -1466,7 +1466,7 @@ impl DiffPairRoot {
     pub fn current_derivative(&self, v: f64) -> f64 {
         let x = (v / (2.0 * self.n_vt)).clamp(-20.0, 20.0);
         let sech2 = {
-            let t = crate::math::tanh(x);
+            let t = crate::math::tanh(x as crate::Wave) as f64;
             1.0 - t * t
         };
         self.alpha * self.i_tail / (2.0 * self.n_vt) * sech2

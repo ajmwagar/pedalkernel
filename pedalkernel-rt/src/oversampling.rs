@@ -81,15 +81,15 @@ impl HalfBandFilter {
     /// Returns vec of [b0, b1, b2, a1, a2] sections.
     fn design_butterworth(order: usize, fc_normalized: f64) -> Vec<[Wave; 5]> {
         let num_sections = order / 2;
-        let wc = math::tan(math::PI * fc_normalized);
+        let wc = math::tan((math::PI as f64 * fc_normalized) as Wave);
         let wc2 = wc * wc;
 
         let mut sections = Vec::with_capacity(num_sections);
         for k in 0..num_sections {
             // Pole angle for Butterworth: (2k + 1) * pi / (2 * order)
-            let theta = (2 * k + 1) as f64 * math::PI / (2.0 * order as f64);
+            let theta = (2 * k + 1) as f64 * math::PI as f64 / (2.0 * order as f64);
             // Butterworth pole bandwidth: 2*cos(theta)
-            let bw = 2.0 * math::cos(theta);
+            let bw = 2.0 * math::cos(theta as Wave);
 
             // Bilinear transform: s = (2/T)(z-1)/(z+1), T=1
             // For unit-delay normalized: s = 2*(z-1)/(z+1)

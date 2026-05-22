@@ -223,7 +223,7 @@ impl BbdDelayLine {
 
         // Anti-alias LPF cutoff: bandwidth_ratio * clock_freq
         let lpf_cutoff = model.bandwidth_ratio * clock_freq;
-        let lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
+        let lpf_coef = crate::math::exp((-2.0 * crate::math::PI as f64 * lpf_cutoff / sample_rate) as crate::Wave) as f64;
 
         // Leakage LPF: models accumulated charge loss across all BBD stages.
         // Each stage loses `leakage_per_stage` of its charge per clock period.
@@ -232,13 +232,13 @@ impl BbdDelayLine {
         let leakage_lpf_coef = Self::compute_leakage_coef(&model, clock_freq, sample_rate);
 
         // Clock feedthrough: the BBD switching clock couples into the signal path.
-        let clock_phase_inc = 2.0 * crate::math::PI * clock_freq / sample_rate;
+        let clock_phase_inc = 2.0 * crate::math::PI as f64 * clock_freq / sample_rate;
 
         // Compander: NE571-style attack/release time constants.
         // Attack ~5ms, release ~50ms (NE571 syllabic time constants).
         // The mismatch causes "breathing" artifacts.
-        let compander_attack = crate::math::exp(-1.0 / (0.005 * sample_rate));
-        let compander_release = crate::math::exp(-1.0 / (0.050 * sample_rate));
+        let compander_attack = crate::math::exp((-1.0 / (0.005 * sample_rate)) as crate::Wave) as f64;
+        let compander_release = crate::math::exp((-1.0 / (0.050 * sample_rate)) as crate::Wave) as f64;
 
         // Envelope delay buffer: sized for maximum BBD delay time.
         // This delays the compression envelope to match the audio delay.
@@ -284,9 +284,9 @@ impl BbdDelayLine {
         // Higher loss → lower cutoff → darker sound.
         let retention = 1.0 - total_loss;
         // Cutoff in Hz: scale with clock frequency (higher clock = shorter hold time = less leakage)
-        let fc_leakage = -(crate::math::ln(retention)) * clock_freq / (2.0 * crate::math::PI);
+        let fc_leakage = -(crate::math::ln(retention as crate::Wave) as f64) * clock_freq / (2.0 * crate::math::PI as f64);
         let fc_clamped = fc_leakage.min(sample_rate * 0.45); // Never exceed Nyquist
-        crate::math::exp(-2.0 * crate::math::PI * fc_clamped / sample_rate)
+        crate::math::exp((-2.0 * crate::math::PI as f64 * fc_clamped / sample_rate) as crate::Wave) as f64
     }
 
     /// Set the clock frequency directly (Hz).
@@ -302,19 +302,19 @@ impl BbdDelayLine {
 
         // Update anti-alias filter
         let lpf_cutoff = self.model.bandwidth_ratio * self.clock_freq;
-        self.lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
+        self.lpf_coef = crate::math::exp((-2.0 * crate::math::PI as f64 * lpf_cutoff / sample_rate) as crate::Wave) as f64;
 
         // Update leakage LPF (more leakage at lower clock = longer delays)
         self.leakage_lpf_coef =
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
 
         // Update clock feedthrough frequency
-        self.clock_phase_inc = 2.0 * crate::math::PI * self.clock_freq / sample_rate;
+        self.clock_phase_inc = 2.0 * crate::math::PI as f64 * self.clock_freq / sample_rate;
 
         // Update envelope delay to match audio delay
         let delay_secs = self.model.delay_at_clock(self.clock_freq);
         self.env_delay_samples =
-            crate::math::round(delay_secs * sample_rate) as usize % self.env_delay_buffer.len();
+            crate::math::round((delay_secs * sample_rate) as crate::Wave) as usize % self.env_delay_buffer.len();
     }
 
     /// Set delay time as a normalized value (0.0 = min delay, 1.0 = max delay).
@@ -324,9 +324,9 @@ impl BbdDelayLine {
         let norm = norm.clamp(0.0, 1.0);
         // Logarithmic interpolation between min and max clock
         // norm=0 -> max clock (min delay), norm=1 -> min clock (max delay)
-        let log_min = crate::math::ln(self.model.clock_min);
-        let log_max = crate::math::ln(self.model.clock_max);
-        let clock = crate::math::exp(log_max - norm * (log_max - log_min));
+        let log_min = crate::math::ln(self.model.clock_min as crate::Wave) as f64;
+        let log_max = crate::math::ln(self.model.clock_max as crate::Wave) as f64;
+        let clock = crate::math::exp((log_max - norm * (log_max - log_min)) as crate::Wave) as f64;
         self.set_clock(clock);
     }
 
@@ -380,7 +380,7 @@ impl BbdDelayLine {
         // Compress: reduce dynamic range by 2:1 (typical NE571 ratio).
         // gain = 1/sqrt(envelope) — louder signals get compressed more.
         let comp_gain = if self.compander_env_in > 0.001 {
-            1.0 / crate::math::sqrt(self.compander_env_in)
+            1.0 / crate::math::sqrt(self.compander_env_in as crate::Wave) as f64
         } else {
             1.0
         };
@@ -416,10 +416,10 @@ impl BbdDelayLine {
 
         // Clock feedthrough
         self.clock_phase += self.clock_phase_inc;
-        if self.clock_phase > 2.0 * crate::math::PI {
-            self.clock_phase -= 2.0 * crate::math::PI;
+        if self.clock_phase > 2.0 * crate::math::PI as f64 {
+            self.clock_phase -= 2.0 * crate::math::PI as f64;
         }
-        let clock_bleed = self.model.clock_feedthrough * crate::math::sin(self.clock_phase);
+        let clock_bleed = self.model.clock_feedthrough * crate::math::sin(self.clock_phase as crate::Wave) as f64;
 
         // Noise injection
         let noise = self.next_noise() * self.model.noise_floor;
@@ -438,7 +438,7 @@ impl BbdDelayLine {
         // Base expansion gain from delayed compression envelope.
         // This restores the original dynamic range (ideally cancels compression).
         let base_exp_gain = if delayed_env > 0.001 {
-            crate::math::sqrt(delayed_env)
+            crate::math::sqrt(delayed_env as crate::Wave) as f64
         } else {
             1.0
         };
@@ -492,12 +492,12 @@ impl BbdDelayLine {
             .set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
 
         let lpf_cutoff = self.model.bandwidth_ratio * self.clock_freq;
-        self.lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
+        self.lpf_coef = crate::math::exp((-2.0 * crate::math::PI as f64 * lpf_cutoff / sample_rate) as crate::Wave) as f64;
         self.leakage_lpf_coef =
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
-        self.clock_phase_inc = 2.0 * crate::math::PI * self.clock_freq / sample_rate;
-        self.compander_attack = crate::math::exp(-1.0 / (0.005 * sample_rate));
-        self.compander_release = crate::math::exp(-1.0 / (0.050 * sample_rate));
+        self.clock_phase_inc = 2.0 * crate::math::PI as f64 * self.clock_freq / sample_rate;
+        self.compander_attack = crate::math::exp((-1.0 / (0.005 * sample_rate)) as crate::Wave) as f64;
+        self.compander_release = crate::math::exp((-1.0 / (0.050 * sample_rate)) as crate::Wave) as f64;
 
         // Resize envelope delay buffer for new sample rate
         let max_delay = self.model.delay_at_clock(self.model.clock_min);
@@ -574,7 +574,7 @@ pub fn tape_saturation(x: f64, level: f64) -> f64 {
     // Scale input so that level corresponds to ~90% saturation
     // tanh(1.47) ≈ 0.9, so we scale accordingly
     let scaled = x * 1.47 / level;
-    level * crate::math::tanh(scaled) / 1.47
+    level * crate::math::tanh(scaled as crate::Wave) as f64 / 1.47
 }
 
 // ===========================================================================

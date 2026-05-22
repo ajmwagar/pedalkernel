@@ -337,9 +337,9 @@ impl DelayLine {
     /// at short delays, larger changes at long delays.
     pub fn set_delay_normalized(&mut self, norm: f64) {
         let norm = norm.clamp(0.0, 1.0);
-        let log_min = crate::math::ln(self.min_delay_sec);
-        let log_max = crate::math::ln(self.max_delay_sec);
-        let delay_sec = crate::math::exp(log_min + norm * (log_max - log_min));
+        let log_min = crate::math::ln(self.min_delay_sec as crate::Wave) as f64;
+        let log_max = crate::math::ln(self.max_delay_sec as crate::Wave) as f64;
+        let delay_sec = crate::math::exp((log_min + norm * (log_max - log_min)) as crate::Wave) as f64;
         self.current_delay_samples = delay_sec * self.sample_rate;
     }
 

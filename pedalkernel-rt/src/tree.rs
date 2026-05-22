@@ -229,7 +229,7 @@ impl RTypeAdaptor {
 
         let sqrt_r: Vec<f64> = port_resistances
             .iter()
-            .map(|r| crate::math::sqrt(*r))
+            .map(|r| crate::math::sqrt(*r as crate::Wave) as f64)
             .collect();
         let inv_sqrt_r: Vec<f64> = sqrt_r.iter().map(|sr| 1.0 / sr).collect();
 
@@ -326,11 +326,11 @@ impl RTypeAdaptor {
         // Approximate scattering for 3-winding (assuming loose coupling model)
         // These coefficients route waves through the transformer correctly
         let s11 = 2.0 * alpha - 1.0;
-        let s12 = 2.0 * crate::math::sqrt(alpha * beta);
-        let s13 = n12 * 2.0 * crate::math::sqrt(alpha) * crate::math::sqrt((1.0 - alpha).max(0.0));
+        let s12 = 2.0 * crate::math::sqrt((alpha * beta) as crate::Wave) as f64;
+        let s13 = n12 * 2.0 * crate::math::sqrt(alpha as crate::Wave) as f64 * crate::math::sqrt((1.0 - alpha).max(0.0) as crate::Wave) as f64;
         let s21 = s12;
         let s22 = 2.0 * beta - 1.0;
-        let s23 = n13 * 2.0 * crate::math::sqrt(beta) * crate::math::sqrt((1.0 - beta).max(0.0));
+        let s23 = n13 * 2.0 * crate::math::sqrt(beta as crate::Wave) as f64 * crate::math::sqrt((1.0 - beta).max(0.0) as crate::Wave) as f64;
         let s31 = n12;
         let s32 = n13;
         let s33 = 0.0; // Adapted
@@ -1431,7 +1431,7 @@ impl MnaSystem {
                     w[i] += a_d[i * n_aug + j] * v[j];
                 }
             }
-            let norm: f64 = crate::math::sqrt(w.iter().map(|x| x * x).sum::<f64>());
+            let norm: f64 = crate::math::sqrt(w.iter().map(|x| x * x).sum::<f64>() as crate::Wave) as f64;
             if norm > 1e-15 {
                 for x in &mut w {
                     *x /= norm;
@@ -1481,9 +1481,9 @@ impl MnaSystem {
             let gain = if r_in < f64::MAX { rf / r_in } else { 1.0 };
 
             // Audio EQ Cookbook BPF (constant 0dB peak)
-            let w0 = 2.0 * crate::math::PI * f0 / sample_rate;
-            let sin_w0 = crate::math::sin(w0);
-            let cos_w0 = crate::math::cos(w0);
+            let w0 = 2.0 * crate::math::PI as f64 * f0 / sample_rate;
+            let sin_w0 = crate::math::sin(w0 as crate::Wave) as f64;
+            let cos_w0 = crate::math::cos(w0 as crate::Wave) as f64;
             let alpha = sin_w0 / (2.0 * q);
 
             let b0 = alpha * gain;
@@ -2242,7 +2242,7 @@ fn invert_matrix_equilibrated(matrix: &[f64], n: usize) -> Vec<f64> {
             row_max = row_max.max(matrix[i * n + j].abs());
         }
         if row_max > 1e-30 {
-            d[i] = 1.0 / crate::math::sqrt(row_max);
+            d[i] = 1.0 / crate::math::sqrt(row_max as crate::Wave) as f64;
         }
     }
 
@@ -2312,8 +2312,8 @@ impl ScatteringInterpolationTable {
     ) -> Self {
         let n_ports = ports.len();
         let n_mna = mna.num_nodes;
-        let log_min = crate::math::ln(r_min);
-        let log_max = crate::math::ln(r_max);
+        let log_min = crate::math::ln(r_min as crate::Wave) as f64;
+        let log_max = crate::math::ln(r_max as crate::Wave) as f64;
 
         let mut resistances = Vec::with_capacity(k);
         let mut scattering_matrices = Vec::with_capacity(k);
@@ -2331,7 +2331,7 @@ impl ScatteringInterpolationTable {
             } else {
                 0.5
             };
-            let r = crate::math::exp(log_min + t * (log_max - log_min));
+            let r = crate::math::exp((log_min + t * (log_max - log_min)) as crate::Wave) as f64;
             let g = 1.0 / r;
 
             // Delta-update: remove previous conductance, add new

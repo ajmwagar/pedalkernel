@@ -248,8 +248,8 @@ impl MetricsAccumulator {
         self.input_sum_sq += input * input;
         self.output_sum_sq += output * output;
 
-        let abs_in = math::abs(input);
-        let abs_out = math::abs(output);
+        let abs_in = input.abs();
+        let abs_out = output.abs();
         let max_abs = abs_in.max(abs_out);
         self.max_abs_sample = self.max_abs_sample.max(max_abs.min(f32::MAX as f64) as f32);
         if max_abs > 32.0 {

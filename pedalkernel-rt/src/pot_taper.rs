@@ -29,9 +29,9 @@ impl PotTaper {
             PotTaper::B => pos,
             // Audio/Log: slow start, fast end
             // Using (10^pos - 1) / 9 which gives ~10% at 50% rotation
-            PotTaper::A => (crate::math::powf(10.0, pos) - 1.0) / 9.0,
+            PotTaper::A => (crate::math::powf(10.0 as crate::Wave, pos as crate::Wave) as f64 - 1.0) / 9.0,
             // Reverse log: fast start, slow end (inverse of A)
-            PotTaper::C => 1.0 - (crate::math::powf(10.0, 1.0 - pos) - 1.0) / 9.0,
+            PotTaper::C => 1.0 - (crate::math::powf(10.0 as crate::Wave, (1.0 - pos) as crate::Wave) as f64 - 1.0) / 9.0,
         }
     }
 }

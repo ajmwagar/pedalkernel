@@ -984,7 +984,7 @@ impl ResonatorFeedback {
     /// Uses the Audio EQ Cookbook bandpass formula with bilinear pre-warping.
     pub fn new(r1: f64, r2: f64, c1: f64, c2: f64, rf: f64, sample_rate: f64) -> Self {
         // Resonant angular frequency
-        let omega_0 = 1.0 / crate::math::sqrt(r1 * r2 * c1 * c2);
+        let omega_0 = 1.0 / crate::math::sqrt((r1 * r2 * c1 * c2) as crate::Wave) as f64;
 
         // Q factor for a bridged-T oscillator.
         // The T-network has a notch attenuation of ~1/3 for equal R,C.
@@ -1001,11 +1001,11 @@ impl ResonatorFeedback {
         };
 
         // Bilinear pre-warping: map analog frequency to digital
-        let w0 = 2.0 * crate::math::atan(omega_0 / (2.0 * sample_rate));
+        let w0 = 2.0 * crate::math::atan((omega_0 / (2.0 * sample_rate)) as crate::Wave) as f64;
 
         // Audio EQ Cookbook: BPF (constant 0 dB peak gain)
-        let sin_w0 = crate::math::sin(w0);
-        let cos_w0 = crate::math::cos(w0);
+        let sin_w0 = crate::math::sin(w0 as crate::Wave) as f64;
+        let cos_w0 = crate::math::cos(w0 as crate::Wave) as f64;
         let alpha = sin_w0 / (2.0 * q);
 
         let b0 = alpha;
@@ -3615,7 +3615,7 @@ impl MultiNlScattering {
             n_nl + n_passive + 1
         } else {
             let len = scattering.len();
-            let nt = crate::math::sqrt(len as f64) as usize;
+            let nt = crate::math::sqrt(len as crate::Wave) as usize;
             debug_assert_eq!(nt * nt, len, "scattering matrix must be square");
             nt
         };
@@ -3879,17 +3879,17 @@ impl IirData {
             return;
         }
 
-        let f0 = 1.0 / (2.0 * PI * crate::math::sqrt(self.r_series_product * self.c_shunt_product));
+        let f0 = 1.0 / (2.0 * PI * crate::math::sqrt((self.r_series_product * self.c_shunt_product) as crate::Wave) as f64);
         let q = if self.r_fb > self.r_crit * 1.01 {
             self.r_fb / (self.r_fb - self.r_crit)
         } else {
             100.0
         };
-        let gain = self.r_fb / (crate::math::sqrt(self.r_series_product)); // Rf / sqrt(R1*R2)
+        let gain = self.r_fb / (crate::math::sqrt(self.r_series_product as crate::Wave) as f64); // Rf / sqrt(R1*R2)
 
         let w0 = 2.0 * PI * f0 / self.sample_rate;
-        let sin_w0 = crate::math::sin(w0);
-        let cos_w0 = crate::math::cos(w0);
+        let sin_w0 = crate::math::sin(w0 as crate::Wave) as f64;
+        let cos_w0 = crate::math::cos(w0 as crate::Wave) as f64;
         let alpha = sin_w0 / (2.0 * q);
 
         let a0 = 1.0 + alpha;
@@ -6013,7 +6013,7 @@ impl DiodeCutoffCalibration {
 
 fn diode_bias_voltage_from_current(model: DiodeModel, current: f64) -> f64 {
     let i = current.max(1.0e-12);
-    let junction = model.n_vt * crate::math::ln(i / model.is + 1.0);
+    let junction = model.n_vt * crate::math::ln((i / model.is + 1.0) as crate::Wave) as f64;
     junction + i * model.rs
 }
 
@@ -6102,7 +6102,7 @@ impl DiodeLadderCore {
 
         let octave_span = 5.0;
         let norm = (0.5 + cutoff_cv_voltage / 5.0).clamp(0.0, 1.0);
-        let ratio = crate::math::exp((norm - 0.5) * octave_span * core::f64::consts::LN_2);
+        let ratio = crate::math::exp(((norm - 0.5) * octave_span * core::f64::consts::LN_2) as crate::Wave) as f64;
         (self.i_tail_bias * ratio).clamp(self.i_tail_min, self.i_tail_max)
     }
 
@@ -6128,7 +6128,7 @@ impl DiodeLadderCore {
             // validation of the composed ladder, not this per-rung state update.
             let fc = (self.alpha_bjt * side_current / (4.0 * core::f64::consts::PI * c * n_vt))
                 .clamp(1.0, sample_rate * 0.45);
-            *alpha = (1.0 - crate::math::exp(-2.0 * core::f64::consts::PI * fc / sample_rate))
+            *alpha = (1.0 - crate::math::exp((-2.0 * core::f64::consts::PI * fc / sample_rate) as crate::Wave) as f64)
                 .clamp(0.0, 1.0) as Wave;
         }
         self.last_alpha_i_tail = i_tail;
@@ -8582,7 +8582,7 @@ mod blockwise_k_method_tests {
                 let y = core.process(x as Wave, 9.0, 0.0, Some(1_000_000.0));
                 sum += y * y;
             }
-            crate::math::sqrt((sum / 9600.0 as Wave) as f64)
+            crate::math::sqrt(sum / 9600.0) as f64
         };
 
         let y_low = measure(&mut low, 100.0);

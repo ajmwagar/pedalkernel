@@ -149,8 +149,9 @@ impl InterstageLoading {
         let c_total = self.source.capacitance + self.load.capacitance;
 
         if c_total > 0.0 {
-            let fc = 1.0 / (2.0 * math::PI * r_parallel * c_total);
-            self.lpf_coef = math::exp(-2.0 * math::PI * fc / self.sample_rate) as Wave;
+            let pi = math::PI as f64;
+            let fc = 1.0 / (2.0 * pi * r_parallel * c_total);
+            self.lpf_coef = math::exp((-2.0 * pi * fc / self.sample_rate) as Wave);
         } else {
             self.lpf_coef = 0.0 as Wave;
         }
@@ -260,9 +261,10 @@ impl CableModel {
 
     fn recompute(&mut self) {
         let tau = self.source_resistance * self.capacitance;
+        let pi = math::PI as f64;
         if tau > 0.0 {
-            let fc = 1.0 / (2.0 * math::PI * tau);
-            self.lpf_coef = math::exp(-2.0 * math::PI * fc / self.sample_rate) as Wave;
+            let fc = 1.0 / (2.0 * pi * tau);
+            self.lpf_coef = math::exp((-2.0 * pi * fc / self.sample_rate) as Wave);
         } else {
             self.lpf_coef = 0.0 as Wave;
         }
@@ -283,8 +285,9 @@ impl CableModel {
     /// Get the -3dB cutoff frequency of this cable.
     pub fn cutoff_hz(&self) -> f64 {
         let tau = self.source_resistance * self.capacitance;
+        let pi = math::PI as f64;
         if tau > 0.0 {
-            1.0 / (2.0 * math::PI * tau)
+            1.0 / (2.0 * pi * tau)
         } else {
             f64::INFINITY
         }

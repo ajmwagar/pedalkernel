@@ -44,8 +44,8 @@ impl AllPassFilter {
     fn update_coefficient(&mut self) {
         // Bilinear transform coefficient
         // a = (1 - tan(πf₀/fs)) / (1 + tan(πf₀/fs))
-        let w = crate::math::PI * self.cutoff / self.sample_rate;
-        let tan_w = crate::math::tan(w);
+        let w = (crate::math::PI as f64) * self.cutoff / self.sample_rate;
+        let tan_w = crate::math::tan(w as crate::Wave) as f64;
         self.coef = (1.0 - tan_w) / (1.0 + tan_w);
     }
 
@@ -141,7 +141,7 @@ impl Phaser {
         // mod_value -1 -> base_freq / mod_depth
         // mod_value  0 -> base_freq
         // mod_value +1 -> base_freq * mod_depth
-        let freq = self.base_freq * crate::math::powf(self.mod_depth, mod_value);
+        let freq = self.base_freq * crate::math::powf(self.mod_depth as crate::Wave, mod_value as crate::Wave) as f64;
         for stage in &mut self.stages {
             stage.set_cutoff(freq);
         }
