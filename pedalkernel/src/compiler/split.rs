@@ -229,6 +229,7 @@ fn build_half(
         calibrate: false,
         subcircuits: vec![],
         ports: vec![],
+        init_hints: vec![],
     }
 }
 

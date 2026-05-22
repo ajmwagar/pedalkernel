@@ -1450,6 +1450,7 @@ pub(super) fn try_build_blockwise(
     force_serial_feedback_gain: f64,
     disable_iir: bool,
     coupled_newton: bool,
+    init_hints: &[crate::dsl::InitHint],
 ) -> Option<Vec<BuiltStage>> {
     let mut plan = analyze_blockwise(edge_indices, graph)?;
 
@@ -1576,7 +1577,9 @@ pub(super) fn try_build_blockwise(
         let early_set: HashSet<usize> = early_extra_coupling.iter().copied().collect();
         for block in &mut plan.blocks {
             block.linear_edges.retain(|eidx| !early_set.contains(eidx));
-            block.reactive_edges.retain(|eidx| !early_set.contains(eidx));
+            block
+                .reactive_edges
+                .retain(|eidx| !early_set.contains(eidx));
         }
         for eidx in early_extra_coupling {
             if !plan.coupling_edges.contains(&eidx) {
@@ -1637,6 +1640,8 @@ pub(super) fn try_build_blockwise(
                 graph,
                 sample_rate,
                 disable_iir,
+                init_hints,
+                supply_voltage,
             )
             .ok()?;
             eprintln!("  [blockwise] block {bi} stage {si}: built");
@@ -2228,12 +2233,8 @@ pub(super) fn try_build_blockwise(
             .and_then(|block| block_cascade_output_node(&block.nl_edges, &block.port_nodes, graph));
 
         let mut coupling_elements = Vec::new();
-        let mut coupling_passive_specs: Vec<(
-            String,
-            Option<usize>,
-            Option<usize>,
-            f64,
-        )> = Vec::new();
+        let mut coupling_passive_specs: Vec<(String, Option<usize>, Option<usize>, f64)> =
+            Vec::new();
         let mut coupling_vcvss = Vec::new();
         for &comp_idx in &coupling_vcvs_comps {
             let comp = &graph.components[comp_idx];
@@ -2661,23 +2662,21 @@ pub(super) fn try_build_blockwise(
             );
         }
 
-        let output_port_index = node_to_mna.get(&graph.out_node).copied().map(|mna_idx| {
-            let scattering_idx = ports.len();
-            ports.push(pedalkernel_rt::tree::WdfPort {
-                node_pos: Some(mna_idx),
-                node_neg: None,
-                // Observation ports are electrically open because runtime uses
-                // b=a, but a finite port resistance keeps the scattering solve
-                // conditioned. A 1G probe made output waves explode.
-                resistance: 100_000.0,
-            });
-            #[cfg(test)]
-            eprintln!(
-                "    output probe: graph.out_node={} → mna_node=Some({mna_idx}), scattering_port={scattering_idx}",
-                graph.out_node
-            );
-            scattering_idx
-        });
+        let output_extraction_nodes = node_to_mna
+            .get(&graph.out_node)
+            .copied()
+            .map(|mna_idx| (Some(mna_idx), None));
+        let output_extraction_coeffs = output_extraction_nodes
+            .map(|(out_pos, out_neg)| {
+                #[cfg(test)]
+                eprintln!(
+                    "    output extraction: graph.out_node={} → mna_node={out_pos:?}",
+                    graph.out_node
+                );
+                mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
+            })
+            .unwrap_or_default();
+        let output_port_index = None;
 
         let n_ports = ports.len();
         eprintln!("  [blockwise] coupling scattering: {n_ports} ports");
@@ -2877,6 +2876,8 @@ pub(super) fn try_build_blockwise(
             n_ports,
             output_block,
             output_port_index,
+            output_extraction_coeffs,
+            output_extraction_nodes,
             supply_voltage,
             vs_port_map,
             cutoff_cv_port,

@@ -1164,6 +1164,7 @@ mod tests {
             calibrate: false,
             subcircuits: vec![],
             ports: vec![],
+            init_hints: vec![],
         }
     }
 
@@ -1307,6 +1308,7 @@ mod tests {
             calibrate: false,
             subcircuits: vec![],
             ports: vec![],
+            init_hints: vec![],
         };
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "no-signal-path"));
@@ -2089,6 +2091,7 @@ mod tests {
             calibrate: false,
             subcircuits: vec![],
             ports: vec![],
+            init_hints: vec![],
         }
     }
 

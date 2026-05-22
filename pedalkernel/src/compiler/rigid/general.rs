@@ -194,6 +194,15 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
     graph: &CircuitGraph,
     sample_rate: f64,
 ) -> Result<MultiNlStage, String> {
+    build_general_mna_from_edges_with_hints(all_edges, graph, sample_rate, &[])
+}
+
+pub(in crate::compiler) fn build_general_mna_from_edges_with_hints(
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    init_hints: &[crate::dsl::InitHint],
+) -> Result<MultiNlStage, String> {
     let oversampling = OversamplingFactor::X2;
     let effective_rate = sample_rate * oversampling.ratio() as f64;
     let supply_voltage = 9.0; // TODO(#bias): pass from PedalDef via build_rigid_from_group
@@ -201,8 +210,9 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
     // Step 1: Collect unique MNA nodes
     let mut node_set = collect_mna_nodes(all_edges, graph);
 
-    // Step 2: Classify NL devices
-    let (nl_kinds, nl_terminals) = classify_nl_devices(all_edges, graph, &mut node_set)?;
+    // Step 2: Classify NL devices (also returns component labels for hint matching)
+    let (nl_kinds, nl_comp_labels, nl_terminals) =
+        classify_nl_devices(all_edges, graph, &mut node_set)?;
     let n_nl = nl_terminals.len();
 
     // Step 3: Check VCC, build MNA, stamp passives
@@ -299,6 +309,8 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
         graph,
         pot_stamps,
         extract_output_nodes,
+        &nl_comp_labels,
+        init_hints,
     )
 }
 
@@ -350,12 +362,14 @@ fn find_output_extract_node(
 
 /// Step 2: Classify NL edges into NonlinearKind + terminal pairs.
 /// Deduplicates by comp_idx for multi-port devices (BJTs have 2 edges).
+/// Also returns a parallel Vec of component labels (e.g. "Q1") for hint matching.
 fn classify_nl_devices(
     all_edges: &[usize],
     graph: &CircuitGraph,
     node_set: &mut Vec<NodeId>,
-) -> Result<(Vec<NonlinearKind>, Vec<(NodeId, NodeId)>), String> {
+) -> Result<(Vec<NonlinearKind>, Vec<String>, Vec<(NodeId, NodeId)>), String> {
     let mut nl_kinds = Vec::new();
+    let mut nl_comp_labels = Vec::new();
     let mut nl_terminals = Vec::new();
     let mut seen: HashSet<usize> = HashSet::new();
 
@@ -407,13 +421,14 @@ fn classify_nl_devices(
                 nl_terminals.push((e.node_a, e.node_b));
             }
         }
+        nl_comp_labels.push(comp.id.clone());
         nl_kinds.push(kind);
     }
 
     if nl_kinds.is_empty() {
         return Err("build_general_mna: no NL edges found".to_string());
     }
-    Ok((nl_kinds, nl_terminals))
+    Ok((nl_kinds, nl_comp_labels, nl_terminals))
 }
 
 /// Check if any edge or NL terminal touches VCC.
@@ -767,6 +782,29 @@ fn create_nl_devices(
     }
 }
 
+/// Resolve a named BJT init state to (Vbe, Vce) magnitudes (unsigned; PNP sign applied by caller).
+///
+/// Named states:
+/// - `saturated`: BJT fully on, low Vce. [Vbe=0.75, Vce=0.1]
+/// - `cutoff`:    BJT fully off, full supply across CE. [Vbe=0.0, Vce=supply]
+/// - `active`:    BJT in linear region. [Vbe=0.65, Vce=supply/2]
+/// - `forward`:   Treated as active (used for diodes, mapped to active for BJT).
+/// - `reverse`:   Treated as cutoff (used for diodes, mapped to cutoff for BJT).
+///
+/// These constants match the table in INIT_BLOCK_DESIGN.md.
+fn resolve_bjt_init_state(state_name: &str, supply_voltage: f64) -> (f64, f64) {
+    match state_name {
+        "saturated" => (0.75, 0.1),
+        "cutoff" => (0.0, supply_voltage),
+        "active" => (0.65, supply_voltage * 0.5),
+        // Diode aliases — map to closest BJT state
+        "forward" => (0.65, supply_voltage * 0.5),
+        "reverse" => (0.0, supply_voltage),
+        // Unknown states fall through to active (safest non-zero state)
+        _ => (0.65, supply_voltage * 0.5),
+    }
+}
+
 /// Step 8: Assemble the final MultiNlStage.
 #[allow(clippy::too_many_arguments)]
 fn assemble_multi_nl_stage(
@@ -788,6 +826,8 @@ fn assemble_multi_nl_stage(
     graph: &CircuitGraph,
     pot_stamps: Vec<PotStamp>,
     extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
+    nl_comp_labels: &[String],
+    init_hints: &[crate::dsl::InitHint],
 ) -> Result<MultiNlStage, String> {
     let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
@@ -804,7 +844,7 @@ fn assemble_multi_nl_stage(
         0
     };
 
-    // Initial voltage state from device groups
+    // Initial voltage state from device groups (physics-based defaults).
     let mut initial_v = vec![0.0; n_nl];
     let mut max_group_ports = 0usize;
     if let Some(ref dg) = device_groups {
@@ -819,6 +859,36 @@ fn assemble_multi_nl_stage(
                 }
                 if off + 1 < n_nl {
                     initial_v[off + 1] = sign * supply_voltage * 0.5;
+                }
+            }
+        }
+    }
+
+    // Apply init hints: override physics-based defaults with author-specified states.
+    // Only BJT two-port groups are supported (Vbe + Vce at port offsets).
+    // Unrecognized hints are silently ignored (they may target diodes or JFETs
+    // in circuits where no grouped solver applies — not an error).
+    if !init_hints.is_empty() {
+        if let Some(ref dg) = device_groups {
+            for (g, group) in dg.groups.iter().enumerate() {
+                let label = nl_comp_labels.get(g).map(|s| s.as_str()).unwrap_or("");
+                let hint = init_hints.iter().find(|h| h.device_label == label);
+                let Some(hint) = hint else { continue };
+                let off = dg.offsets[g];
+                if let NlDeviceGroupKind::BjtTwoPort(bjt) = group {
+                    let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+                    let crate::dsl::InitState::Named(ref state_name) = hint.state;
+                    let (vbe, vce) = resolve_bjt_init_state(state_name, supply_voltage);
+                    if off < n_nl {
+                        initial_v[off] = sign * vbe;
+                    }
+                    if off + 1 < n_nl {
+                        initial_v[off + 1] = sign * vce;
+                    }
+                    eprintln!(
+                        "[init-hint] {label}: {state_name} → Vbe={:.3}, Vce={:.3} (sign={sign})",
+                        vbe, vce
+                    );
                 }
             }
         }

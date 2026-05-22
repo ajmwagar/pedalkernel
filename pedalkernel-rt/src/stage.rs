@@ -2185,6 +2185,9 @@ impl WdfStage {
             *y_prev = 0.0;
         }
         self.prev_source_voltage = 0.0;
+        if let RootKind::Bjt(ref mut bjt) = self.root {
+            bjt.reset();
+        }
         if let RootKind::PassiveRType { children, .. } = &mut self.root {
             for child in children.iter_mut() {
                 child.reset();
@@ -4580,12 +4583,32 @@ pub struct StateSpaceStage {
     pub bypass_serial: bool,
     /// Supply voltage for rail saturation.
     pub supply_voltage: f64,
+    /// Pot bindings used to restamp the MNA conductance matrix and rebuild the
+    /// discrete state-space matrices when a control changes.
+    pub pot_bindings: Vec<StateSpacePotBinding>,
+    /// Baseline MNA system used for controlled restamping.
+    pub recompute_mna: Option<crate::tree::MnaSystem>,
     /// Precomputed v_rail = (supply/2 - 1.5).max(0.5) and 1/v_rail.
     /// Eliminates per-sample division in tanh saturation loop.
     #[cfg_attr(feature = "serde", serde(skip))]
     v_rail: f64,
     #[cfg_attr(feature = "serde", serde(skip))]
     inv_v_rail: f64,
+    /// Previous input sample for bilinear state-space forms that carry both
+    /// u[n+1] and u[n] input vectors.
+    prev_input: f64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StateSpacePotBinding {
+    pub comp_id: String,
+    pub max_r: f64,
+    pub taper: crate::pot_taper::PotTaper,
+    pub position: f64,
+    pub node_pos: Option<usize>,
+    pub node_neg: Option<usize>,
+    pub conductance: f64,
 }
 
 impl StateSpaceStage {
@@ -4601,8 +4624,11 @@ impl StateSpaceStage {
             debug_label: String::new(),
             bypass_serial: false,
             supply_voltage,
+            pot_bindings: Vec::new(),
+            recompute_mna: None,
             v_rail,
             inv_v_rail: 1.0 / v_rail,
+            prev_input: 0.0,
         }
     }
 
@@ -4612,20 +4638,89 @@ impl StateSpaceStage {
         self.inv_v_rail = 1.0 / self.v_rail;
     }
 
+    pub fn has_pot(&self, comp_id: &str) -> bool {
+        self.pot_bindings
+            .iter()
+            .any(|binding| binding.comp_id == comp_id)
+    }
+
+    pub fn set_pot(&mut self, comp_id: &str, position: f64) {
+        let Some(idx) = self
+            .pot_bindings
+            .iter()
+            .position(|binding| binding.comp_id == comp_id)
+        else {
+            return;
+        };
+
+        let Some(ref mut mna) = self.recompute_mna else {
+            return;
+        };
+
+        let binding = &mut self.pot_bindings[idx];
+        binding.position = position.clamp(0.0, 1.0);
+        let tapered = binding.taper.apply(binding.position);
+        let new_r = (tapered * binding.max_r).max(1.0);
+        let new_g = 1.0 / new_r;
+        let delta = new_g - binding.conductance;
+        if delta.abs() <= 1e-15 {
+            return;
+        }
+
+        let n_mna = mna.num_nodes;
+        if let Some(p) = binding.node_pos {
+            mna.g_matrix[p * n_mna + p] += delta;
+            if let Some(n) = binding.node_neg {
+                mna.g_matrix[p * n_mna + n] -= delta;
+            }
+        }
+        if let Some(n) = binding.node_neg {
+            mna.g_matrix[n * n_mna + n] += delta;
+            if let Some(p) = binding.node_pos {
+                mna.g_matrix[n * n_mna + p] -= delta;
+            }
+        }
+        binding.conductance = new_g;
+
+        let (a_d, b_d, c_out, n_states, d_feedthrough) = mna.build_state_space_matrices(
+            &self.ss.cap_stamps,
+            self.ss.vs_idx,
+            self.ss.output_pos,
+            self.ss.output_neg,
+            self.ss.sample_rate,
+        );
+        if n_states == self.ss.n_states
+            && a_d.iter().all(|v| v.is_finite())
+            && b_d.iter().all(|v| v.is_finite())
+            && c_out.iter().all(|v| v.is_finite())
+            && d_feedthrough.is_finite()
+        {
+            self.ss.a_matrix = a_d;
+            self.ss.b_vector = b_d;
+            self.ss.c_vector = c_out;
+            self.ss.d_feedthrough = d_feedthrough;
+        }
+    }
+
     #[inline]
     pub fn process(&mut self, input: f64) -> f64 {
         let n = self.ss.n_states;
         let sample = input * self.compensation;
 
         // x[n] = A · x[n-1] + b · u[n]  (into pre-allocated work buffer)
+        let has_b_minus = self.ss.b_vector.len() >= n * 2;
         for i in 0..n {
             let mut v = self.ss.b_vector[i] * sample;
+            if has_b_minus {
+                v += self.ss.b_vector[n + i] * self.prev_input;
+            }
             let row_start = i * n;
             for j in 0..n {
                 v += self.ss.a_matrix[row_start + j] * self.ss.x[j];
             }
             self.work[i] = flush_denormal(v);
         }
+        self.prev_input = sample;
 
         // Op-amp rail saturation: tanh soft-clip state variables.
         // v_rail and inv_v_rail are precomputed (supply voltage is constant).
@@ -6228,6 +6323,16 @@ pub struct BlockwiseKMethodStage {
     /// node after post-ladder coupling networks.
     #[cfg_attr(feature = "serde", serde(default))]
     pub output_port_index: Option<usize>,
+    /// Read-only MNA extraction coefficients for the circuit output node.
+    ///
+    /// Unlike `output_port_index`, these do not add an observation port to the
+    /// coupling adaptor, so reading `audio_out` cannot perturb the solve.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub output_extraction_coeffs: Vec<f64>,
+    /// MNA node pair used to recompute `output_extraction_coeffs` when coupling
+    /// pots change.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub output_extraction_nodes: Option<(Option<usize>, Option<usize>)>,
     /// Supply voltage (V) for supply VS ports in the coupling.
     pub supply_voltage: f64,
     /// VS port mapping: (port_name, scattering_port_index).
@@ -6314,6 +6419,14 @@ impl BlockwiseKMethodStage {
     const MAX_ITER: usize = 8;
     /// Convergence tolerance on wave variables.
     const TOL: f64 = 1e-6;
+    /// Coupled delayed mode is a realtime approximation. Treat values outside
+    /// normal audio/circuit rails as solver failure so they cannot poison the
+    /// next sample's warm start.
+    const MAX_STABLE_OUTPUT: f64 = 32.0;
+    /// One-sample coupled mode trades delay-free accuracy for real-time cost.
+    /// Relaxing the adaptor wave update prevents high-bias diode ladders from
+    /// turning the explicit delay into an artificial energy source.
+    const DELAYED_COUPLING_RELAXATION: f64 = 0.25;
 
     fn block_drive_voltage(block: &KMethodBlock, physical_voltage: f64) -> f64 {
         block.source_polarity * physical_voltage
@@ -6566,23 +6679,24 @@ impl BlockwiseKMethodStage {
             .position(|passive| passive.port_idx == port_idx)
     }
 
-    fn write_passive_coupling_ports(&mut self) {
-        for passive in &mut self.coupling_passives {
-            if passive.port_idx < self.work_b.len() {
-                self.work_b[passive.port_idx] = passive.node.reflected();
-            }
-        }
-    }
-
-    fn update_passive_coupling_ports(&mut self) {
-        for passive in &mut self.coupling_passives {
-            if passive.port_idx < self.work_a.len() {
-                passive.node.set_incident(self.work_a[passive.port_idx]);
-            }
-        }
-    }
-
     fn output_probe_voltage(&self, fallback: f64) -> f64 {
+        if self.output_extraction_coeffs.len() == self.n_ports
+            && self
+                .output_extraction_coeffs
+                .iter()
+                .any(|c| c.abs() > 1.0e-15)
+        {
+            let v = self
+                .output_extraction_coeffs
+                .iter()
+                .zip(self.work_b.iter())
+                .map(|(coeff, b)| coeff * b)
+                .sum::<f64>();
+            if v.is_finite() {
+                return v;
+            }
+        }
+
         let Some(port_idx) = self.output_port_index else {
             return fallback;
         };
@@ -6755,14 +6869,14 @@ impl BlockwiseKMethodStage {
         // feedback dependency below overwrites/adds a cross derivative.
         for port_idx in 0..n {
             if !self.port_is_block_owned(port_idx) {
-                db_da[port_idx * n + port_idx] =
-                    if self.coupling_passive_index(port_idx).is_some() {
-                        0.0
-                    } else if self.output_port_index == Some(port_idx) {
-                        1.0
-                    } else {
-                        -1.0
-                    };
+                db_da[port_idx * n + port_idx] = if self.coupling_passive_index(port_idx).is_some()
+                {
+                    0.0
+                } else if self.output_port_index == Some(port_idx) {
+                    1.0
+                } else {
+                    -1.0
+                };
             }
         }
 
@@ -7239,6 +7353,10 @@ impl BlockwiseKMethodStage {
             && scattering.iter().all(|v| v.is_finite())
         {
             self.coupling_s = scattering;
+            if let Some((out_pos, out_neg)) = self.output_extraction_nodes {
+                self.output_extraction_coeffs =
+                    mna.derive_node_extraction_coeffs(&self.coupling_ports, out_pos, out_neg);
+            }
         }
     }
 
@@ -7503,6 +7621,56 @@ impl BlockwiseKMethodStage {
         output
     }
 
+    fn process_coupled_one_step_delay(&mut self, vs_signals: &[f64], serial_input: f64) -> f64 {
+        let previous_output = self.b_warm[0];
+        let mut scratch = core::mem::take(&mut self.coupled_scratch);
+        scratch.resize(self.n_ports);
+        scratch.load_a_from(&self.work_a, self.n_ports);
+        scratch.b.resize(self.n_ports, 0.0);
+
+        let block_output =
+            self.coupled_eval_b_for_a(&scratch.a, vs_signals, serial_input, true, &mut scratch.b);
+        self.work_b.copy_from_slice(&scratch.b);
+        self.coupled_scatter_from_b(&scratch.b, &mut scratch.f);
+        let relaxation = Self::DELAYED_COUPLING_RELAXATION.clamp(0.0, 1.0);
+        for (dst, next) in self.work_a.iter_mut().zip(scratch.f.iter()) {
+            *dst += relaxation * (*next - *dst);
+            if !dst.is_finite() {
+                *dst = 0.0;
+            }
+        }
+        let raw_output = self.output_probe_voltage(block_output);
+        let output_is_stable =
+            raw_output.is_finite() && raw_output.abs() <= Self::MAX_STABLE_OUTPUT;
+        let output = if output_is_stable { raw_output } else { 0.0 };
+        self.b_warm[0] = output;
+        if !output_is_stable {
+            for v in &mut self.work_a {
+                *v = 0.0;
+            }
+            for v in &mut self.work_b {
+                *v = 0.0;
+            }
+            for v in &mut scratch.f {
+                *v = 0.0;
+            }
+            for v in &mut scratch.b {
+                *v = 0.0;
+            }
+        }
+        scratch.last_iterations = 1;
+        scratch.last_residual = if output_is_stable {
+            (output - previous_output).abs()
+        } else {
+            Self::MAX_STABLE_OUTPUT
+        };
+        scratch.last_converged = output_is_stable;
+        scratch.last_linear_solve_failed = false;
+        self.coupled_scratch = scratch;
+
+        output
+    }
+
     fn signal_voltage_by_name(&self, needle: &str, vs_signals: &[f64]) -> Option<f64> {
         self.vs_port_map
             .iter()
@@ -7538,43 +7706,7 @@ impl BlockwiseKMethodStage {
             return if output.is_finite() { output } else { 0.0 };
         }
 
-        let mut last_output = self.b_warm[0];
-        let mut iterations = 0u32;
-        let mut residual = f64::INFINITY;
-        let mut converged = false;
-
-        for _iter in 0..Self::MAX_ITER {
-            iterations = iterations.saturating_add(1);
-            self.write_vs_ports(vs_signals);
-            self.write_passive_coupling_ports();
-            self.scatter_coupling();
-            let output = self.run_coupled_blocks(false, serial_input, None);
-
-            residual = (output - last_output).abs();
-            if residual < Self::TOL {
-                converged = true;
-                break;
-            }
-            last_output = output;
-        }
-
-        self.write_vs_ports(vs_signals);
-        self.write_passive_coupling_ports();
-        self.scatter_coupling();
-        let block_output = self.run_coupled_blocks(true, serial_input, None);
-        self.update_passive_coupling_ports();
-        let output = self.output_probe_voltage(block_output);
-        self.b_warm[0] = output;
-        self.coupled_scratch.last_iterations = iterations;
-        self.coupled_scratch.last_residual = residual;
-        self.coupled_scratch.last_converged = converged;
-        self.coupled_scratch.last_linear_solve_failed = false;
-
-        if output.is_finite() {
-            output
-        } else {
-            0.0
-        }
+        self.process_coupled_one_step_delay(vs_signals, serial_input)
     }
 
     pub fn solve_diagnostics(&self) -> SolveDiagnostics {
@@ -7588,10 +7720,19 @@ impl BlockwiseKMethodStage {
 
     /// Debug label for tracing.
     pub fn debug_label(&self) -> String {
+        let max_output_coeff = self
+            .output_extraction_coeffs
+            .iter()
+            .map(|c| c.abs())
+            .fold(0.0_f64, f64::max);
         format!(
-            "BlockwiseKMethod({}blocks, {}ports)",
+            "BlockwiseKMethod({}blocks, {}ports, mode={:?}, vs_ports={}, feedback_ports={}, output_coeff_max={:.3e})",
             self.blocks.len(),
             self.n_ports,
+            self.solve_mode,
+            self.vs_port_map.len(),
+            self.feedback_port_map.len(),
+            max_output_coeff,
         )
     }
 }
@@ -7732,6 +7873,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -7815,6 +7958,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -7864,6 +8009,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -7926,6 +8073,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![(0, 1)],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -7982,6 +8131,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![(0, 0)],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -8037,6 +8188,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -8106,6 +8259,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -8192,6 +8347,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![(0, 2)],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -8311,6 +8468,8 @@ mod blockwise_k_method_tests {
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
             shared_diode_cutoff_pot: Some(alloc::string::String::from("Cutoff")),
             feedback_port_map: vec![],
+            output_extraction_coeffs: vec![],
+            output_extraction_nodes: None,
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,

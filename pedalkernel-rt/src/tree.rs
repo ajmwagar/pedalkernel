@@ -1448,12 +1448,11 @@ impl MnaSystem {
         let lambda_max: f64 = av.iter().zip(&v).map(|(a, b)| a * b).sum::<f64>()
             / v.iter().map(|x| x * x).sum::<f64>();
 
-        // If the system has a VCVS (D matrix has entries > 0), the system
-        // is likely an oscillator or high-gain amplifier. The eigenvalue
-        // analysis with singular M (from input VS D=0) is unreliable.
-        // Use the oscillator IIR path if feedback_r is provided.
-        let has_vcvs = self.d_matrix.iter().any(|&d| d.abs() > 1e-10);
-        let is_unstable = lambda_max.abs() > 1.001 || (has_vcvs && feedback_r.is_some());
+        // Use the oscillator shortcut only for systems that actually present
+        // unstable discrete poles. Stable active filters with VCVS elements
+        // must keep the MNA-derived transfer function; otherwise MFB/Rauch
+        // filters collapse into an unrelated cookbook band-pass.
+        let is_unstable = lambda_max.abs() > 1.001;
 
         if is_unstable {
             // ── Oscillator path: build biquad from component values ──

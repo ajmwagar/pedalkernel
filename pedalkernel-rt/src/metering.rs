@@ -116,6 +116,12 @@ pub struct UiMetrics {
     pub stage_nr_residual: [f32; MAX_STAGES],
     /// Per-stage non-convergence counts, saturated at u8::MAX.
     pub stage_nr_nonconverged: [u8; MAX_STAGES],
+    /// Non-finite inputs, intermediate values, or outputs observed this block.
+    pub nonfinite_count: u32,
+    /// Samples whose magnitude exceeded a conservative blowup threshold.
+    pub blowup_count: u32,
+    /// Largest absolute signal magnitude observed this block.
+    pub max_abs_sample: f32,
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Timing
@@ -169,6 +175,9 @@ pub struct MetricsAccumulator {
     stage_nr_iterations: [u16; MAX_STAGES],
     stage_nr_residual: [f32; MAX_STAGES],
     stage_nr_nonconverged: [u8; MAX_STAGES],
+    nonfinite_count: u32,
+    blowup_count: u32,
+    max_abs_sample: f32,
 
     // Tube state (sampled, not accumulated)
     tube_plate_current: [f32; MAX_TUBES],
@@ -209,6 +218,9 @@ impl MetricsAccumulator {
             stage_nr_iterations: [0; MAX_STAGES],
             stage_nr_residual: [0.0; MAX_STAGES],
             stage_nr_nonconverged: [0; MAX_STAGES],
+            nonfinite_count: 0,
+            blowup_count: 0,
+            max_abs_sample: 0.0,
             tube_plate_current: [0.0; MAX_TUBES],
             tube_dissipation: [0.0; MAX_TUBES],
             tube_count: 0,
@@ -228,11 +240,21 @@ impl MetricsAccumulator {
     /// Accumulate input/output levels for one sample.
     #[inline]
     pub fn accumulate_levels(&mut self, input: f64, output: f64) {
+        if !input.is_finite() || !output.is_finite() {
+            self.nonfinite_count = self.nonfinite_count.saturating_add(1);
+        }
+        let input = if input.is_finite() { input } else { 0.0 };
+        let output = if output.is_finite() { output } else { 0.0 };
         self.input_sum_sq += input * input;
         self.output_sum_sq += output * output;
 
         let abs_in = math::abs(input);
         let abs_out = math::abs(output);
+        let max_abs = abs_in.max(abs_out);
+        self.max_abs_sample = self.max_abs_sample.max(max_abs.min(f32::MAX as f64) as f32);
+        if max_abs > 32.0 {
+            self.blowup_count = self.blowup_count.saturating_add(1);
+        }
         if abs_in > self.input_peak {
             self.input_peak = abs_in;
         }
@@ -272,7 +294,9 @@ impl MetricsAccumulator {
     ) {
         self.nr_solve_count = self.nr_solve_count.saturating_add(1);
         self.nr_total_iterations = self.nr_total_iterations.saturating_add(iterations);
-        self.nr_max_iterations = self.nr_max_iterations.max(iterations.min(u16::MAX as u32) as u16);
+        self.nr_max_iterations = self
+            .nr_max_iterations
+            .max(iterations.min(u16::MAX as u32) as u16);
         if !converged {
             self.nr_nonconverged_count = self.nr_nonconverged_count.saturating_add(1);
         }
@@ -294,6 +318,20 @@ impl MetricsAccumulator {
             if stage_idx >= self.stage_count {
                 self.stage_count = stage_idx + 1;
             }
+        }
+    }
+
+    /// Record a runtime signal fault caught outside normal level metering.
+    #[inline]
+    pub fn record_signal_fault(&mut self, value: f64) {
+        if !value.is_finite() {
+            self.nonfinite_count = self.nonfinite_count.saturating_add(1);
+            return;
+        }
+        let abs = math::abs(value);
+        self.max_abs_sample = self.max_abs_sample.max(abs.min(f32::MAX as f64) as f32);
+        if abs > 32.0 {
+            self.blowup_count = self.blowup_count.saturating_add(1);
         }
     }
 
@@ -392,6 +430,9 @@ impl MetricsAccumulator {
             stage_nr_iterations: self.stage_nr_iterations,
             stage_nr_residual: self.stage_nr_residual,
             stage_nr_nonconverged: self.stage_nr_nonconverged,
+            nonfinite_count: self.nonfinite_count,
+            blowup_count: self.blowup_count,
+            max_abs_sample: self.max_abs_sample,
             block_counter: self.block_counter,
         };
 
@@ -415,6 +456,9 @@ impl MetricsAccumulator {
         self.stage_nr_iterations = [0; MAX_STAGES];
         self.stage_nr_residual = [0.0; MAX_STAGES];
         self.stage_nr_nonconverged = [0; MAX_STAGES];
+        self.nonfinite_count = 0;
+        self.blowup_count = 0;
+        self.max_abs_sample = 0.0;
 
         metrics
     }

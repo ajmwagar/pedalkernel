@@ -119,7 +119,9 @@ impl Stage {
             Stage::SerialDelayedFeedback(serial) => serial
                 .has_pot(comp_id)
                 .then_some(ControlTarget::PotInStage(stage_idx)),
-            Stage::StateSpace(_) => None,
+            Stage::StateSpace(ss) => ss
+                .has_pot(comp_id)
+                .then_some(ControlTarget::PotInStage(stage_idx)),
         }
     }
 
@@ -162,7 +164,14 @@ impl Stage {
             }
             Stage::BlockwiseKMethod(bkm) => bkm.set_pot(comp_id, value),
             Stage::SerialDelayedFeedback(serial) => serial.set_pot(comp_id, value),
-            Stage::StateSpace(_) => false,
+            Stage::StateSpace(ss) => {
+                if ss.has_pot(comp_id) {
+                    ss.set_pot(comp_id, value);
+                    true
+                } else {
+                    false
+                }
+            }
         }
     }
 
@@ -2873,8 +2882,7 @@ impl PedalProcessor for CompiledPedal {
                     let diag = bkm_stage.solve_diagnostics();
                     stage_solver_iterations[stage_idx] = diag.iterations;
                     stage_solver_residual[stage_idx] = diag.residual;
-                    stage_solver_converged[stage_idx] =
-                        diag.converged && !diag.linear_solve_failed;
+                    stage_solver_converged[stage_idx] = diag.converged && !diag.linear_solve_failed;
                     stage_solver_active[stage_idx] = diag.iterations > 0;
                 }
                 if stage_idx < crate::metering::MAX_STAGES {
@@ -3081,6 +3089,9 @@ impl PedalProcessor for CompiledPedal {
         // Guard against NaN/Inf from NL solver divergence — prevents
         // permanent state corruption in the oversampler's IIR filters.
         if !signal.is_finite() {
+            if let Some(ref mut acc) = self.metrics_accumulator {
+                acc.record_signal_fault(signal);
+            }
             signal = 0.0;
         }
         signal = self
@@ -3140,6 +3151,9 @@ impl PedalProcessor for CompiledPedal {
 
         // Final NaN guard — prevent corrupted audio from reaching the output.
         if !signal.is_finite() {
+            if let Some(ref mut acc) = self.metrics_accumulator {
+                acc.record_signal_fault(signal);
+            }
             signal = 0.0;
         }
         let output = signal * self.output_gain;

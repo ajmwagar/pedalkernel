@@ -1208,6 +1208,12 @@ pub struct BjtRoot {
     v_max: f64,
     /// Previous sample's Vce for NR warm-starting.
     prev_v: f64,
+    /// Initial Vce warm-start, restored on reset().
+    ///
+    /// Set from `init { }` block hints (e.g. `Q1: saturated` → 0.1 V).
+    /// For circuits without an init block, this is 0.0 and reset() preserves
+    /// the existing behavior (NR falls back to `a*0.5` cold start).
+    initial_prev_v: f64,
 }
 
 impl BjtRoot {
@@ -1219,6 +1225,7 @@ impl BjtRoot {
             vbe: 0.0,
             v_max: 50.0,
             prev_v: 0.0,
+            initial_prev_v: 0.0,
         }
     }
 
@@ -1230,7 +1237,32 @@ impl BjtRoot {
             vbe: 0.0,
             v_max: v_max.max(1.0),
             prev_v: 0.0,
+            initial_prev_v: 0.0,
         }
+    }
+
+    /// Get the initial Vce warm-start (for diagnostics and testing).
+    pub fn initial_prev_v(&self) -> f64 {
+        self.initial_prev_v
+    }
+
+    /// Set the initial Vce warm-start from an `init { }` hint.
+    ///
+    /// Called once at compile time. On reset(), `prev_v` is restored to this
+    /// value, giving the NR solver an asymmetric starting point that can kick
+    /// free-running oscillators (e.g. BJT astable multivibrators) out of the
+    /// symmetric DC fixed point.
+    pub fn set_initial_prev_v(&mut self, vce: f64) {
+        self.initial_prev_v = vce;
+        self.prev_v = vce;
+    }
+
+    /// Restore `prev_v` to the compile-time initial value.
+    ///
+    /// Called by WdfStage::reset() for Bjt roots so that DAW resets return
+    /// to the hint-specified asymmetric state rather than to 0.0.
+    pub fn reset(&mut self) {
+        self.prev_v = self.initial_prev_v;
     }
 
     /// Set the DC bias operating point from circuit analysis.

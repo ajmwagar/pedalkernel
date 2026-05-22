@@ -10,7 +10,7 @@
 
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
-use super::super::stage::{StateSpaceData, StateSpaceStage};
+use super::super::stage::{StateSpaceData, StateSpacePotBinding, StateSpaceStage};
 use super::mna_builder::build_mna;
 
 /// Build a state-space stage from a linear rigid R-node with 3+ reactive elements.
@@ -43,6 +43,53 @@ pub(in crate::compiler) fn build_state_space_stage(
         return Err("StateSpace: zero states after matrix construction".to_string());
     }
 
+    let node_to_mna = |node: NodeId| -> Option<usize> {
+        if node == graph.gnd_node
+            || graph.supply_nodes.contains(&node)
+            || graph.ac_ground_nodes.contains(&node)
+        {
+            None
+        } else {
+            built.node_set.iter().position(|&n| n == node)
+        }
+    };
+
+    let mut pot_bindings = Vec::new();
+    for &eidx in edge_indices {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if !comp.kind.is_pot() {
+            continue;
+        }
+
+        let comp_edge_count = edge_indices
+            .iter()
+            .filter(|&&other| graph.edges[other].comp_idx == e.comp_idx)
+            .count();
+        if comp_edge_count != 1 {
+            continue;
+        }
+
+        let Some(pot) = comp
+            .kind
+            .as_any()
+            .downcast_ref::<super::super::components::Potentiometer>()
+        else {
+            continue;
+        };
+        let position = 0.5;
+        let conductance = 1.0 / (pot.taper.apply(position) * pot.max_r).max(1.0);
+        pot_bindings.push(StateSpacePotBinding {
+            comp_id: comp.id.clone(),
+            max_r: pot.max_r,
+            taper: pot.taper,
+            position,
+            node_pos: node_to_mna(e.node_a),
+            node_neg: node_to_mna(e.node_b),
+            conductance,
+        });
+    }
+
     let ss = StateSpaceData {
         x: vec![0.0; n_states],
         a_matrix: a_d,
@@ -59,5 +106,11 @@ pub(in crate::compiler) fn build_state_space_stage(
         pot_stamps: Vec::new(),
     };
 
-    Ok(StateSpaceStage::new(ss, supply_voltage))
+    let mut stage = StateSpaceStage::new(ss, supply_voltage);
+    stage.pot_bindings = pot_bindings;
+    if !stage.pot_bindings.is_empty() {
+        stage.recompute_mna = Some(built.mna);
+    }
+
+    Ok(stage)
 }

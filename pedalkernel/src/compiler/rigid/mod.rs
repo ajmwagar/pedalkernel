@@ -20,7 +20,9 @@ mod state_space;
 // Re-exports
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(super) use self::general::{build_general_mna_from_edges, build_opamp_nl_feedback};
+pub(super) use self::general::{
+    build_general_mna_from_edges, build_general_mna_from_edges_with_hints, build_opamp_nl_feedback,
+};
 pub(super) use self::opamp_root::{extract_opamp_config, make_opamp_root, OpAmpConfig};
 
 use super::component::EdgeKind;
@@ -624,6 +626,29 @@ pub(super) fn build_rigid_from_group(
     bias_v_max: Option<(f64, f64)>,
     allow_iir: bool,
 ) -> Result<BuiltStage, String> {
+    build_rigid_from_group_with_hints(
+        edge_indices,
+        graph,
+        sample_rate,
+        group,
+        supply_voltage,
+        bias_v_max,
+        allow_iir,
+        &[],
+    )
+}
+
+/// Build from a FlowGroup with full classification and optional init hints.
+pub(super) fn build_rigid_from_group_with_hints(
+    edge_indices: Vec<usize>,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    group: Option<&FlowGroup>,
+    supply_voltage: f64,
+    bias_v_max: Option<(f64, f64)>,
+    allow_iir: bool,
+    init_hints: &[crate::dsl::InitHint],
+) -> Result<BuiltStage, String> {
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph, group);
 
@@ -775,19 +800,17 @@ pub(super) fn build_rigid_from_group(
             eprintln!("  IIR: degenerate b=[0,0,0], falling through");
         }
 
-        // IIR failed → try StateSpace (only for non-VCVS stages).
-        // VCVS stages with reactive feedback should fall through to WDF
-        // where the op-amp + cap feedback is handled by wave scattering.
-        if stats.vcvs_count == 0 {
-            if let Ok(ss) = state_space::build_state_space_stage(
-                &edge_indices,
-                &pendant_trees,
-                graph,
-                sample_rate,
-                supply_voltage,
-            ) {
-                return Ok(BuiltStage::StateSpace(ss));
-            }
+        // IIR failed → try the MNA-derived state-space form. This is the
+        // active-linear path for VCVS filters whose transfer cannot be reduced
+        // to the current biquad extractor.
+        if let Ok(ss) = state_space::build_state_space_stage(
+            &edge_indices,
+            &pendant_trees,
+            graph,
+            sample_rate,
+            supply_voltage,
+        ) {
+            return Ok(BuiltStage::StateSpace(ss));
         }
     }
 
@@ -915,8 +938,13 @@ pub(super) fn build_rigid_from_group(
             // NL present → General MNA + NR solver.
             // Works with or without FlowGroup — uses raw edge indices.
             if stats.nl_count > 0 {
-                build_general_mna_from_edges(&edge_indices, graph, sample_rate)
-                    .map(BuiltStage::MultiNl)
+                build_general_mna_from_edges_with_hints(
+                    &edge_indices,
+                    graph,
+                    sample_rate,
+                    init_hints,
+                )
+                .map(BuiltStage::MultiNl)
             } else {
                 Err(format!(
                     "General: no NL elements (vcvs={}, nl={}, linear={}, reactive={})",

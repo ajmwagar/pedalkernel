@@ -6,6 +6,7 @@ use super::super::component::{EdgeKind, StampContext};
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use crate::tree::MnaSystem;
+use std::collections::{HashMap, VecDeque};
 
 /// Result of building an MNA system from a set of edges.
 pub(super) struct BuiltMna {
@@ -35,7 +36,10 @@ pub(super) fn build_mna(
     // ── Step 1: Collect unique MNA nodes ─────────────────────────────
     let mut node_set: Vec<NodeId> = Vec::new();
     let mut add_node = |node: NodeId| {
-        if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
+        if node == graph.gnd_node
+            || graph.supply_nodes.contains(&node)
+            || graph.ac_ground_nodes.contains(&node)
+        {
             return;
         }
         if !node_set.contains(&node) {
@@ -69,7 +73,10 @@ pub(super) fn build_mna(
     }
 
     let node_to_mna = |node: NodeId| -> Option<usize> {
-        if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
+        if node == graph.gnd_node
+            || graph.supply_nodes.contains(&node)
+            || graph.ac_ground_nodes.contains(&node)
+        {
             None
         } else {
             node_set.iter().position(|&n| n == node)
@@ -143,10 +150,14 @@ pub(super) fn build_mna(
             }
             EdgeKind::Reactive => {
                 if let Some(c) = comp.kind.capacitance() {
-                    cap_stamps.push((n1, n2, c));
+                    if n1.is_some() || n2.is_some() {
+                        cap_stamps.push((n1, n2, c));
+                    }
                 }
                 if let Some(l) = comp.kind.inductance() {
-                    cap_stamps.push((n1, n2, -l)); // Negative = inductor convention
+                    if n1.is_some() || n2.is_some() {
+                        cap_stamps.push((n1, n2, -l)); // Negative = inductor convention
+                    }
                 }
             }
             EdgeKind::Vcvs => {
@@ -188,6 +199,8 @@ pub(super) fn build_mna(
     // back to the VCVS neg node (for multi-stage pedals where the global
     // input is in a different stage).
     let injection_mna = node_to_mna(graph.in_node).or_else(|| {
+        nearest_stage_input_node(&node_set, graph).and_then(node_to_mna)
+    }).or_else(|| {
         graph
             .nullor_pins
             .iter()
@@ -227,4 +240,42 @@ pub(super) fn build_mna(
         injection_mna,
         output_mna,
     })
+}
+
+fn nearest_stage_input_node(node_set: &[NodeId], graph: &CircuitGraph) -> Option<NodeId> {
+    let mut dist: HashMap<NodeId, usize> = HashMap::new();
+    let mut queue = VecDeque::new();
+    dist.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+
+    while let Some(node) = queue.pop_front() {
+        let next_dist = dist[&node] + 1;
+        for (eidx, edge) in graph.edges.iter().enumerate() {
+            if graph.effective_edge_kind(eidx) == EdgeKind::Vcvs {
+                continue;
+            }
+            let next = if edge.node_a == node {
+                edge.node_b
+            } else if edge.node_b == node {
+                edge.node_a
+            } else {
+                continue;
+            };
+            if next == graph.gnd_node
+                || graph.supply_nodes.contains(&next)
+                || graph.ac_ground_nodes.contains(&next)
+            {
+                continue;
+            }
+            if dist.insert(next, next_dist).is_none() {
+                queue.push_back(next);
+            }
+        }
+    }
+
+    node_set
+        .iter()
+        .filter_map(|node| dist.get(node).map(|distance| (*distance, *node)))
+        .min_by_key(|(distance, node)| (*distance, *node))
+        .map(|(_, node)| node)
 }

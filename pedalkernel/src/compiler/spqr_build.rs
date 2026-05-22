@@ -12,7 +12,8 @@ use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::rigid::{
-    build_general_mna_from_edges, build_rigid, build_rigid_from_group, build_rigid_without_iir,
+    build_general_mna_from_edges, build_general_mna_from_edges_with_hints, build_rigid,
+    build_rigid_from_group, build_rigid_from_group_with_hints, build_rigid_without_iir,
 };
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
@@ -20,6 +21,49 @@ use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use pedalkernel_rt::tree::{MnaSystem, WdfPort};
+
+fn output_coupling_dc_block(
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    let output_node = graph.out_node;
+    let mut output_cap = None;
+    let mut output_load = None;
+
+    for edge in &graph.edges {
+        let comp = &graph.components[edge.comp_idx];
+        let touches_output = edge.node_a == output_node || edge.node_b == output_node;
+        if !touches_output {
+            continue;
+        }
+
+        if let Some(c) = comp.kind.capacitance() {
+            output_cap = Some(c);
+        }
+
+        if let Some(r) = comp.kind.resistance() {
+            let other = if edge.node_a == output_node {
+                edge.node_b
+            } else {
+                edge.node_a
+            };
+            if other == graph.gnd_node || graph.ac_ground_nodes.contains(&other) {
+                output_load = Some(r);
+            }
+        }
+    }
+
+    let (Some(c), Some(r)) = (output_cap, output_load) else {
+        return None;
+    };
+    if !(c.is_finite() && c > 0.0 && r.is_finite() && r > 0.0 && sample_rate > 0.0) {
+        return None;
+    }
+
+    let rc = r * c;
+    let alpha = rc / (rc + 1.0 / sample_rate);
+    Some((alpha, alpha, 0.0, 0.0))
+}
 
 /// A stage built from the SPQR pipeline.
 pub(super) enum BuiltStage {
@@ -134,7 +178,12 @@ pub fn compile_via_spqr_with_options(
     }
 
     if options.collapse_nl {
-        let stage = super::rigid::build_general_mna_from_edges(&all_edges, &graph, sample_rate)?;
+        let stage = build_general_mna_from_edges_with_hints(
+            &all_edges,
+            &graph,
+            sample_rate,
+            &pedal.init_hints,
+        )?;
         let mut compiled = CompiledPedal {
             stages: vec![Stage::MultiNl(stage)],
             push_pull_stages: Vec::new(),
@@ -162,7 +211,7 @@ pub fn compile_via_spqr_with_options(
             metrics_buffer: None,
             input_loading: None,
             output_loading: None,
-            output_dc_block: None,
+            output_dc_block: output_coupling_dc_block(&graph, sample_rate),
             sidechains: Vec::new(),
             subcircuit_processors: Vec::new(),
             subcircuit_routing: Vec::new(),
@@ -438,6 +487,7 @@ pub fn compile_via_spqr_with_options(
                     options.force_serial_blockwise_feedback_gain,
                     options.disable_iir,
                     options.coupled_blockwise_newton,
+                    &pedal.init_hints,
                 ) {
                     for built in built_stages {
                         push_stage!(
@@ -458,7 +508,7 @@ pub fn compile_via_spqr_with_options(
             let bias_v_max =
                 compute_bias_v_max_for_group(group, &graph, &bias_node_voltages, supply_voltage);
 
-            let mut built = build_rigid_from_group(
+            let mut built = build_rigid_from_group_with_hints(
                 group.all_edges(),
                 &graph,
                 sample_rate,
@@ -466,6 +516,7 @@ pub fn compile_via_spqr_with_options(
                 supply_voltage,
                 bias_v_max,
                 !options.disable_iir,
+                &pedal.init_hints,
             )
             .map_err(|e| format!("Group {gi}: {e}"))?;
 
@@ -905,7 +956,7 @@ pub fn compile_via_spqr_with_options(
             if group_has_runtime_pot && group_has_nonlinear {
                 #[cfg(test)]
                 eprintln!("  → rigid whole-group: NL group contains runtime pot");
-                let built = build_rigid_from_group(
+                let built = build_rigid_from_group_with_hints(
                     group_edges,
                     &graph,
                     sample_rate,
@@ -913,6 +964,7 @@ pub fn compile_via_spqr_with_options(
                     supply_voltage,
                     None,
                     !options.disable_iir,
+                    &pedal.init_hints,
                 )
                 .map_err(|e| format!("Group {gi}: {e}"))?;
                 push_stage!(
@@ -1002,6 +1054,7 @@ pub fn compile_via_spqr_with_options(
                     options.force_serial_blockwise_feedback_gain,
                     options.disable_iir,
                     options.coupled_blockwise_newton,
+                    &pedal.init_hints,
                 ) {
                     for built in built_stages {
                         push_stage!(
@@ -1042,12 +1095,52 @@ pub fn compile_via_spqr_with_options(
                     );
                 }
 
+                // Count NL stages from the SPQR decomposition.
+                // Passive WDF stages (ShortCircuit/Passthrough roots) do not
+                // process nonlinear devices. If the group has NL components but
+                // SPQR produces no NlWdf or Rigid stages, the NL devices were
+                // silently dropped as Q-nodes. Fall back to build_rigid_from_group
+                // to ensure they're processed through the general MNA + NR path.
+                let spqr_has_nl_stage = spqr_stages
+                    .iter()
+                    .any(|s| matches!(s, SpqrStage::NlWdf { .. } | SpqrStage::Rigid { .. }));
+
+                if group_has_nonlinear && !spqr_has_nl_stage {
+                    // NL devices were dropped by SPQR (cross-coupled topology with
+                    // no R-node, e.g. BJT astable multivibrator). Use the general
+                    // MNA path with init hints so all NL devices are compiled.
+                    eprintln!(
+                        "  [compile] group {gi}: SPQR dropped NL devices, falling back to rigid MNA"
+                    );
+                    let built = build_rigid_from_group_with_hints(
+                        group_edges,
+                        &graph,
+                        sample_rate,
+                        Some(group),
+                        supply_voltage,
+                        None,
+                        !options.disable_iir,
+                        &pedal.init_hints,
+                    )
+                    .map_err(|e| format!("Group {gi} (rigid fallback): {e}"))?;
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass,
+                        group_comp_ids.clone()
+                    );
+                    continue;
+                }
+
                 for stage in spqr_stages {
                     let built = build_spqr_stage_with_options(
                         stage,
                         &graph,
                         sample_rate,
                         options.disable_iir,
+                        &pedal.init_hints,
+                        supply_voltage,
                     )
                     .map_err(|e| format!("Group {gi}: {e}"))?;
                     push_stage!(
@@ -1368,7 +1461,7 @@ pub fn compile_via_spqr_with_options(
         metrics_buffer: None,
         input_loading: None,
         output_loading: None,
-        output_dc_block: None,
+        output_dc_block: output_coupling_dc_block(&graph, sample_rate),
         sidechains: Vec::new(),
         subcircuit_processors: Vec::new(),
         subcircuit_routing: Vec::new(),
@@ -1662,7 +1755,7 @@ pub(super) fn build_spqr_stage(
     graph: &CircuitGraph,
     _sample_rate: f64,
 ) -> Result<BuiltStage, String> {
-    build_spqr_stage_with_options(stage, graph, _sample_rate, false)
+    build_spqr_stage_with_options(stage, graph, _sample_rate, false, &[], 9.0)
 }
 
 pub(super) fn build_spqr_stage_with_options(
@@ -1670,12 +1763,14 @@ pub(super) fn build_spqr_stage_with_options(
     graph: &CircuitGraph,
     _sample_rate: f64,
     disable_iir: bool,
+    init_hints: &[crate::dsl::InitHint],
+    supply_voltage: f64,
 ) -> Result<BuiltStage, String> {
     match stage {
         SpqrStage::PassiveWdf {
             tree, edge_indices, ..
         } => {
-            if passive_split_pot_rc_needs_rtype(&edge_indices, graph) {
+            if passive_pot_reactive_needs_rtype(&edge_indices, graph) {
                 if let Some(wdf) = build_passive_rtype_stage(&edge_indices, graph, _sample_rate) {
                     return Ok(BuiltStage::Wdf(wdf));
                 }
@@ -1792,7 +1887,26 @@ pub(super) fn build_spqr_stage_with_options(
 
             // BJTs now use BjtRoot (single-port WDF root with external Vbe),
             // same as triodes use TriodeRoot. No MultiNL fallback needed.
-            let (root, base_diode_model) = create_root(&nl_kind, false);
+            let (mut root, base_diode_model) = create_root(&nl_kind, false);
+            eprintln!(
+                "[NlWdf] comp.id={:?} hints={:?}",
+                comp.id,
+                init_hints
+                    .iter()
+                    .map(|h| &h.device_label)
+                    .collect::<Vec<_>>()
+            );
+            // Apply init hint to BjtRoot: set asymmetric initial Vce warm-start.
+            // This is the mechanism for free-running BJT oscillators (e.g. astable
+            // multivibrators). Without asymmetric initial conditions, the NR solver
+            // can trap at the symmetric DC fixed point and produce no oscillation.
+            if let RootKind::Bjt(ref mut bjt) = root {
+                if let Some(hint) = init_hints.iter().find(|h| h.device_label == comp.id) {
+                    let crate::dsl::InitState::Named(ref state_name) = hint.state;
+                    let vce = bjt_hint_vce(state_name, supply_voltage, bjt.is_pnp);
+                    bjt.set_initial_prev_v(vce);
+                }
+            }
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);
             let mut wdf_stage = WdfStage::new(tree, root, oversampler);
@@ -1805,41 +1919,45 @@ pub(super) fn build_spqr_stage_with_options(
             pendant_trees,
             ..
         } => {
-            if disable_iir {
-                build_rigid_without_iir(
-                    edge_indices,
-                    boundary_nodes,
-                    pendant_trees,
-                    graph,
-                    _sample_rate,
-                )
-            } else {
-                build_rigid(
-                    edge_indices,
-                    boundary_nodes,
-                    pendant_trees,
-                    graph,
-                    _sample_rate,
-                )
-            }
+            // Use build_rigid_from_group_with_hints so init_hints flow through
+            // when this Rigid stage is reached via the SPQR or blockwise path.
+            // boundary_nodes and pendant_trees are not used by build_rigid_from_group*
+            // (they were only meaningful for the legacy MNA pendant tree path).
+            let _ = (boundary_nodes, pendant_trees);
+            super::rigid::build_rigid_from_group_with_hints(
+                edge_indices,
+                graph,
+                _sample_rate,
+                None,
+                supply_voltage,
+                None,
+                !disable_iir,
+                init_hints,
+            )
         }
     }
 }
 
-fn passive_split_pot_rc_needs_rtype(edge_indices: &[usize], graph: &CircuitGraph) -> bool {
+fn passive_pot_reactive_needs_rtype(edge_indices: &[usize], graph: &CircuitGraph) -> bool {
+    let mut has_pot = false;
+    let mut has_reactive = false;
     let mut has_split_pot = false;
     let mut split_pot_nodes = std::collections::HashSet::new();
     let mut seen = std::collections::HashSet::new();
 
     for &eidx in edge_indices {
         let comp_idx = graph.edges[eidx].comp_idx;
+        let comp = &graph.components[comp_idx];
+        if comp.kind.capacitance().is_some() || comp.kind.inductance().is_some() {
+            has_reactive = true;
+        }
         if !seen.insert(comp_idx) {
             continue;
         }
-        let comp = &graph.components[comp_idx];
         if !comp.kind.is_pot() {
             continue;
         }
+        has_pot = true;
 
         let pot_edges = edge_indices
             .iter()
@@ -1853,6 +1971,10 @@ fn passive_split_pot_rc_needs_rtype(edge_indices: &[usize], graph: &CircuitGraph
                 }
             }
         }
+    }
+
+    if has_pot && has_reactive {
+        return true;
     }
 
     if !has_split_pot {
@@ -2554,4 +2676,23 @@ pub(super) fn compute_group_terminals(
     }
 
     terminals
+}
+
+/// Resolve a BJT init state name to the initial Vce warm-start for BjtRoot.
+///
+/// Mirrors the table in `rigid/general.rs:resolve_bjt_init_state` but returns
+/// only Vce (the scalar that BjtRoot uses as `prev_v`). Sign is applied for PNP.
+fn bjt_hint_vce(state_name: &str, supply_voltage: f64, is_pnp: bool) -> f64 {
+    let vce = match state_name {
+        "saturated" => 0.1,
+        "cutoff" => supply_voltage,
+        "active" | "forward" => supply_voltage * 0.5,
+        "reverse" => supply_voltage,
+        _ => supply_voltage * 0.5,
+    };
+    if is_pnp {
+        -vce
+    } else {
+        vce
+    }
 }

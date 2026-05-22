@@ -135,6 +135,39 @@ pub struct SidechainInfo {
     pub target: SidechainTarget,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Init block types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Named or explicit initial state for one NL device in an `init { ... }` block.
+///
+/// Named states expand to physics-based voltages at compile time:
+/// - BJT NPN: `saturated` → [Vbe=0.75, Vce=0.1], `cutoff` → [Vbe=0.0, Vce=supply],
+///            `active` → [Vbe=0.65, Vce=supply/2]
+/// - Diode: `forward` → Vd=0.7, `reverse` → Vd=-supply/2
+/// - PNP signs are flipped automatically.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InitState {
+    /// A human-readable alias: "saturated", "cutoff", "active", "forward", "reverse".
+    Named(String),
+}
+
+/// One device hint from the `init { ... }` block.
+///
+/// ```text
+/// init {
+///     Q1: saturated
+///     Q2: cutoff
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct InitHint {
+    /// Component label in the pedal (e.g., "Q1").
+    pub device_label: String,
+    /// Desired initial state.
+    pub state: InitState,
+}
+
 /// Top-level pedal definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PedalDef {
@@ -168,6 +201,12 @@ pub struct PedalDef {
     /// Ports are voltage nodes in the circuit, drivable at audio rate.
     /// When empty, implicit `in`/`out` ports are created by the compiler.
     pub ports: Vec<PortDef>,
+    /// Optional initial NL device states from the `init { ... }` block.
+    /// Empty when no `init` block is present (the common case — all existing pedals).
+    /// Used by the compiler to seed the homotopy pre-convergence asymmetrically,
+    /// which is required for free-running oscillators (BJT astable multivibrators)
+    /// that would otherwise converge to a symmetric saddle point.
+    pub init_hints: Vec<InitHint>,
 }
 
 /// Named port declaration from the .pedal DSL.
@@ -2774,6 +2813,58 @@ fn parse_calibrate(input: &str) -> IResult<&str, ()> {
     Ok((input, ()))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Init block parser
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Valid named initial states for NL devices.
+const VALID_INIT_STATES: &[&str] = &["saturated", "cutoff", "active", "forward", "reverse"];
+
+/// Parse one `DeviceLabel: state_name` line inside an `init { ... }` block.
+fn parse_init_hint(input: &str) -> IResult<&str, InitHint> {
+    let (input, _) = ws_comments(input)?;
+    let (input, label) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, state_str) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    if !VALID_INIT_STATES.contains(&state_str) {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+
+    Ok((
+        input,
+        InitHint {
+            device_label: label.to_string(),
+            state: InitState::Named(state_str.to_string()),
+        },
+    ))
+}
+
+/// Parse the optional `init { ... }` block.
+///
+/// ```text
+/// init {
+///     Q1: saturated
+///     Q2: cutoff
+/// }
+/// ```
+fn init_section(input: &str) -> IResult<&str, Vec<InitHint>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("init")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+    let (input, hints) = many0(parse_init_hint)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, hints))
+}
+
 /// Parse a complete `.pedal` or `.synth` file.
 /// Both `pedal "Name" { ... }` and `synth "Name" { ... }` produce the same AST.
 pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
@@ -2830,6 +2921,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, monitors) = opt(monitors_section)(input)?;
     let (input, sidechains) = opt(sidechains_section)(input)?;
     let (input, calibrate) = opt(parse_calibrate)(input)?;
+    let (input, init_hints) = opt(init_section)(input)?;
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -2849,6 +2941,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         calibrate: calibrate.is_some(),
         subcircuits,
         ports: ports.unwrap_or_default(),
+        init_hints: init_hints.unwrap_or_default(),
     };
     resolve_subcircuit_pins(&mut pedal);
     Ok((input, pedal))

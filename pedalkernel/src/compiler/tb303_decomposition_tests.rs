@@ -1198,6 +1198,65 @@ fn tb303_coupled_fixed_point_is_realtime_opt_out() {
 }
 
 #[test]
+fn tb303_coupled_fixed_point_resonance_zero_has_no_active_peak() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let freqs = [100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0];
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let mut options = super::compile::CompileOptions::default();
+    options.coupled_blockwise_newton = false;
+    options.oversampling = crate::oversampling::OversamplingFactor::X1;
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_delayed_no_active_peak",
+        "tb303_delayed_no_active_peak",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let gains: Vec<f64> = freqs
+        .iter()
+        .map(|&freq| {
+            let mut proc: super::compiled::CompiledPedal =
+                postcard::from_bytes(&blob).expect("deserialize failed");
+            proc.set_control("Cutoff", 0.5);
+            proc.set_control("Resonance", 0.0);
+            quick_sine_ac_rms_ports(
+                &mut proc,
+                freq,
+                0.003,
+                &[("vco_in", 1.0)],
+                &[("audio_in", 0.0), ("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+                "audio_out",
+            )
+        })
+        .collect();
+    let norm = gains[0].max(1.0e-12);
+    let normalized_db: Vec<f64> = gains.iter().map(|gain| db_norm(*gain, norm)).collect();
+    let max_gain_db = normalized_db
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    eprintln!(
+        "  delayed BKM k=0 normalized dB: {:?}",
+        normalized_db
+            .iter()
+            .map(|v| format!("{v:+.1}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        max_gain_db < 6.0,
+        "one-sample delayed BKM at Resonance=0 must not create an active peak; \
+         max_gain_db={max_gain_db:.2}, response={normalized_db:?}"
+    );
+}
+
+#[test]
 fn tb303_bkm_differential_rungs_own_multiple_coupling_ports() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
@@ -1887,7 +1946,8 @@ fn tb303_filter_is_lowpass() {
     let _ = std::fs::create_dir_all(&cache_dir);
 
     eprintln!("  compiling with K-tables (cached)...");
-    let options = super::compile::CompileOptions::default();
+    let mut options = super::compile::CompileOptions::default();
+    options.coupled_blockwise_newton = false;
     let blob = super::compile::compile_pedal_cached(
         &source,
         "tb303_filter_audio",
@@ -2912,7 +2972,10 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
         )
     };
 
-    let bkm: Vec<f64> = freqs.iter().map(|&freq| measure_blob(&bkm_blob, freq)).collect();
+    let bkm: Vec<f64> = freqs
+        .iter()
+        .map(|&freq| measure_blob(&bkm_blob, freq))
+        .collect();
     let serial: Vec<f64> = freqs
         .iter()
         .map(|&freq| measure_blob(&serial_blob, freq))
@@ -2984,6 +3047,56 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     };
     let (bkm_10pole_fc_100, bkm_10pole_err_100) = best_10pole_fit(&bkm, 0);
     let (bkm_10pole_fc_10k, bkm_10pole_err_10k) = best_10pole_fit(&bkm, freqs.len() - 1);
+    let best_10pole_shift_fit = |gains: &[f64], norm_idx: usize| -> (f64, f64, f64) {
+        let target: Vec<f64> = gains
+            .iter()
+            .map(|gain| db_norm(*gain, gains[norm_idx]))
+            .collect();
+        let mut best_scale = 1.0;
+        let mut best_fc = 100.0;
+        let mut best_err = f64::INFINITY;
+
+        for scale_step in 0..81 {
+            let scale = 0.80 + 0.005 * scale_step as f64;
+            for fc_step in 0..240 {
+                let t = fc_step as f64 / 239.0;
+                let fc = 100.0 * (100.0f64).powf(t);
+                let ref_norm = stinchcombe_10pole_magnitude(freqs[norm_idx] * scale, fc, 0.0);
+                if ref_norm <= 1.0e-12 {
+                    continue;
+                }
+                let mut err = 0.0;
+                for (i, &freq) in freqs.iter().enumerate() {
+                    let ref_db = db_norm(
+                        stinchcombe_10pole_magnitude(freq * scale, fc, 0.0),
+                        ref_norm,
+                    );
+                    let diff = target[i] - ref_db;
+                    err += diff * diff;
+                }
+                if err < best_err {
+                    best_err = err;
+                    best_scale = scale;
+                    best_fc = fc;
+                }
+            }
+        }
+
+        let ref_norm = stinchcombe_10pole_magnitude(freqs[norm_idx] * best_scale, best_fc, 0.0);
+        let max_abs_err = freqs
+            .iter()
+            .enumerate()
+            .map(|(i, &freq)| {
+                let ref_db = db_norm(
+                    stinchcombe_10pole_magnitude(freq * best_scale, best_fc, 0.0),
+                    ref_norm,
+                );
+                (target[i] - ref_db).abs()
+            })
+            .fold(0.0, f64::max);
+        (best_scale, best_fc, max_abs_err)
+    };
+    let (bkm_shift_scale, bkm_shift_fc, bkm_shift_err) = best_10pole_shift_fit(&bkm, 0);
     let full_10_ref = stinchcombe_10pole_magnitude(freqs[0], bkm_10pole_fc_100, 0.0);
 
     eprintln!("  TB303 normalized response comparison, Cutoff=0.5 Resonance=0");
@@ -2991,6 +3104,9 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     eprintln!(
         "  10-pole k=0 best fit to BKM: fc={bkm_10pole_fc_100:.1}Hz err={bkm_10pole_err_100:.2}dB (norm 100Hz), \
          fc={bkm_10pole_fc_10k:.1}Hz err={bkm_10pole_err_10k:.2}dB (norm 10kHz)"
+    );
+    eprintln!(
+        "  10-pole k=0 shift fit: freq_scale={bkm_shift_scale:.3}, fc={bkm_shift_fc:.1}Hz, err={bkm_shift_err:.2}dB"
     );
     eprintln!(
         "  {:>8} {:>10} {:>10} {:>10} {:>10} {:>10}",
@@ -3023,6 +3139,314 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
         bkm_10pole_err_100 < 3.0,
         "BKM with coupling caps should match the published 10-pole k=0 shelf/lowpass shape after cutoff fit: \
          fc={bkm_10pole_fc_100:.1}Hz, max_abs_err={bkm_10pole_err_100:.2}dB"
+    );
+}
+
+#[test]
+fn tb303_bkm_output_is_read_only_extraction() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+    let compiled = super::compile_pedal(&def, SR).expect("compile failed");
+
+    let bkm = compiled
+        .stages
+        .iter()
+        .find_map(|s| {
+            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(k) = s {
+                Some(k)
+            } else {
+                None
+            }
+        })
+        .expect("TB303 should compile to blockwise K-method");
+
+    assert!(
+        bkm.output_port_index.is_none(),
+        "audio_out must not be added as an active WDF scattering probe"
+    );
+    assert_eq!(
+        bkm.output_extraction_coeffs.len(),
+        bkm.n_ports,
+        "audio_out should be read back through MNA extraction coefficients"
+    );
+    assert!(
+        bkm.output_extraction_coeffs
+            .iter()
+            .any(|coeff| coeff.abs() > 1.0e-12),
+        "audio_out extraction must observe a real coupling-network node"
+    );
+}
+
+#[test]
+fn tb303_bkm_audio_out_blocks_dc_after_output_coupling_cap() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let mut options = super::compile::CompileOptions::default();
+    options.coupled_blockwise_newton = false;
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_audio_out_dc_blocked_v2",
+        "tb303_audio_out_dc_blocked_v2",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    for input_name in ["audio_in", "vco_in"] {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        let mut bkm_only: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        let mut direct_proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        let mut direct_bkm = match direct_proc.stages.remove(0) {
+            pedalkernel_rt::processor::Stage::BlockwiseKMethod(k) => k,
+            _ => panic!("expected first stage to be BKM"),
+        };
+        bkm_only.stages.truncate(1);
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", 0.0);
+        proc.cache_all_vs_pointers();
+        bkm_only.set_control("Cutoff", 0.5);
+        bkm_only.set_control("Resonance", 0.0);
+        bkm_only.cache_all_vs_pointers();
+        direct_bkm.set_pot("Cutoff", 0.5);
+        direct_bkm.set_pot("Resonance", 0.0);
+        direct_bkm.solve_dc_operating_point();
+
+        let in_idx = proc
+            .resolve_port(input_name)
+            .unwrap_or_else(|| panic!("missing {input_name} port"));
+        let cv_cutoff = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
+        let cv_resonance = proc
+            .resolve_port("cv_resonance")
+            .expect("cv_resonance port");
+        let out_idx = proc.resolve_port("audio_out").expect("audio_out port");
+        let mut ports = vec![0.0; proc.port_count()];
+        let mut bkm_ports = vec![0.0; bkm_only.port_count()];
+        let direct_input_idx = direct_bkm
+            .vs_port_map
+            .iter()
+            .position(|(name, _)| name == input_name)
+            .unwrap_or_else(|| panic!("BKM missing {input_name} VS map"));
+        let direct_cutoff_idx = direct_bkm
+            .vs_port_map
+            .iter()
+            .position(|(name, _)| name == "cv_cutoff")
+            .expect("BKM missing cv_cutoff VS map");
+        let direct_resonance_idx = direct_bkm
+            .vs_port_map
+            .iter()
+            .position(|(name, _)| name == "cv_resonance")
+            .expect("BKM missing cv_resonance VS map");
+        let mut direct_vs = vec![0.0; direct_bkm.vs_port_map.len()];
+
+        for _ in 0..4800 {
+            ports.fill(0.0);
+            ports[cv_cutoff] = 0.0;
+            ports[cv_resonance] = 0.0;
+            proc.process_ports(&mut ports);
+            bkm_ports.fill(0.0);
+            bkm_ports[cv_cutoff] = 0.0;
+            bkm_ports[cv_resonance] = 0.0;
+            bkm_only.process_ports(&mut bkm_ports);
+            direct_vs.fill(0.0);
+            direct_vs[direct_cutoff_idx] = 0.0;
+            direct_vs[direct_resonance_idx] = 0.0;
+            direct_bkm.process_with_serial_input(0.0, &direct_vs);
+        }
+
+        let mut tail = Vec::with_capacity(4800);
+        let mut bkm_tail = Vec::with_capacity(4800);
+        let mut direct_tail = Vec::with_capacity(4800);
+        for i in 0..24_000 {
+            ports.fill(0.0);
+            ports[in_idx] = 0.1;
+            ports[cv_cutoff] = 0.0;
+            ports[cv_resonance] = 0.0;
+            proc.process_ports(&mut ports);
+            bkm_ports.fill(0.0);
+            bkm_ports[in_idx] = 0.1;
+            bkm_ports[cv_cutoff] = 0.0;
+            bkm_ports[cv_resonance] = 0.0;
+            bkm_only.process_ports(&mut bkm_ports);
+            direct_vs.fill(0.0);
+            direct_vs[direct_input_idx] = 0.1;
+            direct_vs[direct_cutoff_idx] = 0.0;
+            direct_vs[direct_resonance_idx] = 0.0;
+            let direct_out = direct_bkm.process_with_serial_input(0.0, &direct_vs);
+            if i >= 19_200 {
+                tail.push(ports[out_idx]);
+                bkm_tail.push(bkm_ports[out_idx]);
+                direct_tail.push(direct_out);
+            }
+        }
+
+        let mean = tail.iter().copied().sum::<f64>() / tail.len() as f64;
+        let max_abs = tail.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let bkm_mean = bkm_tail.iter().copied().sum::<f64>() / bkm_tail.len() as f64;
+        let bkm_max_abs = bkm_tail.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        let direct_mean = direct_tail.iter().copied().sum::<f64>() / direct_tail.len() as f64;
+        let direct_max_abs = direct_tail.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        eprintln!(
+            "  {input_name} DC tail: full mean={mean:+.6e}, full max_abs={max_abs:.6e}; \
+             bkm_only mean={bkm_mean:+.6e}, bkm_only max_abs={bkm_max_abs:.6e}; \
+             direct_bkm mean={direct_mean:+.6e}, direct_bkm max_abs={direct_max_abs:.6e}"
+        );
+        let limit = if input_name == "vco_in" {
+            4.0e-2
+        } else {
+            1.0e-2
+        };
+        assert!(
+            mean.abs() < limit && max_abs < limit,
+            "BKM audio_out must be post-C_out/R_out and bounded/DC-blocked for {input_name}; \
+             limit={limit:.3e}, tail mean={mean:+.6e}, max_abs={max_abs:.6e}"
+        );
+        assert!(
+            direct_mean.is_finite() && direct_max_abs.is_finite() && direct_max_abs < 1.0,
+            "raw BKM extraction should stay finite/bounded before the final output DC blocker for {input_name}; \
+             direct mean={direct_mean:+.6e}, direct max_abs={direct_max_abs:.6e}"
+        );
+    }
+}
+
+#[test]
+fn tb303_k0_response_has_no_midband_output_probe_kink() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_k0_no_output_probe_kink",
+        "tb303_k0_no_output_probe_kink",
+        SR,
+        &super::compile::CompileOptions::default(),
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let freqs = [
+        1250.0, 1500.0, 1600.0, 1650.0, 1700.0, 1750.0, 1800.0, 1900.0, 2000.0, 2200.0, 2500.0,
+    ];
+    let measure = |input_port: &'static str, amp: f64, freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", 0.0);
+        quick_sine_ac_rms_ports(
+            &mut proc,
+            freq,
+            amp,
+            &[(input_port, 1.0)],
+            &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+            "audio_out",
+        )
+    };
+    let audio_gains: Vec<f64> = freqs
+        .iter()
+        .map(|&freq| measure("audio_in", 0.03, freq))
+        .collect();
+    let hot_vco_gains: Vec<f64> = freqs
+        .iter()
+        .map(|&freq| measure("vco_in", 0.03, freq))
+        .collect();
+    let gains: Vec<f64> = freqs
+        .iter()
+        .map(|&freq| measure("vco_in", 0.003, freq))
+        .collect();
+    eprintln!("  TB303 midband kink probe");
+    eprintln!(
+        "  {:>8} {:>12} {:>12} {:>12}",
+        "freq", "audio30mV", "vco30mV", "vco3mV"
+    );
+    for i in 0..freqs.len() {
+        eprintln!(
+            "  {:>8.0} {:>12.6} {:>12.6} {:>12.6}",
+            freqs[i], audio_gains[i], hot_vco_gains[i], gains[i]
+        );
+    }
+
+    let max_jump = gains
+        .windows(2)
+        .map(|pair| (20.0 * (pair[1].max(1.0e-12) / pair[0].max(1.0e-12)).log10()).abs())
+        .fold(0.0, f64::max);
+    let audio_max_jump = audio_gains
+        .windows(2)
+        .map(|pair| (20.0 * (pair[1].max(1.0e-12) / pair[0].max(1.0e-12)).log10()).abs())
+        .fold(0.0, f64::max);
+    assert!(
+        max_jump < 4.0,
+        "k=0 WDF response has a non-physical midband kink: freqs={freqs:?}, audio_gains={audio_gains:?}, hot_vco_gains={hot_vco_gains:?}, audio_max_jump={audio_max_jump:.2}dB, vco_gains={gains:?}, vco_max_jump={max_jump:.2}dB"
+    );
+}
+
+#[test]
+fn tb303_k0_high_frequency_response_has_no_nyquist_cliff() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_k0_no_hf_cliff",
+        "tb303_k0_no_hf_cliff",
+        SR,
+        &super::compile::CompileOptions::default(),
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    const FILTER_AUDIO_INPUT_VOLTS: f64 = 0.03;
+    const FILTER_AUDIO_INPUT_RESISTANCE_OHMS: f64 = 10_000.0;
+    const FILTER_VCO_INPUT_RESISTANCE_OHMS: f64 = 1_000.0;
+    const FILTER_VCO_INPUT_VOLTS: f64 = FILTER_AUDIO_INPUT_VOLTS * FILTER_VCO_INPUT_RESISTANCE_OHMS
+        / FILTER_AUDIO_INPUT_RESISTANCE_OHMS;
+
+    let freqs = [8_000.0, 10_000.0, 12_500.0, 16_000.0];
+    let gains: Vec<f64> = freqs
+        .iter()
+        .map(|&freq| {
+            let mut proc: super::compiled::CompiledPedal =
+                postcard::from_bytes(&blob).expect("deserialize failed");
+            proc.set_control("Cutoff", 0.5);
+            proc.set_control("Resonance", 0.0);
+            settled_sine_ac_rms_ports(
+                &mut proc,
+                freq,
+                FILTER_VCO_INPUT_VOLTS,
+                &[("vco_in", 1.0)],
+                &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+                "audio_out",
+            )
+        })
+        .collect();
+
+    eprintln!("  TB303 high-frequency k=0 response probe");
+    for (freq, gain) in freqs.iter().zip(gains.iter()) {
+        eprintln!("    {freq:>7.0}Hz gain={gain:.9}");
+    }
+
+    let slopes: Vec<f64> = gains
+        .windows(2)
+        .zip(freqs.windows(2))
+        .map(|(gain_pair, freq_pair)| {
+            let db = 20.0 * (gain_pair[1].max(1.0e-12) / gain_pair[0].max(1.0e-12)).log10();
+            db / (freq_pair[1] / freq_pair[0]).log2()
+        })
+        .collect();
+    eprintln!("  HF slopes dB/oct: {slopes:.2?}");
+
+    assert!(
+        slopes.iter().all(|slope| *slope < -6.0 && *slope > -48.0),
+        "HF response should keep rolling off smoothly without flattening or cliffing: freqs={freqs:?}, gains={gains:?}, slopes={slopes:?}"
     );
 }
 
@@ -4037,7 +4461,7 @@ fn tb303_resonance_pot_compiles_as_series_feedback_rheostat() {
 }
 
 #[test]
-fn tb303_active_resonance_feedback_stays_in_bkm_coupling() {
+fn tb303_passive_resonance_feedback_stays_in_bkm_coupling() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
     let compiled =
@@ -4053,11 +4477,23 @@ fn tb303_active_resonance_feedback_stays_in_bkm_coupling() {
                 None
             }
         })
-        .expect("active resonance ladder should still compile to BKM");
+        .expect("passive resonance ladder should still compile to BKM");
 
     assert!(
-        !bkm.coupling_vcvss.is_empty(),
-        "TB303 resonance feedback polarity/gain stage must be stamped into the BKM coupling MNA, not dropped or forced monolithic"
+        bkm.coupling_vcvss.is_empty(),
+        "current TB303 resonance feedback is passive; active gain stages should not be required for BKM coupling"
+    );
+    assert!(
+        bkm.coupling_elements
+            .iter()
+            .any(|element| element.comp_id == "Resonance"),
+        "TB303 resonance pot must be stamped as a passive coupling element"
+    );
+    assert!(
+        bkm.coupling_elements
+            .iter()
+            .any(|element| element.comp_id == "R_fb_limit"),
+        "TB303 feedback limiting resistor must stay in the coupling MNA"
     );
     assert!(
         bkm.feedback_port_map.is_empty(),
@@ -4139,6 +4575,108 @@ fn tb303_resonance_creates_peak() {
         worst_abs < 5.0,
         "Resonance must be a bounded cutoff-band peak, not broadband runaway: worst_abs={worst_abs:.4}, best={best:?}"
     );
+}
+
+#[test]
+fn tb303_resonance_k_sweep_tracks_10pole_shape() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let freqs = [250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
+
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let options = super::compile::CompileOptions::default();
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_resonance_k_sweep",
+        "tb303_resonance_k_sweep",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let measure = |freq: f64, resonance: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", resonance);
+        quick_sine_ac_rms_ports(
+            &mut proc,
+            freq,
+            0.03,
+            &[("vco_in", 1.0)],
+            &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+            "audio_out",
+        )
+    };
+
+    let flat: Vec<f64> = freqs.iter().map(|&freq| measure(freq, 0.0)).collect();
+    let flat_norm: Vec<f64> = flat.iter().map(|gain| db_norm(*gain, flat[0])).collect();
+
+    let mut best_fc = 100.0;
+    let mut best_err = f64::INFINITY;
+    for step in 0..320 {
+        let t = step as f64 / 319.0;
+        let fc = 100.0 * (100.0f64).powf(t);
+        let ref_norm = stinchcombe_10pole_magnitude(freqs[0], fc, 0.0);
+        if ref_norm <= 1.0e-12 {
+            continue;
+        }
+        let err = freqs
+            .iter()
+            .enumerate()
+            .map(|(i, &freq)| {
+                let ref_db = db_norm(stinchcombe_10pole_magnitude(freq, fc, 0.0), ref_norm);
+                let diff = flat_norm[i] - ref_db;
+                diff * diff
+            })
+            .sum::<f64>();
+        if err < best_err {
+            best_err = err;
+            best_fc = fc;
+        }
+    }
+
+    eprintln!("  TB303 resonance k sweep vs 10-pole, fitted k=0 fc={best_fc:.1}Hz");
+    eprintln!(
+        "  {:>5} {:>9} {:>9} {:>9} {:>9}",
+        "k", "err dB", "2k dB", "4k dB", "8k dB"
+    );
+
+    let flat_refs: Vec<f64> = freqs
+        .iter()
+        .map(|&freq| stinchcombe_10pole_magnitude(freq, best_fc, 0.0))
+        .collect();
+    let mut previous_err = 0.0;
+    for (idx, &k) in [0.0, 0.1, 0.2, 0.3].iter().enumerate() {
+        let gains: Vec<f64> = freqs.iter().map(|&freq| measure(freq, k)).collect();
+        let mut max_ratio_err: f64 = 0.0;
+        let mut err_by_freq = Vec::new();
+        for (i, &freq) in freqs.iter().enumerate() {
+            let bkm_ratio_db = db_norm(gains[i], flat[i].max(1.0e-12));
+            let ref_ratio_db = db_norm(
+                stinchcombe_10pole_magnitude(freq, best_fc, k),
+                flat_refs[i].max(1.0e-12),
+            );
+            let ratio_err = bkm_ratio_db - ref_ratio_db;
+            max_ratio_err = max_ratio_err.max(ratio_err.abs());
+            err_by_freq.push(ratio_err);
+        }
+        eprintln!(
+            "  {k:>5.2} {max_ratio_err:>9.2} {:+9.2} {:+9.2} {:+9.2}",
+            err_by_freq[3], err_by_freq[4], err_by_freq[5]
+        );
+        if idx > 0 {
+            assert!(
+                max_ratio_err <= previous_err + 6.0,
+                "resonance error should not explode as k rises; k={k}, previous={previous_err:.2}dB current={max_ratio_err:.2}dB"
+            );
+        }
+        previous_err = max_ratio_err;
+    }
 }
 
 #[test]
@@ -5089,6 +5627,527 @@ fn tb303_render_wav_comparison() {
     eprintln!("  Track 2: filtered (serial), peak={serial_peak:.4}");
     eprintln!("  Track 3: filtered (port), peak={port_peak:.4}");
     eprintln!("  Track 4: filtered (port + CV sweep), peak={cv_peak:.4}");
+}
+
+#[test]
+#[ignore]
+fn tb303_export_publish_k0_response_data() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let out_dir = std::env::var("PK_TB303_PUBLISH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("tb303-publish")
+        });
+    std::fs::create_dir_all(&out_dir).expect("create publish artifact dir");
+
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_publish_response",
+        "tb303_publish_response",
+        SR,
+        &super::compile::CompileOptions::default(),
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    const FILTER_AUDIO_INPUT_VOLTS: f64 = 0.03;
+    const FILTER_AUDIO_INPUT_RESISTANCE_OHMS: f64 = 10_000.0;
+    const FILTER_VCO_INPUT_RESISTANCE_OHMS: f64 = 1_000.0;
+    const FILTER_VCO_INPUT_VOLTS: f64 = FILTER_AUDIO_INPUT_VOLTS * FILTER_VCO_INPUT_RESISTANCE_OHMS
+        / FILTER_AUDIO_INPUT_RESISTANCE_OHMS;
+
+    let freqs = [
+        80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0, 1000.0, 1250.0,
+        1500.0, 1600.0, 1700.0, 1750.0, 1800.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0,
+        8000.0, 10_000.0, 12_500.0, 16_000.0,
+    ];
+
+    let bkm_k0: Vec<f64> = freqs
+        .iter()
+        .map(|&freq| {
+            let mut proc: super::compiled::CompiledPedal =
+                postcard::from_bytes(&blob).expect("deserialize failed");
+            proc.set_control("Cutoff", 0.5);
+            proc.set_control("Resonance", 0.0);
+            quick_sine_ac_rms_ports(
+                &mut proc,
+                freq,
+                FILTER_VCO_INPUT_VOLTS,
+                &[("vco_in", 1.0)],
+                &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+                "audio_out",
+            )
+        })
+        .collect();
+
+    let target: Vec<f64> = bkm_k0
+        .iter()
+        .map(|gain| db_norm(*gain, bkm_k0[1]))
+        .collect();
+    let mut best_fc = 100.0;
+    let mut best_err = f64::INFINITY;
+    for step in 0..240 {
+        let t = step as f64 / 239.0;
+        let fc = 100.0 * (100.0f64).powf(t);
+        let ref_norm = stinchcombe_10pole_magnitude(freqs[1], fc, 0.0);
+        if ref_norm <= 1.0e-12 {
+            continue;
+        }
+        let err = freqs
+            .iter()
+            .enumerate()
+            .map(|(i, &freq)| {
+                let ref_db = db_norm(stinchcombe_10pole_magnitude(freq, fc, 0.0), ref_norm);
+                let diff = target[i] - ref_db;
+                diff * diff
+            })
+            .sum::<f64>();
+        if err < best_err {
+            best_err = err;
+            best_fc = fc;
+        }
+    }
+
+    let htb_norm = stinchcombe_htb_magnitude(freqs[1], best_fc);
+    let tenpole_norm = stinchcombe_10pole_magnitude(freqs[1], best_fc, 0.0);
+    let mut response_csv = String::from("freq_hz,htb_db,tenpole_k0_db,wdf_k0_db\n");
+    for (i, &freq) in freqs.iter().enumerate() {
+        response_csv.push_str(&format!(
+            "{freq:.3},{:.6},{:.6},{:.6}\n",
+            db_norm(stinchcombe_htb_magnitude(freq, best_fc), htb_norm),
+            db_norm(
+                stinchcombe_10pole_magnitude(freq, best_fc, 0.0),
+                tenpole_norm
+            ),
+            db_norm(bkm_k0[i], bkm_k0[1]),
+        ));
+    }
+    std::fs::write(out_dir.join("tb303_response.csv"), response_csv).expect("write response csv");
+    eprintln!(
+        "  TB303 k=0 response CSV written to {:?} (fc={best_fc:.1}Hz)",
+        out_dir.join("tb303_response.csv")
+    );
+}
+
+#[test]
+#[ignore]
+fn tb303_export_publish_response_data() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let out_dir = std::env::var("PK_TB303_PUBLISH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("tb303-publish")
+        });
+    std::fs::create_dir_all(&out_dir).expect("create publish artifact dir");
+
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let options = super::compile::CompileOptions::default();
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_publish_response",
+        "tb303_publish_response",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    const FILTER_AUDIO_INPUT_VOLTS: f64 = 0.03;
+    const FILTER_AUDIO_INPUT_RESISTANCE_OHMS: f64 = 10_000.0;
+    const FILTER_VCO_INPUT_RESISTANCE_OHMS: f64 = 1_000.0;
+    const FILTER_VCO_INPUT_VOLTS: f64 = FILTER_AUDIO_INPUT_VOLTS * FILTER_VCO_INPUT_RESISTANCE_OHMS
+        / FILTER_AUDIO_INPUT_RESISTANCE_OHMS;
+
+    let freqs = [
+        40.0, 50.0, 63.0, 80.0, 100.0, 125.0, 160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0,
+        800.0, 1000.0, 1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0, 8000.0,
+        10_000.0, 12_500.0, 16_000.0,
+    ];
+
+    let measure = |freq: f64, resonance: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", resonance);
+        quick_sine_ac_rms_ports(
+            &mut proc,
+            freq,
+            FILTER_VCO_INPUT_VOLTS,
+            &[("vco_in", 1.0)],
+            &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+            "audio_out",
+        )
+    };
+
+    let bkm_k0: Vec<f64> = freqs.iter().map(|&freq| measure(freq, 0.0)).collect();
+    let bkm_k03: Vec<f64> = freqs.iter().map(|&freq| measure(freq, 0.3)).collect();
+    let bkm_k085: Vec<f64> = freqs.iter().map(|&freq| measure(freq, 0.85)).collect();
+
+    let mut best_fc = 100.0;
+    let mut best_err = f64::INFINITY;
+    let target: Vec<f64> = bkm_k0
+        .iter()
+        .map(|gain| db_norm(*gain, bkm_k0[4]))
+        .collect();
+    for step in 0..360 {
+        let t = step as f64 / 359.0;
+        let fc = 100.0 * (100.0f64).powf(t);
+        let ref_norm = stinchcombe_10pole_magnitude(freqs[4], fc, 0.0);
+        if ref_norm <= 1.0e-12 {
+            continue;
+        }
+        let err = freqs
+            .iter()
+            .enumerate()
+            .map(|(i, &freq)| {
+                let ref_db = db_norm(stinchcombe_10pole_magnitude(freq, fc, 0.0), ref_norm);
+                let diff = target[i] - ref_db;
+                diff * diff
+            })
+            .sum::<f64>();
+        if err < best_err {
+            best_err = err;
+            best_fc = fc;
+        }
+    }
+
+    let mut response_csv =
+        String::from("freq_hz,htb_db,tenpole_k0_db,tenpole_k03_db,tenpole_k085_db,wdf_k0_db,wdf_k03_db,wdf_k085_db\n");
+    let htb_norm = stinchcombe_htb_magnitude(freqs[4], best_fc);
+    let tenpole_k0_norm = stinchcombe_10pole_magnitude(freqs[4], best_fc, 0.0);
+    let tenpole_k03_norm = stinchcombe_10pole_magnitude(freqs[4], best_fc, 0.3);
+    let tenpole_k085_norm = stinchcombe_10pole_magnitude(freqs[4], best_fc, 0.85);
+    for (i, &freq) in freqs.iter().enumerate() {
+        response_csv.push_str(&format!(
+            "{freq:.3},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}\n",
+            db_norm(stinchcombe_htb_magnitude(freq, best_fc), htb_norm),
+            db_norm(
+                stinchcombe_10pole_magnitude(freq, best_fc, 0.0),
+                tenpole_k0_norm
+            ),
+            db_norm(
+                stinchcombe_10pole_magnitude(freq, best_fc, 0.3),
+                tenpole_k03_norm
+            ),
+            db_norm(
+                stinchcombe_10pole_magnitude(freq, best_fc, 0.85),
+                tenpole_k085_norm
+            ),
+            db_norm(bkm_k0[i], bkm_k0[4]),
+            db_norm(bkm_k03[i], bkm_k03[4]),
+            db_norm(bkm_k085[i], bkm_k085[4]),
+        ));
+    }
+    std::fs::write(out_dir.join("tb303_response.csv"), response_csv).expect("write response csv");
+
+    let render = |filename: &str,
+                  resonance: f64,
+                  mut drive: Box<dyn FnMut(f64) -> (f64, f64, f64)>| {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", resonance);
+        let vco_idx = proc.resolve_port("vco_in").expect("missing vco_in");
+        let cv_cutoff_idx = proc.resolve_port("cv_cutoff").expect("missing cv_cutoff");
+        let cv_res_idx = proc
+            .resolve_port("cv_resonance")
+            .expect("missing cv_resonance");
+        let out_idx = proc.resolve_port("audio_out").expect("missing audio_out");
+        let n_samples = SR as usize;
+        let mut ports = vec![0.0; proc.port_count()];
+        let mut output = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let t = i as f64 / SR;
+            let (vco, cutoff_cv, resonance_cv) = drive(t);
+            ports.fill(0.0);
+            ports[vco_idx] = vco;
+            ports[cv_cutoff_idx] = cutoff_cv;
+            ports[cv_res_idx] = resonance_cv;
+            proc.process_ports(&mut ports);
+            output.push(ports[out_idx]);
+        }
+        crate::wav::write_wav(&output, &out_dir.join(filename), SR as u32).expect("write WDF wav");
+        output
+    };
+
+    let waveform = render(
+        "tb303_wdf_k03.wav",
+        0.3,
+        Box::new(|t| {
+            let input = FILTER_VCO_INPUT_VOLTS
+                * ((2.0 * std::f64::consts::PI * 110.0 * t).sin()
+                    + 0.5 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()
+                    + 0.33 * (2.0 * std::f64::consts::PI * 330.0 * t).sin()
+                    + 0.25 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+            (input, 0.0, 0.0)
+        }),
+    );
+
+    let squelch = render(
+        "tb303_squelch_cutoff_sweep.wav",
+        0.85,
+        Box::new(|t| {
+            let input = FILTER_VCO_INPUT_VOLTS
+                * ((2.0 * std::f64::consts::PI * 110.0 * t).sin()
+                    + 0.5 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()
+                    + 0.33 * (2.0 * std::f64::consts::PI * 330.0 * t).sin());
+            let cutoff_cv = 1.2 * (0.5 + 0.5 * (2.0 * std::f64::consts::PI * 1.0 * t).sin());
+            (input, cutoff_cv, 0.0)
+        }),
+    );
+    let self_osc = render(
+        "tb303_self_osc_probe.wav",
+        0.95,
+        Box::new(|_| (0.0, 0.6, 0.0)),
+    );
+    let accent_probe = render(
+        "tb303_accent_cv_probe.wav",
+        0.75,
+        Box::new(|t| {
+            let input = FILTER_VCO_INPUT_VOLTS
+                * ((2.0 * std::f64::consts::PI * 110.0 * t).sin()
+                    + 0.5 * (2.0 * std::f64::consts::PI * 220.0 * t).sin());
+            let step = if (t * 4.0).fract() < 0.18 { 1.0 } else { 0.0 };
+            (input, 0.9 * step, 0.6 * step)
+        }),
+    );
+
+    write_goertzel_csv(&out_dir.join("tb303_fft.csv"), &waveform, 110.0);
+    write_goertzel_csv(&out_dir.join("tb303_squelch_fft.csv"), &squelch, 110.0);
+    write_goertzel_csv(&out_dir.join("tb303_self_osc_fft.csv"), &self_osc, 110.0);
+    write_goertzel_csv(
+        &out_dir.join("tb303_accent_cv_fft.csv"),
+        &accent_probe,
+        110.0,
+    );
+
+    eprintln!("  TB303 publish artifacts written to {:?}", out_dir);
+    eprintln!("  fitted 10-pole fc={best_fc:.1}Hz");
+}
+
+#[test]
+#[ignore]
+fn tb303_export_squelch_then_normal_reference_wav() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let out_dir = std::env::var("PK_TB303_PUBLISH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("tb303-publish")
+        });
+    std::fs::create_dir_all(&out_dir).expect("create publish artifact dir");
+
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let options = super::compile::CompileOptions::default();
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_squelch_reference",
+        "tb303_squelch_reference",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let mut proc: super::compiled::CompiledPedal =
+        postcard::from_bytes(&blob).expect("deserialize failed");
+    let vco_idx = proc.resolve_port("vco_in").expect("missing vco_in");
+    let cv_cutoff_idx = proc.resolve_port("cv_cutoff").expect("missing cv_cutoff");
+    let out_idx = proc.resolve_port("audio_out").expect("missing audio_out");
+    let mut ports = vec![0.0; proc.port_count()];
+    let n_samples = (2.0 * SR) as usize;
+    let mut samples = Vec::with_capacity(n_samples);
+    proc.set_control("Cutoff", 0.5);
+    proc.set_control("Resonance", 0.85);
+
+    for i in 0..n_samples {
+        let t = i as f64 / SR;
+        let first_half = t < 1.0;
+        if i == SR as usize {
+            proc.set_control("Resonance", 0.2);
+        }
+
+        let local_t = if first_half { t } else { t - 1.0 };
+        let cutoff_cv = if first_half {
+            1.4 * (0.5 + 0.5 * (2.0 * std::f64::consts::PI * 2.0 * local_t).sin())
+        } else {
+            0.25
+        };
+        let gate_env = if (local_t * 8.0).fract() < 0.55 {
+            1.0
+        } else {
+            0.25
+        };
+        let input = 0.03
+            * gate_env
+            * ((2.0 * std::f64::consts::PI * 110.0 * t).sin()
+                + 0.5 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()
+                + 0.33 * (2.0 * std::f64::consts::PI * 330.0 * t).sin()
+                + 0.25 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+
+        ports.fill(0.0);
+        ports[vco_idx] = input;
+        ports[cv_cutoff_idx] = cutoff_cv;
+        proc.process_ports(&mut ports);
+        samples.push(ports[out_idx]);
+    }
+
+    let path = out_dir.join("tb303_squelch_then_normal.wav");
+    crate::wav::write_wav(&samples, &path, SR as u32).expect("write squelch reference wav");
+    eprintln!("  wrote {:?}", path);
+}
+
+#[test]
+#[ignore]
+fn tb303_nonlinear_k_sweep_signature_metrics() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let cache_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+    let options = super::compile::CompileOptions::default();
+    let blob = super::compile::compile_pedal_cached(
+        &source,
+        "tb303_nonlinear_k_sweep",
+        "tb303_nonlinear_k_sweep",
+        SR,
+        &options,
+        &cache_dir,
+    )
+    .expect("compile failed");
+
+    let render_segment = |resonance: f64, cutoff_cv: f64, input_amp: f64| -> Vec<f64> {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", resonance);
+        let vco_idx = proc.resolve_port("vco_in").expect("missing vco_in");
+        let cv_cutoff_idx = proc.resolve_port("cv_cutoff").expect("missing cv_cutoff");
+        let out_idx = proc.resolve_port("audio_out").expect("missing audio_out");
+        let mut ports = vec![0.0; proc.port_count()];
+        let n_samples = (0.35 * SR) as usize;
+        let mut output = Vec::with_capacity(n_samples);
+        for i in 0..n_samples {
+            let t = i as f64 / SR;
+            let input = input_amp
+                * ((2.0 * std::f64::consts::PI * 110.0 * t).sin()
+                    + 0.5 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()
+                    + 0.33 * (2.0 * std::f64::consts::PI * 330.0 * t).sin()
+                    + 0.25 * (2.0 * std::f64::consts::PI * 440.0 * t).sin());
+            ports.fill(0.0);
+            ports[vco_idx] = input;
+            ports[cv_cutoff_idx] = cutoff_cv;
+            proc.process_ports(&mut ports);
+            output.push(ports[out_idx]);
+        }
+        output
+    };
+
+    eprintln!("  TB303 nonlinear k-sweep signature metrics");
+    eprintln!(
+        "  {:>5} {:>10} {:>10} {:>10} {:>10}",
+        "k", "rms", "thd-ish", "hf/fund", "finite"
+    );
+    let mut last_hf = 0.0;
+    for &k in &[0.0, 0.3, 0.6, 0.85] {
+        let samples = render_segment(k, 0.4, 0.03);
+        let start = samples.len() / 2;
+        let window = &samples[start..];
+        let rms = ac_rms(window);
+        let fundamental = goertzel_mag(window, 110.0, SR).max(1.0e-12);
+        let harmonic_sum = [220.0, 330.0, 440.0, 550.0, 660.0, 770.0, 880.0]
+            .iter()
+            .map(|&freq| goertzel_mag(window, freq, SR))
+            .sum::<f64>();
+        let hf_sum = [1760.0, 2200.0, 3300.0, 4400.0, 6600.0, 8800.0]
+            .iter()
+            .map(|&freq| goertzel_mag(window, freq, SR))
+            .sum::<f64>();
+        let thdish = harmonic_sum / fundamental;
+        let hf_ratio = hf_sum / fundamental;
+        let finite = samples.iter().all(|sample| sample.is_finite());
+        eprintln!("  {k:>5.2} {rms:>10.5} {thdish:>10.3} {hf_ratio:>10.3} {finite:>10}");
+        assert!(finite, "k={k} produced NaN/Inf");
+        assert!(rms < 10.0, "k={k} runaway output rms={rms}");
+        if k > 0.0 {
+            assert!(
+                hf_ratio >= last_hf * 0.5,
+                "higher k should not collapse high-frequency nonlinear content: previous={last_hf:.3}, current={hf_ratio:.3}"
+            );
+        }
+        last_hf = hf_ratio;
+    }
+
+    let quiet = render_segment(0.95, 0.7, 1.0e-6);
+    let quiet_window = &quiet[quiet.len() / 2..];
+    let mut best = (0.0, 0.0);
+    for freq in [
+        220.0, 330.0, 440.0, 660.0, 880.0, 1100.0, 1320.0, 1760.0, 2200.0, 3300.0, 4400.0, 6600.0,
+        8800.0,
+    ] {
+        let mag = goertzel_mag(quiet_window, freq, SR);
+        if mag > best.1 {
+            best = (freq, mag);
+        }
+    }
+    eprintln!(
+        "  high-k quiet-input dominant bin: {:.0}Hz mag={:.6}",
+        best.0, best.1
+    );
+    assert!(
+        best.1.is_finite(),
+        "quiet-input self-osc probe must stay finite"
+    );
+}
+
+fn write_goertzel_csv(path: &std::path::Path, waveform: &[f64], norm_freq: f64) {
+    let fft_freqs = [
+        55.0, 110.0, 220.0, 330.0, 440.0, 660.0, 880.0, 1100.0, 1320.0, 1760.0, 2200.0, 3300.0,
+        4400.0, 6600.0, 8800.0, 11_000.0, 13_200.0, 16_000.0,
+    ];
+    let start = waveform.len() / 2;
+    let window = &waveform[start..];
+    let norm = goertzel_mag(window, norm_freq, SR).max(1.0e-12);
+    let mut csv = String::from("freq_hz,wdf_db\n");
+    for &freq in &fft_freqs {
+        csv.push_str(&format!(
+            "{freq:.3},{:.6}\n",
+            db_norm(goertzel_mag(window, freq, SR), norm)
+        ));
+    }
+    std::fs::write(path, csv).expect("write goertzel csv");
+}
+
+fn goertzel_mag(samples: &[f64], freq_hz: f64, sample_rate: f64) -> f64 {
+    let omega = 2.0 * std::f64::consts::PI * freq_hz / sample_rate;
+    let coeff = 2.0 * omega.cos();
+    let mut s_prev = 0.0;
+    let mut s_prev2 = 0.0;
+    for (i, &sample) in samples.iter().enumerate() {
+        let window =
+            0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / samples.len() as f64).cos();
+        let s = sample * window + coeff * s_prev - s_prev2;
+        s_prev2 = s_prev;
+        s_prev = s;
+    }
+    (s_prev2 * s_prev2 + s_prev * s_prev - coeff * s_prev * s_prev2).sqrt() / samples.len() as f64
 }
 
 #[test]

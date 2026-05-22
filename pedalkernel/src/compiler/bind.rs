@@ -1041,6 +1041,7 @@ fn extract_sidechain_def(
         calibrate: false,
         subcircuits: vec![],
         ports: vec![],
+        init_hints: vec![],
     }
 }
 
