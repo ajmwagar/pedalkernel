@@ -903,6 +903,53 @@ fn find_nl_blocks(node: &SpqrNode, graph: &CircuitGraph, blocks: &mut Vec<NlBloc
     }
 }
 
+fn add_missing_nl_component_blocks(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    blocks: &mut Vec<NlBlock>,
+) {
+    let covered_edges: HashSet<usize> = blocks
+        .iter()
+        .flat_map(|block| block.nl_edges.iter().copied())
+        .collect();
+    let mut by_comp: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for &eidx in edge_indices {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Nonlinear || covered_edges.contains(&eidx) {
+            continue;
+        }
+        by_comp
+            .entry(graph.edges[eidx].comp_idx)
+            .or_default()
+            .push(eidx);
+    }
+
+    for (comp_idx, nl_edges) in by_comp {
+        let mut nodes = Vec::new();
+        for &eidx in &nl_edges {
+            let edge = &graph.edges[eidx];
+            for node in [edge.node_a, edge.node_b] {
+                if !nodes.contains(&node) {
+                    nodes.push(node);
+                }
+            }
+        }
+        if nodes.is_empty() {
+            continue;
+        }
+        #[cfg(test)]
+        eprintln!(
+            "  [blockwise] synthesized missing NL block for {} ({} edges)",
+            graph.components[comp_idx].id,
+            nl_edges.len()
+        );
+        blocks.push(NlBlock {
+            nl_edges,
+            nodes,
+            comp_idx,
+        });
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Step 2: Collect sibling Q-leaves (non-NL edges)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -960,11 +1007,15 @@ fn validate_plan(plan: &BlockwisePlan, graph: &CircuitGraph) -> bool {
     if plan.blocks.len() < 2 {
         return false;
     }
+    let has_reactive_state = plan
+        .blocks
+        .iter()
+        .any(|block| !block.reactive_edges.is_empty());
+    if !has_reactive_state {
+        return false;
+    }
     for block in &plan.blocks {
         if block.nl_edges.is_empty() {
-            return false;
-        }
-        if block.reactive_edges.is_empty() {
             return false;
         }
     }
@@ -1005,6 +1056,7 @@ pub(super) fn analyze_blockwise(
     // Step 1: find NL blocks (P-nodes or S-node siblings)
     let mut nl_blocks = Vec::new();
     find_nl_blocks(&tree, graph, &mut nl_blocks);
+    add_missing_nl_component_blocks(edge_indices, graph, &mut nl_blocks);
 
     eprintln!("  [blockwise] analyze: found {} NL blocks", nl_blocks.len());
 
@@ -1594,6 +1646,7 @@ pub(super) fn try_build_blockwise(
     }
 
     let mut all_stages = Vec::new();
+    let mut all_stage_plan_blocks = Vec::new();
 
     for (bi, block) in plan.blocks.iter().enumerate() {
         let block_edges = block.all_edges();
@@ -1613,6 +1666,7 @@ pub(super) fn try_build_blockwise(
                 );
                 wdf.k_table = super::k_method::generate_k_table(&mut wdf);
                 all_stages.push(BuiltStage::Wdf(wdf));
+                all_stage_plan_blocks.push(bi);
                 continue;
             }
         }
@@ -1682,6 +1736,7 @@ pub(super) fn try_build_blockwise(
             }
 
             all_stages.push(built);
+            all_stage_plan_blocks.push(bi);
         }
     }
 
@@ -1896,9 +1951,30 @@ pub(super) fn try_build_blockwise(
             .and_then(|port| port.impedance)
             .unwrap_or(10_000.0);
 
+        let has_differential_rung_blocks = plan
+            .blocks
+            .iter()
+            .any(|block| matches!(block.topology, BlockTopology::DifferentialDiodeRung { .. }));
         let mut k_blocks = Vec::new();
-        for (bi, built) in all_stages.iter_mut().enumerate() {
+        let mut plan_block_to_k_block = vec![None; plan.blocks.len()];
+        for (stage_idx, built) in all_stages.iter_mut().enumerate() {
+            let bi = all_stage_plan_blocks
+                .get(stage_idx)
+                .copied()
+                .unwrap_or(stage_idx);
             if let BuiltStage::Wdf(ref mut wdf) = built {
+                if has_differential_rung_blocks
+                    && !matches!(
+                        plan.blocks.get(bi).map(|block| &block.topology),
+                        Some(BlockTopology::DifferentialDiodeRung { .. })
+                    )
+                {
+                    #[cfg(test)]
+                    eprintln!(
+                        "  block {bi}: auxiliary memoryless/control WDF omitted from differential-rung BKM blocks"
+                    );
+                    continue;
+                }
                 let block_port_node = plan.blocks.get(bi).and_then(|block| {
                     block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph)
                 });
@@ -2041,6 +2117,10 @@ pub(super) fn try_build_blockwise(
                     // by the circuit: the cascade node (Q.emitter) is where
                     // the cap connects, which is the right child of the
                     // Series(VS, Cap) adaptor.
+                    let k_block_idx = k_blocks.len();
+                    if bi < plan_block_to_k_block.len() {
+                        plan_block_to_k_block[bi] = Some(k_block_idx);
+                    }
                     k_blocks.push(pedalkernel_rt::stage::KMethodBlock {
                         tree: wdf.tree.clone(),
                         k_table: k_table.clone(),
@@ -2405,18 +2485,21 @@ pub(super) fn try_build_blockwise(
         // rather than the cascade junction.
         let mut used_ports: HashSet<NodeId> = HashSet::new();
         for (bi, block) in plan.blocks.iter().enumerate() {
+            let Some(kbi) = plan_block_to_k_block.get(bi).and_then(|idx| *idx) else {
+                #[cfg(test)]
+                eprintln!(
+                    "    block {bi}: no K-table stage; nonlinear memoryless/control block omitted from BKM coupling ports"
+                );
+                continue;
+            };
             if let Some(rung_ports) = differential_rung_ports(block, graph) {
-                let rp = if bi < k_blocks.len() {
-                    k_blocks[bi].nominal_vs_rp
-                } else {
-                    1000.0
-                };
+                let rp = k_blocks[kbi].nominal_vs_rp;
                 for (label, node) in [
                     ("bottom_left", rung_ports.bottom_left),
                     ("bottom_right", rung_ports.bottom_right),
                 ] {
                     let port_idx = ports.len();
-                    block_port_indices[bi].push(port_idx);
+                    block_port_indices[kbi].push(port_idx);
                     ports.push(pedalkernel_rt::tree::WdfPort {
                         node_pos: node_to_mna.get(&node).copied(),
                         node_neg: None,
@@ -2433,7 +2516,7 @@ pub(super) fn try_build_blockwise(
                     node_to_mna.get(&rung_ports.top_right),
                 ) {
                     let port_idx = ports.len();
-                    block_port_indices[bi].push(port_idx);
+                    block_port_indices[kbi].push(port_idx);
                     ports.push(pedalkernel_rt::tree::WdfPort {
                         node_pos: Some(left_idx),
                         node_neg: Some(right_idx),
@@ -2470,17 +2553,13 @@ pub(super) fn try_build_blockwise(
 
             if let Some(pn) = best_node {
                 let mna_idx = node_to_mna[&pn];
-                let rp = if bi < k_blocks.len() {
-                    k_blocks[bi].nominal_vs_rp
-                } else {
-                    1000.0
-                };
+                let rp = k_blocks[kbi].nominal_vs_rp;
                 ports.push(pedalkernel_rt::tree::WdfPort {
                     node_pos: Some(mna_idx),
                     node_neg: None,
                     resistance: rp,
                 });
-                block_port_indices[bi].push(ports.len() - 1);
+                block_port_indices[kbi].push(ports.len() - 1);
                 used_ports.insert(pn);
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=Some({pn}) → mna_node=Some({mna_idx})");
@@ -2491,16 +2570,14 @@ pub(super) fn try_build_blockwise(
                     node_neg: None,
                     resistance: 1000.0,
                 });
-                block_port_indices[bi].push(ports.len() - 1);
+                block_port_indices[kbi].push(ports.len() - 1);
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=None (no unique coupling node)");
             }
         }
 
-        let use_coupled_solve = plan
-            .blocks
-            .iter()
-            .all(|block| matches!(block.topology, BlockTopology::DifferentialDiodeRung { .. }));
+        let use_coupled_solve =
+            n_blocks >= 2 && block_port_indices.iter().all(|ports| ports.len() == 3);
         let mut feedback_port_map: Vec<(usize, usize)> = Vec::new();
         let output_block_idx = n_blocks.saturating_sub(1);
         for (bi, block) in plan.blocks.iter().enumerate() {

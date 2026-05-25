@@ -553,9 +553,8 @@ fn tb303_cutoff_path_uses_expo_converter_boundary() {
     );
 
     assert!(
-        source.contains("R_tail_l.b -> Q11.collector")
-            && source.contains("R_tail_r.b -> Q11.collector"),
-        "The cutoff converter output should be the shared current sink for both ladder tail legs"
+        source.contains("Q12L.emitter -> Q12R.emitter, Q11.collector"),
+        "The cutoff converter output should be the shared Q12 emitter tail current sink"
     );
 }
 
@@ -662,17 +661,43 @@ fn tb303_filter_uses_one_shared_cutoff_tail_current() {
         "Cutoff pot should not sit in the top feed as a per-rung voltage bias"
     );
 
-    for shared_tail_link in [
-        "QL1.emitter -> R_tail_l.a",
-        "QR1.emitter -> R_tail_r.a",
-        "R_tail_l.b -> Q11.collector",
-        "R_tail_r.b -> Q11.collector",
-        "Cutoff.w -> R_cutoff_sum.a",
-        "R_cv.b -> Q10.base",
-    ] {
+    for shared_tail_link in ["Cutoff.w -> R_cutoff_sum.a", "R_cv.b -> Q10.base"] {
         assert!(
             source.contains(shared_tail_link),
             "TB303 cutoff current path should contain `{shared_tail_link}`"
+        );
+    }
+}
+
+#[test]
+fn tb303_filter_uses_q12_input_differential_pair() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+
+    for q12 in ["Q12L: npn(2sc945)", "Q12R: npn(2sc945)"] {
+        assert!(
+            source.contains(q12),
+            "TB303 audio injection should include input differential pair device `{q12}`"
+        );
+    }
+
+    for direct_injection in ["R_in.b -> QL1.emitter", "R_vco.b -> QL1.emitter"] {
+        assert!(
+            !source.contains(direct_injection),
+            "audio/VCO must enter Q12, not inject directly into the ladder through `{direct_injection}`"
+        );
+    }
+
+    for q12_link in [
+        "R_in.b -> Q12L.base",
+        "R_vco.b -> Q12L.base",
+        "R_q9_bias.b -> Q12R.base",
+        "QL1.emitter -> Q12L.collector",
+        "QR1.emitter -> Q12R.collector",
+        "Q12L.emitter -> Q12R.emitter, Q11.collector",
+    ] {
+        assert!(
+            source.contains(q12_link),
+            "TB303 Q12 input differential pair should contain `{q12_link}`"
         );
     }
 }
@@ -732,8 +757,22 @@ fn tb303_blockwise_classifies_differential_diode_rungs_generically() {
     let plan = blockwise::analyze_blockwise(&all_edges, &graph)
         .expect("TB303 coupled ladder should produce a blockwise plan");
 
-    assert_eq!(plan.blocks.len(), 4);
-    for (i, block) in plan.blocks.iter().enumerate() {
+    let rung_blocks: Vec<_> = plan
+        .blocks
+        .iter()
+        .filter(|block| {
+            matches!(
+                block.topology,
+                blockwise::BlockTopology::DifferentialDiodeRung { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        rung_blocks.len(),
+        4,
+        "TB303 ladder should expose four generic differential diode rung blocks even when Q12/control devices are present"
+    );
+    for (i, block) in rung_blocks.iter().enumerate() {
         assert!(
             matches!(
                 block.topology,

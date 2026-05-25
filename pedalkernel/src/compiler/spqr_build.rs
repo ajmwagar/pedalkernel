@@ -242,7 +242,8 @@ pub fn compile_via_spqr_with_options(
         "  [compile] Step 1: find_flow_groups ({} edges)...",
         all_edges.len()
     );
-    let feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    let mut feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph);
     eprintln!("  [compile] Step 1 done: {} groups", feedback_groups.len());
 
     // Step 1b: Compute signal flow distance for each group via BFS from in_node.
@@ -2190,6 +2191,84 @@ fn is_ground_clip_group(
             || graph.ac_ground_nodes.contains(&e.node_b);
         is_diode && to_gnd
     })
+}
+
+fn merge_cross_reactive_groups_into_active_groups(
+    groups: &mut Vec<super::signal_flow::FlowGroup>,
+    graph: &super::graph::CircuitGraph,
+) {
+    let mut active_terminal_nodes: Vec<std::collections::HashSet<super::graph::NodeId>> =
+        Vec::with_capacity(groups.len());
+    for group in groups.iter() {
+        let mut nodes = std::collections::HashSet::new();
+        for &eidx in &group.active_edges {
+            let edge = &graph.edges[eidx];
+            nodes.insert(edge.node_a);
+            nodes.insert(edge.node_b);
+        }
+        active_terminal_nodes.push(nodes);
+    }
+
+    let mut merge_into: Vec<Option<usize>> = vec![None; groups.len()];
+    for (source_idx, group) in groups.iter().enumerate() {
+        if !group.active_edges.is_empty() {
+            continue;
+        }
+        let reactive_edges: Vec<usize> = group
+            .all_edges()
+            .into_iter()
+            .filter(|&eidx| graph.effective_edge_kind(eidx) == super::component::EdgeKind::Reactive)
+            .collect();
+        if reactive_edges.is_empty() {
+            continue;
+        }
+
+        for (target_idx, nodes) in active_terminal_nodes.iter().enumerate() {
+            if target_idx == source_idx || groups[target_idx].active_edges.is_empty() {
+                continue;
+            }
+            let bridges_active_terminals = reactive_edges.iter().any(|&eidx| {
+                let edge = &graph.edges[eidx];
+                nodes.contains(&edge.node_a) && nodes.contains(&edge.node_b)
+            });
+            if bridges_active_terminals {
+                merge_into[source_idx] = Some(target_idx);
+                break;
+            }
+        }
+    }
+
+    for source_idx in 0..groups.len() {
+        let Some(target_idx) = merge_into[source_idx] else {
+            continue;
+        };
+        let edges = groups[source_idx].all_edges();
+        if edges.is_empty() {
+            continue;
+        }
+        #[cfg(test)]
+        {
+            let names: Vec<&str> = edges
+                .iter()
+                .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+                .collect();
+            eprintln!(
+                "  [compile] merged cross-reactive passive group {source_idx} into active group {target_idx}: {names:?}"
+            );
+        }
+        for eidx in edges {
+            if !groups[target_idx].feedback_edges.contains(&eidx) {
+                groups[target_idx].feedback_edges.push(eidx);
+            }
+        }
+    }
+
+    let mut idx = 0;
+    groups.retain(|_| {
+        let keep = merge_into.get(idx).and_then(|target| *target).is_none();
+        idx += 1;
+        keep
+    });
 }
 
 fn is_nonlinear_modulator_group(
