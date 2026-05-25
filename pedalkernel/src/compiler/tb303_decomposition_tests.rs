@@ -665,10 +665,10 @@ fn tb303_filter_uses_one_shared_cutoff_tail_current() {
     for shared_tail_link in [
         "QL1.emitter -> R_tail_l.a",
         "QR1.emitter -> R_tail_r.a",
-        "R_tail_l.b -> Cutoff.a",
-        "R_tail_r.b -> Cutoff.a",
-        "Cutoff.b -> gnd",
-        "R_cv.b -> Cutoff.a",
+        "R_tail_l.b -> Q11.collector",
+        "R_tail_r.b -> Q11.collector",
+        "Cutoff.w -> R_cutoff_sum.a",
+        "R_cv.b -> Q10.base",
     ] {
         assert!(
             source.contains(shared_tail_link),
