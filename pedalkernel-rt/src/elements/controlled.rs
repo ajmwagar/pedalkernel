@@ -19,21 +19,21 @@ use super::{ControlledResistance, WdfLeaf};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PhotocouplerModel {
     /// Resistance when fully dark (Ω). Typical: 500kΩ - 5MΩ.
-    pub r_dark: f64,
+    pub r_dark: crate::Wave,
     /// Minimum resistance at full illumination (Ω). Typical: 100Ω - 5kΩ.
-    pub r_light: f64,
+    pub r_light: crate::Wave,
     /// Nonlinearity exponent. Typical: 0.7 - 0.9.
-    pub gamma: f64,
+    pub gamma: crate::Wave,
     /// Fast time constant - rise (s). Typical: 1-3ms.
-    pub tau_fast_rise: f64,
+    pub tau_fast_rise: crate::Wave,
     /// Fast time constant - fall (s). Typical: 3-10ms.
-    pub tau_fast_fall: f64,
+    pub tau_fast_fall: crate::Wave,
     /// Slow time constant - rise (s). Typical: 10-30ms.
-    pub tau_slow_rise: f64,
+    pub tau_slow_rise: crate::Wave,
     /// Slow time constant - fall (s). Typical: 30-100ms.
-    pub tau_slow_fall: f64,
+    pub tau_slow_fall: crate::Wave,
     /// Weight of slow component (0-1). Typical: 0.2 - 0.4.
-    pub slow_weight: f64,
+    pub slow_weight: crate::Wave,
 }
 
 impl PhotocouplerModel {
@@ -113,22 +113,22 @@ impl PhotocouplerModel {
 pub struct Photocoupler {
     pub model: PhotocouplerModel,
     /// Fast carrier state (normalized 0-1).
-    state_fast: f64,
+    state_fast: crate::Wave,
     /// Slow carrier state (normalized 0-1).
-    state_slow: f64,
+    state_slow: crate::Wave,
     /// Current port resistance (Ω).
-    resistance: f64,
+    resistance: crate::Wave,
     /// Sample rate for time constant conversion.
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Precomputed coefficients for exponential decay.
-    alpha_fast_rise: f64,
-    alpha_fast_fall: f64,
-    alpha_slow_rise: f64,
-    alpha_slow_fall: f64,
+    alpha_fast_rise: crate::Wave,
+    alpha_fast_fall: crate::Wave,
+    alpha_slow_rise: crate::Wave,
+    alpha_slow_fall: crate::Wave,
 }
 
 impl Photocoupler {
-    pub fn new(model: PhotocouplerModel, sample_rate: f64) -> Self {
+    pub fn new(model: PhotocouplerModel, sample_rate: crate::Wave) -> Self {
         let mut pc = Self {
             model,
             state_fast: 0.0,
@@ -148,10 +148,14 @@ impl Photocoupler {
     fn update_coefficients(&mut self) {
         let dt = 1.0 / self.sample_rate;
         // alpha = exp(-dt/tau), so (1 - alpha) is the step response per sample
-        self.alpha_fast_rise = crate::math::exp((-dt / self.model.tau_fast_rise) as crate::Wave) as f64;
-        self.alpha_fast_fall = crate::math::exp((-dt / self.model.tau_fast_fall) as crate::Wave) as f64;
-        self.alpha_slow_rise = crate::math::exp((-dt / self.model.tau_slow_rise) as crate::Wave) as f64;
-        self.alpha_slow_fall = crate::math::exp((-dt / self.model.tau_slow_fall) as crate::Wave) as f64;
+        self.alpha_fast_rise =
+            crate::math::exp((-dt / self.model.tau_fast_rise) as crate::Wave) as crate::Wave;
+        self.alpha_fast_fall =
+            crate::math::exp((-dt / self.model.tau_fast_fall) as crate::Wave) as crate::Wave;
+        self.alpha_slow_rise =
+            crate::math::exp((-dt / self.model.tau_slow_rise) as crate::Wave) as crate::Wave;
+        self.alpha_slow_fall =
+            crate::math::exp((-dt / self.model.tau_slow_fall) as crate::Wave) as crate::Wave;
     }
 
     /// Set LED drive level and update LDR resistance.
@@ -159,7 +163,7 @@ impl Photocoupler {
     /// `led_drive` is normalized 0.0 (off) to 1.0 (full brightness).
     /// Call this once per sample before using the element in WDF.
     #[inline]
-    pub fn set_led_drive(&mut self, led_drive: f64) {
+    pub fn set_led_drive(&mut self, led_drive: crate::Wave) {
         let target = led_drive.clamp(0.0, 1.0);
 
         // Update fast state with asymmetric time constants
@@ -186,11 +190,14 @@ impl Photocoupler {
         // x = effective_light^gamma, then R = R_dark^(1-x) * R_light^x
         // This gives R_dark when light=0 and approaches R_light as light→1
         if effective_light > 1e-9 {
-            let x = crate::math::powf(effective_light as crate::Wave, self.model.gamma as crate::Wave) as f64;
-            let log_r_dark = crate::math::ln(self.model.r_dark as crate::Wave) as f64;
-            let log_r_light = crate::math::ln(self.model.r_light as crate::Wave) as f64;
+            let x = crate::math::powf(
+                effective_light as crate::Wave,
+                self.model.gamma as crate::Wave,
+            ) as crate::Wave;
+            let log_r_dark = crate::math::ln(self.model.r_dark as crate::Wave) as crate::Wave;
+            let log_r_light = crate::math::ln(self.model.r_light as crate::Wave) as crate::Wave;
             let log_r = log_r_dark + x * (log_r_light - log_r_dark);
-            self.resistance = crate::math::exp(log_r as crate::Wave) as f64;
+            self.resistance = crate::math::exp(log_r as crate::Wave) as crate::Wave;
             self.resistance = self.resistance.clamp(self.model.r_light, self.model.r_dark);
         } else {
             self.resistance = self.model.r_dark;
@@ -198,7 +205,7 @@ impl Photocoupler {
     }
 
     /// Get current LED drive level (for monitoring).
-    pub fn effective_light_level(&self) -> f64 {
+    pub fn effective_light_level(&self) -> crate::Wave {
         let w = self.model.slow_weight;
         (1.0 - w) * self.state_fast + w * self.state_slow
     }
@@ -214,7 +221,7 @@ impl Photocoupler {
     #[cfg(feature = "runtime-warnings")]
     pub fn check_operating_region(
         &self,
-        prev_resistance: Option<f64>,
+        prev_resistance: Option<crate::Wave>,
         comp_id: &str,
         sample_index: u64,
     ) {
@@ -274,23 +281,23 @@ impl Photocoupler {
 
 impl WdfLeaf for Photocoupler {
     #[inline]
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.resistance
     }
 
     /// Reflected wave (same as ideal resistor: b = 0 when matched).
     #[inline]
-    fn reflected(&self) -> f64 {
+    fn reflected(&self) -> crate::Wave {
         0.0
     }
 
     /// Set incident wave (no state update needed for resistor).
     #[inline]
-    fn set_incident(&mut self, _a: f64) {
+    fn set_incident(&mut self, _a: crate::Wave) {
         // Resistor has no reactive state
     }
 
-    fn set_sample_rate(&mut self, sample_rate: f64) {
+    fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.update_coefficients();
     }
@@ -304,11 +311,11 @@ impl WdfLeaf for Photocoupler {
 
 impl ControlledResistance for Photocoupler {
     #[inline]
-    fn set_control(&mut self, value: f64) {
+    fn set_control(&mut self, value: crate::Wave) {
         self.set_led_drive(value);
     }
 
-    fn effective_control(&self) -> f64 {
+    fn effective_control(&self) -> crate::Wave {
         self.effective_light_level()
     }
 }
@@ -336,11 +343,11 @@ impl ControlledResistance for Photocoupler {
 pub struct JfetVariableResistor {
     pub model: JfetModel,
     /// Current gate-source voltage (V).
-    vgs: f64,
+    vgs: crate::Wave,
     /// Current drain-source resistance (Ω).
-    resistance: f64,
+    resistance: crate::Wave,
     /// Resistance at Vgs = 0: 1 / (2 × β × |Vp|).
-    rds_on: f64,
+    rds_on: crate::Wave,
 }
 
 impl JfetVariableResistor {
@@ -356,26 +363,26 @@ impl JfetVariableResistor {
 
     /// Set the gate-source voltage and update Rds.
     #[inline]
-    pub fn set_vgs(&mut self, vgs: f64) {
+    pub fn set_vgs(&mut self, vgs: crate::Wave) {
         self.vgs = vgs;
         self.resistance = self.compute_rds();
     }
 
     /// Current gate-source voltage.
     #[inline]
-    pub fn vgs(&self) -> f64 {
+    pub fn vgs(&self) -> crate::Wave {
         self.vgs
     }
 
     /// Current drain-source resistance.
     #[inline]
-    pub fn rds(&self) -> f64 {
+    pub fn rds(&self) -> crate::Wave {
         self.resistance
     }
 
     /// Resistance at Vgs = 0.
     #[inline]
-    pub fn rds_on(&self) -> f64 {
+    pub fn rds_on(&self) -> crate::Wave {
         self.rds_on
     }
 
@@ -386,7 +393,7 @@ impl JfetVariableResistor {
     /// The ratio Vgs/Vp is clamped to [-0.95, 0.95] to avoid singularity
     /// at pinch-off and unrealistically low resistance beyond zero bias.
     #[inline]
-    fn compute_rds(&self) -> f64 {
+    fn compute_rds(&self) -> crate::Wave {
         let vp = self.model.vto; // Negative for N-channel
                                  // Clamp ratio to avoid div-by-zero near pinch-off
         let ratio = (self.vgs / vp).clamp(-0.95, 0.95);
@@ -401,7 +408,7 @@ impl JfetVariableResistor {
     ///
     ///   `b = a × (Rds - Rp) / (Rds + Rp)`
     #[inline]
-    pub fn process_root(&self, a: f64, rp: f64) -> f64 {
+    pub fn process_root(&self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let rds = self.resistance;
         let sum = rds + rp;
         if sum.abs() < 1e-15 {
@@ -413,21 +420,21 @@ impl JfetVariableResistor {
 
 impl WdfLeaf for JfetVariableResistor {
     #[inline]
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.resistance
     }
 
     #[inline]
-    fn reflected(&self) -> f64 {
+    fn reflected(&self) -> crate::Wave {
         0.0 // Pure resistor: no stored energy
     }
 
     #[inline]
-    fn set_incident(&mut self, _a: f64) {
+    fn set_incident(&mut self, _a: crate::Wave) {
         // Resistor has no reactive state
     }
 
-    fn set_sample_rate(&mut self, _sample_rate: f64) {
+    fn set_sample_rate(&mut self, _sample_rate: crate::Wave) {
         // No sample-rate-dependent state
     }
 
@@ -448,8 +455,8 @@ impl JfetVariableResistor {
     #[cfg(feature = "runtime-warnings")]
     pub fn check_operating_region(
         &self,
-        v_port: f64,
-        prev_rds: Option<f64>,
+        v_port: crate::Wave,
+        prev_rds: Option<crate::Wave>,
         comp_id: &str,
         sample_index: u64,
     ) {
@@ -490,7 +497,7 @@ impl JfetVariableResistor {
         }
 
         // Rds > 10MΩ → near pinch-off
-        const PINCHOFF_THRESHOLD: f64 = 10_000_000.0;
+        const PINCHOFF_THRESHOLD: crate::Wave = 10_000_000.0;
         if rds > PINCHOFF_THRESHOLD {
             emit_warning(
                 sample_index,
@@ -524,11 +531,11 @@ impl JfetVariableResistor {
 
 impl ControlledResistance for JfetVariableResistor {
     #[inline]
-    fn set_control(&mut self, value: f64) {
+    fn set_control(&mut self, value: crate::Wave) {
         self.set_vgs(value);
     }
 
-    fn effective_control(&self) -> f64 {
+    fn effective_control(&self) -> crate::Wave {
         self.vgs
     }
 }

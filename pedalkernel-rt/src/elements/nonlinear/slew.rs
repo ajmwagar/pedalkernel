@@ -21,13 +21,13 @@
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SlewRateLimiter {
     /// Maximum voltage change per sample (V/sample).
-    max_dv: f64,
+    max_dv: crate::Wave,
     /// Previous output voltage (state).
-    prev_out: f64,
+    prev_out: crate::Wave,
     /// Slew rate in V/µs (for reference/display).
-    slew_rate_v_per_us: f64,
+    slew_rate_v_per_us: crate::Wave,
     /// Current sample rate.
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl SlewRateLimiter {
@@ -40,7 +40,7 @@ impl SlewRateLimiter {
     /// - NE5532: 9.0 V/µs (studio clean)
     /// - TL072: 13.0 V/µs (modern, transparent)
     /// - CA3080: 50.0 V/µs (OTA, essentially transparent)
-    pub fn new(slew_rate_v_per_us: f64, sample_rate: f64) -> Self {
+    pub fn new(slew_rate_v_per_us: crate::Wave, sample_rate: crate::Wave) -> Self {
         // Convert V/µs to V/sample: slew_rate * 1e6 / sample_rate
         let max_dv = slew_rate_v_per_us * 1e6 / sample_rate;
         Self {
@@ -58,7 +58,7 @@ impl SlewRateLimiter {
     /// This creates asymmetric HF compression — the exact behavior that
     /// makes the LM308 RAT sound different from a TL072 RAT.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         let dv = input - self.prev_out;
         let limited = if dv > self.max_dv {
             self.prev_out + self.max_dv
@@ -73,7 +73,7 @@ impl SlewRateLimiter {
     }
 
     /// Update sample rate and recompute max_dv.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.max_dv = self.slew_rate_v_per_us * 1e6 / sample_rate;
     }
@@ -84,7 +84,7 @@ impl SlewRateLimiter {
     }
 
     /// Get the slew rate in V/µs.
-    pub fn slew_rate(&self) -> f64 {
+    pub fn slew_rate(&self) -> crate::Wave {
         self.slew_rate_v_per_us
     }
 

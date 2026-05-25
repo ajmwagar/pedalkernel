@@ -22,11 +22,11 @@ pub struct Glide {
     target: Wave,
     glide_coeff: Wave, // per-sample smoothing coefficient (0..1, higher = slower)
     active: bool,
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl Glide {
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: crate::Wave) -> Self {
         Self {
             current: 0.0 as Wave,
             target: 0.0 as Wave,
@@ -36,13 +36,13 @@ impl Glide {
         }
     }
 
-    pub fn set_sample_rate(&mut self, sr: f64) {
+    pub fn set_sample_rate(&mut self, sr: crate::Wave) {
         self.sample_rate = sr;
     }
 
     /// Set glide time from a 0..1 knob.
     /// 0.0 = instant (no glide), 1.0 = ~360ms glide (Devil Fish Manual max).
-    pub fn set_time_from_knob(&mut self, knob: f64) {
+    pub fn set_time_from_knob(&mut self, knob: crate::Wave) {
         let clamped = knob.clamp(0.0, 1.0);
         if clamped < 1e-4 {
             self.glide_coeff = 0.0 as Wave; // instant
@@ -54,7 +54,7 @@ impl Glide {
     }
 
     /// Set target pitch (V/oct).
-    pub fn set_target(&mut self, voct: f64) {
+    pub fn set_target(&mut self, voct: crate::Wave) {
         self.target = voct as Wave;
     }
 
@@ -110,7 +110,7 @@ mod tests {
     use super::*;
     use std::eprintln;
 
-    const SR: f64 = 48_000.0;
+    const SR: crate::Wave = 48_000.0;
 
     #[test]
     fn snap_is_instant() {

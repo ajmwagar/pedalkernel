@@ -73,15 +73,15 @@ pub enum Medium {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZoneBoundary {
     /// Distance from write head in samples.
-    pub distance_samples: f64,
+    pub distance_samples: crate::Wave,
     /// One-pole LP filter state for this zone (tape oxide model).
-    pub filter_state: f64,
+    pub filter_state: crate::Wave,
     /// LP coefficient applied at this boundary.
     /// Higher = stronger HF loss. Typical tape: 0.02–0.05.
-    pub coefficient: f64,
+    pub coefficient: crate::Wave,
     /// Decay rate per zone crossing (BBD leakage model).
     /// Each crossing multiplies the sample by `(1 - leak_rate)`.
-    pub leak_rate: f64,
+    pub leak_rate: crate::Wave,
     /// Tracks the last buffer position processed at this boundary.
     pub last_processed_pos: usize,
 }
@@ -103,7 +103,7 @@ impl MediumPreset {
     ///
     /// Returns coefficients for each zone boundary between taps.
     /// More distant zones have stronger HF loss.
-    pub fn zone_coefficients(&self) -> Vec<f64> {
+    pub fn zone_coefficients(&self) -> Vec<crate::Wave> {
         match self {
             MediumPreset::Re201 => vec![0.02, 0.03, 0.05],
             MediumPreset::Echoplex => vec![0.04, 0.06],
@@ -138,29 +138,29 @@ impl MediumPreset {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DelayLine {
     /// Ring buffer holding delayed samples.
-    buffer: Vec<f64>,
+    buffer: Vec<crate::Wave>,
     /// Current write position in the buffer.
     write_pos: usize,
     /// Current delay time in samples (fractional for interpolation).
-    current_delay_samples: f64,
+    current_delay_samples: crate::Wave,
     /// Minimum delay time in seconds.
-    min_delay_sec: f64,
+    min_delay_sec: crate::Wave,
     /// Maximum delay time in seconds.
-    max_delay_sec: f64,
+    max_delay_sec: crate::Wave,
     /// Sample rate (Hz).
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Interpolation mode for fractional-sample reads.
     interpolation: Interpolation,
     /// Allpass interpolation state (previous output) — one per tap slot.
     /// Index 0 is for the base delay, indices 1..N for taps.
-    allpass_states: Vec<f64>,
+    allpass_states: Vec<crate::Wave>,
     /// Speed modulation accumulator (from LFO wow/flutter).
     /// Applied as a multiplier to the base delay time.
-    speed_mod: f64,
+    speed_mod: crate::Wave,
     /// Feedback sample (from downstream, routed back to input).
-    feedback_sample: f64,
+    feedback_sample: crate::Wave,
     /// Feedback amount (0.0 = no feedback, up to ~0.95 for self-oscillation).
-    feedback: f64,
+    feedback: crate::Wave,
     /// Physical storage medium model.
     medium: Medium,
     /// Zone boundaries for medium processing.
@@ -176,9 +176,9 @@ impl DelayLine {
     /// * `sample_rate` — audio sample rate in Hz
     /// * `interpolation` — fractional-sample interpolation mode
     pub fn new(
-        min_delay_sec: f64,
-        max_delay_sec: f64,
-        sample_rate: f64,
+        min_delay_sec: crate::Wave,
+        max_delay_sec: crate::Wave,
+        sample_rate: crate::Wave,
         interpolation: Interpolation,
     ) -> Self {
         // Buffer sized for max delay + headroom for interpolation
@@ -214,7 +214,7 @@ impl DelayLine {
     /// that have crossed zone boundaries since the last tick.
     /// Call this once per audio sample, before reading any taps.
     #[inline]
-    pub fn write(&mut self, input: f64) {
+    pub fn write(&mut self, input: crate::Wave) {
         let write_sample = input + self.feedback * self.feedback_sample;
         self.buffer[self.write_pos] = write_sample;
         self.write_pos = (self.write_pos + 1) % self.buffer.len();
@@ -228,7 +228,7 @@ impl DelayLine {
     /// Returns the interpolated sample at `write_pos - current_delay_samples`.
     /// This is equivalent to reading from tap ratio 1.0.
     #[inline]
-    pub fn read(&mut self) -> f64 {
+    pub fn read(&mut self) -> crate::Wave {
         self.read_at_ratio(1.0, 0)
     }
 
@@ -240,9 +240,9 @@ impl DelayLine {
     /// The effective delay in samples is:
     ///   `current_delay_samples * speed_mod * ratio`
     #[inline]
-    pub fn read_at_ratio(&mut self, ratio: f64, tap_index: usize) -> f64 {
+    pub fn read_at_ratio(&mut self, ratio: crate::Wave, tap_index: usize) -> crate::Wave {
         let effective_delay = self.current_delay_samples * self.speed_mod * ratio;
-        let max_delay = (self.buffer.len() - 2) as f64;
+        let max_delay = (self.buffer.len() - 2) as crate::Wave;
         let clamped_delay = effective_delay.clamp(1.0, max_delay);
 
         match self.interpolation {
@@ -254,9 +254,9 @@ impl DelayLine {
 
     /// Linear interpolation read.
     #[inline]
-    fn read_linear(&self, delay_samples: f64) -> f64 {
+    fn read_linear(&self, delay_samples: crate::Wave) -> crate::Wave {
         let delay_int = delay_samples as usize;
-        let frac = delay_samples - delay_int as f64;
+        let frac = delay_samples - delay_int as crate::Wave;
         let buf_len = self.buffer.len();
 
         let idx0 = (self.write_pos + buf_len - delay_int) % buf_len;
@@ -274,9 +274,9 @@ impl DelayLine {
     /// This preserves magnitude response (no HF loss) while providing
     /// smooth sub-sample delay — ideal for modulated delays.
     #[inline]
-    fn read_allpass(&mut self, delay_samples: f64, tap_index: usize) -> f64 {
+    fn read_allpass(&mut self, delay_samples: crate::Wave, tap_index: usize) -> crate::Wave {
         let delay_int = delay_samples as usize;
-        let frac = delay_samples - delay_int as f64;
+        let frac = delay_samples - delay_int as crate::Wave;
         let buf_len = self.buffer.len();
 
         let idx0 = (self.write_pos + buf_len - delay_int) % buf_len;
@@ -306,9 +306,9 @@ impl DelayLine {
 
     /// Cubic Hermite interpolation read (4-point).
     #[inline]
-    fn read_cubic(&self, delay_samples: f64) -> f64 {
+    fn read_cubic(&self, delay_samples: crate::Wave) -> crate::Wave {
         let delay_int = delay_samples as usize;
-        let frac = delay_samples - delay_int as f64;
+        let frac = delay_samples - delay_int as crate::Wave;
         let buf_len = self.buffer.len();
 
         // 4 sample points: x[-1], x[0], x[1], x[2]
@@ -335,16 +335,17 @@ impl DelayLine {
     ///
     /// Uses logarithmic interpolation for a natural feel — small changes
     /// at short delays, larger changes at long delays.
-    pub fn set_delay_normalized(&mut self, norm: f64) {
+    pub fn set_delay_normalized(&mut self, norm: crate::Wave) {
         let norm = norm.clamp(0.0, 1.0);
-        let log_min = crate::math::ln(self.min_delay_sec as crate::Wave) as f64;
-        let log_max = crate::math::ln(self.max_delay_sec as crate::Wave) as f64;
-        let delay_sec = crate::math::exp((log_min + norm * (log_max - log_min)) as crate::Wave) as f64;
+        let log_min = crate::math::ln(self.min_delay_sec as crate::Wave) as crate::Wave;
+        let log_max = crate::math::ln(self.max_delay_sec as crate::Wave) as crate::Wave;
+        let delay_sec =
+            crate::math::exp((log_min + norm * (log_max - log_min)) as crate::Wave) as crate::Wave;
         self.current_delay_samples = delay_sec * self.sample_rate;
     }
 
     /// Set the delay time in seconds directly.
-    pub fn set_delay_seconds(&mut self, seconds: f64) {
+    pub fn set_delay_seconds(&mut self, seconds: crate::Wave) {
         let clamped = seconds.clamp(self.min_delay_sec, self.max_delay_sec);
         self.current_delay_samples = clamped * self.sample_rate;
     }
@@ -355,7 +356,7 @@ impl DelayLine {
     /// (longer delay, lower pitch). Values < 1.0 speed it up.
     /// Typically modulated by an LFO for wow/flutter effects.
     #[inline]
-    pub fn set_speed_mod(&mut self, factor: f64) {
+    pub fn set_speed_mod(&mut self, factor: crate::Wave) {
         self.speed_mod = factor.clamp(0.5, 2.0);
     }
 
@@ -363,7 +364,7 @@ impl DelayLine {
     ///
     /// The total speed_mod = 1.0 + sum of all modulation offsets.
     #[inline]
-    pub fn add_speed_mod(&mut self, offset: f64) {
+    pub fn add_speed_mod(&mut self, offset: crate::Wave) {
         self.speed_mod += offset;
     }
 
@@ -374,28 +375,28 @@ impl DelayLine {
     }
 
     /// Set the feedback amount.
-    pub fn set_feedback(&mut self, feedback: f64) {
+    pub fn set_feedback(&mut self, feedback: crate::Wave) {
         self.feedback = feedback.clamp(0.0, 0.99);
     }
 
     /// Store the feedback sample (called after downstream processing).
     #[inline]
-    pub fn set_feedback_sample(&mut self, sample: f64) {
+    pub fn set_feedback_sample(&mut self, sample: crate::Wave) {
         self.feedback_sample = sample;
     }
 
     /// Get the current delay time in seconds.
-    pub fn delay_time(&self) -> f64 {
+    pub fn delay_time(&self) -> crate::Wave {
         self.current_delay_samples / self.sample_rate
     }
 
     /// Get the current delay time in samples (with speed modulation).
-    pub fn effective_delay_samples(&self) -> f64 {
+    pub fn effective_delay_samples(&self) -> crate::Wave {
         self.current_delay_samples * self.speed_mod
     }
 
     /// Update for a new sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         let delay_sec = self.current_delay_samples / self.sample_rate;
         self.sample_rate = sample_rate;
         self.current_delay_samples = delay_sec * sample_rate;
@@ -421,12 +422,12 @@ impl DelayLine {
     }
 
     /// Minimum delay in seconds.
-    pub fn min_delay_sec(&self) -> f64 {
+    pub fn min_delay_sec(&self) -> crate::Wave {
         self.min_delay_sec
     }
 
     /// Maximum delay in seconds.
-    pub fn max_delay_sec(&self) -> f64 {
+    pub fn max_delay_sec(&self) -> crate::Wave {
         self.max_delay_sec
     }
 
@@ -441,7 +442,7 @@ impl DelayLine {
     }
 
     /// Get the current sample rate.
-    pub fn sample_rate(&self) -> f64 {
+    pub fn sample_rate(&self) -> crate::Wave {
         self.sample_rate
     }
 
@@ -451,7 +452,7 @@ impl DelayLine {
     /// reading to complete the tick.  This is used by `BbdDelayLine` which
     /// manages its own feedback path (with soft-clipping between mix and write).
     #[inline]
-    pub fn write_direct(&mut self, sample: f64) {
+    pub fn write_direct(&mut self, sample: crate::Wave) {
         self.buffer[self.write_pos] = sample;
     }
 
@@ -461,8 +462,8 @@ impl DelayLine {
     /// Lower-level than [`read`]/[`read_at_ratio`]: the caller supplies the
     /// exact fractional-sample delay instead of using the stored delay time.
     #[inline]
-    pub fn buffer_read(&mut self, delay_samples: f64, tap_slot: usize) -> f64 {
-        let delay = delay_samples.clamp(1.0, self.buffer.len() as f64 - 2.0);
+    pub fn buffer_read(&mut self, delay_samples: crate::Wave, tap_slot: usize) -> crate::Wave {
+        let delay = delay_samples.clamp(1.0, self.buffer.len() as crate::Wave - 2.0);
         match self.interpolation {
             Interpolation::Linear => self.read_linear(delay),
             Interpolation::Allpass => self.read_allpass(delay, tap_slot),
@@ -490,7 +491,11 @@ impl DelayLine {
     /// * `tap_ratios` — tap positions as ratios of base delay (e.g., [1.0, 2.0, 4.0])
     /// * `coefficients` — optional per-zone LP coefficients; if `None`, uses
     ///   defaults based on medium type and tap count
-    pub fn configure_zones_from_taps(&mut self, tap_ratios: &[f64], coefficients: Option<&[f64]>) {
+    pub fn configure_zones_from_taps(
+        &mut self,
+        tap_ratios: &[crate::Wave],
+        coefficients: Option<&[crate::Wave]>,
+    ) {
         self.zones.clear();
 
         if self.medium == Medium::None || self.medium == Medium::DigitalQuantize {
@@ -498,17 +503,17 @@ impl DelayLine {
         }
 
         // Sort tap ratios to determine zone boundaries
-        let mut sorted_ratios: Vec<f64> = tap_ratios.to_vec();
+        let mut sorted_ratios: Vec<crate::Wave> = tap_ratios.to_vec();
         sorted_ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
         sorted_ratios.dedup();
 
         // Default coefficients: progressively stronger
-        let default_coefficients: Vec<f64> = sorted_ratios
+        let default_coefficients: Vec<crate::Wave> = sorted_ratios
             .iter()
             .enumerate()
             .map(|(i, _)| match self.medium {
-                Medium::TapeOxide => 0.02 + 0.015 * i as f64, // 0.02, 0.035, 0.05, ...
-                Medium::BbdLeakage => 0.01 + 0.005 * i as f64, // 0.01, 0.015, 0.02, ...
+                Medium::TapeOxide => 0.02 + 0.015 * i as crate::Wave, // 0.02, 0.035, 0.05, ...
+                Medium::BbdLeakage => 0.01 + 0.005 * i as crate::Wave, // 0.01, 0.015, 0.02, ...
                 _ => 0.0,
             })
             .collect();
@@ -606,7 +611,7 @@ impl DelayLine {
     /// Called automatically by `set_delay_normalized` and `set_delay_seconds`
     /// to keep zone boundaries aligned with the current delay time.
     #[allow(dead_code)]
-    fn update_zone_distances(&mut self, tap_ratios: &[f64]) {
+    fn update_zone_distances(&mut self, tap_ratios: &[crate::Wave]) {
         for (zone, &ratio) in self.zones.iter_mut().zip(tap_ratios.iter()) {
             zone.distance_samples = self.current_delay_samples * ratio;
         }
@@ -627,7 +632,7 @@ impl DelayLine {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Tap {
     /// Ratio of base delay time (e.g., 1.0, 2.0, 4.0).
-    pub ratio: f64,
+    pub ratio: crate::Wave,
     /// Index of the parent `DelayLine` in the compiled pedal's delay list.
     pub delay_line_idx: usize,
     /// Tap index for allpass state tracking within the delay line.
@@ -640,7 +645,7 @@ mod delay_tests {
     use super::super::bbd::{BbdDelayLine, BbdModel};
     use super::*;
 
-    const SR: f64 = 48000.0;
+    const SR: crate::Wave = 48000.0;
 
     // ── DelayLine basic operation ────────────────────────────────────
 
@@ -654,7 +659,7 @@ mod delay_tests {
 
         // Write impulse then pump zeros, collecting every output.
         let n = 600;
-        let mut outputs = vec![0.0_f64; n];
+        let mut outputs = vec![0.0 as crate::Wave; n];
 
         dl.write(1.0);
         outputs[0] = dl.read();
@@ -688,7 +693,7 @@ mod delay_tests {
         dl.set_delay_seconds(0.025);
 
         for i in 0..2400 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             dl.write(input);
             let out = dl.read();
@@ -724,7 +729,7 @@ mod delay_tests {
         dl.write(1.0);
 
         // Run for several delay periods, collecting output
-        let mut max_out = 0.0_f64;
+        let mut max_out = 0.0 as crate::Wave;
         for _ in 1..1000 {
             dl.write(0.0);
             let out = dl.read();
@@ -746,7 +751,7 @@ mod delay_tests {
 
         // Normal speed: write a tone and measure delay
         for i in 0..960 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             dl.write(crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
         let normal_out = dl.read();
@@ -804,7 +809,7 @@ mod delay_tests {
         dl.set_delay_seconds(0.010);
 
         for i in 0..4800 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             dl.write(input);
             let out = dl.read();
@@ -821,7 +826,7 @@ mod delay_tests {
         dl.set_delay_seconds(0.010);
 
         for i in 0..4800 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             dl.write(input);
             let out = dl.read();
@@ -842,7 +847,7 @@ mod delay_tests {
 
         // Write known pattern
         for i in 0..960 {
-            dl.write((i as f64) / 960.0);
+            dl.write((i as crate::Wave) / 960.0);
         }
 
         // Read — should be clean (no medium distortion)
@@ -866,7 +871,7 @@ mod delay_tests {
 
         // Process a high-frequency tone through both
         for i in 0..4800 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             let input = crate::math::sin(2.0 * crate::math::PI * 8000.0 * t);
             dl_clean.write(input);
             dl_tape.write(input);
@@ -898,7 +903,7 @@ mod delay_tests {
         let mut sum_bbd = 0.0;
 
         for i in 0..4800 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             dl_clean.write(input);
             dl_bbd.write(input);
@@ -927,7 +932,7 @@ mod delay_tests {
         dl.set_delay_seconds(0.010); // 480 samples
 
         let n = 600;
-        let mut outputs = vec![0.0_f64; n];
+        let mut outputs = vec![0.0 as crate::Wave; n];
 
         // Write impulse using direct access
         dl.write_direct(1.0);
@@ -970,7 +975,7 @@ mod delay_tests {
         let mut bbd = BbdDelayLine::new(model, SR);
 
         for i in 0..4800 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             let input = crate::math::sin(2.0 * crate::math::PI * 440.0 * t) * 0.5;
             let out = bbd.process(input);
             assert!(
@@ -1014,7 +1019,7 @@ mod delay_tests {
 
         // Write a short burst then silence
         for i in 0..480 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             let input = if i < 48 {
                 crate::math::sin(2.0 * crate::math::PI * 440.0 * t)
             } else {
@@ -1043,7 +1048,7 @@ mod delay_tests {
 
         // Process some signal
         for i in 0..4800 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             bbd.process(crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
 
@@ -1082,7 +1087,7 @@ mod delay_tests {
 
         // Fill with signal
         for i in 0..4800 {
-            let t = i as f64 / SR;
+            let t = i as crate::Wave / SR;
             dl.write(crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
 

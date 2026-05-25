@@ -51,12 +51,12 @@ use crate::{math, Wave};
 pub struct DecayEnvelope {
     value: Wave,
     decay_coeff: Wave,
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl DecayEnvelope {
     /// Create a new envelope with a default 200ms decay time.
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: crate::Wave) -> Self {
         let mut env = Self {
             value: 0.0 as Wave,
             decay_coeff: 0.0 as Wave,
@@ -67,10 +67,10 @@ impl DecayEnvelope {
     }
 
     /// Update sample rate, preserving the current decay time.
-    pub fn set_sample_rate(&mut self, sr: f64) {
+    pub fn set_sample_rate(&mut self, sr: crate::Wave) {
         // Recover the current time constant, then recompute for new SR
         let old_time_samples = if self.decay_coeff > 0.0 as Wave && self.decay_coeff < 1.0 as Wave {
-            -1.0 / math::ln(self.decay_coeff as f64)
+            -1.0 / math::ln(self.decay_coeff as crate::Wave)
         } else {
             0.01 * self.sample_rate // fallback: 10ms
         };
@@ -85,7 +85,7 @@ impl DecayEnvelope {
     ///
     /// This is the time for the envelope to decay to ~37% (1/e) of its
     /// initial value. Typical 303 range: 5ms (fast) to 2000ms (slow).
-    pub fn set_decay_time_ms(&mut self, ms: f64) {
+    pub fn set_decay_time_ms(&mut self, ms: crate::Wave) {
         let time_samples = ms.max(0.1) * 0.001 * self.sample_rate;
         self.decay_coeff = math::exp(-1.0 / time_samples) as Wave;
     }
@@ -94,7 +94,7 @@ impl DecayEnvelope {
     ///
     /// Maps exponentially: 0.0 → 5ms (fast), 1.0 → 2000ms (slow).
     /// Matches the 303's Decay knob feel.
-    pub fn set_decay_from_knob(&mut self, knob: f64) {
+    pub fn set_decay_from_knob(&mut self, knob: crate::Wave) {
         let clamped = knob.clamp(0.0, 1.0);
         let ms = 5.0 * math::powf(2000.0 / 5.0, clamped);
         self.set_decay_time_ms(ms);
@@ -105,13 +105,13 @@ impl DecayEnvelope {
     /// Use for accent override: the 303 forces a fixed short decay
     /// (~30ms) regardless of the Decay knob. Compute the coefficient
     /// externally and set it here.
-    pub fn set_decay_coeff(&mut self, coeff: f64) {
+    pub fn set_decay_coeff(&mut self, coeff: crate::Wave) {
         self.decay_coeff = coeff.clamp(0.0, 1.0 - 1e-12) as Wave;
     }
 
     /// Get the current decay coefficient (for save/restore).
-    pub fn decay_coeff(&self) -> f64 {
-        self.decay_coeff as f64
+    pub fn decay_coeff(&self) -> crate::Wave {
+        self.decay_coeff as crate::Wave
     }
 
     // ── Triggering ──────────────────────────────────────────────────────
@@ -163,13 +163,13 @@ impl DecayEnvelope {
     /// Use to write a linearly-ramped value during an attack phase
     /// before handing off to the normal exponential decay. Does not
     /// affect the decay coefficient.
-    pub fn set_value(&mut self, v: f64) {
+    pub fn set_value(&mut self, v: crate::Wave) {
         self.value = v as Wave;
     }
 
     /// Check if the envelope has decayed below a threshold.
     #[inline]
-    pub fn is_silent(&self, threshold: f64) -> bool {
+    pub fn is_silent(&self, threshold: crate::Wave) -> bool {
         self.value < threshold as Wave
     }
 }
@@ -179,7 +179,7 @@ impl DecayEnvelope {
 /// Compute the decay coefficient for a fixed time in milliseconds.
 ///
 /// Useful for accent override: `env.set_decay_coeff(decay_coeff_ms(30.0, sr))`.
-pub fn decay_coeff_ms(ms: f64, sample_rate: f64) -> f64 {
+pub fn decay_coeff_ms(ms: crate::Wave, sample_rate: crate::Wave) -> crate::Wave {
     let time_samples = ms.max(0.1) * 0.001 * sample_rate;
     math::exp(-1.0 / time_samples)
 }
@@ -192,7 +192,7 @@ mod tests {
     use super::*;
     use std::eprintln;
 
-    const SR: f64 = 48_000.0;
+    const SR: crate::Wave = 48_000.0;
 
     #[test]
     fn starts_at_zero() {
@@ -228,7 +228,7 @@ mod tests {
 
         // After one time constant (100ms), should be near 1/e ≈ 0.368
         assert!(
-            (after_100ms - 1.0 / core::f64::consts::E).abs() < 0.05,
+            (after_100ms - 1.0 / crate::math::E).abs() < 0.05,
             "after one time constant: expected ~0.368, got {after_100ms:.4}"
         );
     }
@@ -428,7 +428,7 @@ mod tests {
         }
         eprintln!("  30ms coeff: {coeff:.8}, value after 30ms: {val:.4}");
         assert!(
-            (val - 1.0 / core::f64::consts::E).abs() < 0.05,
+            (val - 1.0 / crate::math::E).abs() < 0.05,
             "after one time constant: expected ~0.368, got {val:.4}"
         );
     }

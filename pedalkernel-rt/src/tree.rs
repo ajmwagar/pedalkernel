@@ -32,15 +32,15 @@ use alloc::vec::Vec;
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeriesAdaptor {
-    pub port_resistance: f64,
-    gamma: f64,
+    pub port_resistance: crate::Wave,
+    gamma: crate::Wave,
     // Child reflected waves (cached from scatter_up)
-    b1: f64,
-    b2: f64,
+    b1: crate::Wave,
+    b2: crate::Wave,
 }
 
 impl SeriesAdaptor {
-    pub fn new(r1: f64, r2: f64) -> Self {
+    pub fn new(r1: crate::Wave, r2: crate::Wave) -> Self {
         let rp = r1 + r2;
         Self {
             port_resistance: rp,
@@ -51,14 +51,14 @@ impl SeriesAdaptor {
     }
 
     /// Recompute when child port resistances change.
-    pub fn update_ports(&mut self, r1: f64, r2: f64) {
+    pub fn update_ports(&mut self, r1: crate::Wave, r2: crate::Wave) {
         self.port_resistance = r1 + r2;
         self.gamma = r1 / self.port_resistance;
     }
 
     /// Bottom-up: accept child reflected waves, produce parent reflected wave.
     #[inline]
-    pub fn scatter_up(&mut self, b1: f64, b2: f64) -> f64 {
+    pub fn scatter_up(&mut self, b1: crate::Wave, b2: crate::Wave) -> crate::Wave {
         self.b1 = b1;
         self.b2 = b2;
         -(b1 + b2)
@@ -67,7 +67,7 @@ impl SeriesAdaptor {
     /// Top-down: accept parent incident wave, produce child incident waves.
     /// Returns `(a1, a2)`.
     #[inline]
-    pub fn scatter_down(&self, a3: f64) -> (f64, f64) {
+    pub fn scatter_down(&self, a3: crate::Wave) -> (crate::Wave, crate::Wave) {
         let sum = self.b1 + self.b2 + a3;
         let a1 = self.b1 - self.gamma * sum;
         #[cfg(feature = "fault-injection")]
@@ -110,11 +110,11 @@ impl SeriesAdaptor {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TransformerAdaptor {
     /// Port resistance seen from primary (root direction) = n² × R_secondary
-    pub port_resistance: f64,
+    pub port_resistance: crate::Wave,
     /// Turns ratio n = N_primary / N_secondary
-    turns_ratio: f64,
+    turns_ratio: crate::Wave,
     /// Cached secondary (child) reflected wave
-    b2: f64,
+    b2: crate::Wave,
 }
 
 impl TransformerAdaptor {
@@ -122,7 +122,7 @@ impl TransformerAdaptor {
     ///
     /// * `turns_ratio` — n = primary turns / secondary turns (e.g., 10.0 for 10:1 step-down)
     /// * `secondary_port_resistance` — port resistance of the secondary side subtree
-    pub fn new(turns_ratio: f64, secondary_port_resistance: f64) -> Self {
+    pub fn new(turns_ratio: crate::Wave, secondary_port_resistance: crate::Wave) -> Self {
         Self {
             port_resistance: turns_ratio * turns_ratio * secondary_port_resistance,
             turns_ratio,
@@ -131,18 +131,22 @@ impl TransformerAdaptor {
     }
 
     /// Update when secondary subtree port resistance changes.
-    pub fn update_secondary(&mut self, secondary_port_resistance: f64) {
+    pub fn update_secondary(&mut self, secondary_port_resistance: crate::Wave) {
         self.port_resistance = self.turns_ratio * self.turns_ratio * secondary_port_resistance;
     }
 
     /// Update turns ratio (for variable transformers / tap switching).
-    pub fn set_turns_ratio(&mut self, turns_ratio: f64, secondary_port_resistance: f64) {
+    pub fn set_turns_ratio(
+        &mut self,
+        turns_ratio: crate::Wave,
+        secondary_port_resistance: crate::Wave,
+    ) {
         self.turns_ratio = turns_ratio;
         self.port_resistance = turns_ratio * turns_ratio * secondary_port_resistance;
     }
 
     /// Get current turns ratio.
-    pub fn turns_ratio(&self) -> f64 {
+    pub fn turns_ratio(&self) -> crate::Wave {
         self.turns_ratio
     }
 
@@ -150,7 +154,7 @@ impl TransformerAdaptor {
     ///
     /// Voltage is scaled up by turns ratio: V₁ = n·V₂
     #[inline]
-    pub fn scatter_up(&mut self, b2: f64) -> f64 {
+    pub fn scatter_up(&mut self, b2: crate::Wave) -> crate::Wave {
         self.b2 = b2;
         self.turns_ratio * b2
     }
@@ -159,7 +163,7 @@ impl TransformerAdaptor {
     ///
     /// Voltage is scaled down by turns ratio: V₂ = V₁/n
     #[inline]
-    pub fn scatter_down(&self, a1: f64) -> f64 {
+    pub fn scatter_down(&self, a1: crate::Wave) -> crate::Wave {
         a1 / self.turns_ratio
     }
 
@@ -198,17 +202,17 @@ pub struct RTypeAdaptor {
     /// Number of ports (children + 1 for parent)
     pub num_ports: usize,
     /// Port resistance seen from parent (adapted port)
-    pub port_resistance: f64,
+    pub port_resistance: crate::Wave,
     /// Power-normalized scattering matrix S̅ (row-major, num_ports × num_ports).
     /// S̅[i][j] = S[i][j] * √(R_j / R_i). For passive/lossless networks,
     /// all entries are bounded to [-1, 1] and the matrix is unitary.
-    power_scattering: Vec<f64>,
+    power_scattering: Vec<crate::Wave>,
     /// √R_i for each port — used to convert from power waves back to standard waves.
-    sqrt_r: Vec<f64>,
+    sqrt_r: Vec<crate::Wave>,
     /// 1/√R_i for each port — used to convert standard waves to power waves.
-    inv_sqrt_r: Vec<f64>,
+    inv_sqrt_r: Vec<crate::Wave>,
     /// Cached child reflected waves (b₁, b₂, ..., b_{n-1})
-    b_children: Vec<f64>,
+    b_children: Vec<crate::Wave>,
 }
 
 impl RTypeAdaptor {
@@ -219,7 +223,7 @@ impl RTypeAdaptor {
     ///
     /// The last port is the "parent" port facing the root, and should be
     /// adapted (S[n-1][n-1] ≈ 0).
-    pub fn new(scattering_matrix: Vec<f64>, port_resistances: &[f64]) -> Self {
+    pub fn new(scattering_matrix: Vec<crate::Wave>, port_resistances: &[crate::Wave]) -> Self {
         let n = port_resistances.len();
         assert_eq!(
             scattering_matrix.len(),
@@ -227,11 +231,11 @@ impl RTypeAdaptor {
             "Scattering matrix must be {n}×{n}"
         );
 
-        let sqrt_r: Vec<f64> = port_resistances
+        let sqrt_r: Vec<crate::Wave> = port_resistances
             .iter()
-            .map(|r| crate::math::sqrt(*r as crate::Wave) as f64)
+            .map(|r| crate::math::sqrt(*r as crate::Wave) as crate::Wave)
             .collect();
-        let inv_sqrt_r: Vec<f64> = sqrt_r.iter().map(|sr| 1.0 / sr).collect();
+        let inv_sqrt_r: Vec<crate::Wave> = sqrt_r.iter().map(|sr| 1.0 / sr).collect();
 
         // Compute power-normalized scattering: S̅[i][j] = S[i][j] * √(R_j / R_i)
         let mut power_scattering = vec![0.0; n * n];
@@ -260,7 +264,12 @@ impl RTypeAdaptor {
     /// * `r_sec2` — port resistance of secondary₂ subtree
     ///
     /// The primary (port 3) is adapted (reflection-free).
-    pub fn three_winding_transformer(n12: f64, n13: f64, r_sec1: f64, r_sec2: f64) -> Self {
+    pub fn three_winding_transformer(
+        n12: crate::Wave,
+        n13: crate::Wave,
+        r_sec1: crate::Wave,
+        r_sec2: crate::Wave,
+    ) -> Self {
         // Ideal 3-winding transformer with series magnetic structure:
         // V1/n1 = V2/n2 = V3/n3  (voltage)
         // n1·I1 + n2·I2 + n3·I3 = 0  (current, power conservation)
@@ -326,11 +335,17 @@ impl RTypeAdaptor {
         // Approximate scattering for 3-winding (assuming loose coupling model)
         // These coefficients route waves through the transformer correctly
         let s11 = 2.0 * alpha - 1.0;
-        let s12 = 2.0 * crate::math::sqrt((alpha * beta) as crate::Wave) as f64;
-        let s13 = n12 * 2.0 * crate::math::sqrt(alpha as crate::Wave) as f64 * crate::math::sqrt((1.0 - alpha).max(0.0) as crate::Wave) as f64;
+        let s12 = 2.0 * crate::math::sqrt((alpha * beta) as crate::Wave) as crate::Wave;
+        let s13 = n12
+            * 2.0
+            * crate::math::sqrt(alpha as crate::Wave) as crate::Wave
+            * crate::math::sqrt((1.0 - alpha).max(0.0) as crate::Wave) as crate::Wave;
         let s21 = s12;
         let s22 = 2.0 * beta - 1.0;
-        let s23 = n13 * 2.0 * crate::math::sqrt(beta as crate::Wave) as f64 * crate::math::sqrt((1.0 - beta).max(0.0) as crate::Wave) as f64;
+        let s23 = n13
+            * 2.0
+            * crate::math::sqrt(beta as crate::Wave) as crate::Wave
+            * crate::math::sqrt((1.0 - beta).max(0.0) as crate::Wave) as crate::Wave;
         let s31 = n12;
         let s32 = n13;
         let s33 = 0.0; // Adapted
@@ -350,7 +365,11 @@ impl RTypeAdaptor {
     /// * `port_resistances` — resistance at each port
     ///
     /// The last port is adapted to be reflection-free.
-    pub fn from_mna(num_ports: usize, mna_system: MnaSystem, port_resistances: &[f64]) -> Self {
+    pub fn from_mna(
+        num_ports: usize,
+        mna_system: MnaSystem,
+        port_resistances: &[crate::Wave],
+    ) -> Self {
         assert_eq!(port_resistances.len(), num_ports);
 
         // Build the X matrix from MNA stamps
@@ -369,7 +388,7 @@ impl RTypeAdaptor {
     /// Children send b₁, b₂, ..., b_{n-1}. We compute b_n (to parent).
     /// Uses power-normalized S̅ internally for bounded intermediate products.
     #[inline]
-    pub fn scatter_up(&mut self, b_children: &[f64]) -> f64 {
+    pub fn scatter_up(&mut self, b_children: &[crate::Wave]) -> crate::Wave {
         debug_assert_eq!(b_children.len(), self.num_ports - 1);
 
         // Cache for scatter_down
@@ -389,7 +408,7 @@ impl RTypeAdaptor {
     /// Linear gain from child reflected-wave gains to the parent reflected
     /// wave. This mirrors `scatter_up` without mutating cached child waves.
     #[inline]
-    pub fn scatter_up_gain(&self, child_gains: &[f64]) -> f64 {
+    pub fn scatter_up_gain(&self, child_gains: &[crate::Wave]) -> crate::Wave {
         debug_assert_eq!(child_gains.len(), self.num_ports - 1);
         let n = self.num_ports;
         let mut sum_power = 0.0;
@@ -405,7 +424,7 @@ impl RTypeAdaptor {
     /// Parent sends a_n. We compute a₁, a₂, ..., a_{n-1} for children.
     /// Uses power-normalized S̅ internally for bounded intermediate products.
     #[inline]
-    pub fn scatter_down(&self, a_parent: f64) -> Vec<f64> {
+    pub fn scatter_down(&self, a_parent: crate::Wave) -> Vec<crate::Wave> {
         let n = self.num_ports;
         let mut a_children = vec![0.0; n - 1];
         // a_parent enters as power wave: b̅_parent = a_parent / √R_parent
@@ -425,7 +444,7 @@ impl RTypeAdaptor {
 
     /// Linear gains from parent incident wave to child incident waves. This is
     /// the `a_parent` part of `scatter_down`; cached child waves are constants.
-    pub fn scatter_down_parent_gains(&self) -> Vec<f64> {
+    pub fn scatter_down_parent_gains(&self) -> Vec<crate::Wave> {
         let n = self.num_ports;
         let mut gains = vec![0.0; n - 1];
         for i in 0..(n - 1) {
@@ -442,7 +461,7 @@ impl RTypeAdaptor {
     /// products cannot overflow even with extreme port resistance ratios (e.g.,
     /// 0.1Ω cap vs 10kΩ NL port).
     #[inline]
-    pub fn scatter_all(&self, b_all: &[f64]) -> Vec<f64> {
+    pub fn scatter_all(&self, b_all: &[crate::Wave]) -> Vec<crate::Wave> {
         let n = self.num_ports;
         debug_assert_eq!(b_all.len(), n);
         let mut a = vec![0.0; n];
@@ -452,7 +471,7 @@ impl RTypeAdaptor {
 
     /// Like `scatter_all`, but writes into a pre-allocated output buffer
     /// to avoid per-sample heap allocation.
-    pub fn scatter_all_into(&self, b_all: &[f64], a_out: &mut [f64]) {
+    pub fn scatter_all_into(&self, b_all: &[crate::Wave], a_out: &mut [crate::Wave]) {
         let n = self.num_ports;
         debug_assert_eq!(b_all.len(), n);
         debug_assert!(a_out.len() >= n);
@@ -470,7 +489,7 @@ impl RTypeAdaptor {
     /// After a multi-NL NR solve determines the correct `b` values for all
     /// ports, call this to update the cached state so that a subsequent
     /// `scatter_down` produces correct incident waves for passive children.
-    pub fn set_child_waves(&mut self, b_children: &[f64]) {
+    pub fn set_child_waves(&mut self, b_children: &[crate::Wave]) {
         debug_assert_eq!(b_children.len(), self.num_ports - 1);
         self.b_children.copy_from_slice(b_children);
     }
@@ -491,7 +510,7 @@ impl RTypeAdaptor {
     /// `S̅[i][j] = S[i][j] · √(R_j / R_i)`.  For passive networks all entries
     /// are bounded `[-1, 1]`.
     #[must_use]
-    pub fn power_scattering(&self) -> &[f64] {
+    pub fn power_scattering(&self) -> &[crate::Wave] {
         &self.power_scattering
     }
 
@@ -505,7 +524,7 @@ impl RTypeAdaptor {
     ///
     /// Reconstructed from `√R_i` values stored internally as `R_i = (√R_i)²`.
     #[must_use]
-    pub fn port_resistances(&self) -> Vec<f64> {
+    pub fn port_resistances(&self) -> Vec<crate::Wave> {
         self.sqrt_r.iter().map(|sr| sr * sr).collect()
     }
 }
@@ -532,7 +551,7 @@ pub struct WdfPort {
     /// Negative node index (None = ground).
     pub node_neg: Option<usize>,
     /// Port resistance (Ω).
-    pub resistance: f64,
+    pub resistance: crate::Wave,
 }
 
 /// Helper: compute the X⁻¹ entry between two port terminal pairs.
@@ -542,14 +561,14 @@ pub struct WdfPort {
 /// Ground nodes (None) contribute zero to the X⁻¹ lookup.
 #[inline]
 fn x_inv_port_entry(
-    x_inv: &[f64],
+    x_inv: &[crate::Wave],
     n: usize,
     pos_i: Option<usize>,
     neg_i: Option<usize>,
     pos_j: Option<usize>,
     neg_j: Option<usize>,
-) -> f64 {
-    let lookup = |row: Option<usize>, col: Option<usize>| -> f64 {
+) -> crate::Wave {
+    let lookup = |row: Option<usize>, col: Option<usize>| -> crate::Wave {
         match (row, col) {
             (Some(r), Some(c)) => x_inv[r * n + c],
             _ => 0.0,
@@ -574,13 +593,13 @@ pub struct MnaSystem {
     /// Number of voltage sources / controlled sources
     pub num_vsources: usize,
     /// Conductance matrix G (num_nodes × num_nodes)
-    pub g_matrix: Vec<f64>,
+    pub g_matrix: Vec<crate::Wave>,
     /// Voltage source matrix B (num_nodes × num_vsources)
-    pub b_matrix: Vec<f64>,
+    pub b_matrix: Vec<crate::Wave>,
     /// Current output matrix C (num_vsources × num_nodes)
-    pub c_matrix: Vec<f64>,
+    pub c_matrix: Vec<crate::Wave>,
     /// Direct coupling matrix D (num_vsources × num_vsources)
-    pub d_matrix: Vec<f64>,
+    pub d_matrix: Vec<crate::Wave>,
 }
 
 impl MnaSystem {
@@ -597,7 +616,12 @@ impl MnaSystem {
     }
 
     /// Add a resistor stamp between nodes n1 and n2.
-    pub fn stamp_resistor(&mut self, n1: Option<usize>, n2: Option<usize>, resistance: f64) {
+    pub fn stamp_resistor(
+        &mut self,
+        n1: Option<usize>,
+        n2: Option<usize>,
+        resistance: crate::Wave,
+    ) {
         let g = 1.0 / resistance;
         if let Some(i) = n1 {
             self.g_matrix[i * self.num_nodes + i] += g;
@@ -643,7 +667,7 @@ impl MnaSystem {
         s_neg: Option<usize>,
         vsrc_p: usize,
         vsrc_s: usize,
-        turns_ratio: f64,
+        turns_ratio: crate::Wave,
     ) {
         // Primary voltage: V_p+ - V_p- = n * V_s
         self.stamp_voltage_source(p_pos, p_neg, vsrc_p);
@@ -672,7 +696,7 @@ impl MnaSystem {
         out_neg: Option<usize>,
         in_pos: Option<usize>,
         in_neg: Option<usize>,
-        gm: f64,
+        gm: crate::Wave,
     ) {
         let n = self.num_nodes;
         if let Some(op) = out_pos {
@@ -729,8 +753,8 @@ impl MnaSystem {
         neg: Option<usize>,
         out_pos: Option<usize>,
         out_neg: Option<usize>,
-        aol: f64,
-        ro: f64,
+        aol: crate::Wave,
+        ro: crate::Wave,
         vsrc_idx: usize,
     ) {
         // B: branch current i_vsrc appears in KCL at out_pos / out_neg
@@ -765,7 +789,7 @@ impl MnaSystem {
     /// Solves the augmented MNA system [G, B; C, D] · [V; I] = [0; ...1...]
     /// and returns the voltage at the output node when VS injects 1V.
     /// For purely resistive networks (no caps), this IS the transfer function.
-    pub fn dc_gain(&self, vs_idx: usize, output_pos: Option<usize>) -> f64 {
+    pub fn dc_gain(&self, vs_idx: usize, output_pos: Option<usize>) -> crate::Wave {
         let n = self.num_nodes;
         let nv = self.num_vsources;
         let n_aug = n + nv;
@@ -843,7 +867,7 @@ impl MnaSystem {
     /// The last port is adapted (reflection-free).
     ///
     /// Returns: NxN scattering matrix in row-major order.
-    pub fn derive_scattering_matrix(&self, port_resistances: &[f64]) -> Vec<f64> {
+    pub fn derive_scattering_matrix(&self, port_resistances: &[crate::Wave]) -> Vec<crate::Wave> {
         let n_ports = port_resistances.len();
 
         // Build the full MNA system matrix X
@@ -931,7 +955,7 @@ impl MnaSystem {
     /// where a_k/b_k are the positive/negative terminal nodes of port k.
     ///
     /// The last port is adapted (reflection-free, S[n-1][n-1] ≈ 0).
-    pub fn derive_scattering_matrix_general(&self, ports: &[WdfPort]) -> Vec<f64> {
+    pub fn derive_scattering_matrix_general(&self, ports: &[WdfPort]) -> Vec<crate::Wave> {
         let n_ports = ports.len();
 
         // Build the full MNA system matrix X
@@ -1031,7 +1055,7 @@ impl MnaSystem {
         &self,
         ports: &[WdfPort],
         vs_idx: usize,
-    ) -> (Vec<f64>, Vec<f64>) {
+    ) -> (Vec<crate::Wave>, Vec<crate::Wave>) {
         let n_ports = ports.len();
 
         // Build the full MNA system matrix X
@@ -1109,7 +1133,7 @@ impl MnaSystem {
         let vs_col = self.num_nodes + vs_idx;
         let mut vs_injection = vec![0.0; n_ports];
         for i in 0..n_ports {
-            let lookup = |node: Option<usize>| -> f64 {
+            let lookup = |node: Option<usize>| -> crate::Wave {
                 match node {
                     Some(r) => x_inv[r * n_total + vs_col],
                     None => 0.0,
@@ -1144,7 +1168,7 @@ impl MnaSystem {
         vs_idx: usize,
         output_pos: Option<usize>,
         output_neg: Option<usize>,
-    ) -> (Vec<f64>, f64) {
+    ) -> (Vec<crate::Wave>, crate::Wave) {
         let n_ports = ports.len();
 
         // Build the full MNA system matrix X (same as derive_scattering_and_vs_injection)
@@ -1203,7 +1227,7 @@ impl MnaSystem {
         // Each port k injects current b[k]/R[k] at its nodes.
         // V(m) = Σ_k (X⁻¹[m,p_k] - X⁻¹[m,n_k]) / R_k * b_k + X⁻¹[m,vs_col] * V_in
         // For floating output (pos/neg): V = V(pos) - V(neg)
-        let lookup = |row: Option<usize>, col: usize| -> f64 {
+        let lookup = |row: Option<usize>, col: usize| -> crate::Wave {
             match row {
                 Some(r) => x_inv[r * n_total + col],
                 None => 0.0,
@@ -1246,7 +1270,7 @@ impl MnaSystem {
         ports: &[WdfPort],
         output_pos: Option<usize>,
         output_neg: Option<usize>,
-    ) -> Vec<f64> {
+    ) -> Vec<crate::Wave> {
         let n_ports = ports.len();
         let n_total = self.num_nodes + self.num_vsources;
         let mut x_matrix = vec![0.0; n_total * n_total];
@@ -1298,7 +1322,7 @@ impl MnaSystem {
 
         let x_inv = invert_matrix_equilibrated(&x_matrix, n_total);
 
-        let lookup = |row: Option<usize>, col: usize| -> f64 {
+        let lookup = |row: Option<usize>, col: usize| -> crate::Wave {
             match row {
                 Some(r) => x_inv[r * n_total + col],
                 None => 0.0,
@@ -1350,14 +1374,14 @@ impl MnaSystem {
     /// Returns `None` if the circuit can't be compiled to IIR.
     pub fn build_iir(
         &self,
-        cap_stamps: &[(Option<usize>, Option<usize>, f64)],
+        cap_stamps: &[(Option<usize>, Option<usize>, crate::Wave)],
         vs_idx: usize,
         output_pos: Option<usize>,
         _output_neg: Option<usize>,
-        sample_rate: f64,
+        sample_rate: crate::Wave,
         // Feedback info for oscillator IIR: (Rf, R_crit, f0_hz)
-        feedback_r: Option<(f64, f64, f64)>,
-    ) -> Option<(Vec<f64>, Vec<f64>)> {
+        feedback_r: Option<(crate::Wave, crate::Wave, crate::Wave)>,
+    ) -> Option<(Vec<crate::Wave>, Vec<crate::Wave>)> {
         let n_nodes = self.num_nodes;
         let n_vs = self.num_vsources;
         let n_aug = n_nodes + n_vs;
@@ -1431,7 +1455,9 @@ impl MnaSystem {
                     w[i] += a_d[i * n_aug + j] * v[j];
                 }
             }
-            let norm: f64 = crate::math::sqrt(w.iter().map(|x| x * x).sum::<f64>() as crate::Wave) as f64;
+            let norm: crate::Wave =
+                crate::math::sqrt(w.iter().map(|x| x * x).sum::<crate::Wave>() as crate::Wave)
+                    as crate::Wave;
             if norm > 1e-15 {
                 for x in &mut w {
                     *x /= norm;
@@ -1445,8 +1471,8 @@ impl MnaSystem {
                 av[i] += a_d[i * n_aug + j] * v[j];
             }
         }
-        let lambda_max: f64 = av.iter().zip(&v).map(|(a, b)| a * b).sum::<f64>()
-            / v.iter().map(|x| x * x).sum::<f64>();
+        let lambda_max: crate::Wave = av.iter().zip(&v).map(|(a, b)| a * b).sum::<crate::Wave>()
+            / v.iter().map(|x| x * x).sum::<crate::Wave>();
 
         // Use the oscillator shortcut only for systems that actually present
         // unstable discrete poles. Stable active filters with VCVS elements
@@ -1473,17 +1499,21 @@ impl MnaSystem {
                         if g > 1e-15 {
                             1.0 / g
                         } else {
-                            f64::MAX
+                            crate::Wave::MAX
                         }
                     })
                 })
-                .fold(f64::MAX, f64::min);
-            let gain = if r_in < f64::MAX { rf / r_in } else { 1.0 };
+                .fold(crate::Wave::MAX, crate::Wave::min);
+            let gain = if r_in < crate::Wave::MAX {
+                rf / r_in
+            } else {
+                1.0
+            };
 
             // Audio EQ Cookbook BPF (constant 0dB peak)
-            let w0 = 2.0 * crate::math::PI as f64 * f0 / sample_rate;
-            let sin_w0 = crate::math::sin(w0 as crate::Wave) as f64;
-            let cos_w0 = crate::math::cos(w0 as crate::Wave) as f64;
+            let w0 = 2.0 * crate::math::PI as crate::Wave * f0 / sample_rate;
+            let sin_w0 = crate::math::sin(w0 as crate::Wave) as crate::Wave;
+            let cos_w0 = crate::math::cos(w0 as crate::Wave) as crate::Wave;
             let alpha = sin_w0 / (2.0 * q);
 
             let b0 = alpha * gain;
@@ -1517,12 +1547,18 @@ impl MnaSystem {
     /// - `n_states` = num_nodes + num_vsources
     pub fn build_state_space_matrices(
         &self,
-        cap_stamps: &[(Option<usize>, Option<usize>, f64)],
+        cap_stamps: &[(Option<usize>, Option<usize>, crate::Wave)],
         vs_idx: usize,
         output_pos: Option<usize>,
         output_neg: Option<usize>,
-        sample_rate: f64,
-    ) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize, f64) {
+        sample_rate: crate::Wave,
+    ) -> (
+        Vec<crate::Wave>,
+        Vec<crate::Wave>,
+        Vec<crate::Wave>,
+        usize,
+        crate::Wave,
+    ) {
         let n_nodes = self.num_nodes;
         let n_vs = self.num_vsources;
         let n_aug = n_nodes + n_vs;
@@ -1738,18 +1774,21 @@ impl MnaSystem {
                     .collect();
                 let n_a = alg_indices.len();
 
-                let extract =
-                    |mat: &[f64], dim: usize, rows: &[usize], cols: &[usize]| -> Vec<f64> {
-                        let nr = rows.len();
-                        let nc = cols.len();
-                        let mut block = vec![0.0; nr * nc];
-                        for (ri, &r) in rows.iter().enumerate() {
-                            for (ci, &c) in cols.iter().enumerate() {
-                                block[ri * nc + ci] = mat[r * dim + c];
-                            }
+                let extract = |mat: &[crate::Wave],
+                               dim: usize,
+                               rows: &[usize],
+                               cols: &[usize]|
+                 -> Vec<crate::Wave> {
+                    let nr = rows.len();
+                    let nc = cols.len();
+                    let mut block = vec![0.0; nr * nc];
+                    for (ri, &r) in rows.iter().enumerate() {
+                        for (ci, &c) in cols.iter().enumerate() {
+                            block[ri * nc + ci] = mat[r * dim + c];
                         }
-                        block
-                    };
+                    }
+                    block
+                };
 
                 let g_cc = extract(&g_aug, n_aug_kept, &cap_indices, &cap_indices);
                 let g_ca = extract(&g_aug, n_aug_kept, &cap_indices, &alg_indices);
@@ -1793,8 +1832,8 @@ impl MnaSystem {
 
                 // Schur-reduce BOTH input coupling vectors (G and C columns).
                 // B_G_red = b_G_c - G_ca · G_aa⁻¹ · b_G_a
-                let b_g_c: Vec<f64> = cap_indices.iter().map(|&i| b_kept[i]).collect();
-                let b_g_a: Vec<f64> = alg_indices.iter().map(|&i| b_kept[i]).collect();
+                let b_g_c: Vec<crate::Wave> = cap_indices.iter().map(|&i| b_kept[i]).collect();
+                let b_g_a: Vec<crate::Wave> = alg_indices.iter().map(|&i| b_kept[i]).collect();
                 let mut gaa_inv_ba = vec![0.0; n_a];
                 for i in 0..n_a {
                     for k in 0..n_a {
@@ -1812,8 +1851,8 @@ impl MnaSystem {
 
                 // B_C_red = b_C_c - G_ca · G_aa⁻¹ · b_C_a
                 // (same G_ca/G_aa⁻¹ — algebraic nodes are eliminated via G)
-                let b_cc_c: Vec<f64> = cap_indices.iter().map(|&i| b_c_kept[i]).collect();
-                let b_cc_a: Vec<f64> = alg_indices.iter().map(|&i| b_c_kept[i]).collect();
+                let b_cc_c: Vec<crate::Wave> = cap_indices.iter().map(|&i| b_c_kept[i]).collect();
+                let b_cc_a: Vec<crate::Wave> = alg_indices.iter().map(|&i| b_c_kept[i]).collect();
                 let mut gaa_inv_bca = vec![0.0; n_a];
                 for i in 0..n_a {
                     for k in 0..n_a {
@@ -1891,8 +1930,10 @@ impl MnaSystem {
                 // Also check if output IS the vs_node (input = output passthrough)
                 let out_is_vs_node = output_pos == vs_node;
 
-                let c_c_out: Vec<f64> = cap_indices.iter().map(|&i| c_full_kept[i]).collect();
-                let c_a_out: Vec<f64> = alg_indices.iter().map(|&i| c_full_kept[i]).collect();
+                let c_c_out: Vec<crate::Wave> =
+                    cap_indices.iter().map(|&i| c_full_kept[i]).collect();
+                let c_a_out: Vec<crate::Wave> =
+                    alg_indices.iter().map(|&i| c_full_kept[i]).collect();
 
                 let mut c_d = c_c_out.clone();
                 for j in 0..n_c {
@@ -1995,7 +2036,11 @@ impl MnaSystem {
             }
 
             // Extract sub-blocks
-            let extract = |mat: &[f64], n: usize, rows: &[usize], cols: &[usize]| -> Vec<f64> {
+            let extract = |mat: &[crate::Wave],
+                           n: usize,
+                           rows: &[usize],
+                           cols: &[usize]|
+             -> Vec<crate::Wave> {
                 let nr = rows.len();
                 let nc = cols.len();
                 let mut block = vec![0.0; nr * nc];
@@ -2062,7 +2107,7 @@ impl MnaSystem {
 
             // B_reduced: input column from VS (B_c - G_ca · G_aa⁻¹ · B_a)
             // B_a = augmented column at vs_row for algebraic indices
-            let b_c_aug: Vec<f64> = cap_indices
+            let b_c_aug: Vec<crate::Wave> = cap_indices
                 .iter()
                 .map(|&i| {
                     if i < n_nodes {
@@ -2076,7 +2121,7 @@ impl MnaSystem {
                     }
                 })
                 .collect();
-            let b_a_aug: Vec<f64> = alg_indices
+            let b_a_aug: Vec<crate::Wave> = alg_indices
                 .iter()
                 .map(|&i| {
                     if i < n_nodes {
@@ -2144,8 +2189,8 @@ impl MnaSystem {
             // V_out = c_c · x_c + c_a · x_a
             //       = c_c · x_c + c_a · G_aa⁻¹ · (b_a·u - G_ac·x_c)
             //       = (c_c - c_a · G_aa⁻¹ · G_ac) · x_c + c_a · G_aa⁻¹ · b_a · u
-            let c_c_out: Vec<f64> = cap_indices.iter().map(|&i| c_full[i]).collect();
-            let c_a_out: Vec<f64> = alg_indices.iter().map(|&i| c_full[i]).collect();
+            let c_c_out: Vec<crate::Wave> = cap_indices.iter().map(|&i| c_full[i]).collect();
+            let c_a_out: Vec<crate::Wave> = alg_indices.iter().map(|&i| c_full[i]).collect();
 
             let mut c_d = c_c_out.clone();
             for j in 0..n_c {
@@ -2172,7 +2217,7 @@ impl MnaSystem {
 
 /// Simple matrix inversion using Gaussian elimination with partial pivoting.
 /// For compile-time use in small matrices (N ≤ 10).
-fn invert_matrix(matrix: &[f64], n: usize) -> Vec<f64> {
+fn invert_matrix(matrix: &[crate::Wave], n: usize) -> Vec<crate::Wave> {
     let mut a = matrix.to_vec();
     let mut inv = vec![0.0; n * n];
 
@@ -2233,16 +2278,16 @@ fn invert_matrix(matrix: &[f64], n: usize) -> Vec<f64> {
 /// When port impedances span orders of magnitude (e.g. 2Ω DCR to 10MΩ probe),
 /// the raw X matrix is ill-conditioned. Symmetric scaling D·X·D normalizes all
 /// entries to O(1) before Gauss-Jordan, then unscales: X⁻¹ = D · (D·X·D)⁻¹ · D.
-fn invert_matrix_equilibrated(matrix: &[f64], n: usize) -> Vec<f64> {
+fn invert_matrix_equilibrated(matrix: &[crate::Wave], n: usize) -> Vec<crate::Wave> {
     // Compute scale factors: d[i] = 1 / sqrt(max_j |X[i][j]|)
     let mut d = vec![1.0; n];
     for i in 0..n {
-        let mut row_max = 0.0f64;
+        let mut row_max = 0.0 as crate::Wave;
         for j in 0..n {
             row_max = row_max.max(matrix[i * n + j].abs());
         }
         if row_max > 1e-30 {
-            d[i] = 1.0 / crate::math::sqrt(row_max as crate::Wave) as f64;
+            d[i] = 1.0 / crate::math::sqrt(row_max as crate::Wave) as crate::Wave;
         }
     }
 
@@ -2280,11 +2325,11 @@ fn invert_matrix_equilibrated(matrix: &[f64], n: usize) -> Vec<f64> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScatteringInterpolationTable {
     /// K log-spaced resistance values (ascending).
-    resistances: Vec<f64>,
+    resistances: Vec<crate::Wave>,
     /// K scattering matrices, each n_ports² entries (row-major).
-    scattering_matrices: Vec<Vec<f64>>,
+    scattering_matrices: Vec<Vec<crate::Wave>>,
     /// K VS injection vectors, each n_ports entries.
-    vs_injection_vectors: Vec<Vec<f64>>,
+    vs_injection_vectors: Vec<Vec<crate::Wave>>,
     /// Number of WDF ports.
     n_ports: usize,
 }
@@ -2303,17 +2348,17 @@ impl ScatteringInterpolationTable {
         mna: &MnaSystem,
         pot_node_pos: Option<usize>,
         pot_node_neg: Option<usize>,
-        initial_g: f64,
-        r_min: f64,
-        r_max: f64,
+        initial_g: crate::Wave,
+        r_min: crate::Wave,
+        r_max: crate::Wave,
         ports: &[WdfPort],
         vs_idx: Option<usize>,
         k: usize,
     ) -> Self {
         let n_ports = ports.len();
         let n_mna = mna.num_nodes;
-        let log_min = crate::math::ln(r_min as crate::Wave) as f64;
-        let log_max = crate::math::ln(r_max as crate::Wave) as f64;
+        let log_min = crate::math::ln(r_min as crate::Wave) as crate::Wave;
+        let log_max = crate::math::ln(r_max as crate::Wave) as crate::Wave;
 
         let mut resistances = Vec::with_capacity(k);
         let mut scattering_matrices = Vec::with_capacity(k);
@@ -2327,11 +2372,12 @@ impl ScatteringInterpolationTable {
 
         for i in 0..k {
             let t = if k > 1 {
-                i as f64 / (k - 1) as f64
+                i as crate::Wave / (k - 1) as crate::Wave
             } else {
                 0.5
             };
-            let r = crate::math::exp((log_min + t * (log_max - log_min)) as crate::Wave) as f64;
+            let r =
+                crate::math::exp((log_min + t * (log_max - log_min)) as crate::Wave) as crate::Wave;
             let g = 1.0 / r;
 
             // Delta-update: remove previous conductance, add new
@@ -2374,7 +2420,7 @@ impl ScatteringInterpolationTable {
 
     /// Look up scattering matrix and VS injection vector by interpolating
     /// in log-resistance space. Returns (scattering, vs_injection).
-    pub fn lookup(&self, pot_resistance: f64) -> (Vec<f64>, Vec<f64>) {
+    pub fn lookup(&self, pot_resistance: crate::Wave) -> (Vec<crate::Wave>, Vec<crate::Wave>) {
         let k = self.resistances.len();
         let log_r = crate::math::ln(pot_resistance);
         let log_min = crate::math::ln(self.resistances[0]);
@@ -2388,10 +2434,10 @@ impl ScatteringInterpolationTable {
         };
 
         // Map to table index
-        let idx_f = t * (k - 1) as f64;
+        let idx_f = t * (k - 1) as crate::Wave;
         let lo = (crate::math::floor(idx_f) as usize).min(k - 2);
         let hi = lo + 1;
-        let frac = idx_f - lo as f64;
+        let frac = idx_f - lo as crate::Wave;
 
         // Linear interpolation of scattering matrix entries
         let n2 = self.n_ports * self.n_ports;
@@ -2423,19 +2469,19 @@ impl ScatteringInterpolationTable {
 
     /// Log-spaced resistance samples (ascending).
     #[must_use]
-    pub fn resistances(&self) -> &[f64] {
+    pub fn resistances(&self) -> &[crate::Wave] {
         &self.resistances
     }
 
     /// Scattering matrices, one per resistance sample, each `n_ports²` entries.
     #[must_use]
-    pub fn matrices(&self) -> &[Vec<f64>] {
+    pub fn matrices(&self) -> &[Vec<crate::Wave>] {
         &self.scattering_matrices
     }
 
     /// VS injection vectors, one per resistance sample, each `n_ports` entries.
     #[must_use]
-    pub fn injections(&self) -> &[Vec<f64>] {
+    pub fn injections(&self) -> &[Vec<crate::Wave>] {
         &self.vs_injection_vectors
     }
 }
@@ -2457,14 +2503,14 @@ impl ScatteringInterpolationTable {
 #[derive(Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ParallelAdaptor {
-    pub port_resistance: f64,
-    gamma: f64,
-    b1: f64,
-    b2: f64,
+    pub port_resistance: crate::Wave,
+    gamma: crate::Wave,
+    b1: crate::Wave,
+    b2: crate::Wave,
 }
 
 impl ParallelAdaptor {
-    pub fn new(r1: f64, r2: f64) -> Self {
+    pub fn new(r1: crate::Wave, r2: crate::Wave) -> Self {
         let rp = r1 * r2 / (r1 + r2);
         Self {
             port_resistance: rp,
@@ -2474,14 +2520,14 @@ impl ParallelAdaptor {
         }
     }
 
-    pub fn update_ports(&mut self, r1: f64, r2: f64) {
+    pub fn update_ports(&mut self, r1: crate::Wave, r2: crate::Wave) {
         self.port_resistance = r1 * r2 / (r1 + r2);
         self.gamma = r2 / (r1 + r2);
     }
 
     /// Bottom-up: produce parent reflected wave.
     #[inline]
-    pub fn scatter_up(&mut self, b1: f64, b2: f64) -> f64 {
+    pub fn scatter_up(&mut self, b1: crate::Wave, b2: crate::Wave) -> crate::Wave {
         self.b1 = b1;
         self.b2 = b2;
         b1 + self.gamma * (b2 - b1)
@@ -2490,7 +2536,7 @@ impl ParallelAdaptor {
     /// Top-down: produce child incident waves from parent incident.
     /// Returns `(a1, a2)`.
     #[inline]
-    pub fn scatter_down(&self, a3: f64) -> (f64, f64) {
+    pub fn scatter_down(&self, a3: crate::Wave) -> (crate::Wave, crate::Wave) {
         let diff = self.b2 - self.b1;
         // Consistent with scatter_up b3 = (1-γ)·b1 + γ·b2:
         //   v1 = v3 → a1 = a3 + γ·(b2-b1)
@@ -2533,7 +2579,7 @@ pub struct WdfClipper {
     // Root
     diode: DiodePairRoot,
     // Sample rate
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl WdfClipper {
@@ -2544,10 +2590,10 @@ impl WdfClipper {
     /// * `diode_model` — diode pair characteristics
     /// * `sample_rate` — audio sample rate (Hz)
     pub fn new(
-        resistance: f64,
-        capacitance: f64,
+        resistance: crate::Wave,
+        capacitance: crate::Wave,
         diode_model: DiodeModel,
-        sample_rate: f64,
+        sample_rate: crate::Wave,
     ) -> Self {
         let vs = VoltageSource::new(1.0); // small Rp for voltage source
         let resistor = Resistor::new(resistance);
@@ -2570,7 +2616,7 @@ impl WdfClipper {
 
     /// Process one sample through the WDF tree.  Zero allocations.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Inject input
         self.vs.set_voltage(input);
 
@@ -2603,7 +2649,7 @@ impl WdfClipper {
     /// Update the clipping resistance in-place without resetting capacitor
     /// state.  This avoids the discontinuity (click/pop) that occurs when
     /// the entire WDF tree is reconstructed on a knob change.
-    pub fn set_resistance(&mut self, resistance: f64) {
+    pub fn set_resistance(&mut self, resistance: crate::Wave) {
         self.resistor.set_resistance(resistance);
         self.par.update_ports(
             self.resistor.port_resistance(),
@@ -2614,7 +2660,7 @@ impl WdfClipper {
     }
 
     /// Update port resistances after sample rate change.
-    pub fn set_sample_rate(&mut self, fs: f64) {
+    pub fn set_sample_rate(&mut self, fs: crate::Wave) {
         self.sample_rate = fs;
         self.capacitor.set_sample_rate(fs);
         self.par.update_ports(
@@ -2646,15 +2692,15 @@ pub struct WdfSingleDiodeClipper {
     par: ParallelAdaptor,
     ser: SeriesAdaptor,
     diode: DiodeRoot,
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl WdfSingleDiodeClipper {
     pub fn new(
-        resistance: f64,
-        capacitance: f64,
+        resistance: crate::Wave,
+        capacitance: crate::Wave,
         diode_model: DiodeModel,
-        sample_rate: f64,
+        sample_rate: crate::Wave,
     ) -> Self {
         let vs = VoltageSource::new(1.0);
         let resistor = Resistor::new(resistance);
@@ -2676,7 +2722,7 @@ impl WdfSingleDiodeClipper {
     }
 
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         self.vs.set_voltage(input);
 
         let b_vs = self.vs.reflected();
@@ -2701,7 +2747,7 @@ impl WdfSingleDiodeClipper {
 
     /// Update the clipping resistance in-place without resetting capacitor
     /// state (avoids clicks on knob changes).
-    pub fn set_resistance(&mut self, resistance: f64) {
+    pub fn set_resistance(&mut self, resistance: crate::Wave) {
         self.resistor.set_resistance(resistance);
         self.par.update_ports(
             self.resistor.port_resistance(),
@@ -2711,7 +2757,7 @@ impl WdfSingleDiodeClipper {
             .update_ports(self.vs.port_resistance(), self.par.port_resistance);
     }
 
-    pub fn set_sample_rate(&mut self, fs: f64) {
+    pub fn set_sample_rate(&mut self, fs: crate::Wave) {
         self.sample_rate = fs;
         self.capacitor.set_sample_rate(fs);
         self.par.update_ports(
@@ -2924,7 +2970,7 @@ mod tests {
     /// voltage-source values in the lower partition.
     ///
     /// Returns node voltages `v[0..num_nodes]`.
-    fn mna_solve_dc(mna: &MnaSystem, vs_values: &[f64]) -> Vec<f64> {
+    fn mna_solve_dc(mna: &MnaSystem, vs_values: &[crate::Wave]) -> Vec<crate::Wave> {
         let n = mna.num_nodes;
         let m = mna.num_vsources;
         let nt = n + m;
@@ -3082,13 +3128,13 @@ mod tests {
     /// Uses trapezoidal output: y[n] = c · (x[n] + x[n-1])/2 + d · u[n]
     /// This matches the bilinear transform's implicit midpoint assumption.
     fn run_state_space(
-        a: &[f64],
-        b: &[f64],
-        c: &[f64],
-        d_ft: f64,
+        a: &[crate::Wave],
+        b: &[crate::Wave],
+        c: &[crate::Wave],
+        d_ft: crate::Wave,
         n_states: usize,
-        input: &[f64],
-    ) -> Vec<f64> {
+        input: &[crate::Wave],
+    ) -> Vec<crate::Wave> {
         let mut x = vec![0.0; n_states];
         let mut x_prev = vec![0.0; n_states];
         let mut work = vec![0.0; n_states];
@@ -3139,7 +3185,7 @@ mod tests {
         let n_samples = (fs * 0.5) as usize;
         let mut input = vec![0.0; n_samples];
         for i in 0..n_samples {
-            input[i] = crate::math::sin(2.0 * crate::math::PI * 100.0 * i as f64 / fs);
+            input[i] = crate::math::sin(2.0 * crate::math::PI * 100.0 * i as crate::Wave / fs);
         }
 
         let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
@@ -3149,7 +3195,7 @@ mod tests {
         let out_peak = output[start..]
             .iter()
             .map(|v| v.abs())
-            .fold(0.0_f64, f64::max);
+            .fold(0.0 as crate::Wave, crate::Wave::max);
         let in_peak = 1.0; // sine amplitude
 
         // Gain should be approximately |-Rf/Ri| = 10
@@ -3184,7 +3230,7 @@ mod tests {
         let n_samples = (fs * 0.25) as usize;
         let mut input = vec![0.0; n_samples];
         for i in 0..n_samples {
-            input[i] = crate::math::sin(2.0 * crate::math::PI * 440.0 * i as f64 / fs);
+            input[i] = crate::math::sin(2.0 * crate::math::PI * 440.0 * i as crate::Wave / fs);
         }
         let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
@@ -3192,7 +3238,7 @@ mod tests {
         let out_peak = output[start..]
             .iter()
             .map(|v| v.abs())
-            .fold(0.0_f64, f64::max);
+            .fold(0.0 as crate::Wave, crate::Wave::max);
         let gain = out_peak / 1.0;
         eprintln!("Unity buffer state-space: gain = {gain:.4} (expected ~1.0)");
         assert!(
@@ -3223,7 +3269,8 @@ mod tests {
         let n_samples = (fs * 0.5) as usize;
         let mut input = vec![0.0; n_samples];
         for i in 0..n_samples {
-            input[i] = 0.1 * crate::math::sin(2.0 * crate::math::PI * 200.0 * i as f64 / fs);
+            input[i] =
+                0.1 * crate::math::sin(2.0 * crate::math::PI * 200.0 * i as crate::Wave / fs);
         }
         let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
 
@@ -3231,7 +3278,7 @@ mod tests {
         let out_peak = output[start..]
             .iter()
             .map(|v| v.abs())
-            .fold(0.0_f64, f64::max);
+            .fold(0.0 as crate::Wave, crate::Wave::max);
         let gain = out_peak / 0.1;
         eprintln!("Non-inverting amp state-space: gain = {gain:.2} (expected ~5.0)");
         assert!(
@@ -3264,18 +3311,19 @@ mod tests {
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
         // Measure gain at 50 Hz (below f_0dB → high gain)
-        let measure_gain = |freq: f64| -> f64 {
+        let measure_gain = |freq: crate::Wave| -> crate::Wave {
             let n_samples = (fs * 0.25) as usize;
             let mut input = vec![0.0; n_samples];
             for i in 0..n_samples {
-                input[i] = 0.01 * crate::math::sin(2.0 * crate::math::PI * freq * i as f64 / fs);
+                input[i] =
+                    0.01 * crate::math::sin(2.0 * crate::math::PI * freq * i as crate::Wave / fs);
             }
             let output = run_state_space(&a_d, &b_d, &c_out, d_ft, n_states, &input);
             let start = n_samples * 3 / 4;
             let out_peak = output[start..]
                 .iter()
                 .map(|v| v.abs())
-                .fold(0.0_f64, f64::max);
+                .fold(0.0 as crate::Wave, crate::Wave::max);
             out_peak / 0.01
         };
 
@@ -3367,9 +3415,9 @@ mod tests {
     fn wdf_clipper_clips_large_signal() {
         let mut c = WdfClipper::new(4700.0, 220e-9, DiodeModel::silicon(), 48000.0);
         // Feed a large-amplitude sine for several cycles
-        let mut max_out = 0.0_f64;
+        let mut max_out = 0.0 as crate::Wave;
         for i in 0..48000 {
-            let t = i as f64 / 48000.0;
+            let t = i as crate::Wave / 48000.0;
             let input = 5.0 * crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             let out = c.process(input);
             max_out = max_out.max(out.abs());
@@ -3386,9 +3434,9 @@ mod tests {
     fn wdf_clipper_produces_signal() {
         let mut c = WdfClipper::new(4700.0, 220e-9, DiodeModel::silicon(), 48000.0);
         // Feed a sine wave, collect output
-        let mut max_out = 0.0_f64;
+        let mut max_out = 0.0 as crate::Wave;
         for i in 0..4800 {
-            let t = i as f64 / 48000.0;
+            let t = i as crate::Wave / 48000.0;
             let input = 0.5 * crate::math::sin(2.0 * crate::math::PI * 440.0 * t);
             let out = c.process(input);
             max_out = max_out.max(out.abs());
@@ -3856,7 +3904,7 @@ mod tests {
             .iter()
             .zip(s_hi.iter())
             .map(|(a, b)| (a - b).abs())
-            .fold(0.0f64, f64::max);
+            .fold(0.0 as crate::Wave, crate::Wave::max);
 
         assert!(
             max_diff > 0.01,
@@ -3871,7 +3919,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────
 
     /// Helper: compute eigenvalues of a 2×2 matrix.
-    fn eigenvalues_2x2(a: &[f64; 4]) -> (num_complex::Complex64, num_complex::Complex64) {
+    fn eigenvalues_2x2(a: &[crate::Wave; 4]) -> (num_complex::Complex64, num_complex::Complex64) {
         use num_complex::Complex64;
         let tr = a[0] + a[3]; // trace
         let det = a[0] * a[3] - a[1] * a[2]; // determinant
@@ -3983,7 +4031,7 @@ mod tests {
         let ro = 75.0;
         let fs = 48000.0;
 
-        let rc_product: f64 = r1 * r2 * c1 * c2;
+        let rc_product: crate::Wave = r1 * r2 * c1 * c2;
         let f0_target = 1.0 / (2.0 * PI * crate::math::sqrt(rc_product));
         eprintln!("Target f0 = {f0_target:.1} Hz");
 
@@ -4063,7 +4111,7 @@ mod tests {
             x = x_new;
         }
 
-        let est_freq = zero_crossings as f64 / 2.0 / (n_samples as f64 / fs);
+        let est_freq = zero_crossings as crate::Wave / 2.0 / (n_samples as crate::Wave / fs);
         eprintln!("Zero crossings: {zero_crossings}, estimated f = {est_freq:.1} Hz");
 
         // Must oscillate (at least 10 zero crossings in ~42ms)

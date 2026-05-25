@@ -22,16 +22,24 @@ impl PotTaper {
     /// Apply the taper curve to a linear position (0.0 to 1.0).
     /// Returns the effective resistance ratio (0.0 to 1.0).
     #[inline]
-    pub fn apply(self, pos: f64) -> f64 {
+    pub fn apply(self, pos: crate::Wave) -> crate::Wave {
         let pos = pos.clamp(0.0, 1.0);
         match self {
             // Linear: direct mapping
             PotTaper::B => pos,
             // Audio/Log: slow start, fast end
             // Using (10^pos - 1) / 9 which gives ~10% at 50% rotation
-            PotTaper::A => (crate::math::powf(10.0 as crate::Wave, pos as crate::Wave) as f64 - 1.0) / 9.0,
+            PotTaper::A => {
+                (crate::math::powf(10.0 as crate::Wave, pos as crate::Wave) as crate::Wave - 1.0)
+                    / 9.0
+            }
             // Reverse log: fast start, slow end (inverse of A)
-            PotTaper::C => 1.0 - (crate::math::powf(10.0 as crate::Wave, (1.0 - pos) as crate::Wave) as f64 - 1.0) / 9.0,
+            PotTaper::C => {
+                1.0 - (crate::math::powf(10.0 as crate::Wave, (1.0 - pos) as crate::Wave)
+                    as crate::Wave
+                    - 1.0)
+                    / 9.0
+            }
         }
     }
 }

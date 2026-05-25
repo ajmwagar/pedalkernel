@@ -19,11 +19,11 @@ use crate::elements::WdfRoot;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MosfetModel {
     /// Threshold voltage (V). N-channel: positive, P-channel: negative.
-    pub vth: f64,
+    pub vth: crate::Wave,
     /// Transconductance parameter (A/V²). Kp = µn·Cox·W/(2L).
-    pub kp: f64,
+    pub kp: crate::Wave,
     /// Channel-length modulation parameter (1/V). Typical: 0.01-0.1.
-    pub lambda: f64,
+    pub lambda: crate::Wave,
     /// True for N-channel, false for P-channel.
     pub is_n_channel: bool,
 }
@@ -94,7 +94,7 @@ impl MosfetModel {
 pub struct MosfetRoot {
     pub model: MosfetModel,
     /// Current gate-source voltage (external control parameter).
-    vgs: f64,
+    vgs: crate::Wave,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
 }
@@ -110,13 +110,13 @@ impl MosfetRoot {
 
     /// Set the gate-source voltage (external control from bias, signal, etc.)
     #[inline]
-    pub fn set_vgs(&mut self, vgs: f64) {
+    pub fn set_vgs(&mut self, vgs: crate::Wave) {
         self.vgs = vgs;
     }
 
     /// Get current gate-source voltage.
     #[inline]
-    pub fn vgs(&self) -> f64 {
+    pub fn vgs(&self) -> crate::Wave {
         self.vgs
     }
 
@@ -127,7 +127,7 @@ impl MosfetRoot {
     /// - Triode: Ids = Kp * [2*(Vgs-Vth)*Vds - Vds²]
     /// - Saturation: Ids = Kp * (Vgs-Vth)² * (1 + lambda*|Vds|)
     #[inline]
-    pub fn drain_current(&self, vds: f64) -> f64 {
+    pub fn drain_current(&self, vds: crate::Wave) -> crate::Wave {
         let vth = self.model.vth;
         let kp = self.model.kp;
         let lambda = self.model.lambda;
@@ -168,7 +168,7 @@ impl MosfetRoot {
 
     /// Compute derivative of drain current w.r.t. Vds.
     #[inline]
-    fn drain_current_derivative(&self, vds: f64) -> f64 {
+    fn drain_current_derivative(&self, vds: crate::Wave) -> crate::Wave {
         let vth = self.model.vth;
         let kp = self.model.kp;
         let lambda = self.model.lambda;
@@ -204,7 +204,7 @@ impl MosfetRoot {
 impl WdfRoot for MosfetRoot {
     /// MOSFET drain-source path: `i = Ids(Vds, Vgs)`
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let root = *self;
         let vov = if self.model.is_n_channel {
             (self.vgs - self.model.vth).max(0.0)

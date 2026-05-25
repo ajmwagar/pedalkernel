@@ -39,25 +39,25 @@ pub const NR_MAX_ITER: usize = 24;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NrWorkspace {
     // Independent solver buffers
-    pub f_vec: Vec<f64>,
-    pub jacobian: Vec<f64>, // n_nl * n_nl
-    pub currents: Vec<f64>,
-    pub derivatives: Vec<f64>, // independent solver only
-    pub rhs: Vec<f64>,
-    pub jac_copy: Vec<f64>, // n_nl * n_nl
-    pub b_nl: Vec<f64>,
+    pub f_vec: Vec<crate::Wave>,
+    pub jacobian: Vec<crate::Wave>, // n_nl * n_nl
+    pub currents: Vec<crate::Wave>,
+    pub derivatives: Vec<crate::Wave>, // independent solver only
+    pub rhs: Vec<crate::Wave>,
+    pub jac_copy: Vec<crate::Wave>, // n_nl * n_nl
+    pub b_nl: Vec<crate::Wave>,
 
     // Grouped solver additional buffers
     pub port_group: Vec<(usize, usize)>,
-    pub dev_currents: Vec<f64>,
-    pub dev_jacobian: Vec<f64>,
-    pub full_dev_jac: Vec<f64>, // n_nl * n_nl
+    pub dev_currents: Vec<crate::Wave>,
+    pub dev_jacobian: Vec<crate::Wave>,
+    pub full_dev_jac: Vec<crate::Wave>, // n_nl * n_nl
 
     // Frozen Newton cache: reuse previous sample's system Jacobian and currents
     // for a first "frozen" step that skips device eval entirely.
     // If that step converges, we save all device evals for this sample.
-    pub cached_sys_jac: Vec<f64>,  // n_nl * n_nl
-    pub cached_currents: Vec<f64>, // n_nl
+    pub cached_sys_jac: Vec<crate::Wave>,  // n_nl * n_nl
+    pub cached_currents: Vec<crate::Wave>, // n_nl
     pub has_cached_jac: bool,
 
     // Adaptive oversampling: track frozen Newton failures within a base sample.
@@ -140,7 +140,7 @@ struct SolverStatsAggregate {
     solves: u64,
     total_iterations: u64,
     max_iterations: u32,
-    max_residual: f64,
+    max_residual: crate::Wave,
     clamp_hits: u64,
     step_limited: u64,
     iter_cap_hits: u64,
@@ -171,7 +171,7 @@ pub struct SolverStatsSnapshot {
     pub solves: u64,
     pub total_iterations: u64,
     pub max_iterations: u32,
-    pub max_residual: f64,
+    pub max_residual: crate::Wave,
     pub clamp_hits: u64,
     pub step_limited: u64,
     pub iter_cap_hits: u64,
@@ -180,7 +180,7 @@ pub struct SolverStatsSnapshot {
 #[derive(Default, Clone, Copy)]
 struct SolverStatsEntry {
     iterations: u32,
-    residual: f64,
+    residual: crate::Wave,
     clamp_hit: bool,
     step_limited: bool,
     iter_cap_hit: bool,
@@ -242,13 +242,13 @@ pub struct SolverTraceEntry {
     /// Number of NR iterations for this solve.
     pub iterations: u32,
     /// Final residual norm.
-    pub residual: f64,
+    pub residual: crate::Wave,
     /// Whether voltage clamping was activated.
     pub clamp_hit: bool,
     /// Whether step limiting (damping) was activated.
     pub step_limited: bool,
     /// Solution voltages at convergence (one per NL port).
-    pub v_solution: Vec<f64>,
+    pub v_solution: Vec<crate::Wave>,
 }
 
 /// Enable per-solve tracing. Each NR solve will append a `SolverTraceEntry`
@@ -305,11 +305,11 @@ fn is_solver_trace_enabled() -> bool {
 ///   - x > 50: `ln(1 + exp(x)) ≈ x` (error < 1e-22)
 ///   - x < -50: `ln(1 + exp(x)) ≈ exp(x) ≈ 0` (return 0)
 ///
-/// The transition at |x| = 50 is mathematically smooth to within f64 precision.
+/// The transition at |x| = 50 is mathematically smooth to within crate::Wave precision.
 /// This is the standard numerically-stable implementation used throughout
 /// the Koren triode/pentode equations.
 #[inline]
-pub fn softplus(x: f64) -> f64 {
+pub fn softplus(x: crate::Wave) -> crate::Wave {
     if x > 50.0 {
         x
     } else if x < -50.0 {
@@ -327,7 +327,7 @@ pub fn softplus(x: f64) -> f64 {
 /// For silicon: Icbo ≈ 1–100 nA → Gleakage ≈ 1e-12 to 1e-9 S.
 /// Using 1e-12 S (1 TΩ) is conservative and prevents Newton-Raphson
 /// from dividing by zero without adding measurable phantom current.
-pub const LEAKAGE_CONDUCTANCE: f64 = 1e-12;
+pub const LEAKAGE_CONDUCTANCE: crate::Wave = 1e-12;
 
 // ---------------------------------------------------------------------------
 // NlDeviceIv trait for multi-port NR solver
@@ -339,10 +339,10 @@ pub const LEAKAGE_CONDUCTANCE: f64 = 1e-12;
 /// current and its derivative at a given port voltage.
 pub trait NlDeviceIv {
     /// Return `(current, d_current/d_voltage)` at the given port voltage.
-    fn iv(&self, v: f64) -> (f64, f64);
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave);
 
     /// Return `(v_min, v_max)` voltage clamping bounds for this device.
-    fn v_clamp(&self) -> (f64, f64);
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave);
 }
 
 // ---------------------------------------------------------------------------
@@ -370,10 +370,10 @@ pub trait NlDeviceGroupIv {
     /// - `jacobian[i * n + j]` = ∂i_i/∂v_j  (row-major, n×n)
     ///
     /// Buffers are pre-allocated by the caller (length `n` and `n*n`).
-    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]);
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]);
 
     /// Voltage clamp bounds for a specific port.
-    fn v_clamp_port(&self, port: usize) -> (f64, f64);
+    fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,13 +394,13 @@ impl NlDeviceGroupIv for SinglePortGroupAdapter<'_> {
         1
     }
 
-    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let (i, di) = self.0.iv(v[0]);
         currents[0] = i;
         jacobian[0] = di;
     }
 
-    fn v_clamp_port(&self, _port: usize) -> (f64, f64) {
+    fn v_clamp_port(&self, _port: usize) -> (crate::Wave, crate::Wave) {
         self.0.v_clamp()
     }
 }
@@ -416,7 +416,7 @@ impl NlDeviceGroupIv for SinglePortGroupAdapter<'_> {
 /// For N≥3: Gaussian elimination with partial pivoting.
 ///
 /// Returns `false` if the system is singular (near-zero determinant/pivot).
-pub fn solve_small_linear(n: usize, a: &mut [f64], b: &mut [f64]) -> bool {
+pub fn solve_small_linear(n: usize, a: &mut [crate::Wave], b: &mut [crate::Wave]) -> bool {
     debug_assert_eq!(a.len(), n * n);
     debug_assert_eq!(b.len(), n);
 
@@ -529,14 +529,14 @@ pub fn solve_small_linear(n: usize, a: &mut [f64], b: &mut [f64]) -> bool {
 /// Reflected wave `b[i]` for each NL port.
 pub fn multi_port_nr_solve(
     n_nl: usize,
-    s_nl: &[f64],
-    known_a: &[f64],
-    port_resistances: &[f64],
+    s_nl: &[crate::Wave],
+    known_a: &[crate::Wave],
+    port_resistances: &[crate::Wave],
     devices: &[&dyn NlDeviceIv],
-    v_guess: &mut [f64],
+    v_guess: &mut [crate::Wave],
     max_iter: usize,
-    tolerance: f64,
-) -> Vec<f64> {
+    tolerance: crate::Wave,
+) -> Vec<crate::Wave> {
     let mut ws = NrWorkspace::new(n_nl);
     multi_port_nr_solve_into(
         n_nl,
@@ -555,13 +555,13 @@ pub fn multi_port_nr_solve(
 /// Like `multi_port_nr_solve`, but writes results into `ws.b_nl` to avoid allocation.
 pub fn multi_port_nr_solve_into(
     n_nl: usize,
-    s_nl: &[f64],
-    known_a: &[f64],
-    port_resistances: &[f64],
+    s_nl: &[crate::Wave],
+    known_a: &[crate::Wave],
+    port_resistances: &[crate::Wave],
     devices: &[&dyn NlDeviceIv],
-    v_guess: &mut [f64],
+    v_guess: &mut [crate::Wave],
     max_iter: usize,
-    tolerance: f64,
+    tolerance: crate::Wave,
     ws: &mut NrWorkspace,
 ) {
     debug_assert_eq!(s_nl.len(), n_nl * n_nl);
@@ -612,7 +612,7 @@ pub fn multi_port_nr_solve_into(
         }
 
         // F_i = known_a_i + Σ_j S_nl[i][j]·(v_j - R_j·i_j(v_j)) - v_i - R_i·i_i(v_i) = 0
-        let mut max_f = 0.0_f64;
+        let mut max_f = 0.0 as crate::Wave;
         for i in 0..n_nl {
             let mut fi = known_a[i] - v_guess[i] - port_resistances[i] * ws.currents[i];
             for j in 0..n_nl {
@@ -657,7 +657,7 @@ pub fn multi_port_nr_solve_into(
         }
 
         // Apply damped Newton step: v -= alpha * delta
-        let mut max_dv = 0.0_f64;
+        let mut max_dv = 0.0 as crate::Wave;
         for i in 0..n_nl {
             let mut dv = ws.rhs[i];
             #[cfg(feature = "fault-injection")]
@@ -713,19 +713,22 @@ pub fn multi_port_nr_solve_into(
 
     #[cfg(feature = "debug-trace")]
     {
-        let r_max = port_resistances.iter().copied().fold(0.0_f64, f64::max);
+        let r_max = port_resistances
+            .iter()
+            .copied()
+            .fold(0.0 as crate::Wave, crate::Wave::max);
         let r_min = port_resistances
             .iter()
             .copied()
-            .fold(f64::INFINITY, f64::min);
+            .fold(crate::Wave::INFINITY, crate::Wave::min);
         let cond = r_max / r_min;
         for i in 0..n_nl {
             let (current, _) = devices[i].iv(v_guess[i]);
             let a_i = v_guess[i] + port_resistances[i] * current;
-            let a_scatter: f64 = known_a[i]
+            let a_scatter: crate::Wave = known_a[i]
                 + (0..n_nl)
                     .map(|j| s_nl[i * n_nl + j] * ws.b_nl[j])
-                    .sum::<f64>();
+                    .sum::<crate::Wave>();
             let embed_err = (a_i - a_scatter).abs();
             if embed_err > 1e-4 || cond > 1e6 {
                 #[cfg(feature = "std")]
@@ -790,15 +793,15 @@ pub fn multi_port_nr_solve_into(
 /// ```
 pub fn multi_port_nr_solve_grouped(
     n_nl: usize,
-    s_nl: &[f64],             // n_nl × n_nl scattering sub-block
-    known_a: &[f64],          // n_nl
-    port_resistances: &[f64], // n_nl
+    s_nl: &[crate::Wave],             // n_nl × n_nl scattering sub-block
+    known_a: &[crate::Wave],          // n_nl
+    port_resistances: &[crate::Wave], // n_nl
     device_groups: &[&dyn NlDeviceGroupIv],
     group_port_offsets: &[usize], // start index of each group's ports
-    v_guess: &mut [f64],          // n_nl (warm-start, mutated)
+    v_guess: &mut [crate::Wave],  // n_nl (warm-start, mutated)
     max_iter: usize,
-    tolerance: f64,
-) -> Vec<f64> {
+    tolerance: crate::Wave,
+) -> Vec<crate::Wave> {
     let max_group_ports = device_groups.iter().map(|d| d.n_ports()).max().unwrap_or(1);
     let mut ws = NrWorkspace::new_grouped(n_nl, max_group_ports);
     multi_port_nr_solve_grouped_into(
@@ -819,14 +822,14 @@ pub fn multi_port_nr_solve_grouped(
 /// Like `multi_port_nr_solve_grouped`, but writes results into `ws.b_nl` to avoid allocation.
 pub fn multi_port_nr_solve_grouped_into(
     n_nl: usize,
-    s_nl: &[f64],
-    known_a: &[f64],
-    port_resistances: &[f64],
+    s_nl: &[crate::Wave],
+    known_a: &[crate::Wave],
+    port_resistances: &[crate::Wave],
     device_groups: &[&dyn NlDeviceGroupIv],
     group_port_offsets: &[usize],
-    v_guess: &mut [f64],
+    v_guess: &mut [crate::Wave],
     max_iter: usize,
-    tolerance: f64,
+    tolerance: crate::Wave,
     ws: &mut NrWorkspace,
 ) {
     debug_assert_eq!(s_nl.len(), n_nl * n_nl);
@@ -865,7 +868,7 @@ pub fn multi_port_nr_solve_grouped_into(
     // often converges immediately, saving all device evals for this sample.
     if ws.has_cached_jac {
         // Compute residual using cached currents at current v_guess
-        let mut max_f = 0.0_f64;
+        let mut max_f = 0.0 as crate::Wave;
         for i in 0..n_nl {
             let mut fi = known_a[i] - v_guess[i] - port_resistances[i] * ws.cached_currents[i];
             for j in 0..n_nl {
@@ -949,7 +952,7 @@ pub fn multi_port_nr_solve_grouped_into(
             }
 
             // Compute residual F_i
-            let mut max_f = 0.0_f64;
+            let mut max_f = 0.0 as crate::Wave;
             for i in 0..n_nl {
                 let mut fi = known_a[i] - v_guess[i] - port_resistances[i] * ws.currents[i];
                 for j in 0..n_nl {
@@ -1023,7 +1026,7 @@ pub fn multi_port_nr_solve_grouped_into(
             }
 
             // Apply damped Newton step
-            let mut max_dv = 0.0_f64;
+            let mut max_dv = 0.0 as crate::Wave;
             for i in 0..n_nl {
                 let mut dv = ws.rhs[i];
                 if dv.abs() > 5.0 {
@@ -1090,18 +1093,21 @@ pub fn multi_port_nr_solve_grouped_into(
 
     #[cfg(feature = "debug-trace")]
     {
-        let r_max = port_resistances.iter().copied().fold(0.0_f64, f64::max);
+        let r_max = port_resistances
+            .iter()
+            .copied()
+            .fold(0.0 as crate::Wave, crate::Wave::max);
         let r_min = port_resistances
             .iter()
             .copied()
-            .fold(f64::INFINITY, f64::min);
+            .fold(crate::Wave::INFINITY, crate::Wave::min);
         let cond = r_max / r_min;
         for i in 0..n_nl {
             let a_i = v_guess[i] + port_resistances[i] * ws.currents[i];
-            let a_scatter: f64 = known_a[i]
+            let a_scatter: crate::Wave = known_a[i]
                 + (0..n_nl)
                     .map(|j| s_nl[i * n_nl + j] * ws.b_nl[j])
-                    .sum::<f64>();
+                    .sum::<crate::Wave>();
             let embed_err = (a_i - a_scatter).abs();
             if embed_err > 1e-4 || cond > 1e6 {
                 #[cfg(feature = "std")]
@@ -1160,17 +1166,17 @@ pub fn multi_port_nr_solve_grouped_into(
 /// - `device_iv`: Closure returning `(i, di_dv)` for a given voltage
 #[inline]
 pub fn newton_raphson_solve<F>(
-    a: f64,
-    rp: f64,
-    mut v: f64,
+    a: crate::Wave,
+    rp: crate::Wave,
+    mut v: crate::Wave,
     max_iter: usize,
-    tolerance: f64,
-    v_clamp: Option<(f64, f64)>,
-    step_limit: Option<f64>,
+    tolerance: crate::Wave,
+    v_clamp: Option<(crate::Wave, crate::Wave)>,
+    step_limit: Option<crate::Wave>,
     mut device_iv: F,
-) -> f64
+) -> crate::Wave
 where
-    F: FnMut(f64) -> (f64, f64),
+    F: FnMut(crate::Wave) -> (crate::Wave, crate::Wave),
 {
     #[cfg(feature = "fault-injection")]
     if crate::fault_injection::is_active(crate::fault_injection::Fault::BreakSolverWarmStart) {
@@ -1260,34 +1266,34 @@ mod tests {
 
     /// A simple linear device: i = v / R_device, di/dv = 1/R_device.
     struct LinearDevice {
-        conductance: f64,
-        v_max: f64,
+        conductance: crate::Wave,
+        v_max: crate::Wave,
     }
 
     impl NlDeviceIv for LinearDevice {
-        fn iv(&self, v: f64) -> (f64, f64) {
+        fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
             (v * self.conductance, self.conductance)
         }
-        fn v_clamp(&self) -> (f64, f64) {
+        fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
             (-self.v_max, self.v_max)
         }
     }
 
     /// A simple exponential diode: i = Is*(exp(v/Vt) - 1).
     struct SimpleExponentialDiode {
-        is: f64,
-        vt: f64,
+        is: crate::Wave,
+        vt: crate::Wave,
     }
 
     impl NlDeviceIv for SimpleExponentialDiode {
-        fn iv(&self, v: f64) -> (f64, f64) {
+        fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
             let x = (v / self.vt).clamp(-500.0, 500.0);
             let ev = crate::math::exp(x);
             let i = self.is * (ev - 1.0);
             let di = self.is * ev / self.vt;
             (i, di)
         }
-        fn v_clamp(&self) -> (f64, f64) {
+        fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
             (-5.0, 5.0)
         }
     }
@@ -1639,12 +1645,12 @@ mod tests {
     /// Port 0 = grid (diode), Port 1 = plate (controlled by grid voltage).
     struct MockTriodeGroup {
         /// Grid: i_g = Is*(exp(v_g/Vt) - 1)
-        grid_is: f64,
-        grid_vt: f64,
+        grid_is: crate::Wave,
+        grid_vt: crate::Wave,
         /// Plate: i_p = gm * max(v_g, 0) + v_p / rp
-        gm: f64,
-        rp: f64,
-        v_max: f64,
+        gm: crate::Wave,
+        rp: crate::Wave,
+        v_max: crate::Wave,
     }
 
     impl NlDeviceGroupIv for MockTriodeGroup {
@@ -1652,7 +1658,12 @@ mod tests {
             2
         }
 
-        fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        fn eval(
+            &self,
+            v: &[crate::Wave],
+            currents: &mut [crate::Wave],
+            jacobian: &mut [crate::Wave],
+        ) {
             let vg = v[0];
             let vp = v[1];
 
@@ -1678,7 +1689,7 @@ mod tests {
             jacobian[3] = dip_dvp; // ∂ip/∂vp
         }
 
-        fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+        fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
             match port {
                 0 => (-50.0, 10.0),       // grid
                 _ => (-50.0, self.v_max), // plate
@@ -1693,12 +1704,17 @@ mod tests {
         fn n_ports(&self) -> usize {
             1
         }
-        fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+        fn eval(
+            &self,
+            v: &[crate::Wave],
+            currents: &mut [crate::Wave],
+            jacobian: &mut [crate::Wave],
+        ) {
             let (i, di) = self.0.iv(v[0]);
             currents[0] = i;
             jacobian[0] = di;
         }
-        fn v_clamp_port(&self, _port: usize) -> (f64, f64) {
+        fn v_clamp_port(&self, _port: usize) -> (crate::Wave, crate::Wave) {
             self.0.v_clamp()
         }
     }
@@ -1942,19 +1958,21 @@ mod tests {
     /// must equal the scattering relation: a_i = known_a_i + Σ_j S[i][j] * b_j.
     fn verify_embedding_constraint(
         n_nl: usize,
-        s_nl: &[f64],
-        known_a: &[f64],
-        port_resistances: &[f64],
-        v: &[f64],
-        b: &[f64],
+        s_nl: &[crate::Wave],
+        known_a: &[crate::Wave],
+        port_resistances: &[crate::Wave],
+        v: &[crate::Wave],
+        b: &[crate::Wave],
         devices: &[&dyn NlDeviceIv],
-        tolerance: f64,
+        tolerance: crate::Wave,
     ) {
         for i in 0..n_nl {
             let (current, _) = devices[i].iv(v[i]);
             let a_device = v[i] + port_resistances[i] * current;
-            let a_scatter: f64 =
-                known_a[i] + (0..n_nl).map(|j| s_nl[i * n_nl + j] * b[j]).sum::<f64>();
+            let a_scatter: crate::Wave = known_a[i]
+                + (0..n_nl)
+                    .map(|j| s_nl[i * n_nl + j] * b[j])
+                    .sum::<crate::Wave>();
             let err = (a_device - a_scatter).abs();
             assert!(
                 err < tolerance,
@@ -1968,12 +1986,12 @@ mod tests {
     /// F_i = known_a_i + Σ_j S[i][j]*(v_j - R_j*i_j) - v_i - R_i*i_i
     fn verify_device_residuals(
         n_nl: usize,
-        s_nl: &[f64],
-        known_a: &[f64],
-        port_resistances: &[f64],
-        v: &[f64],
+        s_nl: &[crate::Wave],
+        known_a: &[crate::Wave],
+        port_resistances: &[crate::Wave],
+        v: &[crate::Wave],
         devices: &[&dyn NlDeviceIv],
-        tolerance: f64,
+        tolerance: crate::Wave,
     ) {
         for i in 0..n_nl {
             let (i_i, _) = devices[i].iv(v[i]);
@@ -2206,7 +2224,7 @@ mod tests {
         let n_nl = 2;
 
         // Compute analytic Jacobian
-        let mut jac_analytic = [0.0_f64; 4];
+        let mut jac_analytic = [0.0 as crate::Wave; 4];
         let mut currents = [0.0; 2];
         let mut derivatives = [0.0; 2];
         for i in 0..n_nl {
@@ -2227,7 +2245,7 @@ mod tests {
         }
 
         // Compute F_i at operating point
-        let compute_f = |v_test: &[f64]| -> [f64; 2] {
+        let compute_f = |v_test: &[crate::Wave]| -> [crate::Wave; 2] {
             let mut f = [0.0; 2];
             for i in 0..n_nl {
                 let (i_i, _) = devices[i].iv(v_test[i]);
@@ -2291,7 +2309,7 @@ mod tests {
         let v = [0.5, 100.0];
 
         // Compute the system residual F_i for given voltages
-        let compute_f = |v_test: &[f64]| -> [f64; 2] {
+        let compute_f = |v_test: &[crate::Wave]| -> [crate::Wave; 2] {
             let mut c = [0.0; 2];
             let mut j = [0.0; 4];
             triode.eval(v_test, &mut c, &mut j);
@@ -2314,7 +2332,7 @@ mod tests {
         let mut dev_j = [0.0; 4]; // 2x2 device Jacobian
         triode.eval(&v, &mut dev_c, &mut dev_j);
 
-        let mut jac_analytic = [0.0_f64; 4];
+        let mut jac_analytic = [0.0 as crate::Wave; 4];
         for i in 0..n_nl {
             for k in 0..n_nl {
                 let mut val = s_nl[i * n_nl + k];
@@ -2363,7 +2381,7 @@ mod tests {
         struct TestCase {
             name: &'static str,
             device: Box<dyn NlDeviceIv>,
-            test_voltages: Vec<f64>,
+            test_voltages: Vec<crate::Wave>,
         }
 
         let cases = vec![
@@ -2436,15 +2454,15 @@ mod tests {
         // LinearDevice (with matching conductance) should agree closely.
 
         struct LinearizedDiode {
-            g: f64,
-            i_offset: f64,
-            v_max: f64,
+            g: crate::Wave,
+            i_offset: crate::Wave,
+            v_max: crate::Wave,
         }
         impl NlDeviceIv for LinearizedDiode {
-            fn iv(&self, v: f64) -> (f64, f64) {
+            fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
                 (self.g * v + self.i_offset, self.g)
             }
-            fn v_clamp(&self) -> (f64, f64) {
+            fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
                 (-self.v_max, self.v_max)
             }
         }
@@ -2591,7 +2609,7 @@ mod tests {
         // Large drive should produce measurably different results
         let max_diff = (0..2)
             .map(|i| (b_nl[i] - b_lin[i]).abs())
-            .fold(0.0_f64, f64::max);
+            .fold(0.0 as crate::Wave, crate::Wave::max);
         assert!(
             max_diff > 0.01,
             "Large drive should show NL divergence, but max_diff={max_diff:.6e}"
@@ -2607,9 +2625,9 @@ mod tests {
     fn fd_check_group_jacobian(
         name: &str,
         group: &dyn NlDeviceGroupIv,
-        v_points: &[&[f64]],
-        eps: f64,
-        tol: f64,
+        v_points: &[&[crate::Wave]],
+        eps: crate::Wave,
+        tol: crate::Wave,
     ) {
         let n = group.n_ports();
         for v in v_points {
@@ -2654,7 +2672,7 @@ mod tests {
         let triode = TriodeThreePort::new(TriodeModel::by_name("12AX7"));
         // Port 0 = grid (Vgk), Port 1 = plate (Vpk)
         // Test at multiple operating points spanning cutoff to saturation
-        let v_points: &[&[f64]] = &[
+        let v_points: &[&[crate::Wave]] = &[
             &[-2.0, 100.0], // Normal bias
             &[-1.0, 150.0], // Less negative grid
             &[0.0, 200.0],  // Zero grid bias
@@ -2669,7 +2687,7 @@ mod tests {
         use super::super::{VariMuModel, VariMuThreePort};
         let varimu = VariMuThreePort::new(VariMuModel::ge_6386());
         // Port 0 = grid (Vgk), Port 1 = plate (Vak)
-        let v_points: &[&[f64]] = &[
+        let v_points: &[&[crate::Wave]] = &[
             &[-2.0, 100.0], // Normal variable-mu operation
             &[-1.0, 150.0], // Less negative grid
             &[-5.0, 200.0], // Deep bias (high compression)
@@ -2688,14 +2706,14 @@ mod tests {
     ///                a_scatter = known_a_i + Σ_j S[i][j] * b_j
     fn verify_embedding_constraint_grouped(
         n_nl: usize,
-        s_nl: &[f64],
-        known_a: &[f64],
-        port_resistances: &[f64],
-        v: &[f64],
-        b: &[f64],
+        s_nl: &[crate::Wave],
+        known_a: &[crate::Wave],
+        port_resistances: &[crate::Wave],
+        v: &[crate::Wave],
+        b: &[crate::Wave],
         groups: &[&dyn NlDeviceGroupIv],
         offsets: &[usize],
-        tolerance: f64,
+        tolerance: crate::Wave,
     ) {
         // Evaluate all groups to get port currents
         let mut all_currents = vec![0.0; n_nl];
@@ -2712,8 +2730,10 @@ mod tests {
 
         for i in 0..n_nl {
             let a_device = v[i] + port_resistances[i] * all_currents[i];
-            let a_scatter: f64 =
-                known_a[i] + (0..n_nl).map(|j| s_nl[i * n_nl + j] * b[j]).sum::<f64>();
+            let a_scatter: crate::Wave = known_a[i]
+                + (0..n_nl)
+                    .map(|j| s_nl[i * n_nl + j] * b[j])
+                    .sum::<crate::Wave>();
             let err = (a_device - a_scatter).abs();
             assert!(
                 err < tolerance,
@@ -2927,12 +2947,12 @@ mod tests {
     /// Compute the system residual F for a single-port device system.
     fn compute_residual_ungrouped(
         n_nl: usize,
-        s_nl: &[f64],
-        known_a: &[f64],
-        port_resistances: &[f64],
+        s_nl: &[crate::Wave],
+        known_a: &[crate::Wave],
+        port_resistances: &[crate::Wave],
         devices: &[&dyn NlDeviceIv],
-        v: &[f64],
-    ) -> Vec<f64> {
+        v: &[crate::Wave],
+    ) -> Vec<crate::Wave> {
         let mut f = vec![0.0; n_nl];
         for i in 0..n_nl {
             let (i_i, _) = devices[i].iv(v[i]);
@@ -2949,13 +2969,13 @@ mod tests {
     /// Compute the system residual F for a grouped device system.
     fn compute_residual_grouped(
         n_nl: usize,
-        s_nl: &[f64],
-        known_a: &[f64],
-        port_resistances: &[f64],
+        s_nl: &[crate::Wave],
+        known_a: &[crate::Wave],
+        port_resistances: &[crate::Wave],
         groups: &[&dyn NlDeviceGroupIv],
         offsets: &[usize],
-        v: &[f64],
-    ) -> Vec<f64> {
+        v: &[crate::Wave],
+    ) -> Vec<crate::Wave> {
         // Evaluate all groups
         let mut all_c = vec![0.0; n_nl];
         for (g_idx, &group) in groups.iter().enumerate() {
@@ -2996,7 +3016,7 @@ mod tests {
         let eps = 1e-7;
 
         // Analytic system Jacobian
-        let mut jac = [0.0_f64; 4];
+        let mut jac = [0.0 as crate::Wave; 4];
         let mut derivs = [0.0; 2];
         for i in 0..n_nl {
             let (_, d) = devices[i].iv(v[i]);
@@ -3057,7 +3077,7 @@ mod tests {
         let mut dev_j = [0.0; 4];
         triode.eval(&v, &mut dev_c, &mut dev_j);
 
-        let mut jac = [0.0_f64; 4];
+        let mut jac = [0.0 as crate::Wave; 4];
         for i in 0..n_nl {
             for k in 0..n_nl {
                 let mut val = s_nl[i * n_nl + k];
@@ -3127,7 +3147,7 @@ mod tests {
         let mut dev_j = [0.0; 4];
         varimu.eval(&v, &mut dev_c, &mut dev_j);
 
-        let mut jac = [0.0_f64; 4];
+        let mut jac = [0.0 as crate::Wave; 4];
         for i in 0..n_nl {
             for k in 0..n_nl {
                 let mut val = s_nl[i * n_nl + k];
@@ -3201,7 +3221,7 @@ mod tests {
             let (_, d) = devices[i].iv(v[i]);
             derivs[i] = d;
         }
-        let mut jac = [0.0_f64; 4];
+        let mut jac = [0.0 as crate::Wave; 4];
         for i in 0..n_nl {
             for j in 0..n_nl {
                 let sij = s_nl[i * n_nl + j];

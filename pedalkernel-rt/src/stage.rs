@@ -26,7 +26,7 @@ use crate::helpers::balance_parallel_vs;
 /// stable as long as the owning `WdfStage` (and its tree) is not dropped.
 /// The tree structure is never modified after construction.
 #[derive(Clone, Copy)]
-pub struct VsPtr(*mut f64);
+pub struct VsPtr(*mut crate::Wave);
 
 // SAFETY: VsPtr points into a Box<DynNode> owned by the same WdfStage.
 // The stage is only accessed from one thread (audio thread). No shared
@@ -37,7 +37,7 @@ unsafe impl Sync for VsPtr {}
 impl VsPtr {
     /// Create a new VsPtr from a raw pointer.
     #[inline(always)]
-    pub fn new(ptr: *mut f64) -> Self {
+    pub fn new(ptr: *mut crate::Wave) -> Self {
         Self(ptr)
     }
 
@@ -45,7 +45,7 @@ impl VsPtr {
     /// # Safety
     /// Caller must ensure the pointer is still valid (tree not dropped).
     #[inline(always)]
-    pub unsafe fn set(&self, v: f64) {
+    pub unsafe fn set(&self, v: crate::Wave) {
         *self.0 = v;
     }
 
@@ -53,7 +53,7 @@ impl VsPtr {
     /// # Safety
     /// Caller must ensure the pointer is still valid.
     #[inline(always)]
-    pub unsafe fn get(&self) -> f64 {
+    pub unsafe fn get(&self) -> crate::Wave {
         *self.0
     }
 }
@@ -67,7 +67,7 @@ impl core::fmt::Debug for VsPtr {
 /// Flush denormals to zero. Subnormal floats are 100x slower to process
 /// on x86 and serve no useful purpose in audio signals.
 #[inline(always)]
-pub fn flush_denormal(x: f64) -> f64 {
+pub fn flush_denormal(x: crate::Wave) -> crate::Wave {
     #[cfg(feature = "fault-injection")]
     if crate::fault_injection::is_active(crate::fault_injection::Fault::SkipDenormalFlush) {
         return x;
@@ -98,17 +98,17 @@ pub fn flush_denormal(x: f64) -> f64 {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NonIdealFxState {
     /// GBW lowpass coefficient: α = 2π·fc / (2π·fc + fs).
-    pub gbw_coeff: f64,
+    pub gbw_coeff: crate::Wave,
     /// Single-pole IIR state for GBW rolloff.
-    pub gbw_state: f64,
+    pub gbw_state: crate::Wave,
     /// Maximum voltage change per sample (slew_rate_V_per_us * 1e6 / sample_rate).
-    pub max_dv: f64,
+    pub max_dv: crate::Wave,
     /// Previous output sample for slew rate limiting.
-    pub prev_out: f64,
+    pub prev_out: crate::Wave,
     /// Positive rail saturation voltage (tanh soft clip ceiling).
-    pub v_rail_pos: f64,
+    pub v_rail_pos: crate::Wave,
     /// Negative rail saturation voltage.
-    pub v_rail_neg: f64,
+    pub v_rail_neg: crate::Wave,
 }
 
 impl Default for NonIdealFxState {
@@ -117,10 +117,10 @@ impl Default for NonIdealFxState {
         Self {
             gbw_coeff: 1.0,
             gbw_state: 0.0,
-            max_dv: f64::MAX,
+            max_dv: crate::Wave::MAX,
             prev_out: 0.0,
-            v_rail_pos: f64::MAX,
-            v_rail_neg: f64::MAX,
+            v_rail_pos: crate::Wave::MAX,
+            v_rail_neg: crate::Wave::MAX,
         }
     }
 }
@@ -133,10 +133,16 @@ impl NonIdealFxState {
     /// - `v_max`: symmetric rail saturation voltage in V
     /// - `gain`: closed-loop gain (for fc = GBW/gain)
     /// - `sample_rate`: in Hz
-    pub fn from_params(gbw: f64, slew_rate: f64, v_max: f64, gain: f64, sample_rate: f64) -> Self {
+    pub fn from_params(
+        gbw: crate::Wave,
+        slew_rate: crate::Wave,
+        v_max: crate::Wave,
+        gain: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> Self {
         let gain_abs = gain.abs().max(1.0);
         let fc = gbw / gain_abs;
-        let w = 2.0 * core::f64::consts::PI * fc;
+        let w = 2.0 * crate::math::PI * fc;
         Self {
             gbw_coeff: w / (w + sample_rate),
             gbw_state: 0.0,
@@ -150,8 +156,8 @@ impl NonIdealFxState {
     /// Construct from Component trait's NonIdealFx declarations.
     pub fn from_nonideal_fx(
         fx: &[crate::nonideal_fx::NonIdealFx],
-        gain: f64,
-        sample_rate: f64,
+        gain: crate::Wave,
+        sample_rate: crate::Wave,
     ) -> Self {
         let mut state = Self::default();
         for effect in fx {
@@ -159,7 +165,7 @@ impl NonIdealFxState {
                 crate::nonideal_fx::NonIdealFx::OpAmpBandwidth { gbw, slew_rate } => {
                     let gain_abs = gain.abs().max(1.0);
                     let fc = gbw / gain_abs;
-                    let w = 2.0 * core::f64::consts::PI * fc;
+                    let w = 2.0 * crate::math::PI * fc;
                     state.gbw_coeff = w / (w + sample_rate);
                     state.max_dv = slew_rate * 1e6 / sample_rate;
                 }
@@ -179,10 +185,15 @@ impl NonIdealFxState {
     }
 
     /// Update GBW coefficient for a new gain value (pot changed Rf).
-    pub fn update_gain(&mut self, gbw: f64, new_gain: f64, sample_rate: f64) {
+    pub fn update_gain(
+        &mut self,
+        gbw: crate::Wave,
+        new_gain: crate::Wave,
+        sample_rate: crate::Wave,
+    ) {
         let gain_abs = new_gain.abs().max(1.0);
         let fc = gbw / gain_abs;
-        let w = 2.0 * core::f64::consts::PI * fc;
+        let w = 2.0 * crate::math::PI * fc;
         self.gbw_coeff = w / (w + sample_rate);
     }
 }
@@ -193,7 +204,7 @@ impl NonIdealFxState {
 /// Called at the correct point by each stage type.
 /// No heap allocations, no branching on stage type.
 #[inline]
-pub fn apply_nonideal_fx(sample: f64, state: &mut NonIdealFxState) -> f64 {
+pub fn apply_nonideal_fx(sample: crate::Wave, state: &mut NonIdealFxState) -> crate::Wave {
     // GBW rolloff: single-pole lowpass
     let mut out = state.gbw_coeff * sample + (1.0 - state.gbw_coeff) * state.gbw_state;
     state.gbw_state = out;
@@ -208,9 +219,9 @@ pub fn apply_nonideal_fx(sample: f64, state: &mut NonIdealFxState) -> f64 {
     state.prev_out = out;
 
     // Rail saturation: asymmetric tanh soft clip
-    if out > 0.0 && state.v_rail_pos < f64::MAX {
+    if out > 0.0 && state.v_rail_pos < crate::Wave::MAX {
         out = state.v_rail_pos * crate::fast_math::fast_tanh(out / state.v_rail_pos);
-    } else if out < 0.0 && state.v_rail_neg < f64::MAX {
+    } else if out < 0.0 && state.v_rail_neg < crate::Wave::MAX {
         out = -state.v_rail_neg * crate::fast_math::fast_tanh(-out / state.v_rail_neg);
     }
 
@@ -225,10 +236,10 @@ pub fn apply_nonideal_fx(sample: f64, state: &mut NonIdealFxState) -> f64 {
 /// During steady-state (small delta), use tight tolerance for accuracy.
 /// The linear interpolation avoids a discontinuity at the threshold boundary.
 #[inline]
-fn adaptive_nr_tolerance(input_delta: f64) -> f64 {
-    const TIGHT: f64 = 1e-6;
-    const LOOSE: f64 = 1e-4;
-    const TRANSIENT_THRESHOLD: f64 = 0.1; // ~-20dBFS delta
+fn adaptive_nr_tolerance(input_delta: crate::Wave) -> crate::Wave {
+    const TIGHT: crate::Wave = 1e-6;
+    const LOOSE: crate::Wave = 1e-4;
+    const TRANSIENT_THRESHOLD: crate::Wave = 0.1; // ~-20dBFS delta
 
     if input_delta.abs() > TRANSIENT_THRESHOLD {
         LOOSE
@@ -244,7 +255,13 @@ fn adaptive_nr_tolerance(input_delta: f64) -> f64 {
 /// Adds `g` to the diagonal entries and subtracts from off-diagonal.
 /// Use negative `g` to unstamp (remove) a previous stamp.
 #[inline]
-fn stamp_g(g_matrix: &mut [f64], n: usize, n1: Option<usize>, n2: Option<usize>, g: f64) {
+fn stamp_g(
+    g_matrix: &mut [crate::Wave],
+    n: usize,
+    n1: Option<usize>,
+    n2: Option<usize>,
+    g: crate::Wave,
+) {
     if let Some(i) = n1 {
         g_matrix[i * n + i] += g;
         if let Some(j) = n2 {
@@ -296,11 +313,11 @@ pub struct KTable {
     /// Number of input dimensions (1 for diode, 2 for BJT/triode).
     pub dims: usize,
     /// Min/max of the b_tree input domain.
-    pub b_min: f64,
-    pub b_max: f64,
+    pub b_min: crate::Wave,
+    pub b_max: crate::Wave,
     /// Min/max of the second dimension (control voltage). Unused for 1D.
-    pub ctrl_min: f64,
-    pub ctrl_max: f64,
+    pub ctrl_min: crate::Wave,
+    pub ctrl_max: crate::Wave,
     /// Number of steps per dimension.
     pub steps: usize,
     /// Flat table entries: a_root values.
@@ -309,10 +326,10 @@ pub struct KTable {
     pub entries: alloc::vec::Vec<Wave>,
     /// Precomputed (steps-1) / (b_max - b_min). Eliminates per-sample division.
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub inv_b_scale: f64,
+    pub inv_b_scale: crate::Wave,
     /// Precomputed (steps-1) / (ctrl_max - ctrl_min). Eliminates per-sample division.
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub inv_c_scale: f64,
+    pub inv_c_scale: crate::Wave,
 }
 
 impl KTable {
@@ -321,7 +338,7 @@ impl KTable {
     pub fn precompute_scales(&mut self) {
         let b_range = self.b_max - self.b_min;
         let c_range = self.ctrl_max - self.ctrl_min;
-        let n = (self.steps.max(2) - 1) as f64;
+        let n = (self.steps.max(2) - 1) as crate::Wave;
         self.inv_b_scale = if b_range.abs() > 1e-15 {
             n / b_range
         } else {
@@ -336,7 +353,7 @@ impl KTable {
 
     /// 1D lookup: interpolate a_root from b_tree.
     #[inline(always)]
-    pub fn lookup_1d(&self, b_tree: f64) -> f64 {
+    pub fn lookup_1d(&self, b_tree: crate::Wave) -> crate::Wave {
         if self.steps < 2 || self.entries.is_empty() {
             return 0.0;
         }
@@ -349,12 +366,12 @@ impl KTable {
         let frac = p - i as Wave;
         let y0 = self.entries[i];
         let y1 = self.entries[i + 1];
-        (y0 + frac * (y1 - y0)) as f64
+        (y0 + frac * (y1 - y0)) as crate::Wave
     }
 
     /// 1D lookup plus local derivative da_root/db_tree.
     #[inline(always)]
-    pub fn lookup_1d_with_derivative(&self, b_tree: f64) -> (f64, f64) {
+    pub fn lookup_1d_with_derivative(&self, b_tree: crate::Wave) -> (crate::Wave, crate::Wave) {
         if self.steps < 2 || self.entries.is_empty() {
             return (0.0, 0.0);
         }
@@ -365,13 +382,13 @@ impl KTable {
         let frac = p - i as Wave;
         let y0 = self.entries[i];
         let y1 = self.entries[i + 1];
-        let slope = (y1 - y0) as f64 * self.inv_b_scale;
-        ((y0 + frac * (y1 - y0)) as f64, slope)
+        let slope = (y1 - y0) as crate::Wave * self.inv_b_scale;
+        ((y0 + frac * (y1 - y0)) as crate::Wave, slope)
     }
 
     /// 2D lookup: interpolate a_root from (b_tree, control_voltage).
     #[inline(always)]
-    pub fn lookup_2d(&self, b_tree: f64, ctrl: f64) -> f64 {
+    pub fn lookup_2d(&self, b_tree: crate::Wave, ctrl: crate::Wave) -> crate::Wave {
         if self.steps < 2 || self.entries.is_empty() {
             return 0.0;
         }
@@ -398,12 +415,16 @@ impl KTable {
         // Bilinear interpolation (4 muls + 3 adds)
         let t0 = v00 + fb * (v10 - v00);
         let t1 = v01 + fb * (v11 - v01);
-        (t0 + fc * (t1 - t0)) as f64
+        (t0 + fc * (t1 - t0)) as crate::Wave
     }
 
     /// 2D lookup plus local derivatives `(value, d/db_tree, d/dctrl)`.
     #[inline(always)]
-    pub fn lookup_2d_with_derivatives(&self, b_tree: f64, ctrl: f64) -> (f64, f64, f64) {
+    pub fn lookup_2d_with_derivatives(
+        &self,
+        b_tree: crate::Wave,
+        ctrl: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, crate::Wave) {
         if self.steps < 2 || self.entries.is_empty() {
             return (0.0, 0.0, 0.0);
         }
@@ -428,9 +449,11 @@ impl KTable {
         let t0 = v00 + fb * (v10 - v00);
         let t1 = v01 + fb * (v11 - v01);
         let value = t0 + fc * (t1 - t0);
-        let d_db = ((1.0 as Wave - fc) * (v10 - v00) + fc * (v11 - v01)) as f64 * self.inv_b_scale;
-        let d_dc = ((1.0 as Wave - fb) * (v01 - v00) + fb * (v11 - v10)) as f64 * self.inv_c_scale;
-        (value as f64, d_db, d_dc)
+        let d_db =
+            ((1.0 as Wave - fc) * (v10 - v00) + fc * (v11 - v01)) as crate::Wave * self.inv_b_scale;
+        let d_dc =
+            ((1.0 as Wave - fb) * (v01 - v00) + fb * (v11 - v10)) as crate::Wave * self.inv_c_scale;
+        (value as crate::Wave, d_db, d_dc)
     }
 }
 
@@ -447,19 +470,21 @@ impl KTable {
     ///
     /// For 1D tables: `antideriv[i] = ∫_{b_min}^{b_i} f(x) dx`
     /// For 2D tables: integrates along the b axis for each ctrl slice.
-    pub fn compute_antiderivative(&self) -> Vec<f64> {
+    pub fn compute_antiderivative(&self) -> Vec<crate::Wave> {
         let s = self.steps;
         if s < 2 || self.entries.is_empty() {
             return Vec::new();
         }
-        let db = (self.b_max - self.b_min) / (s - 1) as f64;
+        let db = (self.b_max - self.b_min) / (s - 1) as crate::Wave;
 
         if self.dims == 1 {
             let mut ad = vec![0.0; s];
             for i in 1..s {
                 // Trapezoidal: A[i] = A[i-1] + (f[i-1] + f[i]) / 2 * db
-                ad[i] =
-                    ad[i - 1] + (self.entries[i - 1] as f64 + self.entries[i] as f64) * 0.5 * db;
+                ad[i] = ad[i - 1]
+                    + (self.entries[i - 1] as crate::Wave + self.entries[i] as crate::Wave)
+                        * 0.5
+                        * db;
             }
             ad
         } else {
@@ -470,7 +495,9 @@ impl KTable {
                     let idx = ib + ic * s;
                     let prev = ib - 1 + ic * s;
                     ad[idx] = ad[prev]
-                        + (self.entries[prev] as f64 + self.entries[idx] as f64) * 0.5 * db;
+                        + (self.entries[prev] as crate::Wave + self.entries[idx] as crate::Wave)
+                            * 0.5
+                            * db;
                 }
             }
             ad
@@ -486,7 +513,12 @@ impl KTable {
     /// `antideriv` must be the output of `compute_antiderivative()`.
     /// `b_prev` is the previous sample's b_tree value.
     #[inline(always)]
-    pub fn lookup_1d_adaa(&self, b_tree: f64, b_prev: f64, antideriv: &[f64]) -> f64 {
+    pub fn lookup_1d_adaa(
+        &self,
+        b_tree: crate::Wave,
+        b_prev: crate::Wave,
+        antideriv: &[crate::Wave],
+    ) -> crate::Wave {
         let delta = b_tree - b_prev;
         if delta.abs() < 1e-7 {
             // Inputs nearly equal — use direct evaluation (L'Hôpital)
@@ -502,7 +534,13 @@ impl KTable {
     /// ADAA along the b axis; ctrl axis uses standard interpolation.
     /// `b_prev` is the previous sample's b_tree value.
     #[inline(always)]
-    pub fn lookup_2d_adaa(&self, b_tree: f64, b_prev: f64, ctrl: f64, antideriv: &[f64]) -> f64 {
+    pub fn lookup_2d_adaa(
+        &self,
+        b_tree: crate::Wave,
+        b_prev: crate::Wave,
+        ctrl: crate::Wave,
+        antideriv: &[crate::Wave],
+    ) -> crate::Wave {
         let delta = b_tree - b_prev;
         if delta.abs() < 1e-7 {
             return self.lookup_2d(b_tree, ctrl);
@@ -515,29 +553,34 @@ impl KTable {
     /// Interpolate from an arbitrary table (antiderivative or other) using
     /// the same grid as self.entries. 1D version.
     #[inline(always)]
-    fn interp_table(&self, b: f64, table: &[f64]) -> f64 {
+    fn interp_table(&self, b: crate::Wave, table: &[crate::Wave]) -> crate::Wave {
         if self.steps < 2 || table.len() < self.steps {
             return 0.0;
         }
-        let p = ((b - self.b_min) * self.inv_b_scale).clamp(0.0, (self.steps - 1) as f64);
+        let p = ((b - self.b_min) * self.inv_b_scale).clamp(0.0, (self.steps - 1) as crate::Wave);
         let i = (p as usize).min(self.steps - 2);
-        let frac = p - i as f64;
+        let frac = p - i as crate::Wave;
         table[i] + frac * (table[i + 1] - table[i])
     }
 
     /// Interpolate from an arbitrary 2D table using the same grid.
     #[inline(always)]
-    fn interp_2d_table(&self, b: f64, ctrl: f64, table: &[f64]) -> f64 {
+    fn interp_2d_table(
+        &self,
+        b: crate::Wave,
+        ctrl: crate::Wave,
+        table: &[crate::Wave],
+    ) -> crate::Wave {
         if self.steps < 2 || table.len() < self.steps * self.steps {
             return 0.0;
         }
-        let n_max = (self.steps - 1) as f64;
+        let n_max = (self.steps - 1) as crate::Wave;
         let pb = ((b - self.b_min) * self.inv_b_scale).clamp(0.0, n_max);
         let pc = ((ctrl - self.ctrl_min) * self.inv_c_scale).clamp(0.0, n_max);
         let ib = (pb as usize).min(self.steps - 2);
         let ic = (pc as usize).min(self.steps - 2);
-        let fb = pb - ib as f64;
-        let fc = pc - ic as f64;
+        let fb = pb - ib as crate::Wave;
+        let fc = pc - ic as crate::Wave;
         let s = self.steps;
         let v00 = table[ib + ic * s];
         let v10 = table[ib + 1 + ic * s];
@@ -558,9 +601,9 @@ mod adaa_tests {
         let steps = 256;
         let b_min = -5.0;
         let b_max = 5.0;
-        let entries: Vec<f64> = (0..steps)
+        let entries: Vec<crate::Wave> = (0..steps)
             .map(|i| {
-                let b = b_min + (b_max - b_min) * i as f64 / (steps - 1) as f64;
+                let b = b_min + (b_max - b_min) * i as crate::Wave / (steps - 1) as crate::Wave;
                 b.tanh()
             })
             .collect();
@@ -596,7 +639,10 @@ mod adaa_tests {
             ad[mid]
         );
         // ad should not be all zeros
-        let max_ad = ad.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+        let max_ad = ad
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0 as crate::Wave, crate::Wave::max);
         assert!(
             max_ad > 0.1,
             "Antiderivative should be nonzero, max={max_ad}"
@@ -721,22 +767,22 @@ pub enum RootKind {
     /// Output voltage = (a + state) / 2 gives correct transfer function.
     CapacitorRoot {
         /// Capacitance in Farads
-        capacitance: f64,
+        capacitance: crate::Wave,
         /// Port resistance: 1 / (2 * fs * C)
-        rp: f64,
+        rp: crate::Wave,
         /// State (previous incident wave)
-        state: f64,
+        state: crate::Wave,
     },
     /// Inductor as WDF root for RL highpass and similar filters.
     /// The inductor reflects negated state: b = -state.
     /// Output voltage = (a - state) / 2 gives correct transfer function.
     InductorRoot {
         /// Inductance in Henrys
-        inductance: f64,
+        inductance: crate::Wave,
         /// Port resistance: 2 * fs * L
-        rp: f64,
+        rp: crate::Wave,
         /// State (previous incident wave)
-        state: f64,
+        state: crate::Wave,
     },
     /// Resistive termination: load resistor at the root port.
     /// The resistor absorbs all incident energy: b = 0, so a_root = 0.
@@ -760,9 +806,9 @@ pub enum RootKind {
     /// ```
     PassiveRType {
         /// Scattering matrix S (n_ports × n_ports, row-major).
-        scattering: Vec<f64>,
+        scattering: Vec<crate::Wave>,
         /// VS injection vector k (n_ports elements).
-        vs_injection: Vec<f64>,
+        vs_injection: Vec<crate::Wave>,
         /// Number of ports (reactive + output probe).
         n_ports: usize,
         /// Passive child nodes (capacitors, inductors, output probe, and pots).
@@ -777,8 +823,8 @@ pub enum RootKind {
         /// `Vout = sum(extraction_coeffs[i] * b[i]) + extraction_vs * Vin`.
         /// This avoids using a high-Z probe port as an approximation of a
         /// circuit node voltage.
-        extraction_coeffs: Vec<f64>,
-        extraction_vs: f64,
+        extraction_coeffs: Vec<crate::Wave>,
+        extraction_vs: crate::Wave,
         extraction_output_pos: Option<usize>,
         extraction_output_neg: Option<usize>,
         /// Stored MNA system for pot recomputation (None if no pots).
@@ -787,7 +833,7 @@ pub enum RootKind {
         recompute_ports: Option<Vec<WdfPort>>,
         /// Pot conductance stamps in the MNA G matrix: (child_index, node_pos, node_neg, current_g).
         /// Used to unstamp old conductance and re-stamp new conductance on pot change.
-        pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
+        pot_stamps: Vec<(usize, Option<usize>, Option<usize>, crate::Wave)>,
         /// Dirty flag: set when a pot changes, cleared after S re-derivation.
         needs_recompute: bool,
         /// Precomputed interpolation table for single-pot stages.
@@ -857,7 +903,7 @@ impl RootKind {
 
     /// Process the NL root: incident wave → reflected wave.
     /// Dispatches to the concrete root type's NR solver.
-    pub fn process(&mut self, b_tree: f64, rp: f64) -> f64 {
+    pub fn process(&mut self, b_tree: crate::Wave, rp: crate::Wave) -> crate::Wave {
         match self {
             RootKind::DiodePair(dp) => dp.process(b_tree, rp),
             RootKind::SingleDiode(d) => d.process(b_tree, rp),
@@ -888,7 +934,12 @@ impl RootKind {
     /// - Triodes/VariMu: Vgk from input
     /// - Pentodes: Vg1k from input
     /// - Diodes/JFETs/other: no control voltage
-    pub fn set_control_voltage(&mut self, input: f64, compensation: f64, _bias_offset: f64) {
+    pub fn set_control_voltage(
+        &mut self,
+        input: crate::Wave,
+        compensation: crate::Wave,
+        _bias_offset: crate::Wave,
+    ) {
         match self {
             RootKind::Triode(t) => {
                 t.set_vgk(t.vgk_bias() + input * compensation);
@@ -923,15 +974,15 @@ impl RootKind {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AllpassFeedback {
     /// Input resistance (R_ap) in the signal path before the JFET.
-    pub r_ap: f64,
+    pub r_ap: crate::Wave,
     /// IIR numerator coefficient: Rf / (1 + K) where K = 2·fs·Rf·Cf.
-    pub b0: f64,
+    pub b0: crate::Wave,
     /// IIR denominator coefficient: (K - 1) / (K + 1).
-    pub a1: f64,
+    pub a1: crate::Wave,
     /// Previous input current sample for IIR.
-    pub x_prev: f64,
+    pub x_prev: crate::Wave,
     /// Previous output voltage for IIR.
-    pub y_prev: f64,
+    pub y_prev: crate::Wave,
 }
 
 /// Non-inverting all-pass IIR for Phase 90-style JFET + opamp topology.
@@ -945,13 +996,13 @@ pub struct AllpassFeedback {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AllpassDirect {
     /// Phase-shifting capacitor value (e.g., C_ap = 47nF).
-    pub cap: f64,
+    pub cap: crate::Wave,
     /// Sample rate for coefficient computation.
-    pub sample_rate: f64,
+    pub sample_rate: crate::Wave,
     /// Previous input sample.
-    pub x_prev: f64,
+    pub x_prev: crate::Wave,
     /// Previous output sample.
-    pub y_prev: f64,
+    pub y_prev: crate::Wave,
 }
 
 /// Models a bridged-T opamp resonator as a 2nd-order IIR bandpass.
@@ -965,26 +1016,33 @@ pub struct AllpassDirect {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ResonatorFeedback {
     /// IIR coefficients (normalized by a0).
-    pub b0: f64,
-    pub b1: f64,
-    pub b2: f64,
-    pub a1: f64,
-    pub a2: f64,
+    pub b0: crate::Wave,
+    pub b1: crate::Wave,
+    pub b2: crate::Wave,
+    pub a1: crate::Wave,
+    pub a2: crate::Wave,
     /// State: previous input samples.
-    pub x1: f64,
-    pub x2: f64,
+    pub x1: crate::Wave,
+    pub x2: crate::Wave,
     /// State: previous output samples.
-    pub y1: f64,
-    pub y2: f64,
+    pub y1: crate::Wave,
+    pub y2: crate::Wave,
 }
 
 impl ResonatorFeedback {
     /// Create a new bridged-T resonator IIR from circuit parameters.
     ///
     /// Uses the Audio EQ Cookbook bandpass formula with bilinear pre-warping.
-    pub fn new(r1: f64, r2: f64, c1: f64, c2: f64, rf: f64, sample_rate: f64) -> Self {
+    pub fn new(
+        r1: crate::Wave,
+        r2: crate::Wave,
+        c1: crate::Wave,
+        c2: crate::Wave,
+        rf: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> Self {
         // Resonant angular frequency
-        let omega_0 = 1.0 / crate::math::sqrt((r1 * r2 * c1 * c2) as crate::Wave) as f64;
+        let omega_0 = 1.0 / crate::math::sqrt((r1 * r2 * c1 * c2) as crate::Wave) as crate::Wave;
 
         // Q factor for a bridged-T oscillator.
         // The T-network has a notch attenuation of ~1/3 for equal R,C.
@@ -1001,11 +1059,12 @@ impl ResonatorFeedback {
         };
 
         // Bilinear pre-warping: map analog frequency to digital
-        let w0 = 2.0 * crate::math::atan((omega_0 / (2.0 * sample_rate)) as crate::Wave) as f64;
+        let w0 =
+            2.0 * crate::math::atan((omega_0 / (2.0 * sample_rate)) as crate::Wave) as crate::Wave;
 
         // Audio EQ Cookbook: BPF (constant 0 dB peak gain)
-        let sin_w0 = crate::math::sin(w0 as crate::Wave) as f64;
-        let cos_w0 = crate::math::cos(w0 as crate::Wave) as f64;
+        let sin_w0 = crate::math::sin(w0 as crate::Wave) as crate::Wave;
+        let cos_w0 = crate::math::cos(w0 as crate::Wave) as crate::Wave;
         let alpha = sin_w0 / (2.0 * q);
 
         let b0 = alpha;
@@ -1033,7 +1092,7 @@ impl ResonatorFeedback {
 
     /// Process one sample through the 2nd-order bandpass.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         let y = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
             - self.a2 * self.y2;
@@ -1079,9 +1138,9 @@ pub struct OpAmpWdfAdaptor {
     /// Op-amp model for GBW rolloff and slew rate limiting.
     pub opamp: OpAmpRoot,
     /// GBW rolloff filter state (single-pole LPF on output).
-    pub gbw_state: f64,
+    pub gbw_state: crate::Wave,
     /// Previous output for slew rate limiting.
-    pub prev_out: f64,
+    pub prev_out: crate::Wave,
     /// Feedback pot ID (if any pot in Zf subtree responds to control changes).
     pub feedback_pot_id: Option<String>,
 }
@@ -1092,7 +1151,7 @@ impl OpAmpWdfAdaptor {
     /// `v_plus`: non-inverting input voltage (bias for inverting, signal for non-inv).
     /// `v_in`: far-end voltage of Zi (signal for inverting, 0 for non-inverting).
     #[inline]
-    pub fn process(&mut self, v_plus: f64, v_in: f64) -> f64 {
+    pub fn process(&mut self, v_plus: crate::Wave, v_in: crate::Wave) -> crate::Wave {
         // Up-sweep: get reflected waves from both subtrees
         let b1 = self.zi.reflected();
         let b2 = self.zf.reflected();
@@ -1164,7 +1223,7 @@ pub struct WdfStage {
     pub root: RootKind,
     /// Compensates for passive attenuation in the tree topology.
     /// Computed automatically from the tree's impedance structure.
-    pub compensation: f64,
+    pub compensation: crate::Wave,
     /// Oversampler for antialiasing at nonlinear stages.
     pub oversampler: Oversampler,
     /// Base diode model (before thermal modulation). Stored so thermal
@@ -1189,7 +1248,7 @@ pub struct WdfStage {
     /// DC-blocking highpass filter for triode stages.
     /// Models the output coupling capacitor's DC blocking behavior.
     /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
-    pub dc_block: Option<(f64, f64, f64, f64)>,
+    pub dc_block: Option<(crate::Wave, crate::Wave, crate::Wave, crate::Wave)>,
     /// Inter-stage grid DC blocker: removes plate DC from the previous stage
     /// before setting the tube's grid voltage. Without this, multi-stage chains
     /// feed plate voltage (~80-200V) directly into Vgk, saturating the tube.
@@ -1197,14 +1256,14 @@ pub struct WdfStage {
     /// voltage is set externally via set_control_voltage(). This HPF mimics
     /// the coupling cap's DC-blocking effect on the grid bias.
     /// Format: (x_prev, y_prev). α = 0.9995, fc ≈ 3.5 Hz at 48 kHz.
-    pub grid_dc_blocker: Option<(f64, f64)>,
+    pub grid_dc_blocker: Option<(crate::Wave, crate::Wave)>,
     /// Source follower mode for JFETs.
     /// When true, Vgs is computed as Vgate (input) - Vsource (output).
     /// This enables proper source follower behavior where the source follows the gate.
     pub is_source_follower: bool,
     /// Previous source voltage for source follower Vgs calculation.
     /// Vgs[n] = input[n] - Vsource[n-1]
-    pub prev_source_voltage: f64,
+    pub prev_source_voltage: crate::Wave,
     /// BFS distance from input of the injection node (for topological ordering).
     pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
@@ -1217,7 +1276,7 @@ pub struct WdfStage {
     /// Inter-stage voltage gain from a transformer boundary.
     /// When the stage's injection node is on a transformer secondary,
     /// this is 1/turns_ratio (e.g., 17.0 for a 1:17 step-up).
-    pub transformer_gain: f64,
+    pub transformer_gain: crate::Wave,
     /// Circuit graph node ID where this stage's voltage source injects signal.
     /// Used for node-based routing in parallel-path topologies.
     pub injection_node_id: usize,
@@ -1252,18 +1311,18 @@ pub struct WdfStage {
     pub feedback_pot_id: Option<String>,
     /// Fixed resistance in series with the feedback pot (e.g., R_clip).
     /// Used to compute effective Rf = pot_r + series_r when pot changes.
-    pub feedback_series_r: f64,
+    pub feedback_series_r: crate::Wave,
     /// Input resistance (Ri) for gain computation. Read from pendant tree
     /// port resistance or input-touching resistor at compile time.
-    pub feedback_ri: f64,
+    pub feedback_ri: crate::Wave,
     /// Pot in the op-amp ground/input leg whose resistance controls Ri.
     ///
     /// Some compiler splits consume this pot into scalar gain setup instead of
     /// keeping it as a WDF leaf in the same stage. These fields preserve the
     /// runtime mapping so the control can still update op-amp gain.
     pub feedback_ri_pot_id: Option<String>,
-    pub feedback_ri_fixed_r: f64,
-    pub feedback_ri_pot_max_r: f64,
+    pub feedback_ri_fixed_r: crate::Wave,
+    pub feedback_ri_pot_max_r: crate::Wave,
     pub feedback_ri_pot_taper: crate::pot_taper::PotTaper,
     /// When set, extract output voltage at this component (pot leaf) in the
     /// WDF tree instead of at the root junction. After the down-sweep,
@@ -1286,7 +1345,7 @@ pub struct WdfStage {
     /// VCC injection coefficient (per-unit, wave domain).
     /// Multiply by supply voltage to get the DC bias added to the reflected wave.
     /// Computed from a small resistive MNA at build time. Zero when no VCC edge.
-    pub vcc_injection_coeff: f64,
+    pub vcc_injection_coeff: crate::Wave,
     /// Gradual DC ramp counter (0..256) to prevent NR solver divergence on startup.
     pub vcc_dc_ramp: u32,
     /// Component ID of the coupling capacitor connected to the injection node.
@@ -1398,7 +1457,7 @@ impl WdfStage {
             root_comp_id: String::new(),
             feedback_pot_id: None,
             feedback_series_r: 0.0,
-            feedback_ri: f64::INFINITY,
+            feedback_ri: crate::Wave::INFINITY,
             feedback_ri_pot_id: None,
             feedback_ri_fixed_r: 0.0,
             feedback_ri_pot_max_r: 0.0,
@@ -1447,7 +1506,7 @@ impl WdfStage {
     /// Set the main voltage source value via cached pointer.
     /// Falls back to tree walk if pointer not cached.
     #[inline(always)]
-    pub fn set_vs_voltage(&mut self, v: f64) {
+    pub fn set_vs_voltage(&mut self, v: crate::Wave) {
         if let Some(ptr) = self.main_vs_ptr {
             // SAFETY: pointer was resolved from our own tree and tree
             // structure is immutable after construction.
@@ -1462,7 +1521,7 @@ impl WdfStage {
     /// Set a named port's voltage source via cached pointer.
     /// Falls back to tree walk if pointer not cached.
     #[inline(always)]
-    pub fn set_port_voltage(&mut self, port_name: &str, v: f64) {
+    pub fn set_port_voltage(&mut self, port_name: &str, v: crate::Wave) {
         for (name, ptr) in &self.port_vs_ptrs {
             if name == port_name {
                 // SAFETY: same as set_vs_voltage
@@ -1482,7 +1541,7 @@ impl WdfStage {
 pub struct OpAmpRecomputeData {
     pub mna: crate::tree::MnaSystem,
     pub port_pairs: Vec<(Option<usize>, Option<usize>)>,
-    pub port_resistances: Vec<f64>,
+    pub port_resistances: Vec<crate::Wave>,
 }
 
 /// A photocoupler in the input path of an inverting opamp stage.
@@ -1493,9 +1552,9 @@ pub struct InputPhotocoupler {
     pub comp_id: String,
     pub element: Photocoupler,
     /// Fixed resistance in series with this photocoupler (e.g., R_min).
-    pub fixed_series_r: f64,
+    pub fixed_series_r: crate::Wave,
     /// DC feedback resistance (Rf) for gain recalculation.
-    pub dc_rf: f64,
+    pub dc_rf: crate::Wave,
 }
 
 impl WdfStage {
@@ -1547,7 +1606,7 @@ impl WdfStage {
     /// the op-amp maintains unity gain while the R/C/JFET network shifts
     /// the signal's phase.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
 
@@ -1594,7 +1653,7 @@ impl WdfStage {
                 if let Some(idx) = self.opamp_input_child_idx {
                     self.opamp_children[idx].set_voltage(input * self.compensation);
                 }
-                let b: Vec<f64> = self
+                let b: Vec<crate::Wave> = self
                     .opamp_children
                     .iter_mut()
                     .map(|c| c.reflected())
@@ -1806,7 +1865,7 @@ impl WdfStage {
                     1.0
                 } else {
                     *vcc_dc_ramp += 1;
-                    *vcc_dc_ramp as f64 / DC_RAMP_SAMPLES as f64
+                    *vcc_dc_ramp as crate::Wave / DC_RAMP_SAMPLES as crate::Wave
                 };
                 b1 + vcc_injection_coeff * dc_scale
             } else {
@@ -1967,7 +2026,7 @@ impl WdfStage {
                         let vs_voltage = sample * compensation;
                         let n = *n_ports;
                         // 1. Collect reflected waves from children
-                        let b_children: Vec<f64> =
+                        let b_children: Vec<crate::Wave> =
                             children.iter_mut().map(|c| c.reflected()).collect();
                         // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
                         let mut a_children = vec![0.0; n];
@@ -2126,12 +2185,12 @@ impl WdfStage {
     /// Reactive elements (C/L) must use this effective rate for correct
     /// bilinear-transform discretization. Must be called after construction
     /// when the oversampling factor > 1.
-    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
+    pub fn apply_oversampling_rate(&mut self, base_rate: crate::Wave) {
         let ratio = self.oversampler.ratio();
         if ratio <= 1 {
             return;
         }
-        let effective_rate = base_rate * ratio as f64;
+        let effective_rate = base_rate * ratio as crate::Wave;
         self.tree.set_sample_rate(effective_rate);
         self.tree.recompute();
 
@@ -2198,7 +2257,7 @@ impl WdfStage {
     /// Set a pot value in the PassiveRType children and mark for recompute.
     ///
     /// Returns `true` if the pot was found and updated.
-    pub fn set_passive_rtype_pot(&mut self, comp_id: &str, value: f64) -> bool {
+    pub fn set_passive_rtype_pot(&mut self, comp_id: &str, value: crate::Wave) -> bool {
         if let RootKind::PassiveRType {
             children,
             needs_recompute,
@@ -2342,7 +2401,7 @@ impl WdfStage {
     /// This is used for external modulation (LFO, envelope, etc.).
     /// Has no effect if the root is not a JFET.
     #[inline]
-    pub fn set_jfet_vgs(&mut self, vgs: f64) {
+    pub fn set_jfet_vgs(&mut self, vgs: crate::Wave) {
         match &mut self.root {
             RootKind::Jfet(j) => j.set_vgs(vgs),
             RootKind::JfetVr(j) => j.set_vgs(vgs),
@@ -2352,7 +2411,7 @@ impl WdfStage {
 
     /// Get the current gate-source voltage if this is a JFET stage.
     #[allow(dead_code)]
-    pub fn jfet_vgs(&self) -> Option<f64> {
+    pub fn jfet_vgs(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::Jfet(j) => Some(j.vgs()),
             RootKind::JfetVr(j) => Some(j.vgs()),
@@ -2365,7 +2424,7 @@ impl WdfStage {
     /// This is used for external modulation (bias, LFO, signal input).
     /// Has no effect if the root is not a triode.
     #[inline]
-    pub fn set_triode_vgk(&mut self, vgk: f64) {
+    pub fn set_triode_vgk(&mut self, vgk: crate::Wave) {
         if let RootKind::Triode(t) = &mut self.root {
             t.set_vgk(vgk);
         }
@@ -2373,7 +2432,7 @@ impl WdfStage {
 
     /// Get the current grid-cathode voltage if this is a triode stage.
     #[allow(dead_code)]
-    pub fn triode_vgk(&self) -> Option<f64> {
+    pub fn triode_vgk(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::Triode(t) => Some(t.vgk()),
             _ => None,
@@ -2382,7 +2441,7 @@ impl WdfStage {
 
     /// Set the grid-cathode voltage for variable-mu triode root elements.
     #[inline]
-    pub fn set_vari_mu_vgk(&mut self, vgk: f64) {
+    pub fn set_vari_mu_vgk(&mut self, vgk: crate::Wave) {
         if let RootKind::VariMu(t) = &mut self.root {
             t.set_vgk(vgk);
         }
@@ -2390,7 +2449,7 @@ impl WdfStage {
 
     /// Get the current grid-cathode voltage if this is a variable-mu triode stage.
     #[allow(dead_code)]
-    pub fn vari_mu_vgk(&self) -> Option<f64> {
+    pub fn vari_mu_vgk(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::VariMu(t) => Some(t.vgk()),
             _ => None,
@@ -2399,7 +2458,7 @@ impl WdfStage {
 
     /// Set the control grid voltage (g1-cathode) for pentode root elements.
     #[inline]
-    pub fn set_pentode_vg1k(&mut self, vg1k: f64) {
+    pub fn set_pentode_vg1k(&mut self, vg1k: crate::Wave) {
         if let RootKind::Pentode(p) = &mut self.root {
             p.set_vg1k(vg1k);
         }
@@ -2408,7 +2467,7 @@ impl WdfStage {
     /// Set the screen grid voltage (g2-cathode) for pentode root elements.
     #[allow(dead_code)]
     #[inline]
-    pub fn set_pentode_vg2k(&mut self, vg2k: f64) {
+    pub fn set_pentode_vg2k(&mut self, vg2k: crate::Wave) {
         if let RootKind::Pentode(p) = &mut self.root {
             p.set_vg2k(vg2k);
         }
@@ -2416,7 +2475,7 @@ impl WdfStage {
 
     /// Get the current control grid voltage if this is a pentode stage.
     #[allow(dead_code)]
-    pub fn pentode_vg1k(&self) -> Option<f64> {
+    pub fn pentode_vg1k(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::Pentode(p) => Some(p.vg1k()),
             _ => None,
@@ -2425,7 +2484,7 @@ impl WdfStage {
 
     /// Set the gate-source voltage for MOSFET root elements.
     #[inline]
-    pub fn set_mosfet_vgs(&mut self, vgs: f64) {
+    pub fn set_mosfet_vgs(&mut self, vgs: crate::Wave) {
         if let RootKind::Mosfet(m) = &mut self.root {
             m.set_vgs(vgs);
         }
@@ -2433,7 +2492,7 @@ impl WdfStage {
 
     /// Get the current gate-source voltage if this is a MOSFET stage.
     #[allow(dead_code)]
-    pub fn mosfet_vgs(&self) -> Option<f64> {
+    pub fn mosfet_vgs(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::Mosfet(m) => Some(m.vgs()),
             _ => None,
@@ -2443,7 +2502,7 @@ impl WdfStage {
     /// Set the OTA bias current (for envelope-controlled gain).
     #[allow(dead_code)]
     #[inline]
-    pub fn set_ota_iabc(&mut self, iabc: f64) {
+    pub fn set_ota_iabc(&mut self, iabc: crate::Wave) {
         if let RootKind::Ota(o) = &mut self.root {
             o.set_iabc(iabc);
         }
@@ -2451,7 +2510,7 @@ impl WdfStage {
 
     /// Set OTA gain as normalized value (0.0–1.0).
     #[inline]
-    pub fn set_ota_gain(&mut self, gain: f64) {
+    pub fn set_ota_gain(&mut self, gain: crate::Wave) {
         if let RootKind::Ota(o) = &mut self.root {
             o.set_gain_normalized(gain);
         }
@@ -2463,7 +2522,7 @@ impl WdfStage {
     /// Has no effect if the root is not an op-amp.
     #[allow(dead_code)]
     #[inline]
-    pub fn set_opamp_vp(&mut self, vp: f64) {
+    pub fn set_opamp_vp(&mut self, vp: crate::Wave) {
         if let RootKind::OpAmp(op) = &mut self.root {
             op.set_vp(vp);
         }
@@ -2471,7 +2530,7 @@ impl WdfStage {
 
     /// Get the current non-inverting input voltage if this is an op-amp stage.
     #[allow(dead_code)]
-    pub fn opamp_vp(&self) -> Option<f64> {
+    pub fn opamp_vp(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.vp()),
             _ => None,
@@ -2484,7 +2543,7 @@ impl WdfStage {
     /// - `ratio < 1.0`: Gain stage with feedback network
     #[allow(dead_code)]
     #[inline]
-    pub fn set_opamp_feedback(&mut self, ratio: f64, vm_external: f64) {
+    pub fn set_opamp_feedback(&mut self, ratio: crate::Wave, vm_external: crate::Wave) {
         if let RootKind::OpAmp(op) = &mut self.root {
             op.set_feedback(ratio, vm_external);
         }
@@ -2496,7 +2555,7 @@ impl WdfStage {
     /// op-amp's Vp reference.  In all-pass circuits, this is the signal
     /// before the R/C/JFET network attenuates it.
     #[inline]
-    pub fn set_paired_opamp_vp(&mut self, vp: f64) {
+    pub fn set_paired_opamp_vp(&mut self, vp: crate::Wave) {
         if let Some(ref mut opamp) = self.paired_opamp {
             opamp.set_vp(vp);
         }
@@ -2534,7 +2593,7 @@ impl WdfStage {
                 // Gain = Rf / Ri (inverting) — set_gain takes absolute value
                 let rf = pot_r + self.feedback_series_r;
                 let ri = self.feedback_ri;
-                if ri > 0.0 && ri < f64::MAX {
+                if ri > 0.0 && ri < crate::Wave::MAX {
                     let gain = rf / ri;
                     if let RootKind::OpAmp(ref mut oa) = self.root {
                         oa.set_gain(gain);
@@ -2547,7 +2606,7 @@ impl WdfStage {
         }
     }
 
-    pub fn update_feedback_ri_from_pot(&mut self, comp_id: &str, position: f64) -> bool {
+    pub fn update_feedback_ri_from_pot(&mut self, comp_id: &str, position: crate::Wave) -> bool {
         if self.feedback_ri_pot_id.as_deref() != Some(comp_id) {
             return false;
         }
@@ -2611,7 +2670,7 @@ impl WdfStage {
     /// Uses accumulator pattern (not early return) so split pots (__aw/__wb)
     /// that appear in multiple locations all get updated. Triggers
     /// recompute_all + notify_pot_changed when any pot is found.
-    pub fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
+    pub fn set_pot(&mut self, comp_id: &str, value: crate::Wave) -> bool {
         let mut found = false;
         let aw_id = alloc::format!("{comp_id}__aw");
         let wb_id = alloc::format!("{comp_id}__wb");
@@ -2726,7 +2785,7 @@ impl WdfStage {
         };
 
         // Determine whether this is the MNA path (opamp_children) or the 3-port path (zf/zg).
-        let port_resistances: Vec<f64> = if !self.opamp_children.is_empty() {
+        let port_resistances: Vec<crate::Wave> = if !self.opamp_children.is_empty() {
             // MNA path: rebuild port resistances from children (all but last) + stored adapted R.
             let n_ports = recompute.port_pairs.len();
             let mut pr = Vec::with_capacity(n_ports);
@@ -2791,7 +2850,7 @@ impl WdfStage {
     /// Mu-Tron integrator). The photocoupler's asymmetric time constants
     /// are modeled internally, and the resulting resistance modulates the
     /// opamp's gain: gain = dc_rf / (fixed_r + photocoupler_r).
-    pub fn set_input_photocoupler_led(&mut self, comp_id: &str, led_drive: f64) -> bool {
+    pub fn set_input_photocoupler_led(&mut self, comp_id: &str, led_drive: crate::Wave) -> bool {
         let mut found = false;
         for pc in &mut self.input_photocouplers {
             if pc.comp_id == comp_id {
@@ -2818,7 +2877,7 @@ impl WdfStage {
     ///
     /// Has no effect if the root is not an op-amp gain stage.
     #[inline]
-    pub fn set_opamp_gain(&mut self, gain: f64) {
+    pub fn set_opamp_gain(&mut self, gain: crate::Wave) {
         if let RootKind::OpAmp(op) = &mut self.root {
             op.set_gain(gain);
         }
@@ -2826,7 +2885,7 @@ impl WdfStage {
 
     /// Get the current gain if this is an op-amp gain stage.
     #[allow(dead_code)]
-    pub fn opamp_gain(&self) -> Option<f64> {
+    pub fn opamp_gain(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.gain()),
             _ => None,
@@ -2840,7 +2899,7 @@ impl WdfStage {
     }
 
     /// Get OpAmpRoot sample rate (for verifying oversampling propagation).
-    pub fn opamp_sample_rate(&self) -> Option<f64> {
+    pub fn opamp_sample_rate(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.sample_rate()),
             _ => None,
@@ -2848,7 +2907,7 @@ impl WdfStage {
     }
 
     /// Get OpAmpRoot GBW coefficient (for verifying oversampling propagation).
-    pub fn opamp_gbw_coeff(&self) -> Option<f64> {
+    pub fn opamp_gbw_coeff(&self) -> Option<crate::Wave> {
         match &self.root {
             RootKind::OpAmp(op) => Some(op.gbw_coeff()),
             _ => None,
@@ -2976,7 +3035,7 @@ pub enum TubeRoot {
 
 impl TubeRoot {
     #[inline]
-    pub fn set_vgk(&mut self, vgk: f64) {
+    pub fn set_vgk(&mut self, vgk: crate::Wave) {
         match self {
             TubeRoot::Koren(t) => t.set_vgk(vgk),
             TubeRoot::VariMu(t) => t.set_vgk(vgk),
@@ -2985,7 +3044,7 @@ impl TubeRoot {
     }
 
     #[inline]
-    pub fn v_max(&self) -> f64 {
+    pub fn v_max(&self) -> crate::Wave {
         match self {
             TubeRoot::Koren(t) => t.v_max(),
             TubeRoot::VariMu(t) => t.v_max(),
@@ -2994,7 +3053,7 @@ impl TubeRoot {
     }
 
     #[inline]
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         match self {
             TubeRoot::Koren(t) => t.set_v_max(v_max),
             TubeRoot::VariMu(t) => t.set_v_max(v_max),
@@ -3003,7 +3062,7 @@ impl TubeRoot {
     }
 
     #[inline]
-    pub fn process(&mut self, b_tree: f64, rp: f64) -> f64 {
+    pub fn process(&mut self, b_tree: crate::Wave, rp: crate::Wave) -> crate::Wave {
         match self {
             TubeRoot::Koren(t) => t.process(b_tree, rp),
             TubeRoot::VariMu(t) => t.process(b_tree, rp),
@@ -3012,7 +3071,7 @@ impl TubeRoot {
     }
 
     #[inline]
-    pub fn plate_current(&self, vpk: f64) -> f64 {
+    pub fn plate_current(&self, vpk: crate::Wave) -> crate::Wave {
         match self {
             TubeRoot::Koren(t) => t.plate_current(vpk),
             TubeRoot::VariMu(t) => t.plate_current(vpk),
@@ -3048,16 +3107,16 @@ pub struct PushPullStage {
     /// Oversampler for pull half.
     pub pull_oversampler: Oversampler,
     /// Compensation factor (mu/ref_mu).
-    pub compensation: f64,
+    pub compensation: crate::Wave,
     /// Output transformer turns ratio (primary:secondary).
     /// Output is scaled by 1/ratio (step-down).
-    pub turns_ratio: f64,
+    pub turns_ratio: crate::Wave,
     /// Grid bias voltage (class AB operating point).
-    pub grid_bias: f64,
+    pub grid_bias: crate::Wave,
     /// DC blocker state: previous input sample (1-pole HPF, ~3.5Hz).
-    pub dc_blocker_x1: f64,
+    pub dc_blocker_x1: crate::Wave,
     /// DC blocker state: previous output sample.
-    pub dc_blocker_y1: f64,
+    pub dc_blocker_y1: crate::Wave,
     /// R-type adaptor for push half (3-port mode, when grid passives present).
     pub push_adaptor: Option<PushPullHalfAdaptor>,
     /// R-type adaptor for pull half (3-port mode).
@@ -3075,13 +3134,13 @@ pub struct PushPullHalfAdaptor {
     pub device: NlDeviceGroupKind,
     pub scattering: MultiNlScattering,
     pub passive_children: Vec<DynNode>,
-    pub nl_port_resistances: Vec<f64>,
-    pub v_prev: Vec<f64>,
-    pub dc_bias: Vec<f64>,
+    pub nl_port_resistances: Vec<crate::Wave>,
+    pub v_prev: Vec<crate::Wave>,
+    pub dc_bias: Vec<crate::Wave>,
     pub output_port: usize,
     pub n_nl: usize,
-    pub vs_injection: Option<Vec<f64>>,
-    pub vcc_bias_all: Vec<f64>,
+    pub vs_injection: Option<Vec<crate::Wave>>,
+    pub vcc_bias_all: Vec<crate::Wave>,
     pub dc_ramp: u32,
 }
 
@@ -3090,7 +3149,7 @@ impl PushPullStage {
     /// Input is applied with opposite polarity to push and pull halves.
     /// Output is the differential plate voltage divided by turns ratio.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Check for 3-port R-type adaptor path
         if self.push_adaptor.is_some() {
             return self.process_three_port(input);
@@ -3106,9 +3165,9 @@ impl PushPullStage {
         self.pull_root.set_vgk(vgk_pull);
 
         #[cfg(feature = "debug-trace")]
-        let push_b = core::cell::Cell::new(0.0f64);
+        let push_b = core::cell::Cell::new(0.0 as crate::Wave);
         #[cfg(feature = "debug-trace")]
-        let push_a = core::cell::Cell::new(0.0f64);
+        let push_a = core::cell::Cell::new(0.0 as crate::Wave);
 
         let push_out = self.push_oversampler.process(input, |_| {
             let vs = self.push_root.v_max();
@@ -3193,7 +3252,7 @@ impl PushPullStage {
     ///
     /// The grid voltage is NO LONGER set externally -- it emerges from the NR solver
     /// at port 0. The coupling cap naturally blocks DC.
-    fn process_three_port(&mut self, input: f64) -> f64 {
+    fn process_three_port(&mut self, input: crate::Wave) -> crate::Wave {
         let push_out = self.push_oversampler.process(input, |sample| {
             Self::process_adaptor_half(self.push_adaptor.as_mut().unwrap(), sample)
         });
@@ -3220,7 +3279,7 @@ impl PushPullStage {
     }
 
     /// Process one oversampled sub-sample through a single adaptor half.
-    fn process_adaptor_half(adaptor: &mut PushPullHalfAdaptor, sample: f64) -> f64 {
+    fn process_adaptor_half(adaptor: &mut PushPullHalfAdaptor, sample: crate::Wave) -> crate::Wave {
         let n_nl = adaptor.n_nl;
         let n_passive = adaptor.passive_children.len();
 
@@ -3231,7 +3290,7 @@ impl PushPullStage {
             1.0
         } else {
             adaptor.dc_ramp += 1;
-            adaptor.dc_ramp as f64 / DC_RAMP_SAMPLES as f64
+            adaptor.dc_ramp as crate::Wave / DC_RAMP_SAMPLES as crate::Wave
         };
 
         // 1. Scatter-up passive children
@@ -3334,16 +3393,16 @@ impl PushPullStage {
 
 impl PushPullStage {
     /// Adjust reactive element port resistances for oversampling.
-    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
+    pub fn apply_oversampling_rate(&mut self, base_rate: crate::Wave) {
         let push_ratio = self.push_oversampler.ratio();
         if push_ratio > 1 {
-            let effective_rate = base_rate * push_ratio as f64;
+            let effective_rate = base_rate * push_ratio as crate::Wave;
             self.push_tree.set_sample_rate(effective_rate);
             self.push_tree.recompute();
         }
         let pull_ratio = self.pull_oversampler.ratio();
         if pull_ratio > 1 {
-            let effective_rate = base_rate * pull_ratio as f64;
+            let effective_rate = base_rate * pull_ratio as crate::Wave;
             self.pull_tree.set_sample_rate(effective_rate);
             self.pull_tree.recompute();
         }
@@ -3351,7 +3410,7 @@ impl PushPullStage {
         if let Some(ref mut adaptor) = self.push_adaptor {
             let ratio = self.push_oversampler.ratio();
             if ratio > 1 {
-                let effective_rate = base_rate * ratio as f64;
+                let effective_rate = base_rate * ratio as crate::Wave;
                 for child in &mut adaptor.passive_children {
                     child.set_sample_rate(effective_rate);
                     child.recompute();
@@ -3361,7 +3420,7 @@ impl PushPullStage {
         if let Some(ref mut adaptor) = self.pull_adaptor {
             let ratio = self.pull_oversampler.ratio();
             if ratio > 1 {
-                let effective_rate = base_rate * ratio as f64;
+                let effective_rate = base_rate * ratio as crate::Wave;
                 for child in &mut adaptor.passive_children {
                     child.set_sample_rate(effective_rate);
                     child.recompute();
@@ -3406,7 +3465,12 @@ impl NlDeviceKind {
     ///
     /// `bias_offset` is an additional bias voltage from external controls
     /// (e.g., BJT bias pots). Zero for non-BJT devices.
-    pub fn set_control_voltage(&mut self, input: f64, compensation: f64, bias_offset: f64) {
+    pub fn set_control_voltage(
+        &mut self,
+        input: crate::Wave,
+        compensation: crate::Wave,
+        bias_offset: crate::Wave,
+    ) {
         match self {
             NlDeviceKind::Triode(t) => {
                 t.set_vgk(t.vgk_bias() + input * compensation);
@@ -3464,13 +3528,13 @@ impl NlDeviceGroupIv for NlDeviceKind {
         1
     }
 
-    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let (i, di) = self.as_nl_device_iv().iv(v[0]);
         currents[0] = i;
         jacobian[0] = di;
     }
 
-    fn v_clamp_port(&self, _port: usize) -> (f64, f64) {
+    fn v_clamp_port(&self, _port: usize) -> (crate::Wave, crate::Wave) {
         self.as_nl_device_iv().v_clamp()
     }
 }
@@ -3574,7 +3638,7 @@ pub struct ScatteringRecomputeData {
     /// Or: [NL_0..NL_{n-1}, passive_0..passive_{m-1}, adapted] (standard mode).
     pub port_node_pairs: Vec<(Option<usize>, Option<usize>)>,
     /// Resistance of the adapted (voltage source) port.
-    pub adapted_resistance: f64,
+    pub adapted_resistance: crate::Wave,
     /// When Some, the input VS is stamped as an ideal voltage source in MNA B/C
     /// matrices. The value is the MNA VS branch index. Recompute uses
     /// `derive_scattering_and_vs_injection()` instead of `derive_scattering_matrix_general()`.
@@ -3595,11 +3659,11 @@ pub struct ScatteringRecomputeData {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiNlScattering {
     /// NL-to-NL sub-block (n_nl × n_nl, row-major).
-    pub s_nl: Vec<f64>,
+    pub s_nl: Vec<crate::Wave>,
     /// NL-to-passive sub-block (n_nl × n_passive, row-major).
-    pub s_nl_passive: Vec<f64>,
+    pub s_nl_passive: Vec<crate::Wave>,
     /// NL-to-adapted column (n_nl).
-    pub s_nl_adapted: Vec<f64>,
+    pub s_nl_adapted: Vec<crate::Wave>,
 }
 
 impl MultiNlScattering {
@@ -3610,7 +3674,7 @@ impl MultiNlScattering {
     /// `n_total` is inferred from the scattering matrix size, so extra ports
     /// (like VCC) are handled automatically — only the first `n_nl` rows and
     /// the NL, passive, and last (adapted) columns are extracted.
-    pub fn from_full_matrix(scattering: &[f64], n_nl: usize, n_passive: usize) -> Self {
+    pub fn from_full_matrix(scattering: &[crate::Wave], n_nl: usize, n_passive: usize) -> Self {
         let n_total = if scattering.is_empty() {
             n_nl + n_passive + 1
         } else {
@@ -3661,24 +3725,24 @@ pub struct MultiNlStage {
     /// Nonlinear devices at the NL ports.
     pub nl_devices: Vec<NlDeviceKind>,
     /// Port resistances for the NL ports.
-    pub nl_port_resistances: Vec<f64>,
+    pub nl_port_resistances: Vec<crate::Wave>,
     /// Passive child nodes (capacitors, inductors) needing WDF state updates.
     pub passive_children: Vec<DynNode>,
     /// Pot DynNodes stored separately — pots are G-matrix conductances, not WDF ports.
     pub pot_children: Vec<DynNode>,
     /// MNA stamp tracking for pots: (pot_child_idx, node_pos, node_neg, last_conductance).
     /// Used for delta-updating the G matrix when pot values change.
-    pub pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
+    pub pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, crate::Wave)>,
     /// Number of nonlinear ports.
     pub n_nl: usize,
     /// Warm-start voltages for NR solver.
-    pub v_prev: Vec<f64>,
+    pub v_prev: Vec<crate::Wave>,
     /// Scattering matrix sub-blocks for NR solving.
     pub scattering: MultiNlScattering,
     /// Oversampler for antialiasing.
     pub oversampler: Oversampler,
     /// Passive attenuation compensation factor.
-    pub compensation: f64,
+    pub compensation: crate::Wave,
     /// Which NL port to tap for output.
     pub output_port: usize,
     /// Optional device groups for cross-coupled NR solve (3-port triodes).
@@ -3697,7 +3761,7 @@ pub struct MultiNlStage {
     /// overwrite the serial audio chain signal.
     pub bypass_serial: bool,
     /// Inter-stage voltage gain from a transformer boundary.
-    pub transformer_gain: f64,
+    pub transformer_gain: crate::Wave,
     /// Circuit graph node ID (for debug routing).
     pub injection_node_id: usize,
     /// Circuit graph node ID (for debug routing).
@@ -3705,9 +3769,9 @@ pub struct MultiNlStage {
     /// Flag: pot changed since last scattering recompute.
     pub recompute_pending: bool,
     /// VEB bias offset from a feedback pot.
-    pub veb_bias_offset: f64,
+    pub veb_bias_offset: crate::Wave,
     /// Feedback scale for coupled BJT stages.
-    pub feedback_scale: f64,
+    pub feedback_scale: crate::Wave,
     /// Feedback opamp root for diode-paired stages (Bluesbreaker, Tube Screamer).
     /// Applies opamp gain + GBW + slew to the input before MNA/NR solve.
     pub feedback_opamp: Option<OpAmpRoot>,
@@ -3728,19 +3792,19 @@ pub struct MultiNlStage {
     /// When Some, signal is injected via `a[i] += k[i] * V_in` instead of
     /// an adapted WDF port. Used for linearized OTA stages where the adapted
     /// port would share an MNA node with a reactive port.
-    pub vs_injection: Option<Vec<f64>>,
+    pub vs_injection: Option<Vec<crate::Wave>>,
     /// Node-voltage extraction coefficients for direct output reading.
     /// When Some, the output is computed as:
     ///   V_out = Σ_k extract_coeffs[k] * b[k] + extract_vs * V_in
     /// This bypasses WDF port impedance mismatch by reading the MNA node
     /// voltage directly from X⁻¹ coefficients.
-    pub extract_coeffs: Option<Vec<f64>>,
-    pub extract_vs: f64,
+    pub extract_coeffs: Option<Vec<crate::Wave>>,
+    pub extract_vs: crate::Wave,
     /// When set, identifies a pot in pot_children whose resistance drives
     /// BJT bias recalculation (feedback_scale + veb_bias_offset).
     pub bias_pot_id: Option<String>,
     /// Emitter resistance for bias pot computation (default 470Ω).
-    pub bias_emitter_r: f64,
+    pub bias_emitter_r: crate::Wave,
     /// State-space model for direct discrete-time simulation.
     /// When Some, process() uses state-space update (A·x + b·u) instead of
     /// WDF scattering. Used for linearized OTA stages where cap port
@@ -3755,39 +3819,39 @@ pub struct MultiNlStage {
     /// Precomputed DC bias from VCC supply injection vector (NL ports only).
     /// dc_bias[i] = vcc_injection[i] * supply_voltage, for i in 0..n_nl.
     /// Added to known_a[i] in the NR solver to establish transistor operating points.
-    pub dc_bias: Vec<f64>,
+    pub dc_bias: Vec<crate::Wave>,
     /// Full VCC injection vector × supply_voltage for ALL ports.
     /// Added to a_all after scatter_all to provide DC bias to passive children
     /// and correct output extraction. Length = n_nl + n_passive + adapted(0 or 1).
-    pub vcc_bias_all: Vec<f64>,
+    pub vcc_bias_all: Vec<crate::Wave>,
     /// VCC voltage source index in the MNA (for recomputing dc_bias on pot changes).
     /// When Some, VCC is stamped as an ideal VS in the MNA with zero impedance.
     pub vcc_vs_index: Option<usize>,
     /// Nominal supply voltage (volts). Used for dc_bias computation.
-    pub supply_voltage: f64,
+    pub supply_voltage: crate::Wave,
     /// DC ramp counter for gradual bias injection.
     /// Counts from 0 to DC_RAMP_SAMPLES, scaling dc_bias by ramp/N to let the
     /// NR solver track the operating point as supply voltage gradually increases.
     pub dc_ramp: u32,
     /// Physics-based initial v_prev values. Restored on reset() instead of zeroing,
     /// so the NR solver starts near the correct operating point after a DAW reset.
-    pub initial_v_prev: Vec<f64>,
+    pub initial_v_prev: Vec<crate::Wave>,
     /// Previous-previous sample's NR solution (v[n-2]).
     /// Used with v_prev (v[n-1]) to extrapolate a warm-start guess for v[n]:
     ///   v_guess = 2·v[n-1] − v[n-2]
     /// Reduces NR iterations on transients compared to a plain v_prev warm-start.
-    pub v_prev_2: Vec<f64>,
+    pub v_prev_2: Vec<crate::Wave>,
     /// DC blocker state: previous input sample (x[n-1]).
-    pub dc_blocker_x1: f64,
+    pub dc_blocker_x1: crate::Wave,
     /// DC blocker state: previous output sample (y[n-1]).
-    pub dc_blocker_y1: f64,
+    pub dc_blocker_y1: crate::Wave,
     /// Pre-allocated workspace for NR solver (eliminates per-sample heap allocations).
     pub nr_workspace: crate::elements::nonlinear::solver::NrWorkspace,
     /// Pre-allocated process buffers.
-    pub work_b_passive: Vec<f64>,
-    pub work_known_a: Vec<f64>,
-    pub work_b_all: Vec<f64>,
-    pub work_a_all: Vec<f64>,
+    pub work_b_passive: Vec<crate::Wave>,
+    pub work_known_a: Vec<crate::Wave>,
+    pub work_b_all: Vec<crate::Wave>,
+    pub work_a_all: Vec<crate::Wave>,
     /// Adaptive oversampling: when true, skip NR on odd sub-samples (X2 NR rate).
     /// Set based on previous base sample's frozen Newton success rate.
     pub adaptive_x2: bool,
@@ -3806,7 +3870,7 @@ pub struct MultiNlStage {
     /// Used to compute `input_delta = input - prev_input` each sample.
     /// A large delta indicates a transient, allowing the NR tolerance to be
     /// loosened via `adaptive_nr_tolerance()` to reduce iteration count.
-    pub prev_input: f64,
+    pub prev_input: crate::Wave,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -3824,36 +3888,40 @@ pub struct MultiNlStage {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IirData {
     /// Numerator coefficients [b0, b1, b2].
-    pub b_coeffs: Vec<f64>,
+    pub b_coeffs: Vec<crate::Wave>,
     /// Denominator coefficients [1.0, a1, a2].
-    pub a_coeffs: Vec<f64>,
+    pub a_coeffs: Vec<crate::Wave>,
     /// Input history [x[n-1], x[n-2]].
-    pub x_hist: Vec<f64>,
+    pub x_hist: Vec<crate::Wave>,
     /// Output history [y[n-1], y[n-2]].
-    pub y_hist: Vec<f64>,
+    pub y_hist: Vec<crate::Wave>,
     /// Sample rate for coefficient recomputation.
-    pub sample_rate: f64,
+    pub sample_rate: crate::Wave,
     /// Stored component values for O(1) recomputation.
     /// R_series: product of series resistors (R1×R2).
-    pub r_series_product: f64,
+    pub r_series_product: crate::Wave,
     /// C_shunt: product of shunt caps (C1×C2).
-    pub c_shunt_product: f64,
+    pub c_shunt_product: crate::Wave,
     /// Feedback resistor value (current, changes with pot).
-    pub r_fb: f64,
+    pub r_fb: crate::Wave,
     /// Critical resistance: R1 + R2 + R1*C1/C2.
     /// Recomputed when series R changes (tuning pot).
-    pub r_crit: f64,
+    pub r_crit: crate::Wave,
     /// Pot-to-component mapping for recomputation.
     /// Each entry: (pot_child_index, affects_r_series, affects_r_fb)
     pub pot_map: Vec<(usize, bool, bool)>,
     /// Base R values for series resistors (before pot contribution).
-    pub r_series_base: [f64; 2],
+    pub r_series_base: [crate::Wave; 2],
     /// Base C values for shunt caps.
-    pub c_shunt_base: [f64; 2],
+    pub c_shunt_base: [crate::Wave; 2],
 }
 
 impl IirData {
-    pub fn new(b_coeffs: Vec<f64>, a_coeffs: Vec<f64>, sample_rate: f64) -> Self {
+    pub fn new(
+        b_coeffs: Vec<crate::Wave>,
+        a_coeffs: Vec<crate::Wave>,
+        sample_rate: crate::Wave,
+    ) -> Self {
         let order = a_coeffs.len() - 1;
         Self {
             b_coeffs,
@@ -3874,22 +3942,27 @@ impl IirData {
     /// Recompute biquad coefficients from current R/C values.
     /// O(1): sqrt + sin + cos + a few multiplies. Cortex-M7 safe.
     pub fn recompute(&mut self) {
-        use core::f64::consts::PI;
+        use crate::math::PI;
         if self.r_series_product <= 0.0 || self.c_shunt_product <= 0.0 || self.r_fb <= 0.0 {
             return;
         }
 
-        let f0 = 1.0 / (2.0 * PI * crate::math::sqrt((self.r_series_product * self.c_shunt_product) as crate::Wave) as f64);
+        let f0 = 1.0
+            / (2.0
+                * PI
+                * crate::math::sqrt((self.r_series_product * self.c_shunt_product) as crate::Wave)
+                    as crate::Wave);
         let q = if self.r_fb > self.r_crit * 1.01 {
             self.r_fb / (self.r_fb - self.r_crit)
         } else {
             100.0
         };
-        let gain = self.r_fb / (crate::math::sqrt(self.r_series_product as crate::Wave) as f64); // Rf / sqrt(R1*R2)
+        let gain =
+            self.r_fb / (crate::math::sqrt(self.r_series_product as crate::Wave) as crate::Wave); // Rf / sqrt(R1*R2)
 
         let w0 = 2.0 * PI * f0 / self.sample_rate;
-        let sin_w0 = crate::math::sin(w0 as crate::Wave) as f64;
-        let cos_w0 = crate::math::cos(w0 as crate::Wave) as f64;
+        let sin_w0 = crate::math::sin(w0 as crate::Wave) as crate::Wave;
+        let cos_w0 = crate::math::cos(w0 as crate::Wave) as crate::Wave;
         let alpha = sin_w0 / (2.0 * q);
 
         let a0 = 1.0 + alpha;
@@ -3901,9 +3974,9 @@ impl IirData {
     }
 
     /// DC gain: H(z=1) = sum(b) / sum(a).
-    pub fn dc_gain(&self) -> f64 {
-        let num: f64 = self.b_coeffs.iter().sum();
-        let den: f64 = self.a_coeffs.iter().sum();
+    pub fn dc_gain(&self) -> crate::Wave {
+        let num: crate::Wave = self.b_coeffs.iter().sum();
+        let den: crate::Wave = self.a_coeffs.iter().sum();
         if den.abs() < 1e-30 {
             1.0
         } else {
@@ -3913,7 +3986,7 @@ impl IirData {
 
     /// Process one sample through the IIR (Direct Form I).
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         let order = self.x_hist.len();
         let mut y = self.b_coeffs[0] * input;
         for k in 0..order {
@@ -3954,17 +4027,17 @@ pub struct IirPotBinding {
     /// Component ID of the pot (matches ControlBinding::component_id).
     pub comp_id: String,
     /// Maximum resistance of the pot.
-    pub max_r: f64,
+    pub max_r: crate::Wave,
     /// Fixed resistance in series with the pot (e.g., R_min before Drive pot).
-    pub fixed_series_r: f64,
+    pub fixed_series_r: crate::Wave,
     /// Input resistance Ri (for gain = Rf/Ri calculation).
-    pub ri: f64,
+    pub ri: crate::Wave,
     /// Current pot position (0.0–1.0).
-    pub position: f64,
+    pub position: crate::Wave,
     /// Circuit role of this pot inside the IIR group.
     pub role: IirPotRole,
     /// Feedback resistance used by ground-leg gain recomputation.
-    pub feedback_r: f64,
+    pub feedback_r: crate::Wave,
     /// True when the op-amp topology is non-inverting.
     pub non_inverting: bool,
 }
@@ -3977,7 +4050,7 @@ pub struct IirPotBinding {
 /// no matrix math, no alloc. Cortex-M7 safe.
 ///
 /// Dimensions correspond to independent control labels (ganged pots = 1 dim).
-/// Table size: `steps^n_dims × 5` f64 entries.
+/// Table size: `steps^n_dims × 5` crate::Wave entries.
 #[cfg(feature = "biquad-table")]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -3989,7 +4062,7 @@ pub struct BiquadTable {
     pub dim_labels: alloc::vec::Vec<alloc::string::String>,
     /// Flattened [b0, b1, b2, a1, a2] × (steps^n_dims) entries.
     /// Entry index for (d0, d1, ...): d0 + d1*steps + d2*steps² + ...
-    pub coeffs: alloc::vec::Vec<f64>,
+    pub coeffs: alloc::vec::Vec<crate::Wave>,
 }
 
 #[cfg(feature = "biquad-table")]
@@ -4000,7 +4073,7 @@ impl BiquadTable {
     /// Look up and interpolate biquad coefficients for given positions.
     /// `positions` maps dim index → normalized position [0.0, 1.0].
     /// Writes 5 values into `out`: [b0, b1, b2, a1, a2].
-    pub fn lookup(&self, positions: &[f64], out: &mut [f64; 5]) {
+    pub fn lookup(&self, positions: &[crate::Wave], out: &mut [crate::Wave; 5]) {
         let n_dims = self.dim_labels.len();
         if n_dims == 0 || self.steps < 2 {
             return;
@@ -4010,9 +4083,9 @@ impl BiquadTable {
         match n_dims {
             1 => {
                 // Linear interpolation
-                let p = positions[0].clamp(0.0, 1.0) * max_idx as f64;
+                let p = positions[0].clamp(0.0, 1.0) * max_idx as crate::Wave;
                 let i0 = (p as usize).min(max_idx - 1);
-                let frac = p - i0 as f64;
+                let frac = p - i0 as crate::Wave;
                 let base0 = i0 * Self::COEFF_COUNT;
                 let base1 = (i0 + 1) * Self::COEFF_COUNT;
                 for c in 0..5 {
@@ -4021,12 +4094,12 @@ impl BiquadTable {
             }
             2 => {
                 // Bilinear interpolation
-                let p0 = positions[0].clamp(0.0, 1.0) * max_idx as f64;
-                let p1 = positions[1].clamp(0.0, 1.0) * max_idx as f64;
+                let p0 = positions[0].clamp(0.0, 1.0) * max_idx as crate::Wave;
+                let p1 = positions[1].clamp(0.0, 1.0) * max_idx as crate::Wave;
                 let i0 = (p0 as usize).min(max_idx - 1);
                 let i1 = (p1 as usize).min(max_idx - 1);
-                let f0 = p0 - i0 as f64;
-                let f1 = p1 - i1 as f64;
+                let f0 = p0 - i0 as crate::Wave;
+                let f1 = p1 - i1 as crate::Wave;
                 let s = self.steps;
                 let idx00 = (i0 + i1 * s) * Self::COEFF_COUNT;
                 let idx10 = (i0 + 1 + i1 * s) * Self::COEFF_COUNT;
@@ -4048,7 +4121,7 @@ impl BiquadTable {
                 let mut flat_idx = 0usize;
                 let mut stride = 1usize;
                 for d in 0..n_dims {
-                    let p = positions[d].clamp(0.0, 1.0) * max_idx as f64;
+                    let p = positions[d].clamp(0.0, 1.0) * max_idx as crate::Wave;
                     let i = (p as usize).min(max_idx);
                     flat_idx += i * stride;
                     stride *= self.steps;
@@ -4067,7 +4140,7 @@ pub struct IirStage {
     /// The biquad filter data (coefficients + history).
     pub iir: IirData,
     /// Passive attenuation compensation factor.
-    pub compensation: f64,
+    pub compensation: crate::Wave,
     /// BFS distance from input (for topological ordering).
     pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
@@ -4086,20 +4159,20 @@ pub struct IirStage {
     #[cfg(feature = "biquad-table")]
     pub biquad_table: Option<BiquadTable>,
     /// Sample rate (needed for GBW recomputation on gain change).
-    pub sample_rate: f64,
+    pub sample_rate: crate::Wave,
     // ── NonIdealFx runtime state ──
     /// GBW single-pole IIR state (for OpAmpBandwidth).
-    gbw_state: f64,
+    gbw_state: crate::Wave,
     /// GBW lowpass coefficient: α = 2π·fc / (2π·fc + fs) where fc = GBW/gain.
-    gbw_coeff: f64,
+    gbw_coeff: crate::Wave,
     /// Previous output sample (for slew rate limiting).
-    prev_out: f64,
+    prev_out: crate::Wave,
     /// Maximum dV per sample from slew rate (slew_rate / sample_rate).
-    max_dv_per_sample: f64,
+    max_dv_per_sample: crate::Wave,
     /// Rail saturation voltage (from RailSaturation).
-    v_max: f64,
+    v_max: crate::Wave,
     /// Stored GBW from OpAmpBandwidth (for recomputation when gain changes).
-    stored_gbw: f64,
+    stored_gbw: crate::Wave,
 }
 
 impl IirStage {
@@ -4120,8 +4193,8 @@ impl IirStage {
             gbw_state: 0.0,
             gbw_coeff: 1.0, // passthrough (no GBW limiting)
             prev_out: 0.0,
-            max_dv_per_sample: f64::MAX,
-            v_max: f64::MAX,
+            max_dv_per_sample: crate::Wave::MAX,
+            v_max: crate::Wave::MAX,
             stored_gbw: 0.0,
         }
     }
@@ -4130,7 +4203,11 @@ impl IirStage {
     ///
     /// Pre-computes runtime constants (gbw_coeff, max_dv_per_sample, v_max)
     /// so process() stays O(1) with no branching on enum variants.
-    pub fn set_nonideal_fx(&mut self, fx: Vec<crate::nonideal_fx::NonIdealFx>, sample_rate: f64) {
+    pub fn set_nonideal_fx(
+        &mut self,
+        fx: Vec<crate::nonideal_fx::NonIdealFx>,
+        sample_rate: crate::Wave,
+    ) {
         use crate::nonideal_fx::NonIdealFx;
         for effect in &fx {
             match effect {
@@ -4139,7 +4216,7 @@ impl IirStage {
                     // Estimate closed-loop gain from IIR DC response (b[0]+b[1]+b[2]) / (a[0]+a[1]+a[2])
                     let gain = self.iir.dc_gain().abs().max(1.0);
                     let fc = gbw / gain;
-                    let w = 2.0 * core::f64::consts::PI * fc;
+                    let w = 2.0 * crate::math::PI * fc;
                     self.gbw_coeff = w / (w + sample_rate);
                     // slew_rate from SPICE model is in V/µs — convert to V/s
                     self.max_dv_per_sample = slew_rate * 1e6 / sample_rate;
@@ -4153,7 +4230,7 @@ impl IirStage {
     }
 
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         let mut out = self.iir.process(input * self.compensation);
 
         // GBW rolloff: single-pole lowpass
@@ -4170,7 +4247,7 @@ impl IirStage {
         self.prev_out = out;
 
         // Rail saturation: tanh soft clip
-        if self.v_max < f64::MAX {
+        if self.v_max < crate::Wave::MAX {
             out = self.v_max * crate::fast_math::fast_tanh(out / self.v_max);
         }
 
@@ -4190,7 +4267,7 @@ impl IirStage {
     ///
     /// Without table: falls back to DC gain recalculation (Rf/Ri).
     /// No heap allocations — all state is pre-allocated.
-    pub fn set_pot(&mut self, comp_id: &str, position: f64) {
+    pub fn set_pot(&mut self, comp_id: &str, position: crate::Wave) {
         let binding_idx = match self.pot_bindings.iter().position(|b| b.comp_id == comp_id) {
             Some(idx) => idx,
             None => return,
@@ -4203,7 +4280,7 @@ impl IirStage {
         #[cfg(feature = "biquad-table")]
         if let Some(ref table) = self.biquad_table {
             // Build position vector from all pot bindings, matched by comp_id
-            let mut positions = alloc::vec![0.0f64; table.dim_labels.len()];
+            let mut positions = alloc::vec![0.0 as crate::Wave; table.dim_labels.len()];
             for binding in &self.pot_bindings {
                 for (di, comp_id) in table.dim_labels.iter().enumerate() {
                     if comp_id.as_str() == binding.comp_id.as_str() {
@@ -4211,7 +4288,7 @@ impl IirStage {
                     }
                 }
             }
-            let mut coeffs = [0.0f64; 5];
+            let mut coeffs = [0.0 as crate::Wave; 5];
             table.lookup(&positions, &mut coeffs);
             // Update biquad coefficients
             if self.iir.b_coeffs.len() >= 3 && self.iir.a_coeffs.len() >= 3 {
@@ -4225,7 +4302,7 @@ impl IirStage {
             if self.stored_gbw > 0.0 {
                 let dc_gain = self.iir.dc_gain().abs().max(1.0);
                 let fc = self.stored_gbw / dc_gain;
-                let w = 2.0 * core::f64::consts::PI * fc;
+                let w = 2.0 * crate::math::PI * fc;
                 self.gbw_coeff = w / (w + self.sample_rate);
             }
             return;
@@ -4246,14 +4323,14 @@ impl IirStage {
             if self.stored_gbw > 0.0 {
                 let gain_abs = self.iir.dc_gain().abs().max(1.0);
                 let fc = self.stored_gbw / gain_abs;
-                let w = 2.0 * core::f64::consts::PI * fc;
+                let w = 2.0 * crate::math::PI * fc;
                 self.gbw_coeff = w / (w + self.sample_rate);
             }
             return;
         }
 
         if binding.role == IirPotRole::GroundLeg && binding.feedback_r > 0.0 {
-            let gain_for = |pos: f64| {
+            let gain_for = |pos: crate::Wave| {
                 let rg = (binding.fixed_series_r + pos * binding.max_r).max(1.0);
                 if binding.non_inverting {
                     1.0 + binding.feedback_r / rg
@@ -4275,7 +4352,7 @@ impl IirStage {
             if self.stored_gbw > 0.0 {
                 let gain_abs = new_gain.abs().max(1.0);
                 let fc = self.stored_gbw / gain_abs;
-                let w = 2.0 * core::f64::consts::PI * fc;
+                let w = 2.0 * crate::math::PI * fc;
                 self.gbw_coeff = w / (w + self.sample_rate);
             }
             return;
@@ -4291,7 +4368,7 @@ impl IirStage {
         if self.stored_gbw > 0.0 {
             let gain_abs = dc_gain.abs().max(1.0);
             let fc = self.stored_gbw / gain_abs;
-            let w = 2.0 * core::f64::consts::PI * fc;
+            let w = 2.0 * crate::math::PI * fc;
             self.gbw_coeff = w / (w + self.sample_rate);
         }
     }
@@ -4316,17 +4393,17 @@ impl IirStage {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlackFeedbackStage {
     /// Feedback resistance (Ohms). Changes at runtime when pot sweeps.
-    rf: f64,
+    rf: crate::Wave,
     /// Input resistance (Ohms). Fixed at compile time.
-    ri: f64,
+    ri: crate::Wave,
     /// True = inverting (gain = -Rf/Ri), false = non-inverting (1 + Rf/Ri).
     inverting: bool,
     /// NonIdealFx post-processing state (GBW/slew/rails).
     fx_state: NonIdealFxState,
     /// Stored GBW for recomputation when gain changes.
-    stored_gbw: f64,
+    stored_gbw: crate::Wave,
     /// Sample rate for GBW recomputation.
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// BFS distance from input (for topological ordering).
     pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
@@ -4341,24 +4418,24 @@ pub struct BlackFeedbackStage {
     /// Pot component ID bound to Rf (if any). Set at compile time.
     pub pot_comp_id: Option<String>,
     /// Maximum pot resistance (Ohms). Position 1.0 = this value.
-    pub pot_max_r: f64,
+    pub pot_max_r: crate::Wave,
     /// Pot component ID in the ground leg (Ri). When this pot changes,
     /// Ri = ri_fixed_r + pot_position × ri_pot_max_r.
     pub ri_pot_comp_id: Option<String>,
     /// Fixed resistance in the ground leg (sum of non-pot resistors: R5 + R6).
-    pub ri_fixed_r: f64,
+    pub ri_fixed_r: crate::Wave,
     /// Max resistance of the Ri pot (e.g. Gain_A max_r = 100k).
-    pub ri_pot_max_r: f64,
+    pub ri_pot_max_r: crate::Wave,
 }
 
 impl BlackFeedbackStage {
     /// Construct from circuit parameters.
     pub fn new(
-        rf: f64,
-        ri: f64,
+        rf: crate::Wave,
+        ri: crate::Wave,
         inverting: bool,
         fx: &[crate::nonideal_fx::NonIdealFx],
-        sample_rate: f64,
+        sample_rate: crate::Wave,
     ) -> Self {
         let gain = if inverting {
             rf / ri.max(1.0)
@@ -4395,12 +4472,17 @@ impl BlackFeedbackStage {
     }
 
     /// Test helper: construct with default NonIdealFx.
-    pub fn new_test(rf: f64, ri: f64, inverting: bool, sample_rate: f64) -> Self {
+    pub fn new_test(
+        rf: crate::Wave,
+        ri: crate::Wave,
+        inverting: bool,
+        sample_rate: crate::Wave,
+    ) -> Self {
         Self::new(rf, ri, inverting, &[], sample_rate)
     }
 
     /// Current closed-loop gain.
-    pub fn gain(&self) -> f64 {
+    pub fn gain(&self) -> crate::Wave {
         // When Rf is 0 (all-reactive feedback, e.g., coupling cap only),
         // the DC gain is undefined. Use unity passthrough — the reactive
         // elements handle frequency shaping in the WDF tree, not here.
@@ -4425,7 +4507,7 @@ impl BlackFeedbackStage {
     }
 
     /// Set pot position (0.0–1.0). Converts to Rf = position * max_r.
-    pub fn set_pot(&mut self, _comp_id: &str, position: f64) {
+    pub fn set_pot(&mut self, _comp_id: &str, position: crate::Wave) {
         if self.pot_max_r > 0.0 {
             self.set_rf(position * self.pot_max_r);
         }
@@ -4434,7 +4516,7 @@ impl BlackFeedbackStage {
     /// Update Ri from ground-leg pot position. Called when a pot in the
     /// ground leg (e.g. Gain_A in Goldenrod) changes position.
     /// The position is range-mapped but NOT tapered — apply taper here.
-    pub fn update_ri_from_pot(&mut self, comp_id: &str, position: f64) {
+    pub fn update_ri_from_pot(&mut self, comp_id: &str, position: crate::Wave) {
         if self.ri_pot_comp_id.as_deref() == Some(comp_id) {
             // Apply taper to get actual resistance fraction.
             // Gain_A is linear (b) taper, so taper(pos) ≈ pos.
@@ -4447,18 +4529,18 @@ impl BlackFeedbackStage {
     }
 
     /// Set input resistance (for pipeline Ri fix).
-    pub fn set_ri(&mut self, ri: f64) {
+    pub fn set_ri(&mut self, ri: crate::Wave) {
         self.ri = ri;
     }
 
     /// Set asymmetric rail limits from bias analysis.
-    pub fn set_v_rails(&mut self, v_rail_pos: f64, v_rail_neg: f64) {
+    pub fn set_v_rails(&mut self, v_rail_pos: crate::Wave, v_rail_neg: crate::Wave) {
         self.fx_state.v_rail_pos = v_rail_pos;
         self.fx_state.v_rail_neg = v_rail_neg;
     }
 
     /// Update Rf (pot sweep). Recomputes gain and GBW coefficient.
-    pub fn set_rf(&mut self, rf: f64) {
+    pub fn set_rf(&mut self, rf: crate::Wave) {
         self.rf = rf;
         if self.stored_gbw > 0.0 {
             self.fx_state
@@ -4468,7 +4550,7 @@ impl BlackFeedbackStage {
 
     /// Process one sample: gain × input → NonIdealFx → output.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         let gained = input * self.gain();
         flush_denormal(apply_nonideal_fx(gained, &mut self.fx_state))
     }
@@ -4488,9 +4570,9 @@ impl BlackFeedbackStage {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SerialDelayedFeedbackStage {
     pub stages: Vec<WdfStage>,
-    pub feedback_gain: f64,
+    pub feedback_gain: crate::Wave,
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub delayed_output: f64,
+    pub delayed_output: crate::Wave,
     pub signal_flow_distance: usize,
     pub bypass_serial: bool,
     #[cfg(debug_assertions)]
@@ -4498,7 +4580,7 @@ pub struct SerialDelayedFeedbackStage {
 }
 
 impl SerialDelayedFeedbackStage {
-    pub fn new(stages: Vec<WdfStage>, feedback_gain: f64) -> Self {
+    pub fn new(stages: Vec<WdfStage>, feedback_gain: crate::Wave) -> Self {
         Self {
             stages,
             feedback_gain,
@@ -4518,7 +4600,7 @@ impl SerialDelayedFeedbackStage {
             .any(|stage| stage.has_pot(comp_id) || stage.has_pot(&aw_id) || stage.has_pot(&wb_id))
     }
 
-    pub fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
+    pub fn set_pot(&mut self, comp_id: &str, value: crate::Wave) -> bool {
         let aw_id = format!("{comp_id}__aw");
         let wb_id = format!("{comp_id}__wb");
         let mut changed = false;
@@ -4547,7 +4629,7 @@ impl SerialDelayedFeedbackStage {
     }
 
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         let mut signal = input + self.feedback_gain * self.delayed_output;
         for stage in &mut self.stages {
             signal = stage.process(signal);
@@ -4569,9 +4651,9 @@ impl SerialDelayedFeedbackStage {
 pub struct StateSpaceStage {
     pub ss: StateSpaceData,
     /// Pre-allocated work buffer for state update (avoids per-sample allocation).
-    work: Vec<f64>,
+    work: Vec<crate::Wave>,
     /// Passive attenuation compensation factor.
-    pub compensation: f64,
+    pub compensation: crate::Wave,
     /// BFS distance from input (for topological ordering).
     pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
@@ -4582,7 +4664,7 @@ pub struct StateSpaceStage {
     /// overwrite the serial audio chain signal.
     pub bypass_serial: bool,
     /// Supply voltage for rail saturation.
-    pub supply_voltage: f64,
+    pub supply_voltage: crate::Wave,
     /// Pot bindings used to restamp the MNA conductance matrix and rebuild the
     /// discrete state-space matrices when a control changes.
     pub pot_bindings: Vec<StateSpacePotBinding>,
@@ -4591,28 +4673,28 @@ pub struct StateSpaceStage {
     /// Precomputed v_rail = (supply/2 - 1.5).max(0.5) and 1/v_rail.
     /// Eliminates per-sample division in tanh saturation loop.
     #[cfg_attr(feature = "serde", serde(skip))]
-    v_rail: f64,
+    v_rail: crate::Wave,
     #[cfg_attr(feature = "serde", serde(skip))]
-    inv_v_rail: f64,
+    inv_v_rail: crate::Wave,
     /// Previous input sample for bilinear state-space forms that carry both
     /// u[n+1] and u[n] input vectors.
-    prev_input: f64,
+    prev_input: crate::Wave,
 }
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StateSpacePotBinding {
     pub comp_id: String,
-    pub max_r: f64,
+    pub max_r: crate::Wave,
     pub taper: crate::pot_taper::PotTaper,
-    pub position: f64,
+    pub position: crate::Wave,
     pub node_pos: Option<usize>,
     pub node_neg: Option<usize>,
-    pub conductance: f64,
+    pub conductance: crate::Wave,
 }
 
 impl StateSpaceStage {
-    pub fn new(ss: StateSpaceData, supply_voltage: f64) -> Self {
+    pub fn new(ss: StateSpaceData, supply_voltage: crate::Wave) -> Self {
         let n = ss.n_states;
         let v_rail = (supply_voltage * 0.5 - 1.5).max(0.5);
         Self {
@@ -4644,7 +4726,7 @@ impl StateSpaceStage {
             .any(|binding| binding.comp_id == comp_id)
     }
 
-    pub fn set_pot(&mut self, comp_id: &str, position: f64) {
+    pub fn set_pot(&mut self, comp_id: &str, position: crate::Wave) {
         let Some(idx) = self
             .pot_bindings
             .iter()
@@ -4703,7 +4785,7 @@ impl StateSpaceStage {
     }
 
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         let n = self.ss.n_states;
         let sample = input * self.compensation;
 
@@ -4747,33 +4829,33 @@ impl StateSpaceStage {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StateSpaceData {
     /// State vector [V_nodes..., I_vs...] (n_states elements).
-    pub x: Vec<f64>,
+    pub x: Vec<crate::Wave>,
     /// State transition matrix A_d = M⁻¹·N (n_states × n_states, row-major).
-    pub a_matrix: Vec<f64>,
+    pub a_matrix: Vec<crate::Wave>,
     /// Input vector b_d = M⁻¹·F (n_states × 1).
-    pub b_vector: Vec<f64>,
+    pub b_vector: Vec<crate::Wave>,
     /// Output extraction vector c_out (1 × n_states).
-    pub c_vector: Vec<f64>,
+    pub c_vector: Vec<crate::Wave>,
     /// Number of state variables (num_nodes + num_vsources).
     pub n_states: usize,
     /// Capacitance stamps for rebuilding state-space when G changes.
     /// Each entry: (node_pos, node_neg, capacitance_farads).
-    pub cap_stamps: Vec<(Option<usize>, Option<usize>, f64)>,
+    pub cap_stamps: Vec<(Option<usize>, Option<usize>, crate::Wave)>,
     /// VS branch index for input.
     pub vs_idx: usize,
     /// Output extraction nodes.
     pub output_pos: Option<usize>,
     pub output_neg: Option<usize>,
     /// Sample rate for bilinear transform (2·f_s·C scaling).
-    pub sample_rate: f64,
+    pub sample_rate: crate::Wave,
     /// Direct feedthrough: y = c·x + d·u. From Schur complement elimination.
-    pub d_feedthrough: f64,
+    pub d_feedthrough: crate::Wave,
     /// Previous output for 2-sample Nyquist filter.
     /// Removes parasitic -1 eigenvalue oscillation from unreduced systems.
-    pub prev_output: f64,
+    pub prev_output: crate::Wave,
     /// Pot stamps for delta-updating G when pots change.
     /// Each entry: (passive_child_index, node_pos, node_neg, last_conductance).
-    pub pot_stamps: Vec<(usize, Option<usize>, Option<usize>, f64)>,
+    pub pot_stamps: Vec<(usize, Option<usize>, Option<usize>, crate::Wave)>,
 }
 
 /// Data for a linearized OTA whose gm is stamped into the R-type MNA.
@@ -4787,10 +4869,10 @@ pub struct LinearizedOtaData {
     /// OTA model parameters (iabc_max, vt, r_load).
     pub model: crate::elements::OtaModel,
     /// Current normalized gain (0.0 = off, 1.0 = max). Set by envelope.
-    pub gain: f64,
+    pub gain: crate::Wave,
     /// MNA cell indices for the VCCS stamp: (row, col, sign).
     /// These are the cells in g_matrix that encode the transconductance.
-    pub stamp_cells: Vec<(usize, usize, f64)>,
+    pub stamp_cells: Vec<(usize, usize, crate::Wave)>,
     /// Number of MNA nodes (for indexing into g_matrix).
     pub num_mna_nodes: usize,
 }
@@ -4806,7 +4888,7 @@ impl MultiNlStage {
     ///    d. Set all b values on adaptor → scatter_down → set_incident on passive children
     ///    e. Output = (a_out + b_nl[output_port]) / 2 (voltage at output NL port)
     /// 3. Return output sample
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
 
@@ -4901,7 +4983,7 @@ impl MultiNlStage {
             1.0
         } else {
             self.dc_ramp += 1;
-            self.dc_ramp as f64 / DC_RAMP_SAMPLES as f64
+            self.dc_ramp as crate::Wave / DC_RAMP_SAMPLES as crate::Wave
         };
 
         // Adaptive NR tolerance: loosen on transients to reduce iterations.
@@ -5198,11 +5280,11 @@ impl MultiNlStage {
     /// Since the scattering matrix is now built at the effective (oversampled)
     /// rate, passive children are already at the correct rate. This is a no-op
     /// for MultiNlStage — the builder handles oversampled rate directly.
-    pub fn apply_oversampling_rate(&mut self, base_rate: f64) {
+    pub fn apply_oversampling_rate(&mut self, base_rate: crate::Wave) {
         // DynNode trees are already at the correct rate (built with effective_rate).
         // But feedback_opamp GBW/slew filters need the oversampled rate.
         if let Some(ref mut opamp) = self.feedback_opamp {
-            let effective_rate = base_rate * self.oversampler.ratio() as f64;
+            let effective_rate = base_rate * self.oversampler.ratio() as crate::Wave;
             if effective_rate > base_rate {
                 opamp.set_sample_rate(effective_rate);
             }
@@ -5214,7 +5296,7 @@ impl MultiNlStage {
     /// Scales dc_bias and vcc_bias_all linearly with the new voltage relative
     /// to the build-time supply voltage. This shifts the transistor DC operating
     /// point in response to supply droop, modeling real power supply sag.
-    pub fn update_supply_voltage(&mut self, new_voltage: f64) {
+    pub fn update_supply_voltage(&mut self, new_voltage: crate::Wave) {
         if self.supply_voltage == 0.0 || self.vcc_bias_all.is_empty() {
             return;
         }
@@ -5351,7 +5433,7 @@ impl MultiNlStage {
     ///
     /// When a pot is found and updated, recomputes the scattering matrix
     /// from the stored MNA data with updated port resistances.
-    pub fn set_pot(&mut self, target_id: &str, value: f64) -> bool {
+    pub fn set_pot(&mut self, target_id: &str, value: crate::Wave) -> bool {
         let mut found = false;
 
         // Try base name. Native 3-terminal pots can contribute multiple
@@ -5403,7 +5485,7 @@ impl MultiNlStage {
     /// in `flush_recompute()` will re-derive the scattering matrix.
     ///
     /// gain: 0.0 = off, 1.0 = max transconductance.
-    pub fn set_ota_gain_linear(&mut self, gain: f64) {
+    pub fn set_ota_gain_linear(&mut self, gain: crate::Wave) {
         let gain = gain.clamp(0.0, 1.0);
         if let Some(ref mut ota) = self.linearized_ota {
             let old_gm = ota.gain * ota.model.iabc_max / (2.0 * ota.model.vt);
@@ -5433,7 +5515,7 @@ impl MultiNlStage {
     ///
     /// Updates `feedback_scale` and `veb_bias_offset` which are applied during
     /// `set_control_voltage()` on BJT NL devices.
-    pub fn set_feedback_from_pot(&mut self, position: f64, max_pot_r: f64) {
+    pub fn set_feedback_from_pot(&mut self, position: crate::Wave, max_pot_r: crate::Wave) {
         let pot_r = position * max_pot_r;
         let emitter_r = self.bias_emitter_r;
         self.feedback_scale = emitter_r / (emitter_r + pot_r);
@@ -5456,7 +5538,7 @@ impl MultiNlStage {
     }
 
     /// Get the current resistance of a pot in pot_children by component ID.
-    fn get_pot_child_resistance(&self, pot_id: &str) -> Option<f64> {
+    fn get_pot_child_resistance(&self, pot_id: &str) -> Option<crate::Wave> {
         for child in &self.pot_children {
             if let Some(r) = child.get_pot_resistance(pot_id) {
                 return Some(r);
@@ -5671,7 +5753,7 @@ impl MultiNlStage {
             }
 
             self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
-            let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+            let port_resistances: Vec<crate::Wave> = ports.iter().map(|p| p.resistance).collect();
             self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
             self.vs_injection = Some(vs_inj);
 
@@ -5710,7 +5792,8 @@ impl MultiNlStage {
                 self.vcc_bias_all = vcc_inj.iter().map(|&k| k * self.supply_voltage).collect();
 
                 self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
-                let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+                let port_resistances: Vec<crate::Wave> =
+                    ports.iter().map(|p| p.resistance).collect();
                 self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
 
                 if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
@@ -5730,7 +5813,8 @@ impl MultiNlStage {
                 }
 
                 self.scattering = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
-                let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
+                let port_resistances: Vec<crate::Wave> =
+                    ports.iter().map(|p| p.resistance).collect();
                 self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
 
                 if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
@@ -5754,18 +5838,18 @@ impl MultiNlStage {
     }
 
     /// VS injection vector (present when driven by an ideal voltage source).
-    pub fn vs_injection(&self) -> Option<&Vec<f64>> {
+    pub fn vs_injection(&self) -> Option<&Vec<crate::Wave>> {
         self.vs_injection.as_ref()
     }
 
     /// Node-voltage extraction coefficients (present when output is read from
     /// MNA node voltages directly rather than WDF port waves).
-    pub fn extract_coeffs(&self) -> Option<&Vec<f64>> {
+    pub fn extract_coeffs(&self) -> Option<&Vec<crate::Wave>> {
         self.extract_coeffs.as_ref()
     }
 
     /// VS component of the extraction formula.
-    pub fn extract_vs(&self) -> f64 {
+    pub fn extract_vs(&self) -> crate::Wave {
         self.extract_vs
     }
 
@@ -5796,18 +5880,18 @@ pub struct SidechainProcessor {
     /// The compiled sidechain sub-circuit.
     pub circuit: crate::processor::CompiledPedal,
     /// 1-sample delay state for the feedback loop CV.
-    pub cv_delayed: f64,
+    pub cv_delayed: crate::Wave,
 }
 
 impl SidechainProcessor {
     /// Process one sample through the sidechain sub-circuit.
     #[inline]
-    pub fn process(&mut self, tapped_signal: f64) -> f64 {
-        self.circuit.process(tapped_signal as Wave) as f64
+    pub fn process(&mut self, tapped_signal: crate::Wave) -> crate::Wave {
+        self.circuit.process(tapped_signal as Wave) as crate::Wave
     }
 
     /// Forward a control change to the sidechain sub-circuit.
-    pub fn set_control(&mut self, label: &str, value: f64) {
+    pub fn set_control(&mut self, label: &str, value: crate::Wave) {
         self.circuit.set_control(label, value);
     }
 
@@ -5840,9 +5924,9 @@ pub struct SubcircuitProcessor {
     /// Countdown to next processing tick (decrements each sample, resets to `rate_divisor`).
     pub rate_counter: u32,
     /// Last computed output value (held between decimated samples).
-    pub held_output: f64,
+    pub held_output: crate::Wave,
     /// Output from one `rate_divisor` period ago (for linear interpolation).
-    pub prev_output: f64,
+    pub prev_output: crate::Wave,
 }
 
 impl SubcircuitProcessor {
@@ -5853,9 +5937,9 @@ impl SubcircuitProcessor {
     /// inner circuit is only called every `rate_divisor` samples; between calls
     /// the output is linearly interpolated from the previous to the current value.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         if self.rate_divisor <= 1 {
-            self.held_output = self.circuit.process(input as Wave) as f64;
+            self.held_output = self.circuit.process(input as Wave) as crate::Wave;
             return self.held_output;
         }
 
@@ -5863,17 +5947,17 @@ impl SubcircuitProcessor {
         if self.rate_counter == 0 {
             self.rate_counter = self.rate_divisor;
             self.prev_output = self.held_output;
-            self.held_output = self.circuit.process(input as Wave) as f64;
+            self.held_output = self.circuit.process(input as Wave) as crate::Wave;
         }
 
         // Linear interpolation between prev_output and held_output.
         // t = 1.0 when we just computed a new value, 0.0 when counter is back to rate_divisor.
-        let t = 1.0 - (self.rate_counter as f64 / self.rate_divisor as f64);
+        let t = 1.0 - (self.rate_counter as crate::Wave / self.rate_divisor as crate::Wave);
         self.prev_output + t * (self.held_output - self.prev_output)
     }
 
     /// Forward a control change to the subcircuit's inner processor.
-    pub fn set_control(&mut self, label: &str, value: f64) {
+    pub fn set_control(&mut self, label: &str, value: crate::Wave) {
         self.circuit.set_control(label, value);
     }
 
@@ -5911,15 +5995,15 @@ pub struct KMethodBlock {
     /// the explicit root and bypass the table when Rp is modulated.
     pub explicit_diode_root: Option<ExplicitDiodeRoot>,
     /// Nominal voltage-source resistance used when the block was compiled.
-    pub nominal_vs_rp: f64,
+    pub nominal_vs_rp: crate::Wave,
     /// Circuit-derived cutoff calibration for explicit diode ladders.
     pub diode_cutoff: Option<DiodeCutoffCalibration>,
     /// Port resistance of this block's WDF tree root.
-    pub rp: f64,
+    pub rp: crate::Wave,
     /// DC bias voltage for the BJT (Vbe operating point).
-    pub vbe_bias: f64,
+    pub vbe_bias: crate::Wave,
     /// DC operating point tracked at runtime.
-    pub dc_offset: f64,
+    pub dc_offset: crate::Wave,
     /// If true, cascade output is from the passive subtree (right child
     /// of Series adaptor = cap voltage). If false, from root port.
     /// Set by compiler from circuit graph topology.
@@ -5932,21 +6016,21 @@ pub struct KMethodBlock {
     /// This mirrors `WdfStage::process()` root/topology sign handling. BKM
     /// computes physical block drive voltages in the coupling/cascade domain,
     /// then maps them into the WDF tree's voltage-source convention here.
-    pub source_polarity: f64,
+    pub source_polarity: crate::Wave,
     /// Polarity used for K-table control axes such as bias voltage.
     ///
     /// This is intentionally separate from `source_polarity`: the WDF tree may
     /// need a sign flip for its voltage-source convention, while a K-table
     /// bias axis is defined in the physical device voltage convention.
     #[cfg_attr(feature = "serde", serde(default = "default_k_table_control_polarity"))]
-    pub k_table_control_polarity: f64,
+    pub k_table_control_polarity: crate::Wave,
     /// Optional shared diode bias voltage for current-controlled diode ladders.
     ///
     /// TB-303-style ladders use one cutoff current to set all rung operating
     /// points coherently. When present, this voltage drives the K-table control
     /// axis instead of the block's local coupling voltage.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub shared_diode_bias_voltage: Option<f64>,
+    pub shared_diode_bias_voltage: Option<crate::Wave>,
     /// Whether the K-table control axis should be driven from this block's
     /// physical input voltage.
     ///
@@ -5959,7 +6043,7 @@ pub struct KMethodBlock {
 }
 
 #[cfg(feature = "serde")]
-fn default_k_table_control_polarity() -> f64 {
+fn default_k_table_control_polarity() -> crate::Wave {
     1.0
 }
 
@@ -5987,15 +6071,15 @@ impl Default for BlockwiseSolveMode {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiodeCutoffCalibration {
-    pub bias_voltage: f64,
-    pub bias_resistance: f64,
-    pub cv_resistance: Option<f64>,
-    pub min_rp: f64,
-    pub max_rp: f64,
+    pub bias_voltage: crate::Wave,
+    pub bias_resistance: crate::Wave,
+    pub cv_resistance: Option<crate::Wave>,
+    pub min_rp: crate::Wave,
+    pub max_rp: crate::Wave,
 }
 
 impl DiodeCutoffCalibration {
-    pub fn source_resistance(&self, model: DiodeModel, cutoff_cv: f64) -> f64 {
+    pub fn source_resistance(&self, model: DiodeModel, cutoff_cv: crate::Wave) -> crate::Wave {
         if let Some(r_cv) = self.cv_resistance {
             model
                 .dynamic_resistance_from_sources(&[
@@ -6011,9 +6095,9 @@ impl DiodeCutoffCalibration {
     }
 }
 
-fn diode_bias_voltage_from_current(model: DiodeModel, current: f64) -> f64 {
+fn diode_bias_voltage_from_current(model: DiodeModel, current: crate::Wave) -> crate::Wave {
     let i = current.max(1.0e-12);
-    let junction = model.n_vt * crate::math::ln((i / model.is + 1.0) as crate::Wave) as f64;
+    let junction = model.n_vt * crate::math::ln((i / model.is + 1.0) as crate::Wave) as crate::Wave;
     junction + i * model.rs
 }
 
@@ -6028,31 +6112,31 @@ fn diode_bias_voltage_from_current(model: DiodeModel, current: f64) -> f64 {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiodeLadderCore {
     pub tanh_table: KTable,
-    pub cap_values: Vec<f64>,
+    pub cap_values: Vec<crate::Wave>,
     pub states: Vec<Wave>,
     pub rung_alphas: Vec<Wave>,
-    pub sample_rate: f64,
-    pub alpha_bjt: f64,
-    pub n_vt: f64,
+    pub sample_rate: crate::Wave,
+    pub alpha_bjt: crate::Wave,
+    pub n_vt: crate::Wave,
     pub tail_current_table: KTable,
-    pub i_tail_bias: f64,
-    pub i_tail_min: f64,
-    pub i_tail_max: f64,
-    pub cutoff_bias_resistance: f64,
-    pub last_alpha_i_tail: f64,
+    pub i_tail_bias: crate::Wave,
+    pub i_tail_min: crate::Wave,
+    pub i_tail_max: crate::Wave,
+    pub cutoff_bias_resistance: crate::Wave,
+    pub last_alpha_i_tail: crate::Wave,
 }
 
 impl DiodeLadderCore {
     pub fn new(
         tanh_table: KTable,
-        cap_values: Vec<f64>,
-        sample_rate: f64,
-        alpha_bjt: f64,
-        n_vt: f64,
+        cap_values: Vec<crate::Wave>,
+        sample_rate: crate::Wave,
+        alpha_bjt: crate::Wave,
+        n_vt: crate::Wave,
         tail_current_table: KTable,
-        i_tail_bias: f64,
-        i_tail_max: f64,
-        cutoff_bias_resistance: f64,
+        i_tail_bias: crate::Wave,
+        i_tail_max: crate::Wave,
+        cutoff_bias_resistance: crate::Wave,
     ) -> Self {
         let mut core = Self {
             tanh_table,
@@ -6067,7 +6151,7 @@ impl DiodeLadderCore {
             i_tail_min: (i_tail_bias * 0.01).max(1.0e-9),
             i_tail_max: i_tail_max.max(i_tail_bias * 1.01).max(1.0e-9),
             cutoff_bias_resistance: cutoff_bias_resistance.max(1.0),
-            last_alpha_i_tail: f64::NAN,
+            last_alpha_i_tail: crate::Wave::NAN,
         };
         core.tanh_table.precompute_scales();
         core.tail_current_table.precompute_scales();
@@ -6082,16 +6166,16 @@ impl DiodeLadderCore {
         }
         if self.rung_alphas.len() != self.cap_values.len() {
             self.rung_alphas = vec![0.0 as Wave; self.cap_values.len()];
-            self.last_alpha_i_tail = f64::NAN;
+            self.last_alpha_i_tail = crate::Wave::NAN;
         }
     }
 
     pub fn tail_current(
         &self,
-        supply_voltage: f64,
-        cutoff_cv_voltage: f64,
-        cutoff_series_resistance: Option<f64>,
-    ) -> f64 {
+        supply_voltage: crate::Wave,
+        cutoff_cv_voltage: crate::Wave,
+        cutoff_series_resistance: Option<crate::Wave>,
+    ) -> crate::Wave {
         if let Some(r_cutoff) = cutoff_series_resistance {
             let total_r = (self.cutoff_bias_resistance + r_cutoff).max(1.0);
             return self
@@ -6102,11 +6186,13 @@ impl DiodeLadderCore {
 
         let octave_span = 5.0;
         let norm = (0.5 + cutoff_cv_voltage / 5.0).clamp(0.0, 1.0);
-        let ratio = crate::math::exp(((norm - 0.5) * octave_span * core::f64::consts::LN_2) as crate::Wave) as f64;
+        let ratio =
+            crate::math::exp(((norm - 0.5) * octave_span * crate::math::LN_2) as crate::Wave)
+                as crate::Wave;
         (self.i_tail_bias * ratio).clamp(self.i_tail_min, self.i_tail_max)
     }
 
-    fn update_rung_alphas(&mut self, i_tail: f64) {
+    fn update_rung_alphas(&mut self, i_tail: crate::Wave) {
         if (i_tail - self.last_alpha_i_tail).abs()
             <= self.last_alpha_i_tail.abs().max(1.0e-12) * 1.0e-6
         {
@@ -6126,9 +6212,11 @@ impl DiodeLadderCore {
             // the shared tail current splits through the two diode chains, so
             // each rung side is biased by I_tail/2. Stinchcombe fc belongs to
             // validation of the composed ladder, not this per-rung state update.
-            let fc = (self.alpha_bjt * side_current / (4.0 * core::f64::consts::PI * c * n_vt))
+            let fc = (self.alpha_bjt * side_current / (4.0 * crate::math::PI * c * n_vt))
                 .clamp(1.0, sample_rate * 0.45);
-            *alpha = (1.0 - crate::math::exp((-2.0 * core::f64::consts::PI * fc / sample_rate) as crate::Wave) as f64)
+            *alpha = (1.0
+                - crate::math::exp((-2.0 * crate::math::PI * fc / sample_rate) as crate::Wave)
+                    as crate::Wave)
                 .clamp(0.0, 1.0) as Wave;
         }
         self.last_alpha_i_tail = i_tail;
@@ -6137,9 +6225,9 @@ impl DiodeLadderCore {
     pub fn process(
         &mut self,
         input: Wave,
-        supply_voltage: f64,
-        cutoff_cv_voltage: f64,
-        cutoff_series_resistance: Option<f64>,
+        supply_voltage: crate::Wave,
+        cutoff_cv_voltage: crate::Wave,
+        cutoff_series_resistance: Option<crate::Wave>,
     ) -> Wave {
         self.init();
         let i_tail = self.tail_current(supply_voltage, cutoff_cv_voltage, cutoff_series_resistance);
@@ -6148,7 +6236,7 @@ impl DiodeLadderCore {
         let n_vt = self.n_vt.max(1.0e-6);
 
         for (idx, state) in self.states.iter_mut().enumerate() {
-            let drive = (x as f64).clamp(self.tanh_table.b_min, self.tanh_table.b_max);
+            let drive = (x as crate::Wave).clamp(self.tanh_table.b_min, self.tanh_table.b_max);
             let tanh_v = self.tanh_table.lookup_1d(drive);
             let target =
                 (2.0 * n_vt * self.alpha_bjt * tanh_v).clamp(-2.0 * n_vt, 2.0 * n_vt) as Wave;
@@ -6174,8 +6262,8 @@ pub struct CouplingElement {
     pub comp_id: String,
     pub node_a: Option<usize>,
     pub node_b: Option<usize>,
-    pub resistance: f64,
-    pub pot_max_resistance: Option<f64>,
+    pub resistance: crate::Wave,
+    pub pot_max_resistance: Option<crate::Wave>,
     pub taper: crate::pot_taper::PotTaper,
     /// Feedback amount controls are wired as series resistances in the
     /// coupling graph, but the exposed control convention is "more = more
@@ -6198,8 +6286,8 @@ pub struct CouplingVcvs {
     pub neg: Option<usize>,
     pub out_pos: Option<usize>,
     pub out_neg: Option<usize>,
-    pub gain: f64,
-    pub output_resistance: f64,
+    pub gain: crate::Wave,
+    pub output_resistance: crate::Wave,
     pub vsource_index: usize,
 }
 
@@ -6209,15 +6297,15 @@ pub struct CouplingVcvs {
 /// set of parallel temporary vectors across `BlockwiseKMethodStage` itself.
 #[derive(Clone, Default)]
 pub struct CoupledSolveScratch {
-    pub a: Vec<f64>,
-    pub b: Vec<f64>,
-    pub f: Vec<f64>,
-    pub g: Vec<f64>,
-    pub j: Vec<f64>,
-    pub rhs: Vec<f64>,
-    pub db_da: Vec<f64>,
+    pub a: Vec<crate::Wave>,
+    pub b: Vec<crate::Wave>,
+    pub f: Vec<crate::Wave>,
+    pub g: Vec<crate::Wave>,
+    pub j: Vec<crate::Wave>,
+    pub rhs: Vec<crate::Wave>,
+    pub db_da: Vec<crate::Wave>,
     pub last_iterations: u32,
-    pub last_residual: f64,
+    pub last_residual: crate::Wave,
     pub last_converged: bool,
     pub last_linear_solve_failed: bool,
 }
@@ -6239,7 +6327,7 @@ impl CoupledSolveScratch {
         self.db_da.resize(n_ports * n_ports, 0.0);
     }
 
-    fn load_a_from(&mut self, source: &[f64], n_ports: usize) {
+    fn load_a_from(&mut self, source: &[crate::Wave], n_ports: usize) {
         self.a.resize(n_ports, 0.0);
         if source.len() == n_ports {
             self.a.copy_from_slice(source);
@@ -6248,7 +6336,7 @@ impl CoupledSolveScratch {
         }
     }
 
-    fn load_b_from(&mut self, source: &[f64], n_ports: usize) {
+    fn load_b_from(&mut self, source: &[crate::Wave], n_ports: usize) {
         self.b.resize(n_ports, 0.0);
         if source.len() == n_ports {
             self.b.copy_from_slice(source);
@@ -6261,7 +6349,7 @@ impl CoupledSolveScratch {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SolveDiagnostics {
     pub iterations: u32,
-    pub residual: f64,
+    pub residual: crate::Wave,
     pub converged: bool,
     pub linear_solve_failed: bool,
 }
@@ -6285,9 +6373,9 @@ pub struct BlockwiseKMethodStage {
     pub blocks: Vec<KMethodBlock>,
     /// Coupling scattering matrix (n_ports × n_ports, row-major).
     /// Port ordering: [block_0, block_1, ..., block_{N-1}, VS_input].
-    pub coupling_s: Vec<f64>,
+    pub coupling_s: Vec<crate::Wave>,
     /// Port resistances for each coupling port.
-    pub coupling_rp: Vec<f64>,
+    pub coupling_rp: Vec<crate::Wave>,
     /// MNA node count used to derive the coupling matrix.
     pub coupling_n_mna: usize,
     /// Ports used to derive the coupling scattering matrix.
@@ -6328,13 +6416,13 @@ pub struct BlockwiseKMethodStage {
     /// Unlike `output_port_index`, these do not add an observation port to the
     /// coupling adaptor, so reading `audio_out` cannot perturb the solve.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub output_extraction_coeffs: Vec<f64>,
+    pub output_extraction_coeffs: Vec<crate::Wave>,
     /// MNA node pair used to recompute `output_extraction_coeffs` when coupling
     /// pots change.
     #[cfg_attr(feature = "serde", serde(default))]
     pub output_extraction_nodes: Option<(Option<usize>, Option<usize>)>,
     /// Supply voltage (V) for supply VS ports in the coupling.
-    pub supply_voltage: f64,
+    pub supply_voltage: crate::Wave,
     /// VS port mapping: (port_name, scattering_port_index).
     /// Input ports from the .pedal that connect through coupling edges.
     /// At runtime, port values are written to work_b[scattering_port_idx]
@@ -6356,7 +6444,7 @@ pub struct BlockwiseKMethodStage {
     /// TB-303 resonance path from the final emitter back to the first base.
     pub feedback_port_map: Vec<(usize, usize)>,
     /// Passive attenuation compensation factor.
-    pub compensation: f64,
+    pub compensation: crate::Wave,
     /// Oversampler for antialiasing.
     pub oversampler: Oversampler,
     /// BFS distance from input (for pipeline ordering).
@@ -6377,13 +6465,13 @@ pub struct BlockwiseKMethodStage {
     // ── Work buffers (pre-allocated, not serialized) ────────────────────
     /// Previous sample's reflected waves (warm-start for Newton).
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub b_warm: Vec<f64>,
+    pub b_warm: Vec<crate::Wave>,
     /// Work buffer: reflected waves from blocks (b_coupling).
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub work_b: Vec<f64>,
+    pub work_b: Vec<crate::Wave>,
     /// Work buffer: incident waves from coupling scatter (a_coupling).
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub work_a: Vec<f64>,
+    pub work_a: Vec<crate::Wave>,
     /// Coupled solver scratch buffers.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub coupled_scratch: CoupledSolveScratch,
@@ -6418,21 +6506,21 @@ impl BlockwiseKMethodStage {
     /// Maximum Newton iterations per sample.
     const MAX_ITER: usize = 8;
     /// Convergence tolerance on wave variables.
-    const TOL: f64 = 1e-6;
+    const TOL: crate::Wave = 1e-6;
     /// Coupled delayed mode is a realtime approximation. Treat values outside
     /// normal audio/circuit rails as solver failure so they cannot poison the
     /// next sample's warm start.
-    const MAX_STABLE_OUTPUT: f64 = 32.0;
+    const MAX_STABLE_OUTPUT: crate::Wave = 32.0;
     /// One-sample coupled mode trades delay-free accuracy for real-time cost.
     /// Relaxing the adaptor wave update prevents high-bias diode ladders from
     /// turning the explicit delay into an artificial energy source.
-    const DELAYED_COUPLING_RELAXATION: f64 = 0.25;
+    const DELAYED_COUPLING_RELAXATION: crate::Wave = 0.25;
 
-    fn block_drive_voltage(block: &KMethodBlock, physical_voltage: f64) -> f64 {
+    fn block_drive_voltage(block: &KMethodBlock, physical_voltage: crate::Wave) -> crate::Wave {
         block.source_polarity * physical_voltage
     }
 
-    fn block_control_voltage(block: &KMethodBlock, physical_voltage: f64) -> f64 {
+    fn block_control_voltage(block: &KMethodBlock, physical_voltage: crate::Wave) -> crate::Wave {
         if let Some(v_bias) = block.shared_diode_bias_voltage {
             return v_bias;
         }
@@ -6471,11 +6559,11 @@ impl BlockwiseKMethodStage {
     fn scatter_owned_block_ports(
         &mut self,
         block_idx: usize,
-        a: &[f64],
-        serial_input: f64,
+        a: &[crate::Wave],
+        serial_input: crate::Wave,
         update_state: bool,
-        b_out: &mut [f64],
-    ) -> f64 {
+        b_out: &mut [crate::Wave],
+    ) -> crate::Wave {
         let Some(primary_port) = self.primary_port_for_block(block_idx) else {
             return 0.0;
         };
@@ -6542,7 +6630,11 @@ impl BlockwiseKMethodStage {
         }
     }
 
-    fn block_root_incident(block: &mut KMethodBlock, b_tree: f64, ctrl: f64) -> f64 {
+    fn block_root_incident(
+        block: &mut KMethodBlock,
+        b_tree: crate::Wave,
+        ctrl: crate::Wave,
+    ) -> crate::Wave {
         if block.k_table.dims == 1 {
             block.k_table.lookup_1d(b_tree)
         } else {
@@ -6552,9 +6644,9 @@ impl BlockwiseKMethodStage {
 
     fn block_root_incident_with_derivatives(
         block: &KMethodBlock,
-        b_tree: f64,
-        ctrl: f64,
-    ) -> (f64, f64, f64) {
+        b_tree: crate::Wave,
+        ctrl: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, crate::Wave) {
         if block.k_table.dims == 1 {
             let (value, d_b) = block.k_table.lookup_1d_with_derivative(b_tree);
             (value, d_b, 0.0)
@@ -6565,8 +6657,8 @@ impl BlockwiseKMethodStage {
 
     fn solve_block_without_state_update(
         block: &mut KMethodBlock,
-        physical_voltage: f64,
-    ) -> (f64, f64, f64, f64) {
+        physical_voltage: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, crate::Wave, crate::Wave) {
         let drive_voltage = Self::block_drive_voltage(block, physical_voltage);
         let control_voltage = Self::block_control_voltage(block, physical_voltage);
         block.tree.set_voltage(drive_voltage);
@@ -6578,8 +6670,8 @@ impl BlockwiseKMethodStage {
 
     fn solve_block_without_state_update_with_derivative(
         block: &mut KMethodBlock,
-        physical_voltage: f64,
-    ) -> (f64, f64, f64) {
+        physical_voltage: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, crate::Wave) {
         let drive_voltage = Self::block_drive_voltage(block, physical_voltage);
         let control_voltage = Self::block_control_voltage(block, physical_voltage);
         block.tree.set_voltage(drive_voltage);
@@ -6606,15 +6698,15 @@ impl BlockwiseKMethodStage {
 
     fn solve_block_and_update_state(
         block: &mut KMethodBlock,
-        physical_voltage: f64,
-    ) -> (f64, f64, f64, f64) {
+        physical_voltage: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, crate::Wave, crate::Wave) {
         let (a_root, b_tree, raw_cascade, ac_cascade) =
             Self::solve_block_without_state_update(block, physical_voltage);
         block.tree.set_incident(a_root);
         (a_root, b_tree, raw_cascade, ac_cascade)
     }
 
-    fn write_vs_ports(&mut self, vs_signals: &[f64]) {
+    fn write_vs_ports(&mut self, vs_signals: &[crate::Wave]) {
         let n = self.n_ports;
         for (i, &(ref name, vs_idx)) in self.vs_port_map.iter().enumerate() {
             if vs_idx < n {
@@ -6628,7 +6720,7 @@ impl BlockwiseKMethodStage {
         }
     }
 
-    fn write_feedback_ports(&mut self, output: f64) {
+    fn write_feedback_ports(&mut self, output: crate::Wave) {
         let n = self.n_ports;
         for &(block_idx, port_idx) in &self.feedback_port_map {
             if port_idx < n {
@@ -6679,7 +6771,7 @@ impl BlockwiseKMethodStage {
             .position(|passive| passive.port_idx == port_idx)
     }
 
-    fn output_probe_voltage(&self, fallback: f64) -> f64 {
+    fn output_probe_voltage(&self, fallback: crate::Wave) -> crate::Wave {
         if self.output_extraction_coeffs.len() == self.n_ports
             && self
                 .output_extraction_coeffs
@@ -6691,7 +6783,7 @@ impl BlockwiseKMethodStage {
                 .iter()
                 .zip(self.work_b.iter())
                 .map(|(coeff, b)| coeff * b)
-                .sum::<f64>();
+                .sum::<crate::Wave>();
             if v.is_finite() {
                 return v;
             }
@@ -6726,9 +6818,9 @@ impl BlockwiseKMethodStage {
         &mut self,
         include_cascade: bool,
         update_state: bool,
-        serial_input: f64,
-        mut block_outputs: Option<&mut alloc::vec::Vec<f64>>,
-    ) -> f64 {
+        serial_input: crate::Wave,
+        mut block_outputs: Option<&mut alloc::vec::Vec<crate::Wave>>,
+    ) -> crate::Wave {
         let mut cascade_drive = 0.0;
         let mut cascade_out = 0.0;
         for i in 0..self.blocks.len() {
@@ -6754,7 +6846,11 @@ impl BlockwiseKMethodStage {
         cascade_out
     }
 
-    fn solve_block_port(block: &mut KMethodBlock, incident: f64, update_state: bool) -> (f64, f64) {
+    fn solve_block_port(
+        block: &mut KMethodBlock,
+        incident: crate::Wave,
+        update_state: bool,
+    ) -> (crate::Wave, crate::Wave) {
         if !incident.is_finite() {
             return (0.0, 0.0);
         }
@@ -6774,7 +6870,11 @@ impl BlockwiseKMethodStage {
         }
     }
 
-    fn vs_voltage_for_port(&self, port_idx: usize, vs_signals: &[f64]) -> Option<f64> {
+    fn vs_voltage_for_port(
+        &self,
+        port_idx: usize,
+        vs_signals: &[crate::Wave],
+    ) -> Option<crate::Wave> {
         self.vs_port_map
             .iter()
             .enumerate()
@@ -6792,12 +6892,12 @@ impl BlockwiseKMethodStage {
 
     fn coupled_eval_b_for_a(
         &mut self,
-        a: &[f64],
-        vs_signals: &[f64],
-        serial_input: f64,
+        a: &[crate::Wave],
+        vs_signals: &[crate::Wave],
+        serial_input: crate::Wave,
         update_state: bool,
-        b_out: &mut [f64],
-    ) -> f64 {
+        b_out: &mut [crate::Wave],
+    ) -> crate::Wave {
         let mut output = 0.0;
         for v in b_out.iter_mut() {
             *v = 0.0;
@@ -6849,7 +6949,7 @@ impl BlockwiseKMethodStage {
         output
     }
 
-    fn coupled_scatter_from_b(&self, b: &[f64], a_out: &mut [f64]) {
+    fn coupled_scatter_from_b(&self, b: &[crate::Wave], a_out: &mut [crate::Wave]) {
         let n = self.n_ports;
         for i in 0..n {
             let mut sum = 0.0;
@@ -6860,7 +6960,12 @@ impl BlockwiseKMethodStage {
         }
     }
 
-    fn coupled_fill_sparse_db_da(&mut self, a: &[f64], serial_input: f64, db_da: &mut [f64]) {
+    fn coupled_fill_sparse_db_da(
+        &mut self,
+        a: &[crate::Wave],
+        serial_input: crate::Wave,
+        db_da: &mut [crate::Wave],
+    ) {
         let n = self.n_ports;
         db_da.fill(0.0);
 
@@ -6971,7 +7076,11 @@ impl BlockwiseKMethodStage {
         }
     }
 
-    fn coupled_solve_newton(&mut self, vs_signals: &[f64], serial_input: f64) -> (f64, bool) {
+    fn coupled_solve_newton(
+        &mut self,
+        vs_signals: &[crate::Wave],
+        serial_input: crate::Wave,
+    ) -> (crate::Wave, bool) {
         let n = self.n_ports;
         if n == 0 {
             return (0.0, true);
@@ -6983,7 +7092,7 @@ impl BlockwiseKMethodStage {
         let mut output = 0.0;
         let mut converged = false;
         let mut iterations = 0u32;
-        let mut last_residual = f64::INFINITY;
+        let mut last_residual = crate::Wave::INFINITY;
         let mut linear_solve_failed = false;
 
         for _ in 0..Self::MAX_ITER {
@@ -6997,7 +7106,7 @@ impl BlockwiseKMethodStage {
             );
             self.coupled_scatter_from_b(&scratch.b, &mut scratch.f);
 
-            let mut max_err: f64 = 0.0;
+            let mut max_err: crate::Wave = 0.0;
             for i in 0..n {
                 scratch.g[i] = scratch.a[i] - scratch.f[i];
                 max_err = max_err.max(scratch.g[i].abs());
@@ -7032,7 +7141,7 @@ impl BlockwiseKMethodStage {
                 break;
             }
 
-            let mut max_step: f64 = 0.0;
+            let mut max_step: crate::Wave = 0.0;
             for i in 0..n {
                 let step = scratch.rhs[i].clamp(-1.0, 1.0);
                 scratch.a[i] += step;
@@ -7071,9 +7180,9 @@ impl BlockwiseKMethodStage {
     fn run_coupled_blocks(
         &mut self,
         update_state: bool,
-        serial_input: f64,
-        mut block_outputs: Option<&mut alloc::vec::Vec<f64>>,
-    ) -> f64 {
+        serial_input: crate::Wave,
+        mut block_outputs: Option<&mut alloc::vec::Vec<crate::Wave>>,
+    ) -> crate::Wave {
         let n_blocks = self.blocks.len();
         let n_ports = self.n_ports;
         let mut scratch = core::mem::take(&mut self.coupled_scratch);
@@ -7112,8 +7221,8 @@ impl BlockwiseKMethodStage {
 
     pub fn debug_process_with_block_outputs(
         &mut self,
-        vs_signals: &[f64],
-    ) -> (f64, alloc::vec::Vec<f64>) {
+        vs_signals: &[crate::Wave],
+    ) -> (crate::Wave, alloc::vec::Vec<crate::Wave>) {
         if self.work_b.len() != self.n_ports {
             self.init_buffers();
         }
@@ -7138,7 +7247,11 @@ impl BlockwiseKMethodStage {
         (output, outputs)
     }
 
-    fn block_output_voltage(block: &KMethodBlock, a_root: f64, b_tree: f64) -> f64 {
+    fn block_output_voltage(
+        block: &KMethodBlock,
+        a_root: crate::Wave,
+        b_tree: crate::Wave,
+    ) -> crate::Wave {
         if let Some(ref probe_id) = block.cascade_probe_id {
             if let Some(v) = block.tree.leaf_voltage_for_incident(probe_id, a_root) {
                 return v;
@@ -7165,7 +7278,11 @@ impl BlockwiseKMethodStage {
         }
     }
 
-    fn block_output_voltage_gain(block: &KMethodBlock, da_root_dv: f64, db_tree_dv: f64) -> f64 {
+    fn block_output_voltage_gain(
+        block: &KMethodBlock,
+        da_root_dv: crate::Wave,
+        db_tree_dv: crate::Wave,
+    ) -> crate::Wave {
         if let Some(ref probe_id) = block.cascade_probe_id {
             if let Some(gain) = block.tree.leaf_voltage_for_incident_gain(probe_id) {
                 return gain * da_root_dv;
@@ -7196,7 +7313,7 @@ impl BlockwiseKMethodStage {
     /// updates use the same dirty-path recompute as WDF stages. Split pot
     /// halves are intentionally handled here because BKM controls bind through
     /// the generic PotInStage target.
-    pub fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
+    pub fn set_pot(&mut self, comp_id: &str, value: crate::Wave) -> bool {
         let aw_id = alloc::format!("{comp_id}__aw");
         let wb_id = alloc::format!("{comp_id}__wb");
         let mut found = false;
@@ -7241,7 +7358,7 @@ impl BlockwiseKMethodStage {
         found
     }
 
-    fn update_shared_diode_cutoff_bias_from_ports(&mut self, vs_signals: &[f64]) {
+    fn update_shared_diode_cutoff_bias_from_ports(&mut self, vs_signals: &[crate::Wave]) {
         let cutoff_cv = self
             .cutoff_cv_port
             .as_ref()
@@ -7255,7 +7372,7 @@ impl BlockwiseKMethodStage {
         self.update_shared_diode_cutoff_bias(cutoff_cv);
     }
 
-    fn update_shared_diode_cutoff_bias(&mut self, cutoff_cv_voltage: f64) {
+    fn update_shared_diode_cutoff_bias(&mut self, cutoff_cv_voltage: crate::Wave) {
         let Some(comp_id) = self.shared_diode_cutoff_pot.as_deref() else {
             return;
         };
@@ -7478,7 +7595,7 @@ impl BlockwiseKMethodStage {
     /// Process one sample. `vs_signals` contains one voltage per VS port
     /// in scattering order (matching `vs_port_map`). These are the input
     /// signals (audio, VCO, CV) that drive the coupling network.
-    pub fn process(&mut self, vs_signals: &[f64]) -> f64 {
+    pub fn process(&mut self, vs_signals: &[crate::Wave]) -> crate::Wave {
         self.process_with_serial_input(0.0, vs_signals)
     }
 
@@ -7489,11 +7606,18 @@ impl BlockwiseKMethodStage {
     /// BKM with only CV and supply VS ports. In that case the processor feeds
     /// the current serial audio sample here instead of requiring a synthetic
     /// `audio_in` coupling port.
-    pub fn process_with_serial_input(&mut self, serial_input: f64, vs_signals: &[f64]) -> f64 {
+    pub fn process_with_serial_input(
+        &mut self,
+        serial_input: crate::Wave,
+        vs_signals: &[crate::Wave],
+    ) -> crate::Wave {
         self.process_inner(vs_signals, true, serial_input)
     }
 
-    pub fn debug_process_without_feedback_ports(&mut self, vs_signals: &[f64]) -> f64 {
+    pub fn debug_process_without_feedback_ports(
+        &mut self,
+        vs_signals: &[crate::Wave],
+    ) -> crate::Wave {
         if self.work_b.len() != self.n_ports {
             self.init_buffers();
         }
@@ -7517,10 +7641,10 @@ impl BlockwiseKMethodStage {
 
     fn process_inner(
         &mut self,
-        vs_signals: &[f64],
+        vs_signals: &[crate::Wave],
         include_cascade: bool,
-        serial_input: f64,
-    ) -> f64 {
+        serial_input: crate::Wave,
+    ) -> crate::Wave {
         if self.work_b.len() != self.n_ports {
             self.init_buffers();
         }
@@ -7588,7 +7712,11 @@ impl BlockwiseKMethodStage {
         }
     }
 
-    fn process_diode_ladder_core(&mut self, vs_signals: &[f64], serial_input: f64) -> f64 {
+    fn process_diode_ladder_core(
+        &mut self,
+        vs_signals: &[crate::Wave],
+        serial_input: crate::Wave,
+    ) -> crate::Wave {
         let cutoff_cv = self
             .cutoff_cv_port
             .as_ref()
@@ -7616,12 +7744,16 @@ impl BlockwiseKMethodStage {
             self.supply_voltage,
             cutoff_cv,
             cutoff_series_resistance,
-        ) as f64;
+        ) as crate::Wave;
         self.b_warm[0] = output;
         output
     }
 
-    fn process_coupled_one_step_delay(&mut self, vs_signals: &[f64], serial_input: f64) -> f64 {
+    fn process_coupled_one_step_delay(
+        &mut self,
+        vs_signals: &[crate::Wave],
+        serial_input: crate::Wave,
+    ) -> crate::Wave {
         let previous_output = self.b_warm[0];
         let mut scratch = core::mem::take(&mut self.coupled_scratch);
         scratch.resize(self.n_ports);
@@ -7671,7 +7803,11 @@ impl BlockwiseKMethodStage {
         output
     }
 
-    fn signal_voltage_by_name(&self, needle: &str, vs_signals: &[f64]) -> Option<f64> {
+    fn signal_voltage_by_name(
+        &self,
+        needle: &str,
+        vs_signals: &[crate::Wave],
+    ) -> Option<crate::Wave> {
         self.vs_port_map
             .iter()
             .enumerate()
@@ -7684,7 +7820,11 @@ impl BlockwiseKMethodStage {
             })
     }
 
-    fn process_coupled_fixed_point(&mut self, vs_signals: &[f64], serial_input: f64) -> f64 {
+    fn process_coupled_fixed_point(
+        &mut self,
+        vs_signals: &[crate::Wave],
+        serial_input: crate::Wave,
+    ) -> crate::Wave {
         self.update_shared_diode_cutoff_bias_from_ports(vs_signals);
 
         if self.solve_mode == BlockwiseSolveMode::CoupledNewton {
@@ -7724,7 +7864,7 @@ impl BlockwiseKMethodStage {
             .output_extraction_coeffs
             .iter()
             .map(|c| c.abs())
-            .fold(0.0_f64, f64::max);
+            .fold(0.0 as crate::Wave, crate::Wave::max);
         format!(
             "BlockwiseKMethod({}blocks, {}ports, mode={:?}, vs_ports={}, feedback_ports={}, output_coeff_max={:.3e})",
             self.blocks.len(),
@@ -7746,9 +7886,9 @@ mod blockwise_k_method_tests {
         let steps = 3;
         let mut entries = Vec::with_capacity(steps * steps);
         for ic in 0..steps {
-            let ctrl = ic as f64;
+            let ctrl = ic as crate::Wave;
             for ib in 0..steps {
-                let b = ib as f64;
+                let b = ib as crate::Wave;
                 entries.push(b + 10.0 * ctrl);
             }
         }
@@ -7784,7 +7924,7 @@ mod blockwise_k_method_tests {
         table
     }
 
-    fn test_block(vbe_bias: f64) -> KMethodBlock {
+    fn test_block(vbe_bias: crate::Wave) -> KMethodBlock {
         KMethodBlock {
             tree: DynNode::VoltageSource(0.0, 1.0),
             k_table: control_sensitive_table(),
@@ -8527,7 +8667,7 @@ mod blockwise_k_method_tests {
         let steps = 64;
         let mut entries = Vec::with_capacity(steps);
         for ib in 0..steps {
-            let v = -1.0 + (ib as f64 / (steps - 1) as f64) * 2.0;
+            let v = -1.0 + (ib as crate::Wave / (steps - 1) as crate::Wave) * 2.0;
             entries.push((v / (2.0 * 0.026)).tanh() as Wave);
         }
         let mut table = KTable {
@@ -8571,18 +8711,18 @@ mod blockwise_k_method_tests {
             100_000.0,
         );
         let mut high = low.clone();
-        let measure = |core: &mut DiodeLadderCore, freq: f64| {
+        let measure = |core: &mut DiodeLadderCore, freq: crate::Wave| {
             for i in 0..9600 {
-                let x = 0.01 * (2.0 * core::f64::consts::PI * freq * i as f64 / 48_000.0).sin();
+                let x = 0.01 * (2.0 * crate::math::PI * freq * i as crate::Wave / 48_000.0).sin();
                 let _ = core.process(x as Wave, 9.0, 0.0, Some(1_000_000.0));
             }
             let mut sum = 0.0 as Wave;
             for i in 0..9600 {
-                let x = 0.01 * (2.0 * core::f64::consts::PI * freq * i as f64 / 48_000.0).sin();
+                let x = 0.01 * (2.0 * crate::math::PI * freq * i as crate::Wave / 48_000.0).sin();
                 let y = core.process(x as Wave, 9.0, 0.0, Some(1_000_000.0));
                 sum += y * y;
             }
-            crate::math::sqrt(sum / 9600.0) as f64
+            crate::math::sqrt(sum / 9600.0) as crate::Wave
         };
 
         let y_low = measure(&mut low, 100.0);

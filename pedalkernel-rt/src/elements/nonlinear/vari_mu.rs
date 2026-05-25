@@ -33,21 +33,21 @@ use crate::elements::WdfRoot;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VariMuModel {
     /// Overall current scaling factor.
-    pub p1: f64,
+    pub p1: crate::Wave,
     /// Plate voltage exponent (controls Ia vs Vak relationship).
-    pub p2: f64,
+    pub p2: crate::Wave,
     /// Cutoff offset — denominator base (must be > p4 × Vgk for conduction).
-    pub p3: f64,
+    pub p3: crate::Wave,
     /// Grid voltage scaling in denominator.
-    pub p4: f64,
+    pub p4: crate::Wave,
     /// Denominator exponent — controls how sharply gain varies with Vgk.
-    pub p5: f64,
+    pub p5: crate::Wave,
     /// Exponential term offset.
-    pub p6: f64,
+    pub p6: crate::Wave,
     /// Plate voltage coefficient in exponential term.
-    pub p7: f64,
+    pub p7: crate::Wave,
     /// Grid voltage coefficient in exponential term.
-    pub p8: f64,
+    pub p8: crate::Wave,
 }
 
 impl VariMuModel {
@@ -108,11 +108,11 @@ impl VariMuModel {
 pub struct VariMuTriodeRoot {
     pub model: VariMuModel,
     /// DC grid-cathode bias voltage.
-    vgk_bias: f64,
+    vgk_bias: crate::Wave,
     /// Current grid-cathode voltage (bias + AC signal).
-    vgk: f64,
+    vgk: crate::Wave,
     /// Maximum plate voltage (determined by supply rail B+).
-    v_max: f64,
+    v_max: crate::Wave,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
     /// Number of parallel tubes (default 1). Plate current is scaled by N.
@@ -132,7 +132,7 @@ impl VariMuTriodeRoot {
     }
 
     /// Create a variable-mu triode root with a specific supply voltage (B+).
-    pub fn new_with_v_max(model: VariMuModel, v_max: f64) -> Self {
+    pub fn new_with_v_max(model: VariMuModel, v_max: crate::Wave) -> Self {
         Self {
             model,
             vgk_bias: -2.0,
@@ -151,13 +151,13 @@ impl VariMuTriodeRoot {
 
     /// Set the maximum plate voltage (B+ supply rail).
     #[inline]
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         self.v_max = v_max.max(1.0);
     }
 
     /// Get the current v_max setting.
     #[inline]
-    pub fn v_max(&self) -> f64 {
+    pub fn v_max(&self) -> crate::Wave {
         self.v_max
     }
 
@@ -166,25 +166,25 @@ impl VariMuTriodeRoot {
     }
 
     /// Set the DC bias operating point from circuit analysis.
-    pub fn set_bias(&mut self, vgk_bias: f64) {
+    pub fn set_bias(&mut self, vgk_bias: crate::Wave) {
         self.vgk_bias = vgk_bias;
         self.vgk = vgk_bias;
     }
 
     /// Get the DC bias operating point.
-    pub fn vgk_bias(&self) -> f64 {
+    pub fn vgk_bias(&self) -> crate::Wave {
         self.vgk_bias
     }
 
     /// Set the grid-cathode voltage (external control from bias, signal, LFO).
     #[inline]
-    pub fn set_vgk(&mut self, vgk: f64) {
+    pub fn set_vgk(&mut self, vgk: crate::Wave) {
         self.vgk = vgk;
     }
 
     /// Get current grid-cathode voltage.
     #[inline]
-    pub fn vgk(&self) -> f64 {
+    pub fn vgk(&self) -> crate::Wave {
         self.vgk
     }
 
@@ -199,7 +199,7 @@ impl VariMuTriodeRoot {
     /// - p3 - p4*Vgk ≤ 0: past cutoff (only at Vgk > +5V for 6386 params)
     /// - Exp argument clamped to ±500 for overflow safety
     #[inline]
-    pub fn plate_current(&self, vak: f64) -> f64 {
+    pub fn plate_current(&self, vak: crate::Wave) -> crate::Wave {
         let m = &self.model;
         let vgk = self.vgk;
 
@@ -226,7 +226,7 @@ impl VariMuTriodeRoot {
             return 0.0;
         }
 
-        (numerator / denominator) * self.parallel_count as f64
+        (numerator / denominator) * self.parallel_count as crate::Wave
     }
 
     /// Compute derivative of plate current w.r.t. Vak for Newton-Raphson.
@@ -240,7 +240,7 @@ impl VariMuTriodeRoot {
     /// Note the minus sign: ∂D/∂Vak = D_base^p5 × p7 × exp_term, and
     /// Ia = N/D, so dIa/dVak = Ia×(dN/N - dD/D) = Ia×(p2/Vak - p7×exp/sum).
     #[inline]
-    fn plate_current_derivative(&self, vak: f64) -> f64 {
+    fn plate_current_derivative(&self, vak: crate::Wave) -> crate::Wave {
         let m = &self.model;
         let vgk = self.vgk;
 
@@ -261,7 +261,7 @@ impl VariMuTriodeRoot {
             return LEAKAGE_CONDUCTANCE;
         }
 
-        let ia = self.plate_current(vak) / self.parallel_count as f64;
+        let ia = self.plate_current(vak) / self.parallel_count as crate::Wave;
         if ia <= 0.0 {
             return LEAKAGE_CONDUCTANCE;
         }
@@ -271,14 +271,14 @@ impl VariMuTriodeRoot {
 
         // Ensure positive derivative (physical: more plate voltage → more current)
 
-        d.max(LEAKAGE_CONDUCTANCE) * self.parallel_count as f64
+        d.max(LEAKAGE_CONDUCTANCE) * self.parallel_count as crate::Wave
     }
 }
 
 impl WdfRoot for VariMuTriodeRoot {
     /// Variable-mu triode plate-cathode path: `i = Ia(Vak, Vgk)`
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let root = *self;
         let v_max = self.v_max;
         newton_raphson_solve(
@@ -296,12 +296,12 @@ impl WdfRoot for VariMuTriodeRoot {
 
 impl NlDeviceIv for VariMuTriodeRoot {
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         (self.plate_current(v), self.plate_current_derivative(v))
     }
 
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         (-50.0, self.v_max)
     }
 }
@@ -336,13 +336,13 @@ impl NlDeviceIv for VariMuTriodeRoot {
 pub struct VariMuThreePort {
     pub model: VariMuModel,
     /// Maximum plate voltage (B+ supply rail).
-    v_max: f64,
+    v_max: crate::Wave,
     /// Number of parallel tubes.
     parallel_count: usize,
     /// Grid emission current (saturation current for grid diode).
-    grid_is: f64,
+    grid_is: crate::Wave,
     /// Grid thermal voltage.
-    grid_vt: f64,
+    grid_vt: crate::Wave,
 }
 
 impl VariMuThreePort {
@@ -357,7 +357,7 @@ impl VariMuThreePort {
         }
     }
 
-    pub fn new_with_v_max(model: VariMuModel, v_max: f64) -> Self {
+    pub fn new_with_v_max(model: VariMuModel, v_max: crate::Wave) -> Self {
         Self {
             v_max: v_max.max(1.0),
             ..Self::new(model)
@@ -369,11 +369,11 @@ impl VariMuThreePort {
         self
     }
 
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         self.v_max = v_max.max(1.0);
     }
 
-    pub fn v_max(&self) -> f64 {
+    pub fn v_max(&self) -> crate::Wave {
         self.v_max
     }
 
@@ -384,11 +384,11 @@ impl VariMuThreePort {
     /// Grid current (diode model): i_g = I_gs × (exp(Vgk/Vt) - 1).
     /// Returns (current, di/dv_gk).
     #[inline]
-    fn grid_iv(&self, vgk: f64) -> (f64, f64) {
+    fn grid_iv(&self, vgk: crate::Wave) -> (crate::Wave, crate::Wave) {
         let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
         let ev = crate::math::exp(x);
-        let ig = self.grid_is * (ev - 1.0) * self.parallel_count as f64;
-        let dig = self.grid_is * ev / self.grid_vt * self.parallel_count as f64;
+        let ig = self.grid_is * (ev - 1.0) * self.parallel_count as crate::Wave;
+        let dig = self.grid_is * ev / self.grid_vt * self.parallel_count as crate::Wave;
         (ig, dig)
     }
 
@@ -396,9 +396,13 @@ impl VariMuThreePort {
     /// Takes both Vgk and Vak as inputs.
     /// Returns (Ia, ∂Ia/∂Vak, ∂Ia/∂Vgk).
     #[inline]
-    fn plate_iv(&self, vgk: f64, vak: f64) -> (f64, f64, f64) {
+    fn plate_iv(
+        &self,
+        vgk: crate::Wave,
+        vak: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, crate::Wave) {
         let m = &self.model;
-        let pc = self.parallel_count as f64;
+        let pc = self.parallel_count as crate::Wave;
 
         // No reverse current
         if vak <= 0.0 {
@@ -461,7 +465,7 @@ impl NlDeviceGroupIv for VariMuThreePort {
         2
     }
 
-    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let vgk = v[0]; // Port 0: grid-cathode
         let vak = v[1]; // Port 1: plate-cathode
 
@@ -478,7 +482,7 @@ impl NlDeviceGroupIv for VariMuThreePort {
         jacobian[3] = dip_dvak; // ∂ip/∂vak
     }
 
-    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+    fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
         match port {
             0 => (-50.0, 10.0),       // Grid: well below cutoff to slight forward bias
             _ => (-50.0, self.v_max), // Plate: 0 to B+

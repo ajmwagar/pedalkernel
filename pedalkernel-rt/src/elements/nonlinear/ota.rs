@@ -28,11 +28,11 @@ use crate::elements::WdfRoot;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OtaModel {
     /// Maximum bias current (A). CA3080 typical: 0.5mA.
-    pub iabc_max: f64,
+    pub iabc_max: crate::Wave,
     /// Thermal voltage (V). ~25.85mV at 20°C.
-    pub vt: f64,
+    pub vt: crate::Wave,
     /// Output load resistance (Ω). Determines voltage gain from current output.
-    pub r_load: f64,
+    pub r_load: crate::Wave,
 }
 
 impl OtaModel {
@@ -71,7 +71,7 @@ pub struct OtaRoot {
     pub model: OtaModel,
     /// Current amplifier bias current (A). Controls gain.
     /// In a compressor, this is modulated by the envelope follower.
-    iabc: f64,
+    iabc: crate::Wave,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
 }
@@ -90,13 +90,13 @@ impl OtaRoot {
     /// In a compressor circuit, higher envelope = lower Iabc = less gain.
     /// Range: 0 to iabc_max.
     #[inline]
-    pub fn set_iabc(&mut self, iabc: f64) {
+    pub fn set_iabc(&mut self, iabc: crate::Wave) {
         self.iabc = iabc.clamp(0.0, self.model.iabc_max);
     }
 
     /// Get current amplifier bias current.
     #[inline]
-    pub fn iabc(&self) -> f64 {
+    pub fn iabc(&self) -> crate::Wave {
         self.iabc
     }
 
@@ -105,7 +105,7 @@ impl OtaRoot {
     /// This is a convenience wrapper for compressor-style control:
     /// the envelope follower output (0-1) directly maps to gain reduction.
     #[inline]
-    pub fn set_gain_normalized(&mut self, gain: f64) {
+    pub fn set_gain_normalized(&mut self, gain: crate::Wave) {
         self.iabc = gain.clamp(0.0, 1.0) * self.model.iabc_max;
     }
 
@@ -114,7 +114,7 @@ impl OtaRoot {
     /// Uses the tanh transfer characteristic of the differential pair:
     /// `Iout = Iabc * tanh(Vin / (2*Vt))`
     #[inline]
-    pub fn output_current(&self, v_in: f64) -> f64 {
+    pub fn output_current(&self, v_in: crate::Wave) -> crate::Wave {
         let x = v_in / (2.0 * self.model.vt);
         self.iabc * crate::math::tanh(x)
     }
@@ -124,7 +124,7 @@ impl OtaRoot {
     /// `dIout/dVin = Iabc / (2*Vt) * sech²(Vin / (2*Vt))`
     ///            = gm * sech²(Vin / (2*Vt))
     #[inline]
-    fn output_current_derivative(&self, v_in: f64) -> f64 {
+    fn output_current_derivative(&self, v_in: crate::Wave) -> crate::Wave {
         let x = v_in / (2.0 * self.model.vt);
         let sech = 1.0 / crate::math::cosh(x);
         self.iabc / (2.0 * self.model.vt) * sech * sech
@@ -134,7 +134,7 @@ impl OtaRoot {
     ///
     /// gm = Iabc / (2 * Vt) — this is the small-signal gain.
     /// For CA3080 at Iabc=500µA: gm ≈ 9.7 mA/V (≈ 9.7 mS)
-    pub fn transconductance(&self) -> f64 {
+    pub fn transconductance(&self) -> crate::Wave {
         self.iabc / (2.0 * self.model.vt)
     }
 }
@@ -148,13 +148,13 @@ impl OtaRoot {
     /// - Effectively off: Iabc < 1µA
     /// - Overbiased: Iabc > 1mA
     #[cfg(feature = "runtime-warnings")]
-    pub fn check_operating_region(&self, v_port: f64, comp_id: &str, sample_index: u64) {
+    pub fn check_operating_region(&self, v_port: crate::Wave, comp_id: &str, sample_index: u64) {
         use crate::runtime_warnings::{emit_warning, Severity, WarningKind};
 
         let vdiff = v_port.abs();
 
         // |Vdiff| > 40mV → hard saturation (check first, more severe)
-        const HARD_SAT_THRESHOLD: f64 = 40e-3;
+        const HARD_SAT_THRESHOLD: crate::Wave = 40e-3;
         if vdiff > HARD_SAT_THRESHOLD {
             emit_warning(
                 sample_index,
@@ -168,7 +168,7 @@ impl OtaRoot {
         }
         // |Vdiff| > 20mV → entering compression
         else {
-            const COMPRESSION_THRESHOLD: f64 = 20e-3;
+            const COMPRESSION_THRESHOLD: crate::Wave = 20e-3;
             if vdiff > COMPRESSION_THRESHOLD {
                 emit_warning(
                     sample_index,
@@ -183,7 +183,7 @@ impl OtaRoot {
         }
 
         // Iabc < 1µA → effectively off
-        const OFF_THRESHOLD: f64 = 1e-6;
+        const OFF_THRESHOLD: crate::Wave = 1e-6;
         if self.iabc < OFF_THRESHOLD {
             emit_warning(
                 sample_index,
@@ -197,7 +197,7 @@ impl OtaRoot {
         }
 
         // Iabc > 1mA → overbiased
-        const OVERBIAS_THRESHOLD: f64 = 1e-3;
+        const OVERBIAS_THRESHOLD: crate::Wave = 1e-3;
         if self.iabc > OVERBIAS_THRESHOLD {
             emit_warning(
                 sample_index,
@@ -215,7 +215,7 @@ impl OtaRoot {
 impl WdfRoot for OtaRoot {
     /// OTA transconductance: `i = Iabc * tanh(v / (2·Vt))`
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let root = *self;
         let gm = self.transconductance();
         let v0 = if gm > LEAKAGE_CONDUCTANCE {

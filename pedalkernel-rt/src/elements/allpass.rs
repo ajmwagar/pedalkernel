@@ -15,20 +15,20 @@ use alloc::vec::Vec;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AllPassFilter {
     /// Filter coefficient (computed from cutoff frequency)
-    coef: f64,
+    coef: crate::Wave,
     /// Previous input sample
-    x1: f64,
+    x1: crate::Wave,
     /// Previous output sample
-    y1: f64,
+    y1: crate::Wave,
     /// Sample rate
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Current cutoff frequency (Hz)
-    cutoff: f64,
+    cutoff: crate::Wave,
 }
 
 impl AllPassFilter {
     /// Create a new all-pass filter with given cutoff frequency.
-    pub fn new(cutoff: f64, sample_rate: f64) -> Self {
+    pub fn new(cutoff: crate::Wave, sample_rate: crate::Wave) -> Self {
         let mut filter = Self {
             coef: 0.0,
             x1: 0.0,
@@ -44,14 +44,14 @@ impl AllPassFilter {
     fn update_coefficient(&mut self) {
         // Bilinear transform coefficient
         // a = (1 - tan(πf₀/fs)) / (1 + tan(πf₀/fs))
-        let w = (crate::math::PI as f64) * self.cutoff / self.sample_rate;
-        let tan_w = crate::math::tan(w as crate::Wave) as f64;
+        let w = (crate::math::PI as crate::Wave) * self.cutoff / self.sample_rate;
+        let tan_w = crate::math::tan(w as crate::Wave) as crate::Wave;
         self.coef = (1.0 - tan_w) / (1.0 + tan_w);
     }
 
     /// Set the cutoff frequency (Hz).
     #[inline]
-    pub fn set_cutoff(&mut self, freq: f64) {
+    pub fn set_cutoff(&mut self, freq: crate::Wave) {
         // Clamp to valid range
         let freq = freq.clamp(20.0, self.sample_rate * 0.45);
         if (freq - self.cutoff).abs() > 0.1 {
@@ -61,13 +61,13 @@ impl AllPassFilter {
     }
 
     /// Get current cutoff frequency.
-    pub fn cutoff(&self) -> f64 {
+    pub fn cutoff(&self) -> crate::Wave {
         self.cutoff
     }
 
     /// Process one sample through the all-pass filter.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // y[n] = a * x[n] + x[n-1] - a * y[n-1]
         let output = self.coef * input + self.x1 - self.coef * self.y1;
         self.x1 = input;
@@ -82,7 +82,7 @@ impl AllPassFilter {
     }
 
     /// Update sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.update_coefficient();
     }
@@ -98,24 +98,24 @@ pub struct Phaser {
     /// All-pass filter stages
     stages: Vec<AllPassFilter>,
     /// Dry/wet mix (0.0 = dry, 1.0 = wet)
-    mix: f64,
+    mix: crate::Wave,
     /// Feedback amount (0.0 to ~0.9)
-    feedback: f64,
+    feedback: crate::Wave,
     /// Feedback state
-    feedback_state: f64,
+    feedback_state: crate::Wave,
     /// Base cutoff frequency (Hz)
-    base_freq: f64,
+    base_freq: crate::Wave,
     /// Modulation depth (multiplier on base_freq)
-    mod_depth: f64,
+    mod_depth: crate::Wave,
     /// Sample rate
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl Phaser {
     /// Create a new phaser with given number of stages.
     ///
     /// Classic Phase 90 uses 4 stages. More stages = deeper effect.
-    pub fn new(num_stages: usize, sample_rate: f64) -> Self {
+    pub fn new(num_stages: usize, sample_rate: crate::Wave) -> Self {
         let base_freq = 1000.0; // 1kHz default center frequency
         let stages = (0..num_stages)
             .map(|_| AllPassFilter::new(base_freq, sample_rate))
@@ -136,40 +136,42 @@ impl Phaser {
     ///
     /// This sweeps the cutoff frequency of all stages together.
     #[inline]
-    pub fn set_modulation(&mut self, mod_value: f64) {
+    pub fn set_modulation(&mut self, mod_value: crate::Wave) {
         // Map modulation to exponential frequency sweep
         // mod_value -1 -> base_freq / mod_depth
         // mod_value  0 -> base_freq
         // mod_value +1 -> base_freq * mod_depth
-        let freq = self.base_freq * crate::math::powf(self.mod_depth as crate::Wave, mod_value as crate::Wave) as f64;
+        let freq = self.base_freq
+            * crate::math::powf(self.mod_depth as crate::Wave, mod_value as crate::Wave)
+                as crate::Wave;
         for stage in &mut self.stages {
             stage.set_cutoff(freq);
         }
     }
 
     /// Set the base center frequency (Hz).
-    pub fn set_base_freq(&mut self, freq: f64) {
+    pub fn set_base_freq(&mut self, freq: crate::Wave) {
         self.base_freq = freq.clamp(100.0, 5000.0);
     }
 
     /// Set the modulation depth (frequency sweep range).
-    pub fn set_mod_depth(&mut self, depth: f64) {
+    pub fn set_mod_depth(&mut self, depth: crate::Wave) {
         self.mod_depth = depth.clamp(1.5, 10.0);
     }
 
     /// Set the dry/wet mix (0.0 = dry, 1.0 = wet).
-    pub fn set_mix(&mut self, mix: f64) {
+    pub fn set_mix(&mut self, mix: crate::Wave) {
         self.mix = mix.clamp(0.0, 1.0);
     }
 
     /// Set feedback amount (0.0 to 0.9).
-    pub fn set_feedback(&mut self, feedback: f64) {
+    pub fn set_feedback(&mut self, feedback: crate::Wave) {
         self.feedback = feedback.clamp(0.0, 0.9);
     }
 
     /// Process one sample through the phaser.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Add feedback
         let input_with_fb = input + self.feedback_state * self.feedback;
 
@@ -196,7 +198,7 @@ impl Phaser {
     }
 
     /// Update sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         for stage in &mut self.stages {
             stage.set_sample_rate(sample_rate);
@@ -219,7 +221,7 @@ mod tests {
         let mut sum_sq_out = 0.0;
 
         for i in 0..4800 {
-            let t = i as f64 / 48000.0;
+            let t = i as crate::Wave / 48000.0;
             let input = crate::math::sin((2.0 * crate::math::PI * freq * t));
             let output = filter.process(input);
 
@@ -246,7 +248,7 @@ mod tests {
         // Process some samples - should produce output
         let mut output_sum = 0.0;
         for i in 0..4800 {
-            let t = i as f64 / 48000.0;
+            let t = i as crate::Wave / 48000.0;
             let input = crate::math::sin((2.0 * crate::math::PI * 440.0 * t));
             output_sum += phaser.process(input).abs();
         }

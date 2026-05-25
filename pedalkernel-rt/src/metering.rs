@@ -155,15 +155,15 @@ pub struct MetricsAccumulator {
     block_counter: u32,
 
     // Running accumulators
-    input_sum_sq: f64,
-    output_sum_sq: f64,
-    input_peak: f64,
-    output_peak: f64,
-    signal_min: f64,
-    signal_max: f64,
+    input_sum_sq: crate::Wave,
+    output_sum_sq: crate::Wave,
+    input_peak: crate::Wave,
+    output_peak: crate::Wave,
+    signal_min: crate::Wave,
+    signal_max: crate::Wave,
 
     // Per-stage level accumulators
-    stage_sum_sq: [f64; MAX_STAGES],
+    stage_sum_sq: [crate::Wave; MAX_STAGES],
     stage_count: usize,
 
     // Solver diagnostics
@@ -239,7 +239,7 @@ impl MetricsAccumulator {
 
     /// Accumulate input/output levels for one sample.
     #[inline]
-    pub fn accumulate_levels(&mut self, input: f64, output: f64) {
+    pub fn accumulate_levels(&mut self, input: crate::Wave, output: crate::Wave) {
         if !input.is_finite() || !output.is_finite() {
             self.nonfinite_count = self.nonfinite_count.saturating_add(1);
         }
@@ -251,7 +251,9 @@ impl MetricsAccumulator {
         let abs_in = input.abs();
         let abs_out = output.abs();
         let max_abs = abs_in.max(abs_out);
-        self.max_abs_sample = self.max_abs_sample.max(max_abs.min(f32::MAX as f64) as f32);
+        self.max_abs_sample = self
+            .max_abs_sample
+            .max(max_abs.min(f32::MAX as crate::Wave) as f32);
         if max_abs > 32.0 {
             self.blowup_count = self.blowup_count.saturating_add(1);
         }
@@ -274,7 +276,7 @@ impl MetricsAccumulator {
 
     /// Record a stage level (call after each WDF stage processes).
     #[inline]
-    pub fn accumulate_stage(&mut self, stage_idx: usize, level: f64) {
+    pub fn accumulate_stage(&mut self, stage_idx: usize, level: crate::Wave) {
         if stage_idx < MAX_STAGES {
             self.stage_sum_sq[stage_idx] += level * level;
             if stage_idx >= self.stage_count {
@@ -289,7 +291,7 @@ impl MetricsAccumulator {
         &mut self,
         stage_idx: usize,
         iterations: u32,
-        residual: f64,
+        residual: crate::Wave,
         converged: bool,
     ) {
         self.nr_solve_count = self.nr_solve_count.saturating_add(1);
@@ -323,13 +325,15 @@ impl MetricsAccumulator {
 
     /// Record a runtime signal fault caught outside normal level metering.
     #[inline]
-    pub fn record_signal_fault(&mut self, value: f64) {
+    pub fn record_signal_fault(&mut self, value: crate::Wave) {
         if !value.is_finite() {
             self.nonfinite_count = self.nonfinite_count.saturating_add(1);
             return;
         }
         let abs = math::abs(value);
-        self.max_abs_sample = self.max_abs_sample.max(abs.min(f32::MAX as f64) as f32);
+        self.max_abs_sample = self
+            .max_abs_sample
+            .max(abs.min(f32::MAX as crate::Wave) as f32);
         if abs > 32.0 {
             self.blowup_count = self.blowup_count.saturating_add(1);
         }
@@ -375,13 +379,13 @@ impl MetricsAccumulator {
     ///
     /// Call this every `block_size` samples. Returns the reduced metrics.
     pub fn reduce(&mut self) -> UiMetrics {
-        let n = self.sample_count.max(1) as f64;
+        let n = self.sample_count.max(1) as crate::Wave;
 
         // RMS to dB (reference: 1.0 = 0 dB)
         let input_rms = math::sqrt(self.input_sum_sq / n);
         let output_rms = math::sqrt(self.output_sum_sq / n);
 
-        let to_db = |x: f64| -> f32 {
+        let to_db = |x: crate::Wave| -> f32 {
             if x > 1e-10 {
                 (20.0 * math::log10(x)) as f32
             } else {

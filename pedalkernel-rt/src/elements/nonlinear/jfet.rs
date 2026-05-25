@@ -10,7 +10,7 @@ use super::solver::{newton_raphson_solve, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 
 /// Thermal voltage at room temperature (26.85°C / 300K).
-const VT: f64 = 0.02585;
+const VT: crate::Wave = 0.02585;
 
 // ---------------------------------------------------------------------------
 // JFET Models
@@ -24,23 +24,23 @@ const VT: f64 = 0.02585;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JfetModel {
     /// Threshold (pinch-off) voltage (V). Negative for N-channel depletion mode.
-    pub vto: f64,
+    pub vto: crate::Wave,
     /// Transconductance coefficient (A/V²). Ids_sat = BETA × (Vgs - VTO)².
-    pub beta: f64,
+    pub beta: crate::Wave,
     /// Channel-length modulation parameter (1/V).
-    pub lambda: f64,
+    pub lambda: crate::Wave,
     /// Gate junction saturation current (A).
-    pub gate_is: f64,
+    pub gate_is: crate::Wave,
     /// Gate junction ideality factor.
-    pub n: f64,
+    pub n: crate::Wave,
     /// Drain ohmic resistance (Ω).
-    pub rd: f64,
+    pub rd: crate::Wave,
     /// Source ohmic resistance (Ω).
-    pub rs: f64,
+    pub rs: crate::Wave,
     /// Gate-source zero-bias junction capacitance (F).
-    pub cgs: f64,
+    pub cgs: crate::Wave,
     /// Gate-drain zero-bias junction capacitance (F).
-    pub cgd: f64,
+    pub cgd: crate::Wave,
     /// True for N-channel, false for P-channel.
     pub is_n_channel: bool,
 }
@@ -52,7 +52,7 @@ impl JfetModel {
 
     /// Zero-gate-voltage drain saturation current: Idss = BETA × VTO².
     #[inline]
-    pub fn idss(&self) -> f64 {
+    pub fn idss(&self) -> crate::Wave {
         self.beta * self.vto * self.vto
     }
 
@@ -60,7 +60,7 @@ impl JfetModel {
     ///
     /// `Igs = IS × (exp(Vgs / (N × Vt)) - 1)`
     #[inline]
-    pub fn gate_source_current(&self, vgs: f64) -> f64 {
+    pub fn gate_source_current(&self, vgs: crate::Wave) -> crate::Wave {
         let sign = if self.is_n_channel { 1.0 } else { -1.0 };
         let vgs_int = sign * vgs;
         // Limit exponent to avoid overflow
@@ -72,7 +72,7 @@ impl JfetModel {
     ///
     /// `Igd = IS × (exp(Vgd / (N × Vt)) - 1)`
     #[inline]
-    pub fn gate_drain_current(&self, vgd: f64) -> f64 {
+    pub fn gate_drain_current(&self, vgd: crate::Wave) -> crate::Wave {
         let sign = if self.is_n_channel { 1.0 } else { -1.0 };
         let vgd_int = sign * vgd;
         let arg = (vgd_int / (self.n * VT)).min(40.0);
@@ -111,11 +111,11 @@ impl JfetModel {
 pub struct JfetRoot {
     pub model: JfetModel,
     /// Current gate-source voltage (external control parameter).
-    vgs: f64,
+    vgs: crate::Wave,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
     /// Previous sample's drain voltage for warm-starting Newton-Raphson.
-    prev_v: f64,
+    prev_v: crate::Wave,
 }
 
 impl JfetRoot {
@@ -130,13 +130,13 @@ impl JfetRoot {
 
     /// Set the gate-source voltage (external control from LFO, bias, etc.)
     #[inline]
-    pub fn set_vgs(&mut self, vgs: f64) {
+    pub fn set_vgs(&mut self, vgs: crate::Wave) {
         self.vgs = vgs;
     }
 
     /// Get current gate-source voltage.
     #[inline]
-    pub fn vgs(&self) -> f64 {
+    pub fn vgs(&self) -> crate::Wave {
         self.vgs
     }
 
@@ -144,7 +144,7 @@ impl JfetRoot {
     /// Rds = 1 / (2 × Beta × Vov), where Vov = Vgs - Vto.
     /// Returns a large resistance (1MΩ) if the JFET is in cutoff.
     #[inline]
-    pub fn rds_approx(&self) -> f64 {
+    pub fn rds_approx(&self) -> crate::Wave {
         let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };
         let vov = sign * self.vgs - self.model.vto;
         if vov > 0.0 {
@@ -159,7 +159,7 @@ impl JfetRoot {
     /// Handles triode, saturation, and cutoff regions using SPICE sign
     /// convention for both N-channel and P-channel devices.
     #[inline]
-    pub fn drain_current(&self, vds: f64) -> f64 {
+    pub fn drain_current(&self, vds: crate::Wave) -> crate::Wave {
         let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };
         let vgs_int = sign * self.vgs;
         let vds_int = sign * vds;
@@ -194,7 +194,7 @@ impl JfetRoot {
     /// The external derivative dIds/dVds equals the internal derivative
     /// dIds_int/dVds_int because the two sign factors cancel.
     #[inline]
-    fn drain_current_derivative(&self, vds: f64) -> f64 {
+    fn drain_current_derivative(&self, vds: crate::Wave) -> crate::Wave {
         let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };
         let vgs_int = sign * self.vgs;
         let vds_int = sign * vds;
@@ -223,11 +223,11 @@ impl JfetRoot {
 
 impl super::solver::NlDeviceIv for JfetRoot {
     /// I(Vds) at current Vgs — drain-source as a 1-port nonlinear element.
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         (self.drain_current(v), self.drain_current_derivative(v))
     }
 
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         (-20.0, 20.0)
     }
 }
@@ -244,12 +244,17 @@ impl JfetRoot {
     ///
     /// Returns the reflected wave b = 2*Vs - a.
     #[inline]
-    pub fn process_source_follower(&mut self, a: f64, rp: f64, vgate: f64) -> f64 {
+    pub fn process_source_follower(
+        &mut self,
+        a: crate::Wave,
+        rp: crate::Wave,
+        vgate: crate::Wave,
+    ) -> crate::Wave {
         let model = self.model;
         let max_iter = self.max_iter;
         let sign = if model.is_n_channel { 1.0 } else { -1.0 };
 
-        let source_follower_current = |vs: f64| -> (f64, f64) {
+        let source_follower_current = |vs: crate::Wave| -> (crate::Wave, crate::Wave) {
             let vgs = vgate - vs;
             let vgs_int = sign * vgs;
             let vov = vgs_int - model.vto;
@@ -296,7 +301,7 @@ impl JfetRoot {
 impl WdfRoot for JfetRoot {
     /// JFET drain-source path with warm-starting.
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let root = *self;
 
         let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };

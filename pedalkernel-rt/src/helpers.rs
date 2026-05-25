@@ -47,7 +47,7 @@ pub fn balance_parallel_vs(node: &mut DynNode) {
 }
 
 /// Adjust the Vs port resistance inside `branch` so that `branch.port_resistance() ~ target_rp`.
-pub fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
+pub fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: crate::Wave) {
     let current_rp = branch.port_resistance();
     if current_rp >= target_rp * 0.5 {
         return;
@@ -88,7 +88,7 @@ pub fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
     }
 }
 
-pub fn set_vs_rp(node: &mut DynNode, rp_val: f64) {
+pub fn set_vs_rp(node: &mut DynNode, rp_val: crate::Wave) {
     match node {
         DynNode::Leaf(leaf) if leaf.type_tag() == "voltage_source" => {
             leaf.set_resistance(rp_val);

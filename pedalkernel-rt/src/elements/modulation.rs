@@ -35,26 +35,26 @@ pub enum LfoWaveform {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Lfo {
     /// Current phase (0.0 - 1.0).
-    phase: f64,
+    phase: crate::Wave,
     /// Frequency in Hz.
-    frequency: f64,
+    frequency: crate::Wave,
     /// Modulation depth (0.0 - 1.0).
-    depth: f64,
+    depth: crate::Wave,
     /// Waveform shape.
     waveform: LfoWaveform,
     /// Sample rate for phase increment calculation.
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Phase increment per sample.
-    phase_inc: f64,
+    phase_inc: crate::Wave,
     /// Held value for sample-and-hold mode.
-    sh_value: f64,
+    sh_value: crate::Wave,
     /// Simple RNG state for sample-and-hold.
     rng_state: u32,
 }
 
 impl Lfo {
     /// Create a new LFO with the given waveform and sample rate.
-    pub fn new(waveform: LfoWaveform, sample_rate: f64) -> Self {
+    pub fn new(waveform: LfoWaveform, sample_rate: crate::Wave) -> Self {
         let frequency = 5.0; // Default 5 Hz
         let phase_inc = frequency / sample_rate;
         Self {
@@ -71,12 +71,12 @@ impl Lfo {
 
     /// Set modulation depth (0.0 = no modulation, 1.0 = full depth).
     #[inline]
-    pub fn set_depth(&mut self, depth: f64) {
+    pub fn set_depth(&mut self, depth: crate::Wave) {
         self.depth = depth.clamp(0.0, 1.0);
     }
 
     /// Get the current depth.
-    pub fn depth(&self) -> f64 {
+    pub fn depth(&self) -> crate::Wave {
         self.depth
     }
 
@@ -92,21 +92,24 @@ impl Lfo {
 
     /// Simple fast PRNG for sample-and-hold (xorshift).
     #[inline]
-    fn next_random(&mut self) -> f64 {
+    fn next_random(&mut self) -> crate::Wave {
         let mut x = self.rng_state;
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
         self.rng_state = x;
         // Convert to 0.0 - 1.0 range
-        (x as f64) / (u32::MAX as f64)
+        (x as crate::Wave) / (u32::MAX as crate::Wave)
     }
 
     /// Generate raw waveform value from phase (returns -1.0 to 1.0).
     #[inline]
-    fn raw_waveform(&mut self, phase: f64) -> f64 {
+    fn raw_waveform(&mut self, phase: crate::Wave) -> crate::Wave {
         match self.waveform {
-            LfoWaveform::Sine => crate::math::sin((phase * crate::math::TAU as f64) as crate::Wave) as f64,
+            LfoWaveform::Sine => {
+                crate::math::sin((phase * crate::math::TAU as crate::Wave) as crate::Wave)
+                    as crate::Wave
+            }
             LfoWaveform::Triangle => {
                 // Triangle: rises from -1 to 1 in first half, falls in second
                 if phase < 0.5 {
@@ -141,18 +144,19 @@ impl Lfo {
     ///
     /// Useful for tremolo depth where 0 = no cut, depth = full cut.
     #[inline]
-    pub fn tick_unipolar(&mut self) -> f64 {
+    pub fn tick_unipolar(&mut self) -> crate::Wave {
         (self.tick() + self.depth) * 0.5
     }
 
     /// Get current phase (0.0 - 1.0), useful for phase displays.
-    pub fn phase(&self) -> f64 {
+    pub fn phase(&self) -> crate::Wave {
         self.phase
     }
 
     /// Set phase directly (0.0 - 1.0), useful for sync.
-    pub fn set_phase(&mut self, phase: f64) {
-        self.phase = crate::math::rem_euclid(phase as crate::Wave, 1.0 as crate::Wave) as f64;
+    pub fn set_phase(&mut self, phase: crate::Wave) {
+        self.phase =
+            crate::math::rem_euclid(phase as crate::Wave, 1.0 as crate::Wave) as crate::Wave;
     }
 }
 
@@ -162,7 +166,7 @@ impl Modulator for Lfo {
     /// Returns a value in the range [-depth, +depth].
     /// For unipolar output (0 to depth), use `tick_unipolar()`.
     #[inline]
-    fn tick(&mut self) -> f64 {
+    fn tick(&mut self) -> crate::Wave {
         let value = self.raw_waveform(self.phase);
 
         // Advance phase
@@ -187,16 +191,16 @@ impl Modulator for Lfo {
     }
 
     #[inline]
-    fn set_rate(&mut self, hz: f64) {
+    fn set_rate(&mut self, hz: crate::Wave) {
         self.frequency = hz.max(0.01);
         self.phase_inc = self.frequency / self.sample_rate;
     }
 
-    fn rate(&self) -> f64 {
+    fn rate(&self) -> crate::Wave {
         self.frequency
     }
 
-    fn set_sample_rate(&mut self, sample_rate: f64) {
+    fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.phase_inc = self.frequency / sample_rate;
     }
@@ -215,26 +219,26 @@ impl Modulator for Lfo {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnvelopeFollower {
     /// Current envelope value (0.0 - 1.0+).
-    envelope: f64,
+    envelope: crate::Wave,
     /// Attack time constant coefficient.
-    attack_coef: f64,
+    attack_coef: crate::Wave,
     /// Release time constant coefficient.
-    release_coef: f64,
+    release_coef: crate::Wave,
     /// Sample rate for coefficient calculation.
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Attack time in milliseconds.
-    attack_ms: f64,
+    attack_ms: crate::Wave,
     /// Release time in milliseconds.
-    release_ms: f64,
+    release_ms: crate::Wave,
     /// Input sensitivity/gain.
-    sensitivity: f64,
+    sensitivity: crate::Wave,
 }
 
 impl EnvelopeFollower {
     /// Create a new envelope follower with default parameters.
     ///
     /// Default: 10ms attack, 100ms release, unity sensitivity.
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: crate::Wave) -> Self {
         let mut ef = Self {
             envelope: 0.0,
             attack_coef: 0.0,
@@ -263,12 +267,12 @@ impl EnvelopeFollower {
     /// Time constants: τ_attack = R_attack × C_attack (in seconds),
     /// τ_release = R_release × C_release (in seconds).
     pub fn from_rc(
-        attack_r: f64,
-        attack_c: f64,
-        release_r: f64,
-        release_c: f64,
-        sensitivity_r: f64,
-        sample_rate: f64,
+        attack_r: crate::Wave,
+        attack_c: crate::Wave,
+        release_r: crate::Wave,
+        release_c: crate::Wave,
+        sensitivity_r: crate::Wave,
+        sample_rate: crate::Wave,
     ) -> Self {
         // τ = R × C gives seconds, convert to ms
         let attack_ms = attack_r * attack_c * 1000.0;
@@ -297,21 +301,22 @@ impl EnvelopeFollower {
         let attack_samples = (self.attack_ms * self.sample_rate / 1000.0).max(1.0);
         let release_samples = (self.release_ms * self.sample_rate / 1000.0).max(1.0);
 
-        self.attack_coef = crate::math::exp((-1.0 / attack_samples) as crate::Wave) as f64;
-        self.release_coef = crate::math::exp((-1.0 / release_samples) as crate::Wave) as f64;
+        self.attack_coef = crate::math::exp((-1.0 / attack_samples) as crate::Wave) as crate::Wave;
+        self.release_coef =
+            crate::math::exp((-1.0 / release_samples) as crate::Wave) as crate::Wave;
     }
 
     /// Set attack time in milliseconds.
     ///
     /// Shorter attack responds faster to transients but may track
     /// individual waveform cycles. Typical range: 1-50ms.
-    pub fn set_attack(&mut self, ms: f64) {
+    pub fn set_attack(&mut self, ms: crate::Wave) {
         self.attack_ms = ms.max(0.1);
         self.update_coefficients();
     }
 
     /// Get current attack time in milliseconds.
-    pub fn attack(&self) -> f64 {
+    pub fn attack(&self) -> crate::Wave {
         self.attack_ms
     }
 
@@ -319,13 +324,13 @@ impl EnvelopeFollower {
     ///
     /// Longer release gives smoother output but slower response
     /// to level drops. Typical range: 50-500ms.
-    pub fn set_release(&mut self, ms: f64) {
+    pub fn set_release(&mut self, ms: crate::Wave) {
         self.release_ms = ms.max(0.1);
         self.update_coefficients();
     }
 
     /// Get current release time in milliseconds.
-    pub fn release(&self) -> f64 {
+    pub fn release(&self) -> crate::Wave {
         self.release_ms
     }
 
@@ -333,12 +338,12 @@ impl EnvelopeFollower {
     ///
     /// Higher sensitivity amplifies the input before envelope detection,
     /// useful for low-level signals. Typical range: 0.5-5.0.
-    pub fn set_sensitivity(&mut self, sens: f64) {
+    pub fn set_sensitivity(&mut self, sens: crate::Wave) {
         self.sensitivity = sens.max(0.0);
     }
 
     /// Get current sensitivity.
-    pub fn sensitivity(&self) -> f64 {
+    pub fn sensitivity(&self) -> crate::Wave {
         self.sensitivity
     }
 
@@ -348,7 +353,7 @@ impl EnvelopeFollower {
     /// asymmetric attack/release smoothing. Output range is 0.0 upward,
     /// typically staying below 1.0 for normalized audio input.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Full-wave rectify and apply sensitivity
         let rectified = input.abs() * self.sensitivity;
 
@@ -365,7 +370,7 @@ impl EnvelopeFollower {
     }
 
     /// Get current envelope value without processing new input.
-    pub fn envelope(&self) -> f64 {
+    pub fn envelope(&self) -> crate::Wave {
         self.envelope
     }
 
@@ -375,7 +380,7 @@ impl EnvelopeFollower {
     }
 
     /// Update sample rate and recalculate coefficients.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.update_coefficients();
     }

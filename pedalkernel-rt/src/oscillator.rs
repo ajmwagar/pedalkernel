@@ -28,27 +28,27 @@ use crate::math;
 // ── Constants ───────────────────────────────────────────────────────────
 
 /// Base frequency for V/oct = 0V (C1, MIDI 36).
-const BASE_FREQ_HZ: f64 = 65.4064;
+const BASE_FREQ_HZ: crate::Wave = 65.4064;
 
 /// Default saw ramp curvature exponent. 1.0 = linear, <1.0 = concave bow.
 /// 0.92 gives subtle even-harmonic content matching 303 measurements.
-const SAW_CURVE: f64 = 0.92;
+const SAW_CURVE: crate::Wave = 0.92;
 
 /// Default square pulse width. 0.5 = perfect 50%. 303 sits around 0.48.
-const PULSE_WIDTH: f64 = 0.48;
+const PULSE_WIDTH: crate::Wave = 0.48;
 
 /// Output lowpass cutoff (Hz). Models parasitic rolloff in analog path.
-const OUTPUT_LP_HZ: f64 = 12_000.0;
+const OUTPUT_LP_HZ: crate::Wave = 12_000.0;
 
 /// Drift: slow wander magnitude in semitones (±).
-const DRIFT_SLOW_SEMITONES: f64 = 0.05; // ~5 cents
+const DRIFT_SLOW_SEMITONES: crate::Wave = 0.05; // ~5 cents
 
 /// Drift: lowpass time constant for slow wander (seconds).
-const DRIFT_SLOW_TAU: f64 = 2.0;
+const DRIFT_SLOW_TAU: crate::Wave = 2.0;
 
 /// Drift: thermal coefficient — drift scales with log2(freq/base_freq).
 /// Higher notes drift more because the exponential converter runs hotter.
-const DRIFT_THERMAL_SCALE: f64 = 0.02; // cents per octave above base
+const DRIFT_THERMAL_SCALE: crate::Wave = 0.02; // cents per octave above base
 
 // ── PolyBLEP ────────────────────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ const DRIFT_THERMAL_SCALE: f64 = 0.02; // cents per octave above base
 /// `t` is the phase distance from the discontinuity, normalized to [0, dt).
 /// `dt` is the phase increment (freq / sample_rate).
 #[inline]
-fn poly_blep(t: f64, dt: f64) -> f64 {
+fn poly_blep(t: crate::Wave, dt: crate::Wave) -> crate::Wave {
     if t < dt {
         // Rising toward discontinuity
         let t_norm = t / dt;
@@ -86,13 +86,13 @@ impl Rng {
 
     /// Returns a value in [-1.0, 1.0].
     #[inline]
-    fn next_bipolar(&mut self) -> f64 {
+    fn next_bipolar(&mut self) -> crate::Wave {
         // xorshift32
         self.state ^= self.state << 13;
         self.state ^= self.state >> 17;
         self.state ^= self.state << 5;
         // Map u32 to [-1, 1]
-        (self.state as f64 / u32::MAX as f64) * 2.0 - 1.0
+        (self.state as crate::Wave / u32::MAX as crate::Wave) * 2.0 - 1.0
     }
 }
 
@@ -101,21 +101,21 @@ impl Rng {
 /// Band-limited oscillator with analog imperfections.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Vco {
-    phase: f64,
-    sample_rate: f64,
-    inv_sample_rate: f64,
+    phase: crate::Wave,
+    sample_rate: crate::Wave,
+    inv_sample_rate: crate::Wave,
 
     // Analog imperfections
     #[cfg_attr(feature = "serde", serde(skip, default = "default_rng"))]
     rng: Rng,
-    drift_slow: f64,      // slow random walk state (semitones)
-    drift_lp_coeff: f64,  // lowpass coefficient for drift smoothing
-    output_lp: f64,       // output bandwidth limiter state
-    output_lp_coeff: f64, // coefficient for output LP
+    drift_slow: crate::Wave,      // slow random walk state (semitones)
+    drift_lp_coeff: crate::Wave,  // lowpass coefficient for drift smoothing
+    output_lp: crate::Wave,       // output bandwidth limiter state
+    output_lp_coeff: crate::Wave, // coefficient for output LP
 
     // Character parameters
-    saw_curve: f64,
-    pulse_width: f64,
+    saw_curve: crate::Wave,
+    pulse_width: crate::Wave,
 }
 
 #[cfg(feature = "serde")]
@@ -125,7 +125,7 @@ fn default_rng() -> Rng {
 
 impl Vco {
     /// Create a new VCO at the given sample rate.
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: crate::Wave) -> Self {
         let inv_sr = 1.0 / sample_rate;
         Self {
             phase: 0.0,
@@ -135,34 +135,34 @@ impl Vco {
             drift_slow: 0.0,
             drift_lp_coeff: math::exp(-1.0 / (DRIFT_SLOW_TAU * sample_rate)),
             output_lp: 0.0,
-            output_lp_coeff: math::exp(-2.0 * core::f64::consts::PI * OUTPUT_LP_HZ * inv_sr),
+            output_lp_coeff: math::exp(-2.0 * crate::math::PI * OUTPUT_LP_HZ * inv_sr),
             saw_curve: SAW_CURVE,
             pulse_width: PULSE_WIDTH,
         }
     }
 
     /// Update sample rate (e.g., when host changes it).
-    pub fn set_sample_rate(&mut self, sr: f64) {
+    pub fn set_sample_rate(&mut self, sr: crate::Wave) {
         self.sample_rate = sr;
         self.inv_sample_rate = 1.0 / sr;
         self.drift_lp_coeff = math::exp(-1.0 / (DRIFT_SLOW_TAU * sr));
-        self.output_lp_coeff = math::exp(-2.0 * core::f64::consts::PI * OUTPUT_LP_HZ / sr);
+        self.output_lp_coeff = math::exp(-2.0 * crate::math::PI * OUTPUT_LP_HZ / sr);
     }
 
     /// Set saw ramp curvature. 1.0 = linear, <1.0 = concave (303-like).
-    pub fn set_saw_curve(&mut self, curve: f64) {
+    pub fn set_saw_curve(&mut self, curve: crate::Wave) {
         self.saw_curve = curve.clamp(0.5, 1.0);
     }
 
     /// Set square pulse width. 0.5 = perfect square. 303 ≈ 0.48.
-    pub fn set_pulse_width(&mut self, pw: f64) {
+    pub fn set_pulse_width(&mut self, pw: crate::Wave) {
         self.pulse_width = pw.clamp(0.1, 0.9);
     }
 
     /// Convert V/oct + tuning offset to frequency in Hz.
     #[inline]
-    fn voct_to_hz(voct: f64, tuning_semitones: f64) -> f64 {
-        BASE_FREQ_HZ * math::exp((voct + tuning_semitones / 12.0) * core::f64::consts::LN_2)
+    fn voct_to_hz(voct: crate::Wave, tuning_semitones: crate::Wave) -> crate::Wave {
+        BASE_FREQ_HZ * math::exp((voct + tuning_semitones / 12.0) * crate::math::LN_2)
     }
 
     /// Process one sample.
@@ -173,7 +173,7 @@ impl Vco {
     ///
     /// Returns a single sample in approximately [-1, 1].
     #[inline]
-    pub fn process(&mut self, voct: f64, tuning: f64, square: bool) -> f64 {
+    pub fn process(&mut self, voct: crate::Wave, tuning: crate::Wave, square: bool) -> crate::Wave {
         // ── 1. Drift ────────────────────────────────────────────────────
         // Slow random walk, lowpass filtered
         let noise = self.rng.next_bipolar();
@@ -249,13 +249,13 @@ mod tests {
     use super::*;
     use std::eprintln;
 
-    const SR: f64 = 48_000.0;
+    const SR: crate::Wave = 48_000.0;
 
     #[test]
     fn saw_output_bounded() {
         let mut vco = Vco::new(SR);
-        let mut min = f64::MAX;
-        let mut max = f64::MIN;
+        let mut min = crate::Wave::MAX;
+        let mut max = crate::Wave::MIN;
         // Sweep through a few cycles at 440Hz
         for _ in 0..4800 {
             let s = vco.process(3.75, 0.0, false); // ~440Hz (C1 * 2^3.75)
@@ -273,8 +273,8 @@ mod tests {
     #[test]
     fn square_output_bounded() {
         let mut vco = Vco::new(SR);
-        let mut min = f64::MAX;
-        let mut max = f64::MIN;
+        let mut min = crate::Wave::MAX;
+        let mut max = crate::Wave::MIN;
         for _ in 0..4800 {
             let s = vco.process(3.75, 0.0, true);
             min = min.min(s);
@@ -326,7 +326,7 @@ mod tests {
                 neg_samples += 1;
             }
         }
-        let ratio = pos_samples as f64 / (pos_samples + neg_samples) as f64;
+        let ratio = pos_samples as crate::Wave / (pos_samples + neg_samples) as crate::Wave;
         eprintln!("  PW ratio: {ratio:.4} (target ~0.48)");
         // Should be close to 0.48, not 0.50
         assert!(
@@ -361,8 +361,8 @@ mod tests {
         // At very high frequency, the output LP should attenuate
         let mut vco = Vco::new(SR);
         // 20kHz = well above the 12kHz cutoff
-        let voct = math::ln(20_000.0 / BASE_FREQ_HZ) / core::f64::consts::LN_2;
-        let mut peak = 0.0f64;
+        let voct = math::ln(20_000.0 / BASE_FREQ_HZ) / crate::math::LN_2;
+        let mut peak = 0.0 as crate::Wave;
         for _ in 0..4800 {
             let s = vco.process(voct, 0.0, false);
             peak = peak.max(s.abs());
@@ -379,7 +379,7 @@ mod tests {
     fn voct_tracking() {
         // Verify V/oct produces roughly correct frequencies
         // by counting zero crossings
-        let measure_freq = |voct: f64| -> f64 {
+        let measure_freq = |voct: crate::Wave| -> crate::Wave {
             let mut vco = Vco::new(SR);
             let mut crossings = 0usize;
             let mut prev = 0.0;
@@ -391,7 +391,7 @@ mod tests {
                 }
                 prev = s;
             }
-            crossings as f64 // crossings per second ≈ freq
+            crossings as crate::Wave // crossings per second ≈ freq
         };
 
         let f_c2 = measure_freq(1.0); // C2 = 130.8 Hz

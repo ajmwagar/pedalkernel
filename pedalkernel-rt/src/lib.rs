@@ -105,16 +105,16 @@ pub trait PedalProcessor {
     fn process(&mut self, input: Wave) -> Wave;
 
     /// Set sample rate (call before processing).
-    fn set_sample_rate(&mut self, rate: f64);
+    fn set_sample_rate(&mut self, rate: Wave);
 
     /// Reset all internal state.
     fn reset(&mut self);
 
     /// Set a named control parameter (0.0-1.0). Default: no-op.
-    fn set_control(&mut self, _label: &str, _value: f64) {}
+    fn set_control(&mut self, _label: &str, _value: Wave) {}
 
     /// Set supply voltage in volts (default 9.0).
-    fn set_supply_voltage(&mut self, _voltage: f64) {}
+    fn set_supply_voltage(&mut self, _voltage: Wave) {}
 
     // ── Named port API (audio-rate voltage I/O) ─────────────────────
 
@@ -148,12 +148,12 @@ pub trait PedalProcessor {
 
     /// List all editable passive components (R, C, L with comp_ids).
     /// Returns (comp_id, kind_str, current_value) for each editable leaf.
-    fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
+    fn list_editable_components(&self) -> Vec<(String, &'static str, Wave)> {
         Vec::new()
     }
 
     /// Set a passive component's value by comp_id. Returns true if found.
-    fn set_passive(&mut self, _comp_id: &str, _value: f64) -> bool {
+    fn set_passive(&mut self, _comp_id: &str, _value: Wave) -> bool {
         false
     }
 
@@ -163,7 +163,7 @@ pub trait PedalProcessor {
     }
 
     /// Debug: return current control state as (label, target_value, smoothed_value).
-    fn control_debug_info(&self) -> Vec<(String, f64, f64)> {
+    fn control_debug_info(&self) -> Vec<(String, Wave, Wave)> {
         Vec::new()
     }
 }

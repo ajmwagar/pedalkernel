@@ -129,7 +129,7 @@ impl Stage {
     ///
     /// Returns true when the stage accepted the control. Each stage handles
     /// its own recompute/update contract here.
-    pub fn set_control_pot(&mut self, comp_id: &str, value: f64) -> bool {
+    pub fn set_control_pot(&mut self, comp_id: &str, value: crate::Wave) -> bool {
         match self {
             Stage::Wdf(wdf) => {
                 let changed = wdf.set_pot(comp_id, value);
@@ -398,7 +398,7 @@ pub struct PortBinding {
     /// Circuit graph node ID for injection/extraction.
     pub node_id: usize,
     /// Default value when no external signal is connected (volts).
-    pub default_value: f64,
+    pub default_value: crate::Wave,
     /// Stage index that contains this port's VS leaf.
     /// Set at compile time so runtime skips stages that don't have this port.
     /// usize::MAX = not yet resolved (inject into all stages as fallback).
@@ -412,13 +412,13 @@ pub struct ControlBinding {
     pub target: ControlTarget,
     pub component_id: String,
     #[allow(dead_code)]
-    pub max_resistance: f64,
+    pub max_resistance: crate::Wave,
     /// Pot taper curve — applied once before splitting into aw/wb halves
     /// so that aw + wb = max_R always (split halves use Linear taper internally).
     pub taper: crate::pot_taper::PotTaper,
     /// Range mapping: (min, max).  Input 0→min, 1→max.
     /// Default (0.0, 1.0) is identity; (1.0, 0.0) inverts.
-    pub range: (f64, f64),
+    pub range: (crate::Wave, crate::Wave),
 }
 
 #[derive(Debug)]
@@ -478,7 +478,7 @@ pub struct WiperDivider {
     /// Component ID of the pot (for smoother matching).
     pub pot_comp_id: String,
     /// Current position (0.0–1.0, after taper). Updated by smoother.
-    pub position: f64,
+    pub position: crate::Wave,
     /// Pot taper for mapping raw position to effective position.
     pub taper: crate::pot_taper::PotTaper,
 }
@@ -487,7 +487,7 @@ pub struct WiperDivider {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriggerState {
-    pub amplitude: f64,
+    pub amplitude: crate::Wave,
     pub countdown: u32,
     /// True on the sample when this trigger fired (before tick() clears countdown).
     /// Used by VCA envelope gating which runs after tick().
@@ -500,7 +500,7 @@ pub struct TriggerState {
 }
 
 impl TriggerState {
-    pub fn new(amplitude: f64) -> Self {
+    pub fn new(amplitude: crate::Wave) -> Self {
         Self {
             amplitude,
             countdown: 0,
@@ -515,7 +515,7 @@ impl TriggerState {
     /// Returns the impulse value for this sample (amplitude or 0.0).
     /// Also sets `active_this_sample` so downstream consumers (VCA envelopes)
     /// can detect the trigger even after countdown is decremented.
-    pub fn tick(&mut self) -> f64 {
+    pub fn tick(&mut self) -> crate::Wave {
         if self.countdown > 0 {
             self.countdown -= 1;
             self.active_this_sample = true;
@@ -577,7 +577,7 @@ pub struct DelayLineBinding {
     pub delay_line: crate::elements::DelayLine,
     /// Tap ratios for multi-tap reading (e.g., [1.0, 2.0, 4.0] for RE-201).
     /// Each tap reads from the buffer at `base_delay * ratio`.
-    pub taps: Vec<f64>,
+    pub taps: Vec<crate::Wave>,
     /// Component ID for debugging and control binding.
     #[allow(dead_code)]
     pub comp_id: String,
@@ -633,11 +633,11 @@ pub struct LfoBinding {
     pub lfo: crate::elements::Lfo,
     pub target: ModulationTarget,
     /// Bias offset for the modulation (e.g., Vgs center point).
-    pub bias: f64,
+    pub bias: crate::Wave,
     /// Modulation range (amplitude).
-    pub range: f64,
+    pub range: crate::Wave,
     /// Base frequency from RC timing: f = 1/(2πRC).
-    pub base_freq: f64,
+    pub base_freq: crate::Wave,
     /// LFO component ID (for debugging and future control binding).
     #[allow(dead_code)]
     pub lfo_id: String,
@@ -649,9 +649,9 @@ pub struct EnvelopeBinding {
     pub envelope: crate::elements::EnvelopeFollower,
     pub target: ModulationTarget,
     /// Bias offset for the modulation.
-    pub bias: f64,
+    pub bias: crate::Wave,
     /// Modulation range (amplitude).
-    pub range: f64,
+    pub range: crate::Wave,
     /// Envelope follower component ID.
     #[allow(dead_code)]
     pub env_id: String,
@@ -667,18 +667,18 @@ pub struct EnvelopeBinding {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SmoothedParam {
     /// Target value (set immediately by user input)
-    pub target: f64,
+    pub target: crate::Wave,
     /// Current smoothed value (approaches target over time)
-    pub current: f64,
+    pub current: crate::Wave,
     /// Smoothing coefficient (0.9995 = ~10ms at 48kHz)
-    pub coef: f64,
+    pub coef: crate::Wave,
     /// Control index in the controls vec (for updating the actual control)
     pub control_idx: usize,
 }
 
 impl SmoothedParam {
     /// Create a new smoothed parameter.
-    pub fn new(initial: f64, control_idx: usize, sample_rate: f64) -> Self {
+    pub fn new(initial: crate::Wave, control_idx: usize, sample_rate: crate::Wave) -> Self {
         // Smoothing time constant ~10ms = 0.010 seconds
         // coef = exp(-1 / (tau * fs)) ≈ exp(-1 / (0.010 * 48000)) ≈ 0.9979
         let tau = 0.010; // 10ms smoothing
@@ -705,7 +705,7 @@ impl SmoothedParam {
     }
 
     /// Set the target value (called from set_control).
-    pub fn set_target(&mut self, value: f64) {
+    pub fn set_target(&mut self, value: crate::Wave) {
         self.target = value;
     }
 
@@ -715,7 +715,7 @@ impl SmoothedParam {
     }
 
     /// Update smoothing coefficient for new sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         let tau = 0.010;
         self.coef = crate::math::exp(-1.0 / (tau * sample_rate));
     }
@@ -735,19 +735,19 @@ pub enum RailSaturation {
     /// distortion near zero. Output stage is push-pull emitter follower
     /// that saturates symmetrically against both rails.
     /// `output_swing_ratio` is Vout_max / Vsupply (typically 0.85–0.95).
-    OpAmp { output_swing_ratio: f64 },
+    OpAmp { output_swing_ratio: crate::Wave },
     /// BJT common-emitter: asymmetric saturation.  The collector saturates
     /// hard (~0.2V from rail) when driven into saturation, but cuts off
     /// softly when the base drive is removed.  NPN saturates at positive
     /// rail (hard), cuts off toward negative rail (soft).
-    Bjt { vce_sat: f64 },
+    Bjt { vce_sat: crate::Wave },
     /// JFET/MOSFET: soft saturation onset due to square-law I-V curve.
     /// The drain current pinches off gradually as Vds approaches Vgs-Vth.
     Fet,
     /// Triode/pentode: grid conduction (hard clip) at positive swing,
     /// plate current cutoff (soft) at negative swing.
     /// `mu` is the amplification factor (affects saturation sharpness).
-    Tube { mu: f64 },
+    Tube { mu: crate::Wave },
 }
 
 impl RailSaturation {
@@ -755,7 +755,7 @@ impl RailSaturation {
     ///
     /// `headroom` is `supply_voltage / 9.0` (normalized to 9V reference).
     #[inline]
-    fn process(&self, signal: f64, headroom: f64) -> f64 {
+    fn process(&self, signal: crate::Wave, headroom: crate::Wave) -> crate::Wave {
         match self {
             RailSaturation::None => signal,
             RailSaturation::OpAmp { output_swing_ratio } => {
@@ -873,18 +873,18 @@ pub struct CompiledPedal {
     /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
     /// These are processed after regular stages.
     pub push_pull_stages: Vec<PushPullStage>,
-    pub pre_gain: f64,
+    pub pre_gain: crate::Wave,
     /// Auto-calibrated output gain scalar (1.0 = no calibration).
-    pub output_gain: f64,
+    pub output_gain: crate::Wave,
     pub rail_saturation: RailSaturation,
     /// Oversampler for rail saturation to anti-alias harmonics generated
     /// by the nonlinear clipping at supply rails.
     pub rail_sat_oversampler: crate::oversampling::Oversampler,
-    pub sample_rate: f64,
+    pub sample_rate: crate::Wave,
     pub controls: Vec<ControlBinding>,
-    pub gain_range: (f64, f64),
+    pub gain_range: (crate::Wave, crate::Wave),
     /// Supply voltage in volts (default 9.0).
-    pub supply_voltage: f64,
+    pub supply_voltage: crate::Wave,
     /// LFO modulators.
     pub lfos: Vec<LfoBinding>,
     /// Envelope follower modulators.
@@ -936,7 +936,7 @@ pub struct CompiledPedal {
     /// Output DC blocker — first-order HPF at ~5 Hz to remove subsonic drift
     /// from integrator DC tails and opamp offset accumulation.
     /// Format: (a1, b0, y_prev, x_prev) for IIR highpass.
-    pub output_dc_block: Option<(f64, f64, f64, f64)>,
+    pub output_dc_block: Option<(crate::Wave, crate::Wave, crate::Wave, crate::Wave)>,
     /// Sidechain processors for feedback compression loops.
     /// Each sidechain taps audio, extracts an envelope, and modulates
     /// the push-pull grid bias. Multiple sidechains are supported
@@ -951,7 +951,7 @@ pub struct CompiledPedal {
     /// Index of the subcircuit whose output is the equipment output.
     pub subcircuit_output_idx: Option<usize>,
     /// Per-subcircuit output buffer (indexed by subcircuit_idx).
-    pub subcircuit_outputs: Vec<f64>,
+    pub subcircuit_outputs: Vec<crate::Wave>,
     /// Smoothed parameters for zipper-free pot control.
     /// One per pot in the circuit that needs smoothing.
     pub pot_smoothers: Vec<SmoothedParam>,
@@ -963,7 +963,7 @@ pub struct CompiledPedal {
     pub pot_mirrors: HashMap<String, Vec<MirrorPot>>,
     /// Base (unmodulated) grid bias for push-pull stages.
     /// Stored so sidechain CV can be subtracted without accumulation.
-    pub base_grid_bias: f64,
+    pub base_grid_bias: crate::Wave,
     /// Sample counter for throttling multi-NL scattering recomputes.
     /// When a pot inside a multi-NL R-type adaptor changes, the O(n³) matrix
     /// inversion is deferred and flushed every 32 samples (~0.7 ms at 48 kHz).
@@ -973,10 +973,10 @@ pub struct CompiledPedal {
     /// Maps circuit graph node IDs to signal values. When non-empty, multi-NL
     /// stages read from their injection_node_id and write to their output_node_id,
     /// enabling correct parallel channel processing (e.g., 670 sidechain).
-    pub node_signals: Vec<(usize, f64)>,
+    pub node_signals: Vec<(usize, crate::Wave)>,
     /// BBD wet/dry mix (0.0 = fully dry, 1.0 = fully wet).
     /// Controlled by "Blend"/"Mix" knobs on BBD delay pedals.
-    pub bbd_wet_mix: f64,
+    pub bbd_wet_mix: crate::Wave,
     /// Component ID of the pot controlling BBD wet/dry mix.
     /// When set, the pot position is read directly after pot updates.
     pub bbd_mix_pot_id: Option<String>,
@@ -987,7 +987,7 @@ pub struct CompiledPedal {
     /// Skipped for serde: `&'static str` cannot be deserialized from owned data.
     /// Reconstructed on the M7 target if needed.
     #[cfg_attr(feature = "serde", serde(skip))]
-    pub original_passive_values: HashMap<String, (&'static str, f64)>,
+    pub original_passive_values: HashMap<String, (&'static str, crate::Wave)>,
 
     /// Named voltage port bindings (audio I/O, CV, gates, envelope outputs).
     /// Ports inject/extract voltage at circuit nodes at audio rate without
@@ -996,7 +996,7 @@ pub struct CompiledPedal {
     /// Dense port value buffer — indexed by PortBinding::index.
     /// Input ports: written by external code via set_port() before process().
     /// Output ports: written by process(), read via get_port() after.
-    pub port_values: Vec<f64>,
+    pub port_values: Vec<crate::Wave>,
     /// Auto-init flag: cache_all_vs_pointers runs once on first process() call.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub initialized: bool,
@@ -1088,7 +1088,7 @@ impl CompiledPedal {
                 .is_some_and(|prefix| prefix == label)
     }
 
-    fn set_matching_input_port_control(&mut self, label: &str, value: f64) -> bool {
+    fn set_matching_input_port_control(&mut self, label: &str, value: crate::Wave) -> bool {
         let mut found = false;
         for port in &self.ports {
             if port.direction == crate::PortDirection::Input
@@ -1115,7 +1115,7 @@ impl CompiledPedal {
     ///
     /// For tube circuits, the plate voltage can swing from 0V to B+ (supply).
     /// For BJT circuits, Vce can swing from ~0V to Vcc (supply).
-    pub fn set_supply_voltage(&mut self, voltage: f64) {
+    pub fn set_supply_voltage(&mut self, voltage: crate::Wave) {
         let prev_voltage = self.supply_voltage;
         // Support negative supplies (PNP positive-ground, e.g. -9V Rangemaster)
         self.supply_voltage = if voltage >= 0.0 {
@@ -1292,7 +1292,7 @@ impl CompiledPedal {
     }
 
     /// Debug: return opamp gains and feedback pot IDs for all stages.
-    pub fn opamp_debug_info(&self) -> Vec<(usize, f64, Option<String>)> {
+    pub fn opamp_debug_info(&self) -> Vec<(usize, crate::Wave, Option<String>)> {
         self.stages
             .iter()
             .enumerate()
@@ -1310,7 +1310,15 @@ impl CompiledPedal {
     }
 
     /// Debug: return multi-NL stage scattering info.
-    pub fn multi_nl_debug_info(&self) -> Vec<(usize, usize, Vec<f64>, f64, Vec<f64>)> {
+    pub fn multi_nl_debug_info(
+        &self,
+    ) -> Vec<(
+        usize,
+        usize,
+        Vec<crate::Wave>,
+        crate::Wave,
+        Vec<crate::Wave>,
+    )> {
         self.stages
             .iter()
             .enumerate()
@@ -1331,7 +1339,7 @@ impl CompiledPedal {
     }
 
     /// Get the supply voltage.
-    pub fn supply_voltage(&self) -> f64 {
+    pub fn supply_voltage(&self) -> crate::Wave {
         self.supply_voltage
     }
 
@@ -1340,7 +1348,7 @@ impl CompiledPedal {
     /// Returns the WDF port resistance seen looking into the input.
     /// This is the impedance of the first WDF stage's tree.
     /// If the pedal has no stages, returns high impedance (1MΩ).
-    pub fn input_impedance(&self) -> f64 {
+    pub fn input_impedance(&self) -> crate::Wave {
         self.stages
             .iter()
             .find_map(|s| {
@@ -1358,7 +1366,7 @@ impl CompiledPedal {
     /// Returns the WDF port resistance seen looking back into the output.
     /// This is the impedance of the last WDF stage's tree.
     /// If the pedal has no stages, returns low impedance (1kΩ).
-    pub fn output_impedance(&self) -> f64 {
+    pub fn output_impedance(&self) -> crate::Wave {
         self.stages
             .iter()
             .rev()
@@ -1400,7 +1408,7 @@ impl CompiledPedal {
     /// // Buffered pedal output
     /// pedal.set_source_impedance(1000.0, 50e-12);
     /// ```
-    pub fn set_source_impedance(&mut self, resistance: f64, capacitance: f64) {
+    pub fn set_source_impedance(&mut self, resistance: crate::Wave, capacitance: crate::Wave) {
         let source = ImpedanceModel {
             resistance,
             capacitance,
@@ -1438,7 +1446,7 @@ impl CompiledPedal {
     /// // Driving a Fuzz Face (low impedance!)
     /// pedal.set_load_impedance(10_000.0, 50e-12);
     /// ```
-    pub fn set_load_impedance(&mut self, resistance: f64, capacitance: f64) {
+    pub fn set_load_impedance(&mut self, resistance: crate::Wave, capacitance: crate::Wave) {
         // Use this circuit's output impedance as the source
         let source = ImpedanceModel {
             resistance: self.output_impedance(),
@@ -1521,7 +1529,7 @@ impl CompiledPedal {
     }
 
     /// List all editable passive components across all stages.
-    pub fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
+    pub fn list_editable_components(&self) -> Vec<(String, &'static str, crate::Wave)> {
         let mut result = Vec::new();
         for stage in &self.stages {
             match stage {
@@ -1546,7 +1554,7 @@ impl CompiledPedal {
     /// Set a passive component's value by comp_id across all stages.
     /// Automatically determines component type from original_passive_values.
     /// After setting, recomputes all affected WDF tree coefficients.
-    pub fn set_passive(&mut self, comp_id: &str, value: f64) -> bool {
+    pub fn set_passive(&mut self, comp_id: &str, value: crate::Wave) -> bool {
         let kind = match self.original_passive_values.get(comp_id) {
             Some((k, _)) => *k,
             None => return false,
@@ -1653,7 +1661,7 @@ impl CompiledPedal {
     ///
     /// Use [`resolve_control`] at init to get the index, then call this
     /// at audio rate for envelope-modulated parameters.
-    pub fn set_control_indexed(&mut self, control_idx: usize, value: f64) {
+    pub fn set_control_indexed(&mut self, control_idx: usize, value: crate::Wave) {
         if control_idx >= self.controls.len() {
             return;
         }
@@ -1681,7 +1689,7 @@ impl CompiledPedal {
         }
     }
 
-    pub fn set_control(&mut self, label: &str, value: f64) {
+    pub fn set_control(&mut self, label: &str, value: crate::Wave) {
         let value = value.clamp(0.0, 1.0);
         let mut found = false;
         for i in 0..self.controls.len() {
@@ -1733,7 +1741,8 @@ impl CompiledPedal {
                     if let Some(binding) = self.lfos.get_mut(lfo_idx) {
                         // Scale rate around base_freq: 0.1x to 10x (100x range)
                         // pot=0 -> 0.1x, pot=0.5 -> 1x, pot=1 -> 10x
-                        let scale = 0.1_f64 * crate::math::powf(100.0_f64, value);
+                        let scale =
+                            0.1 as crate::Wave * crate::math::powf(100.0 as crate::Wave, value);
                         let rate = binding.base_freq * scale;
                         binding.lfo.set_rate(rate);
                     }
@@ -1778,7 +1787,8 @@ impl CompiledPedal {
                     let position = if num_positions <= 1 {
                         0
                     } else {
-                        ((value * (num_positions as f64 - 0.001)) as usize).min(num_positions - 1)
+                        ((value * (num_positions as crate::Wave - 0.001)) as usize)
+                            .min(num_positions - 1)
                     };
                     // Update all stages' switched resistors
                     for stage in &mut self.stages {
@@ -1826,7 +1836,7 @@ impl CompiledPedal {
     }
 
     /// Update mirrored pots (position = 1.0 - source) across all stages.
-    fn apply_pot_mirrors(&mut self, comp_id: &str, value: f64) {
+    fn apply_pot_mirrors(&mut self, comp_id: &str, value: crate::Wave) {
         // Collect mirror info to avoid borrow conflict with self.stages.
         let mirror_info: Option<Vec<(String, String, String)>> =
             self.pot_mirrors.get(comp_id).map(|mirrors| {
@@ -2096,7 +2106,7 @@ impl CompiledPedal {
     /// Called when `subcircuit_processors` is non-empty. Iterates the
     /// topologically-sorted routing steps, resolving signal sources and
     /// forwarding samples to each subcircuit's inner processor.
-    fn process_subcircuits(&mut self, input: f64) -> f64 {
+    fn process_subcircuits(&mut self, input: crate::Wave) -> crate::Wave {
         // Reset per-sample output buffer
         for v in &mut self.subcircuit_outputs {
             *v = 0.0;
@@ -2127,15 +2137,15 @@ impl CompiledPedal {
         }
     }
 
-    /// Resolve a `SignalSource` to a concrete `f64` sample value.
+    /// Resolve a `SignalSource` to a concrete `crate::Wave` sample value.
     ///
     /// Static version (no `&self`) so it can be called while `subcircuit_processors`
     /// is borrowed mutably.
     fn resolve_signal_static(
-        input: f64,
+        input: crate::Wave,
         source: &crate::subcircuit::SignalSource,
-        outputs: &[f64],
-    ) -> f64 {
+        outputs: &[crate::Wave],
+    ) -> crate::Wave {
         use crate::subcircuit::SignalSource;
         match source {
             SignalSource::EquipmentInput => input,
@@ -2150,7 +2160,7 @@ impl CompiledPedal {
 
 impl PedalProcessor for CompiledPedal {
     fn process(&mut self, input: Wave) -> Wave {
-        let input = input as f64;
+        let input = input as crate::Wave;
         // Auto-init on first call.
         if !self.initialized {
             self.cache_all_vs_pointers();
@@ -2182,7 +2192,7 @@ impl PedalProcessor for CompiledPedal {
         // for per-voice WDF stage routing. Triggers without (injection_node == MAX)
         // sum into a global impulse that replaces the input signal.
         self.node_signals.clear();
-        let mut global_trigger: f64 = 0.0;
+        let mut global_trigger: crate::Wave = 0.0;
         for trigger in &mut self.triggers {
             let impulse = trigger.tick();
             if impulse != 0.0 {
@@ -2523,9 +2533,9 @@ impl PedalProcessor for CompiledPedal {
         // not chain serially.
         let mut prev_was_clipping = false;
         let num_stages = self.stages.len();
-        let mut stage_levels = [0.0f64; crate::metering::MAX_STAGES];
+        let mut stage_levels = [0.0 as crate::Wave; crate::metering::MAX_STAGES];
         let mut stage_solver_iterations = [0u32; crate::metering::MAX_STAGES];
-        let mut stage_solver_residual = [0.0f64; crate::metering::MAX_STAGES];
+        let mut stage_solver_residual = [0.0 as crate::Wave; crate::metering::MAX_STAGES];
         let mut stage_solver_converged = [true; crate::metering::MAX_STAGES];
         let mut stage_solver_active = [false; crate::metering::MAX_STAGES];
         let mut wdf_stage_counter = 0usize;
@@ -2608,7 +2618,7 @@ impl PedalProcessor for CompiledPedal {
                 // if they have injection_node_id set for other purposes.
                 let stage_input = if stage.is_trigger_voice {
                     let inj_node = stage.injection_node_id;
-                    let impulse: f64 = self
+                    let impulse: crate::Wave = self
                         .node_signals
                         .iter()
                         .rev()
@@ -2857,7 +2867,7 @@ impl PedalProcessor for CompiledPedal {
                 };
                 // Build VS signals from port values.
                 let n_vs = bkm_stage.vs_port_map.len();
-                let mut vs_signals = alloc::vec![0.0f64; n_vs];
+                let mut vs_signals = alloc::vec![0.0 as crate::Wave; n_vs];
                 for (i, port_idx) in bkm_stage.port_index_cache.iter().enumerate() {
                     let port_name = &bkm_stage.vs_port_map[i].0;
                     vs_signals[i] = if first_input_name.as_ref() == Some(port_name) {
@@ -2975,7 +2985,7 @@ impl PedalProcessor for CompiledPedal {
                 .rev()
                 .filter(|(nid, _)| *nid == vca_binding.input_node_id)
                 .map(|(_, v)| *v)
-                .sum::<f64>();
+                .sum::<crate::Wave>();
 
             // If no node signal found, use the serial chain signal
             let vca_input = if vca_input == 0.0 && vca_binding.input_node_id == usize::MAX {
@@ -3030,7 +3040,7 @@ impl PedalProcessor for CompiledPedal {
         };
 
         if !self.sidechains.is_empty() {
-            let total_cv: f64 = self.sidechains.iter().map(|sc| sc.cv_delayed).sum();
+            let total_cv: crate::Wave = self.sidechains.iter().map(|sc| sc.cv_delayed).sum();
             for pp_stage in self.push_pull_stages[..pp_active].iter_mut() {
                 pp_stage.grid_bias = self.base_grid_bias - total_cv;
                 signal = pp_stage.process(signal);
@@ -3119,7 +3129,7 @@ impl PedalProcessor for CompiledPedal {
                 for (tap_idx, &ratio) in dl_binding.taps.iter().enumerate() {
                     wet += dl_binding.delay_line.read_at_ratio(ratio, tap_idx);
                 }
-                wet /= num_taps as f64;
+                wet /= num_taps as crate::Wave;
 
                 // Mix wet/dry equally (same convention as BBD)
                 signal = signal * 0.5 + wet * 0.5;
@@ -3196,13 +3206,13 @@ impl PedalProcessor for CompiledPedal {
                     match &wdf.root {
                         RootKind::Triode(t) => {
                             let vpk = (self.supply_voltage * 0.6) as f32;
-                            let ip_ma = (t.plate_current(vpk as f64) * 1000.0) as f32;
+                            let ip_ma = (t.plate_current(vpk as crate::Wave) * 1000.0) as f32;
                             acc.record_tube(tube_idx, ip_ma, vpk);
                             tube_idx += 1;
                         }
                         RootKind::Pentode(p) => {
                             let vpk = (self.supply_voltage * 0.6) as f32;
-                            let ip_ma = (p.plate_current(vpk as f64) * 1000.0) as f32;
+                            let ip_ma = (p.plate_current(vpk as crate::Wave) * 1000.0) as f32;
                             acc.record_tube(tube_idx, ip_ma, vpk);
                             tube_idx += 1;
                         }
@@ -3213,10 +3223,10 @@ impl PedalProcessor for CompiledPedal {
             // Record push-pull triode tubes
             for pp in &self.push_pull_stages {
                 let vpk = (self.supply_voltage * 0.6) as f32;
-                let ip_push = (pp.push_root.plate_current(vpk as f64) * 1000.0) as f32;
+                let ip_push = (pp.push_root.plate_current(vpk as crate::Wave) * 1000.0) as f32;
                 acc.record_tube(tube_idx, ip_push, vpk);
                 tube_idx += 1;
-                let ip_pull = (pp.pull_root.plate_current(vpk as f64) * 1000.0) as f32;
+                let ip_pull = (pp.pull_root.plate_current(vpk as crate::Wave) * 1000.0) as f32;
                 acc.record_tube(tube_idx, ip_pull, vpk);
                 tube_idx += 1;
             }
@@ -3256,7 +3266,7 @@ impl PedalProcessor for CompiledPedal {
         output as Wave
     }
 
-    fn set_sample_rate(&mut self, rate: f64) {
+    fn set_sample_rate(&mut self, rate: crate::Wave) {
         self.sample_rate = rate;
         for stage in &mut self.stages {
             match stage {
@@ -3343,19 +3353,19 @@ impl PedalProcessor for CompiledPedal {
         }
     }
 
-    fn set_control(&mut self, label: &str, value: f64) {
+    fn set_control(&mut self, label: &str, value: crate::Wave) {
         self.set_control(label, value);
     }
 
-    fn set_supply_voltage(&mut self, voltage: f64) {
+    fn set_supply_voltage(&mut self, voltage: crate::Wave) {
         self.set_supply_voltage(voltage);
     }
 
-    fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
+    fn list_editable_components(&self) -> Vec<(String, &'static str, crate::Wave)> {
         self.list_editable_components()
     }
 
-    fn set_passive(&mut self, comp_id: &str, value: f64) -> bool {
+    fn set_passive(&mut self, comp_id: &str, value: crate::Wave) -> bool {
         self.set_passive(comp_id, value)
     }
 
@@ -3363,7 +3373,7 @@ impl PedalProcessor for CompiledPedal {
         self.reset_passive(comp_id)
     }
 
-    fn control_debug_info(&self) -> Vec<(String, f64, f64)> {
+    fn control_debug_info(&self) -> Vec<(String, crate::Wave, crate::Wave)> {
         let mut out = Vec::new();
 
         // Stage type map: {S0} WDF, {S1} IIR, etc.
@@ -3485,7 +3495,7 @@ impl PedalProcessor for CompiledPedal {
         // Copy input port values from caller's slice
         for port in &self.ports {
             if port.direction == crate::PortDirection::Input && port.index < ports.len() {
-                self.port_values[port.index] = ports[port.index] as f64;
+                self.port_values[port.index] = ports[port.index] as crate::Wave;
             }
         }
 

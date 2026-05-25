@@ -25,9 +25,9 @@ use crate::math;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThermalCoefficients {
     /// Beta (hFE) temperature coefficient (%/deg C from 25 deg C reference).
-    pub beta_tempco: f64,
+    pub beta_tempco: crate::Wave,
     /// Is doubling temperature (deg C).  Is(T) = Is(Tref) * exp(dT / t0)
-    pub is_doubling_temp: f64,
+    pub is_doubling_temp: crate::Wave,
 }
 
 impl ThermalCoefficients {
@@ -76,21 +76,21 @@ impl Default for ThermalCoefficients {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThermalState {
     /// Current junction temperature in deg C.
-    pub temperature: f64,
+    pub temperature: crate::Wave,
     /// BJT current gain multiplier (relative to nominal at 25 deg C).
     /// > 1.0 when warm, < 1.0 when cold.
-    pub beta_multiplier: f64,
+    pub beta_multiplier: crate::Wave,
     /// Diode saturation current multiplier (relative to nominal at 25 deg C).
     /// > 1.0 when warm (Is doubles every ~10 deg C).
-    pub is_multiplier: f64,
+    pub is_multiplier: crate::Wave,
     /// Thermal voltage at current temperature (V).
     /// Vt = k*T/q where T is in Kelvin. ~25.85 mV at 20 deg C.
-    pub vt: f64,
+    pub vt: crate::Wave,
 }
 
 impl ThermalState {
     /// Compute thermal state using device-specific coefficients.
-    fn at_temperature_with_coeffs(temp_c: f64, coeffs: &ThermalCoefficients) -> Self {
+    fn at_temperature_with_coeffs(temp_c: crate::Wave, coeffs: &ThermalCoefficients) -> Self {
         let temp_k = temp_c + 273.15;
         let ref_temp_c = 25.0;
 
@@ -128,19 +128,19 @@ impl ThermalState {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThermalModel {
     /// Ambient (starting) temperature in deg C.
-    ambient_temp: f64,
+    ambient_temp: crate::Wave,
     /// Steady-state operating temperature in deg C.
-    steady_state_temp: f64,
+    steady_state_temp: crate::Wave,
     /// Thermal time constant in seconds.
-    thermal_tau: f64,
+    thermal_tau: crate::Wave,
     /// Device-specific thermal coefficients.
     coefficients: ThermalCoefficients,
     /// Current thermal state.
     state: ThermalState,
     /// Elapsed time in seconds.
-    elapsed: f64,
+    elapsed: crate::Wave,
     /// Sample rate (for converting samples to time).
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Samples since last thermal update (we don't need to update every sample).
     samples_since_update: usize,
     /// How often to update thermal state (in samples).
@@ -150,11 +150,11 @@ pub struct ThermalModel {
 impl ThermalModel {
     /// Create a new thermal model with device-specific coefficients.
     pub fn with_coefficients(
-        ambient_temp: f64,
-        steady_state_temp: f64,
-        thermal_tau: f64,
+        ambient_temp: crate::Wave,
+        steady_state_temp: crate::Wave,
+        thermal_tau: crate::Wave,
         coefficients: ThermalCoefficients,
-        sample_rate: f64,
+        sample_rate: crate::Wave,
     ) -> Self {
         let state = ThermalState::at_temperature_with_coeffs(ambient_temp, &coefficients);
         Self {
@@ -172,10 +172,10 @@ impl ThermalModel {
 
     /// Create a new thermal model with default (silicon) coefficients.
     pub fn new(
-        ambient_temp: f64,
-        steady_state_temp: f64,
-        thermal_tau: f64,
-        sample_rate: f64,
+        ambient_temp: crate::Wave,
+        steady_state_temp: crate::Wave,
+        thermal_tau: crate::Wave,
+        sample_rate: crate::Wave,
     ) -> Self {
         Self::with_coefficients(
             ambient_temp,
@@ -187,7 +187,7 @@ impl ThermalModel {
     }
 
     /// Germanium Fuzz Face thermal model.
-    pub fn germanium_fuzz(sample_rate: f64) -> Self {
+    pub fn germanium_fuzz(sample_rate: crate::Wave) -> Self {
         Self::with_coefficients(
             15.0,
             40.0,
@@ -198,7 +198,7 @@ impl ThermalModel {
     }
 
     /// Silicon circuit thermal model.
-    pub fn silicon_standard(sample_rate: f64) -> Self {
+    pub fn silicon_standard(sample_rate: crate::Wave) -> Self {
         Self::with_coefficients(
             25.0,
             35.0,
@@ -209,7 +209,7 @@ impl ThermalModel {
     }
 
     /// Tube amp thermal model.
-    pub fn tube_amp(sample_rate: f64) -> Self {
+    pub fn tube_amp(sample_rate: crate::Wave) -> Self {
         Self::with_coefficients(
             25.0,
             60.0,
@@ -225,7 +225,7 @@ impl ThermalModel {
         self.samples_since_update += 1;
         if self.samples_since_update >= self.update_interval {
             self.samples_since_update = 0;
-            self.elapsed += self.update_interval as f64 / self.sample_rate;
+            self.elapsed += self.update_interval as crate::Wave / self.sample_rate;
 
             // First-order thermal response
             let alpha = 1.0 - math::exp(-self.elapsed / self.thermal_tau);
@@ -242,7 +242,7 @@ impl ThermalModel {
     }
 
     /// Get current temperature in deg C.
-    pub fn temperature(&self) -> f64 {
+    pub fn temperature(&self) -> crate::Wave {
         self.state.temperature
     }
 
@@ -262,7 +262,7 @@ impl ThermalModel {
     }
 
     /// Set sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
     }
 }
@@ -276,7 +276,7 @@ mod tests {
     use super::*;
 
     /// Test helper: compute thermal state with default (silicon) coefficients.
-    fn state_at(temp_c: f64) -> ThermalState {
+    fn state_at(temp_c: crate::Wave) -> ThermalState {
         ThermalState::at_temperature_with_coeffs(temp_c, &ThermalCoefficients::default())
     }
 
