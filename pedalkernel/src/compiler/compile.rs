@@ -34,7 +34,7 @@ pub struct CompileOptions {
     pub skip_blockwise: bool,
     /// Diagnostic mode: build blockwise-decomposed nonlinear ladders as
     /// serial WDF/K-method rung stages instead of packaging them into one
-    /// delay-free BlockwiseKMethod coupling stage. This intentionally breaks
+    /// delay-free Blockwise coupling stage. This intentionally breaks
     /// delay-free feedback, so it is only useful for isolating rung behavior.
     pub force_serial_blockwise: bool,
     /// Diagnostic mode: when `force_serial_blockwise` is enabled, wrap the

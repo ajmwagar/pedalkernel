@@ -1017,7 +1017,7 @@ fn screamer_pot_stage_diagnostic() {
                 let d = bf.has_pot("Drive");
                 ("BF", t, l, d)
             }
-            pedalkernel_rt::processor::Stage::BlockwiseKMethod(_) => ("BKM", false, false, false),
+            pedalkernel_rt::processor::Stage::Blockwise(_) => ("BKM", false, false, false),
             pedalkernel_rt::processor::Stage::SerialDelayedFeedback(serial) => (
                 "SerialFB",
                 serial.has_pot("Tone"),

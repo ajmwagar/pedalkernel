@@ -402,7 +402,7 @@ fn feedforward_stage_ordering() {
                 m.bypass_serial,
                 false,
             ),
-            super::compiled::Stage::BlockwiseKMethod(bk) => (
+            super::compiled::Stage::Blockwise(bk) => (
                 bk.signal_flow_distance,
                 "blockwise",
                 bk.bypass_serial,
@@ -438,7 +438,7 @@ fn feedforward_stage_ordering() {
                     super::compiled::Stage::Iir(i) => i.bypass_serial,
                     super::compiled::Stage::StateSpace(s) => s.bypass_serial,
                     super::compiled::Stage::MultiNl(m) => m.bypass_serial,
-                    super::compiled::Stage::BlockwiseKMethod(bk) => bk.bypass_serial,
+                    super::compiled::Stage::Blockwise(bk) => bk.bypass_serial,
                     super::compiled::Stage::SerialDelayedFeedback(s) => s.bypass_serial,
                 };
                 !bp

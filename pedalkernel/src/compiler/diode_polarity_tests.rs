@@ -111,7 +111,7 @@ fn dump_stage_metering(compiled: &mut CompiledPedal, amp: f64, warmup: usize, me
                 b.debug_label.as_str(),
                 b.bypass_serial,
             ),
-            super::compiled::Stage::BlockwiseKMethod(bk) => (
+            super::compiled::Stage::Blockwise(bk) => (
                 "BKM",
                 bk.signal_flow_distance,
                 "blockwise",

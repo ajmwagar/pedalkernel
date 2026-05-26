@@ -266,7 +266,7 @@ fn trace_mfb_pot_compilation() {
             super::compiled::Stage::BlackFeedback(bf) => format!("BF gain={:.2}", bf.gain()),
             super::compiled::Stage::MultiNl(_) => "MultiNL".to_string(),
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
-            super::compiled::Stage::BlockwiseKMethod(bk) => {
+            super::compiled::Stage::Blockwise(bk) => {
                 format!("BKM dist={}", bk.signal_flow_distance)
             }
             super::compiled::Stage::SerialDelayedFeedback(s) => {
@@ -336,7 +336,7 @@ fn trace_mfb_hpf_compilation() {
             super::compiled::Stage::BlackFeedback(bf) => format!("BF gain={:.2}", bf.gain()),
             super::compiled::Stage::MultiNl(_) => "MultiNL".to_string(),
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
-            super::compiled::Stage::BlockwiseKMethod(bk) => {
+            super::compiled::Stage::Blockwise(bk) => {
                 format!("BKM dist={}", bk.signal_flow_distance)
             }
             super::compiled::Stage::SerialDelayedFeedback(s) => {
@@ -421,7 +421,7 @@ fn trace_mfb_hpf_fixed_compilation() {
             super::compiled::Stage::BlackFeedback(bf) => format!("BF gain={:.2}", bf.gain()),
             super::compiled::Stage::MultiNl(_) => "MultiNL".to_string(),
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
-            super::compiled::Stage::BlockwiseKMethod(bk) => {
+            super::compiled::Stage::Blockwise(bk) => {
                 format!("BKM dist={}", bk.signal_flow_distance)
             }
             super::compiled::Stage::SerialDelayedFeedback(s) => {
@@ -471,7 +471,7 @@ fn trace_mfb_fixed_compilation() {
             super::compiled::Stage::BlackFeedback(bf) => format!("BF gain={:.2}", bf.gain()),
             super::compiled::Stage::MultiNl(_) => "MultiNL".to_string(),
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
-            super::compiled::Stage::BlockwiseKMethod(bk) => {
+            super::compiled::Stage::Blockwise(bk) => {
                 format!("BKM dist={}", bk.signal_flow_distance)
             }
             super::compiled::Stage::SerialDelayedFeedback(s) => {

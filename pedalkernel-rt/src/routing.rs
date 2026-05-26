@@ -156,7 +156,7 @@ impl StageRoutePlan {
         let Some(bkm_graph_idx) = graph
             .stages
             .iter()
-            .position(|stage| stage.kind == "BlockwiseKMethod")
+            .position(|stage| stage.kind == "Blockwise" || stage.kind == "BlockwiseKMethod")
         else {
             return Self {
                 connections,
@@ -171,7 +171,7 @@ impl StageRoutePlan {
             };
         }
 
-        let Some(Stage::BlockwiseKMethod(bkm)) = stages.get(bkm_stage_idx) else {
+        let Some(Stage::Blockwise(bkm)) = stages.get(bkm_stage_idx) else {
             return Self {
                 connections,
                 ..Self::default()
@@ -301,7 +301,7 @@ impl StageRoutePlan {
         ports: &[PortBinding],
         stages: &[Stage],
         bkm_graph_idx: usize,
-        bkm: &crate::stage::BlockwiseKMethodStage,
+        bkm: &crate::stage::BlockwiseStage,
     ) -> Vec<BkmBoundaryDrive> {
         let mut drives = Vec::new();
         for graph_stage in &graph.stages {
@@ -423,7 +423,7 @@ impl StageRoutePlan {
     }
 
     fn bkm_coupling_ports_for_node(
-        bkm: &crate::stage::BlockwiseKMethodStage,
+        bkm: &crate::stage::BlockwiseStage,
         node: Option<usize>,
     ) -> Vec<usize> {
         let Some(node) = node else {
@@ -440,7 +440,7 @@ impl StageRoutePlan {
 
     fn external_ports_reaching_node(
         ports: &[PortBinding],
-        bkm: &crate::stage::BlockwiseKMethodStage,
+        bkm: &crate::stage::BlockwiseStage,
         node: Option<usize>,
     ) -> Vec<usize> {
         let Some(node) = node else {

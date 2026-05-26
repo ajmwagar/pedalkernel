@@ -982,7 +982,7 @@ fn print_stages(name: &str, compiled: &super::compiled::CompiledPedal) {
             super::compiled::Stage::StateSpace(_) => {
                 eprintln!("  [{i}] StateSpace");
             }
-            super::compiled::Stage::BlockwiseKMethod(bk) => {
+            super::compiled::Stage::Blockwise(bk) => {
                 eprintln!("  [{i}] BKM dist={}", bk.signal_flow_distance);
             }
             super::compiled::Stage::SerialDelayedFeedback(s) => {

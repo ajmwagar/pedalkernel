@@ -487,7 +487,7 @@ fn goldenrod_gain_b_produces_stages() {
                 super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
-                super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::Blockwise(_) => "blockwise",
                 super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             lbl.contains("Gain_B")

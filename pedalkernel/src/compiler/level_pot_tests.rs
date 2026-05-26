@@ -47,7 +47,7 @@ fn screamer_legend_level_debug_trace() {
                 bf.signal_flow_distance
             ),
             Stage::StateSpace(_) => "StateSpace".to_string(),
-            Stage::BlockwiseKMethod(bk) => format!("BKM(dist={})", bk.signal_flow_distance),
+            Stage::Blockwise(bk) => format!("BKM(dist={})", bk.signal_flow_distance),
             Stage::SerialDelayedFeedback(s) => format!(
                 "SerialFB(rungs={}, dist={})",
                 s.stages.len(),

@@ -72,7 +72,7 @@ pub(super) enum BuiltStage {
     StateSpace(StateSpaceStage),
     MultiNl(MultiNlStage),
     BlackFeedback(super::stage::BlackFeedbackStage),
-    BlockwiseKMethod(pedalkernel_rt::stage::BlockwiseKMethodStage),
+    Blockwise(pedalkernel_rt::stage::BlockwiseStage),
     SerialDelayedFeedback(pedalkernel_rt::stage::SerialDelayedFeedbackStage),
 }
 
@@ -353,7 +353,7 @@ pub fn compile_via_spqr_with_options(
                     stages.push(Stage::BlackFeedback(bf));
                     stage_comp_ids.push($comp_ids.clone());
                 }
-                BuiltStage::BlockwiseKMethod(mut bkm) => {
+                BuiltStage::Blockwise(mut bkm) => {
                     let mut consumed: std::collections::HashSet<String> = bkm
                         .coupling_elements
                         .iter()
@@ -375,12 +375,12 @@ pub fn compile_via_spqr_with_options(
                         }
                         bkm_consumed_comp_ids.extend(consumed);
                     }
-                    // BKM stages set their own flow distance (0 = primary
+                    // Blockwise stages set their own flow distance (0 = primary
                     // signal path, processes before output coupling stages).
                     // Don't override with the feedback group's inflated distance.
                     bkm.bypass_serial = $bypass;
                     bkm.init_buffers();
-                    stages.push(Stage::BlockwiseKMethod(bkm));
+                    stages.push(Stage::Blockwise(bkm));
                     stage_comp_ids.push($comp_ids.clone());
                 }
                 BuiltStage::SerialDelayedFeedback(mut serial) => {
@@ -1167,7 +1167,7 @@ pub fn compile_via_spqr_with_options(
         Stage::StateSpace(ss) => ss.signal_flow_distance,
         Stage::MultiNl(m) => m.signal_flow_distance,
         Stage::BlackFeedback(b) => b.signal_flow_distance,
-        Stage::BlockwiseKMethod(k) => k.signal_flow_distance,
+        Stage::Blockwise(k) => k.signal_flow_distance,
         Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
     });
 
@@ -1418,7 +1418,7 @@ pub fn compile_via_spqr_with_options(
             Stage::StateSpace(ss) => (ss.signal_flow_distance, false),
             Stage::MultiNl(m) => (m.signal_flow_distance, false),
             Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
-            Stage::BlockwiseKMethod(k) => (k.signal_flow_distance, false),
+            Stage::Blockwise(k) => (k.signal_flow_distance, false),
             Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
         };
         (d, ff as u8) // false=0 sorts before true=1
@@ -1431,7 +1431,7 @@ pub fn compile_via_spqr_with_options(
             Stage::StateSpace(ss) => (ss.signal_flow_distance, false),
             Stage::MultiNl(m) => (m.signal_flow_distance, false),
             Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
-            Stage::BlockwiseKMethod(k) => (k.signal_flow_distance, false),
+            Stage::Blockwise(k) => (k.signal_flow_distance, false),
             Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
         };
         (d, ff as u8)
@@ -1661,7 +1661,7 @@ fn build_compiled_stage_graph(
                 }
                 ("BlackFeedback".to_string(), "black-feedback".to_string())
             }
-            Stage::BlockwiseKMethod(bkm) => {
+            Stage::Blockwise(bkm) => {
                 let mut labels: Vec<String> = (0..bkm.n_ports)
                     .map(|idx| format!("coupling_{idx}"))
                     .collect();
@@ -1708,7 +1708,7 @@ fn build_compiled_stage_graph(
                         });
                     }
                 }
-                ("BlockwiseKMethod".to_string(), "blockwise".to_string())
+                ("Blockwise".to_string(), "blockwise".to_string())
             }
             Stage::Iir(_) => ("Iir".to_string(), "iir".to_string()),
             Stage::StateSpace(_) => ("StateSpace".to_string(), "state-space".to_string()),

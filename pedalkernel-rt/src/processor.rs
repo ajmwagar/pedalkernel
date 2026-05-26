@@ -32,7 +32,8 @@ pub enum Stage {
     Iir(IirStage),
     StateSpace(StateSpaceStage),
     BlackFeedback(crate::stage::BlackFeedbackStage),
-    BlockwiseKMethod(crate::stage::BlockwiseKMethodStage),
+    #[cfg_attr(feature = "serde", serde(alias = "BlockwiseKMethod"))]
+    Blockwise(crate::stage::BlockwiseStage),
     SerialDelayedFeedback(SerialDelayedFeedbackStage),
 }
 
@@ -44,7 +45,7 @@ impl core::fmt::Debug for Stage {
             Stage::Iir(_) => write!(f, "Stage::Iir(..)"),
             Stage::StateSpace(_) => write!(f, "Stage::StateSpace(..)"),
             Stage::BlackFeedback(_) => write!(f, "Stage::BlackFeedback(..)"),
-            Stage::BlockwiseKMethod(_) => write!(f, "Stage::BlockwiseKMethod(..)"),
+            Stage::Blockwise(_) => write!(f, "Stage::Blockwise(..)"),
             Stage::SerialDelayedFeedback(_) => {
                 write!(f, "Stage::SerialDelayedFeedback(..)")
             }
@@ -102,7 +103,7 @@ impl Stage {
             Stage::BlackFeedback(bf) => bf
                 .has_pot(comp_id)
                 .then_some(ControlTarget::PotInBlackFeedbackStage(stage_idx)),
-            Stage::BlockwiseKMethod(bkm) => {
+            Stage::Blockwise(bkm) => {
                 for block in &bkm.blocks {
                     if block.tree.get_pot_position(comp_id).is_some()
                         || block.tree.get_pot_position(&aw_id).is_some()
@@ -162,7 +163,7 @@ impl Stage {
                     false
                 }
             }
-            Stage::BlockwiseKMethod(bkm) => bkm.set_pot(comp_id, value),
+            Stage::Blockwise(bkm) => bkm.set_pot(comp_id, value),
             Stage::SerialDelayedFeedback(serial) => serial.set_pot(comp_id, value),
             Stage::StateSpace(ss) => {
                 if ss.has_pot(comp_id) {
@@ -1258,7 +1259,7 @@ impl CompiledPedal {
                 Stage::StateSpace(ref mut ss) => {
                     ss.recompute_v_rail();
                 }
-                Stage::BlockwiseKMethod(ref mut bkm) => {
+                Stage::Blockwise(ref mut bkm) => {
                     // Resolve port name → port_values index (once, not per-sample)
                     bkm.port_index_cache = bkm
                         .vs_port_map
@@ -1309,7 +1310,7 @@ impl CompiledPedal {
             }
         }
 
-        let Stage::BlockwiseKMethod(bkm_stage) = self.stages.get_mut(route.stage_idx)? else {
+        let Stage::Blockwise(bkm_stage) = self.stages.get_mut(route.stage_idx)? else {
             return None;
         };
         let n_vs = bkm_stage.vs_port_map.len();
@@ -2089,9 +2090,9 @@ impl CompiledPedal {
                 Stage::BlackFeedback(_) => {
                     s.push_str(&format!("\n[Stage {} (BlackFeedback)]\n", i));
                 }
-                Stage::BlockwiseKMethod(k) => {
+                Stage::Blockwise(k) => {
                     s.push_str(&format!(
-                        "\n[Stage {} (BlockwiseKMethod)] {}\n",
+                        "\n[Stage {} (Blockwise)] {}\n",
                         i,
                         k.debug_label()
                     ));
@@ -2660,7 +2661,7 @@ impl PedalProcessor for CompiledPedal {
             let is_iir = matches!(&self.stages[stage_idx], Stage::Iir(_));
             let is_ss = matches!(&self.stages[stage_idx], Stage::StateSpace(_));
             let is_bf = matches!(&self.stages[stage_idx], Stage::BlackFeedback(_));
-            let is_bkm = matches!(&self.stages[stage_idx], Stage::BlockwiseKMethod(_));
+            let is_blockwise = matches!(&self.stages[stage_idx], Stage::Blockwise(_));
             let is_serial_fb = matches!(&self.stages[stage_idx], Stage::SerialDelayedFeedback(_));
 
             // Check bypass_serial: static bias networks process for metering
@@ -2671,7 +2672,7 @@ impl PedalProcessor for CompiledPedal {
                 Stage::Iir(i) => i.bypass_serial,
                 Stage::StateSpace(s) => s.bypass_serial,
                 Stage::BlackFeedback(b) => b.bypass_serial,
-                Stage::BlockwiseKMethod(k) => k.bypass_serial,
+                Stage::Blockwise(k) => k.bypass_serial,
                 Stage::SerialDelayedFeedback(s) => s.bypass_serial,
             };
 
@@ -2685,7 +2686,7 @@ impl PedalProcessor for CompiledPedal {
                         // Control/bias nonlinear groups can be split out of
                         // the audio path. Do not run them as independent
                         // audio-rate solvers; their derived effect is owned by
-                        // the target stage (for example BKM cutoff current).
+                        // the target stage (for example blockwise cutoff current).
                     }
                     Stage::Iir(i) => {
                         let _ = i.process(0.0);
@@ -2696,7 +2697,7 @@ impl PedalProcessor for CompiledPedal {
                     Stage::BlackFeedback(b) => {
                         let _ = b.process(0.0);
                     }
-                    Stage::BlockwiseKMethod(k) => {
+                    Stage::Blockwise(k) => {
                         let _ = k.process(&[]);
                     }
                     Stage::SerialDelayedFeedback(s) => {
@@ -2964,14 +2965,14 @@ impl PedalProcessor for CompiledPedal {
                 if stage_idx < crate::metering::MAX_STAGES {
                     stage_levels[stage_idx] = signal;
                 }
-            } else if is_bkm {
+            } else if is_blockwise {
                 prev_was_clipping = false;
                 let first_input_name = self
                     .ports
                     .iter()
                     .find(|p| p.direction == crate::PortDirection::Input)
                     .map(|p| p.name.clone());
-                let bkm_stage = if let Stage::BlockwiseKMethod(s) = &mut self.stages[stage_idx] {
+                let bkm_stage = if let Stage::Blockwise(s) = &mut self.stages[stage_idx] {
                     s
                 } else {
                     unreachable!()
@@ -3501,7 +3502,7 @@ impl PedalProcessor for CompiledPedal {
                 Stage::Iir(_) => "IIR",
                 Stage::StateSpace(_) => "StateSpace",
                 Stage::BlackFeedback(_) => "BlackFB",
-                Stage::BlockwiseKMethod(_) => "BKM",
+                Stage::Blockwise(_) => "Blockwise",
                 Stage::SerialDelayedFeedback(_) => "SerialFB",
             };
             out.push((format!("{{S{si}}} {type_name}"), 0.0, 0.0));
@@ -3569,7 +3570,7 @@ impl PedalProcessor for CompiledPedal {
                         });
                     }
                 }
-                Stage::BlockwiseKMethod(bkm) => {
+                Stage::Blockwise(bkm) => {
                     for (bi, block) in bkm.blocks.iter().enumerate() {
                         block.tree.for_each_leaf(&mut |leaf| {
                             if leaf.type_tag() == "pot" {

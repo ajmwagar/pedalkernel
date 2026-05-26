@@ -189,9 +189,7 @@ fn screamer_per_stage_signal_levels() {
                 super::compiled::Stage::BlackFeedback(b) => {
                     ("BF", b.debug_label.as_str(), b.bypass_serial)
                 }
-                super::compiled::Stage::BlockwiseKMethod(bk) => {
-                    ("BKM", "blockwise", bk.bypass_serial)
-                }
+                super::compiled::Stage::Blockwise(bk) => ("BKM", "blockwise", bk.bypass_serial),
                 super::compiled::Stage::SerialDelayedFeedback(s) => {
                     ("SerialFB", "serial_feedback", s.bypass_serial)
                 }
@@ -234,7 +232,7 @@ fn screamer_per_stage_signal_levels() {
             super::compiled::Stage::Iir(s) => s.bypass_serial,
             super::compiled::Stage::StateSpace(s) => s.bypass_serial,
             super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
-            super::compiled::Stage::BlockwiseKMethod(bk) => bk.bypass_serial,
+            super::compiled::Stage::Blockwise(bk) => bk.bypass_serial,
             super::compiled::Stage::SerialDelayedFeedback(s) => s.bypass_serial,
         };
         if bypass {
@@ -248,7 +246,7 @@ fn screamer_per_stage_signal_levels() {
                 super::compiled::Stage::Iir(s) => s.debug_label.as_str(),
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
-                super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::Blockwise(_) => "blockwise",
                 super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             assert!(
@@ -296,9 +294,7 @@ fn ratking_per_stage_signal_levels() {
                 super::compiled::Stage::BlackFeedback(b) => {
                     ("BF", b.debug_label.as_str(), b.bypass_serial)
                 }
-                super::compiled::Stage::BlockwiseKMethod(bk) => {
-                    ("BKM", "blockwise", bk.bypass_serial)
-                }
+                super::compiled::Stage::Blockwise(bk) => ("BKM", "blockwise", bk.bypass_serial),
                 super::compiled::Stage::SerialDelayedFeedback(s) => {
                     ("SerialFB", "serial_feedback", s.bypass_serial)
                 }
@@ -341,7 +337,7 @@ fn ratking_per_stage_signal_levels() {
             super::compiled::Stage::Iir(s) => s.bypass_serial,
             super::compiled::Stage::StateSpace(s) => s.bypass_serial,
             super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
-            super::compiled::Stage::BlockwiseKMethod(bk) => bk.bypass_serial,
+            super::compiled::Stage::Blockwise(bk) => bk.bypass_serial,
             super::compiled::Stage::SerialDelayedFeedback(s) => s.bypass_serial,
         };
         if bypass {
@@ -355,7 +351,7 @@ fn ratking_per_stage_signal_levels() {
                 super::compiled::Stage::Iir(s) => s.debug_label.as_str(),
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
-                super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::Blockwise(_) => "blockwise",
                 super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             assert!(

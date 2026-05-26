@@ -154,7 +154,7 @@ fn antiparallel_diodes_to_ground_clip_both_directions() {
                 super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
-                super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::Blockwise(_) => "blockwise",
                 super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             eprintln!("    stage {i}: [{label}] → {lvl:.4} ({db:.1} dB)");
@@ -240,7 +240,7 @@ fn diode_to_ground_stage_exists_in_pipeline() {
                 super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
                 super::compiled::Stage::StateSpace(ss) => ss.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
-                super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::Blockwise(_) => "blockwise",
                 super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             };
             label.contains("D1")
@@ -434,7 +434,7 @@ fn ratking_stage_diagnostic() {
                     b.bypass_serial,
                     b.signal_flow_distance,
                 ),
-                super::compiled::Stage::BlockwiseKMethod(bk) => (
+                super::compiled::Stage::Blockwise(bk) => (
                     "BKM",
                     "blockwise",
                     bk.bypass_serial,
@@ -512,7 +512,7 @@ fn merged_diodes_label_contains_both() {
                 super::compiled::Stage::Iir(i) => i.debug_label.as_str(),
                 super::compiled::Stage::StateSpace(s) => s.debug_label.as_str(),
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
-                super::compiled::Stage::BlockwiseKMethod(_) => "blockwise",
+                super::compiled::Stage::Blockwise(_) => "blockwise",
                 super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
             })
             .collect();

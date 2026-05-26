@@ -2011,11 +2011,11 @@ pub(super) fn try_build_blockwise(
         }
     }
 
-    // ── Build coupling scattering matrix + package as BlockwiseKMethodStage ──
+    // ── Build coupling scattering matrix + package as BlockwiseStage ────────
     //
     // Instead of building coupling edges as a separate passive WDF stage
     // (which has no feedback loop), we build a coupling scattering matrix
-    // that connects all blocks' ports. The BlockwiseKMethodStage uses
+    // that connects all blocks' ports. The BlockwiseStage uses
     // wave-domain Newton iteration to solve the algebraic feedback loop
     // each sample — no unit delay, correct resonance tracking.
     if !plan.coupling_edges.is_empty() && !all_stages.is_empty() {
@@ -2247,11 +2247,11 @@ pub(super) fn try_build_blockwise(
                             Some(BlockTopology::InputDifferentialPair { .. })
                         ) {
                             eprintln!(
-                                "  block {bi}: input differential pair kept as a WDF boundary block outside rung BKM"
+                                "  block {bi}: input differential pair kept as a WDF boundary block outside rung blockwise stage"
                             );
                         } else {
                             eprintln!(
-                                "  block {bi}: auxiliary memoryless/control WDF omitted from differential-rung BKM blocks"
+                                "  block {bi}: auxiliary memoryless/control WDF omitted from differential-rung blockwise blocks"
                             );
                         }
                     }
@@ -2449,7 +2449,7 @@ pub(super) fn try_build_blockwise(
                 )]);
             }
             eprintln!(
-                "  [blockwise] force_serial: returning {} rung stages without BKM coupling",
+                "  [blockwise] force_serial: returning {} rung stages without coupled blockwise solve",
                 all_stages.len()
             );
             return Some(all_stages);
@@ -2788,7 +2788,7 @@ pub(super) fn try_build_blockwise(
             let Some(kbi) = plan_block_to_k_block.get(bi).and_then(|idx| *idx) else {
                 #[cfg(test)]
                 eprintln!(
-                    "    block {bi}: no K-table stage; nonlinear memoryless/control block omitted from BKM coupling ports"
+                    "    block {bi}: no K-table stage; nonlinear memoryless/control block omitted from blockwise coupling ports"
                 );
                 continue;
             };
@@ -3223,7 +3223,7 @@ pub(super) fn try_build_blockwise(
             if !vs_port_map.iter().any(|(name, _)| name == cutoff_name) {
                 // The TB-303 cutoff CV can enter through an exponential
                 // converter outside the ladder coupling network. Keep it in
-                // the BKM source map as a control-only input so the shared
+                // the blockwise source map as a control-only input so the shared
                 // tail-current axis updates without stamping a synthetic
                 // voltage source into the ladder scattering matrix.
                 vs_port_map.push((cutoff_name.clone(), n_ports));
@@ -3246,14 +3246,14 @@ pub(super) fn try_build_blockwise(
         // default VS Rp = 1Ω. The DSL extension `audio_in: input(10k)`
         // is implemented and ready to use.
 
-        // ── Package as BlockwiseKMethodStage ─────────────────────────────
+        // ── Package as BlockwiseStage ────────────────────────────────────
         let output_block = n_blocks - 1;
         // Keep the specialized diode ladder core disabled by default. The real
-        // BKM path must use the coupled block solve and coupling matrix; the
+        // Blockwise path must use the coupled block solve and coupling matrix; the
         // core shortcut bypasses resonance/feedback coupling and is only a
         // future explicit optimization target.
         let diode_ladder_core = None;
-        let bkm = pedalkernel_rt::stage::BlockwiseKMethodStage {
+        let bkm = pedalkernel_rt::stage::BlockwiseStage {
             blocks: k_blocks,
             coupling_s: scattering,
             coupling_rp,
@@ -3278,7 +3278,7 @@ pub(super) fn try_build_blockwise(
             oversampler: pedalkernel_rt::oversampling::Oversampler::new(
                 pedalkernel_rt::oversampling::OversamplingFactor::X1,
             ),
-            // BKM stage should process after input/source impedance groups
+            // Blockwise stage should process after input/source impedance groups
             // but before output coupling (C_out). The feedback flow distance
             // formula inflates distance for ladders, so keep this near the
             // front without outrunning the input port conditioning stage.
@@ -3300,12 +3300,12 @@ pub(super) fn try_build_blockwise(
         };
 
         eprintln!(
-            "  [blockwise] built BlockwiseKMethodStage: {} blocks, {} ports",
+            "  [blockwise] built BlockwiseStage: {} blocks, {} ports",
             bkm.blocks.len(),
             bkm.n_ports
         );
 
-        // Replace the rung-local stages with the single BKM stage, but keep
+        // Replace the rung-local stages with the single blockwise stage, but keep
         // explicit multi-boundary WDF blocks such as input differential pairs.
         let mut boundary_wdf_stages = Vec::new();
         for (stage, bi) in all_stages.drain(..).zip(all_stage_plan_blocks.drain(..)) {
@@ -3318,7 +3318,7 @@ pub(super) fn try_build_blockwise(
             }
         }
         all_stages = boundary_wdf_stages;
-        all_stages.push(BuiltStage::BlockwiseKMethod(bkm));
+        all_stages.push(BuiltStage::Blockwise(bkm));
     }
 
     eprintln!("  [blockwise] done: {} total stages", all_stages.len());

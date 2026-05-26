@@ -411,7 +411,7 @@ fn load_pro_pedal(filename: &str) -> Option<String> {
 }
 
 fn tb303_bkm_vs_signals(
-    bkm: &pedalkernel_rt::stage::BlockwiseKMethodStage,
+    bkm: &pedalkernel_rt::stage::BlockwiseStage,
     cutoff_cv: f64,
     resonance_cv: f64,
 ) -> Vec<f64> {
@@ -430,7 +430,7 @@ fn tb303_bkm_vs_signals(
 }
 
 fn tb303_bkm_vs_signals_with_vco(
-    bkm: &pedalkernel_rt::stage::BlockwiseKMethodStage,
+    bkm: &pedalkernel_rt::stage::BlockwiseStage,
     vco_in: f64,
     cutoff_cv: f64,
     resonance_cv: f64,
@@ -496,7 +496,7 @@ fn tb303_source_without_resonance_feedback(source: &str) -> String {
 }
 
 fn bkm_block_row_coupling_summary(
-    bkm: &pedalkernel_rt::stage::BlockwiseKMethodStage,
+    bkm: &pedalkernel_rt::stage::BlockwiseStage,
 ) -> Vec<(usize, f64, f64)> {
     let block_rows = bkm.blocks.len().min(bkm.n_ports);
     (0..block_rows)
@@ -511,9 +511,7 @@ fn bkm_block_row_coupling_summary(
         .collect()
 }
 
-fn bkm_identity_isolated_block_rows(
-    bkm: &pedalkernel_rt::stage::BlockwiseKMethodStage,
-) -> Vec<usize> {
+fn bkm_identity_isolated_block_rows(bkm: &pedalkernel_rt::stage::BlockwiseStage) -> Vec<usize> {
     bkm_block_row_coupling_summary(bkm)
         .into_iter()
         .filter_map(|(row, diag, offdiag_max)| {
@@ -790,8 +788,15 @@ fn tb303_stage_graph_connects_q12_collectors_to_bkm_ladder_ports() {
     let bkm_stage_idx = graph
         .stages
         .iter()
-        .position(|stage| stage.kind == "BlockwiseKMethod")
+        .position(|stage| stage.kind == "Blockwise")
         .expect("TB303 ladder should appear as a BKM stage graph node");
+    assert!(
+        !graph
+            .stages
+            .iter()
+            .any(|stage| stage.kind == "BlockwiseKMethod"),
+        "stage graph should name the topology Blockwise; K-method is a solver/table detail"
+    );
 
     for collector_label in ["collector_left", "collector_right"] {
         let q12_port_idx = graph.stages[q12_stage_idx]
@@ -836,7 +841,7 @@ fn tb303_stage_route_plan_maps_external_ports_to_bkm_vs_boundaries() {
     let bkm_stage_idx = compiled
         .stages
         .iter()
-        .position(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_)))
+        .position(|stage| matches!(stage, pedalkernel_rt::processor::Stage::Blockwise(_)))
         .expect("TB303 ladder should compile to a BKM stage");
     let audio_out_idx = compiled
         .resolve_port("audio_out")
@@ -982,7 +987,7 @@ fn tb303_coupled_differential_ladder_compiles_to_bkm_not_monolithic_mna() {
             .expect("compile failed");
 
     let bkm = compiled.stages.iter().find_map(|stage| {
-        if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+        if let super::compiled::Stage::Blockwise(bkm) = stage {
             Some(bkm)
         } else {
             None
@@ -1065,7 +1070,7 @@ fn tb303_bkm_output_and_feedback_tap_top_rung() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1138,7 +1143,7 @@ fn tb303_bkm_vco_drive_is_external_coupling_port() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1169,7 +1174,7 @@ fn tb303_bkm_does_not_stamp_reactive_coupling_as_resistor() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1234,7 +1239,7 @@ fn tb303_bkm_pulls_input_coupling_caps_into_adaptor() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1275,7 +1280,7 @@ fn tb303_coupling_caps_land_near_stinchcombe_shelf_corners() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1338,7 +1343,7 @@ fn tb303_bkm_differential_rungs_have_side_aware_block_ports() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1410,7 +1415,7 @@ fn tb303_coupled_fixed_point_is_realtime_opt_out() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1494,7 +1499,7 @@ fn tb303_bkm_differential_rungs_own_multiple_coupling_ports() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1571,7 +1576,7 @@ fn tb303_bkm_coupling_matrix_connects_ladder_block_ports() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1601,7 +1606,7 @@ fn tb303_coupled_bkm_stays_finite_on_silence() {
         .stages
         .iter_mut()
         .find_map(|stage| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+            if let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -1874,7 +1879,7 @@ fn two_rung_diode_ladder_bkm_direct_path_is_lowpass() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -1917,7 +1922,7 @@ fn two_rung_normal_diode_ladder_cv_moves_cutoff() {
         probe
             .stages
             .iter()
-            .any(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_))),
+            .any(|stage| matches!(stage, pedalkernel_rt::processor::Stage::Blockwise(_))),
         "normal diode CV ladder should compile to BKM"
     );
 
@@ -2032,7 +2037,7 @@ fn two_rung_normal_diode_ladder_cutoff_uses_circuit_calibration() {
         proc.stages
             .iter()
             .find_map(|stage| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+                if let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage {
                     Some(bkm.blocks[0].rp)
                 } else {
                     None
@@ -2063,7 +2068,7 @@ fn two_rung_feedback_diode_ladder_compiles_to_bkm() {
     let bkm_count = proc
         .stages
         .iter()
-        .filter(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_)))
+        .filter(|stage| matches!(stage, pedalkernel_rt::processor::Stage::Blockwise(_)))
         .count();
 
     assert_eq!(
@@ -2081,7 +2086,7 @@ fn two_rung_feedback_bkm_coupling_matrix_connects_block_ports() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+            if let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -2539,7 +2544,7 @@ fn tb303_bkm_direct_output_reaches_serial_output() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                 Some(k)
             } else {
                 None
@@ -2613,7 +2618,7 @@ fn tb303_bkm_direct_path_is_lowpass() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -2667,7 +2672,7 @@ fn tb303_bkm_feedback_ports_are_the_lowpass_bypass_source() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -2731,7 +2736,7 @@ fn tb303_bkm_cutoff_pot_without_cv_is_lowpass() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -2782,7 +2787,7 @@ fn tb303_bkm_core_without_resonance_feedback_is_lowpass() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -2941,7 +2946,7 @@ fn tb303_bkm_max_resonance_remains_finite() {
     }
 
     for stage in &proc.stages {
-        if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+        if let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage {
             assert!(
                 bkm.work_a
                     .iter()
@@ -2991,7 +2996,7 @@ fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -3094,7 +3099,7 @@ fn tb303_bkm_rung_response_exposes_missing_cascaded_poles() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -3379,7 +3384,7 @@ fn tb303_bkm_output_is_read_only_extraction() {
         .stages
         .iter()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(k) = s {
                 Some(k)
             } else {
                 None
@@ -3431,7 +3436,7 @@ fn tb303_bkm_audio_out_blocks_dc_after_output_coupling_cap() {
         let mut direct_proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
         let mut direct_bkm = match direct_proc.stages.remove(0) {
-            pedalkernel_rt::processor::Stage::BlockwiseKMethod(k) => k,
+            pedalkernel_rt::processor::Stage::Blockwise(k) => k,
             _ => panic!("expected first stage to be BKM"),
         };
         bkm_only.stages.truncate(1);
@@ -3877,7 +3882,7 @@ fn tb303_force_serial_feedback_compiles_to_serial_feedback_stage() {
         !proc
             .stages
             .iter()
-            .any(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_))),
+            .any(|stage| matches!(stage, pedalkernel_rt::processor::Stage::Blockwise(_))),
         "forced serial feedback should bypass the BKM packaging path"
     );
 }
@@ -3931,7 +3936,7 @@ fn tb303_bkm_direct_block_matches_forced_serial_first_rung_order() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -4038,7 +4043,7 @@ fn tb303_bkm_direct_blocks_each_have_lowpass_order() {
             .stages
             .iter_mut()
             .find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                     Some(k)
                 } else {
                     None
@@ -4180,7 +4185,7 @@ fn tb303_bkm_k_tables_are_generated_per_rung_not_shared() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                 Some(k)
             } else {
                 None
@@ -4248,7 +4253,7 @@ fn tb303_serial_blockwise_without_bkm_is_lowpass_diagnostic() {
     let bkm_count = compiled
         .stages
         .iter()
-        .filter(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_)))
+        .filter(|stage| matches!(stage, pedalkernel_rt::processor::Stage::Blockwise(_)))
         .count();
     let wdf_count = compiled
         .stages
@@ -4328,7 +4333,7 @@ fn tb303_forced_serial_stage_outputs_show_reference_shape() {
                     pedalkernel_rt::processor::Stage::Iir(iir) => iir.process(x),
                     pedalkernel_rt::processor::Stage::StateSpace(ss) => ss.process(x),
                     pedalkernel_rt::processor::Stage::BlackFeedback(bf) => bf.process(x),
-                    pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) => {
+                    pedalkernel_rt::processor::Stage::Blockwise(bkm) => {
                         bkm.process(&[x, 0.0, 0.0, 0.0])
                     }
                     pedalkernel_rt::processor::Stage::SerialDelayedFeedback(s) => s.process(x),
@@ -4398,7 +4403,7 @@ fn two_rung_feedback_bkm_stays_bounded_on_silence() {
                 .stages
                 .iter()
                 .find_map(|s| {
-                    if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref k) = s {
+                    if let pedalkernel_rt::processor::Stage::Blockwise(ref k) = s {
                         Some(k)
                     } else {
                         None
@@ -4467,7 +4472,7 @@ fn tb303_resonance_recomputes_bkm_coupling_matrix() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                 Some(k)
             } else {
                 None
@@ -4535,7 +4540,7 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                 Some(k)
             } else {
                 None
@@ -4614,7 +4619,7 @@ fn tb303_resonance_pot_compiles_as_series_feedback_rheostat() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(k) = s {
                 Some(k)
             } else {
                 None
@@ -4662,7 +4667,7 @@ fn tb303_resonance_pot_compiles_as_series_feedback_rheostat() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(k) = s {
                 Some(k)
             } else {
                 None
@@ -4698,7 +4703,7 @@ fn tb303_passive_resonance_feedback_stays_in_bkm_coupling() {
         .stages
         .iter()
         .find_map(|stage| {
-            if let super::compiled::Stage::BlockwiseKMethod(bkm) = stage {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
                 Some(bkm)
             } else {
                 None
@@ -5130,9 +5135,9 @@ fn tb303_single_block_filters() {
     let proc: super::compiled::CompiledPedal =
         postcard::from_bytes(&blob).expect("deserialize failed");
 
-    // Find the BlockwiseKMethod stage
+    // Find the Blockwise stage
     let bkm = proc.stages.iter().find_map(|s| {
-        if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref k) = s {
+        if let pedalkernel_rt::processor::Stage::Blockwise(ref k) = s {
             Some(k)
         } else {
             None
@@ -5140,7 +5145,7 @@ fn tb303_single_block_filters() {
     });
 
     if bkm.is_none() {
-        eprintln!("  SKIP: no BlockwiseKMethod stage found");
+        eprintln!("  SKIP: no Blockwise stage found");
         return;
     }
     let bkm = bkm.unwrap();
@@ -5360,7 +5365,7 @@ fn tb303_cutoff_cv_updates_shared_diffpair_tail_current_axis() {
         proc.stages
             .iter()
             .find_map(|stage| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage {
+                if let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage {
                     Some(
                         bkm.blocks[1]
                             .shared_diode_bias_voltage
@@ -5514,9 +5519,9 @@ fn tb303_k_table_not_identity() {
     let proc: super::compiled::CompiledPedal =
         postcard::from_bytes(&blob).expect("deserialize failed");
 
-    // Find the BlockwiseKMethod stage and inspect its K-tables
+    // Find the Blockwise stage and inspect its K-tables
     let bkm = proc.stages.iter().find_map(|s| {
-        if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref k) = s {
+        if let pedalkernel_rt::processor::Stage::Blockwise(ref k) = s {
             Some(k)
         } else {
             None
@@ -5524,7 +5529,7 @@ fn tb303_k_table_not_identity() {
     });
 
     if bkm.is_none() {
-        eprintln!("  SKIP: no BlockwiseKMethod stage found");
+        eprintln!("  SKIP: no Blockwise stage found");
         return;
     }
     let bkm = bkm.unwrap();
@@ -6411,7 +6416,7 @@ fn tb303_trace_cascade_one_sample() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                 Some(k)
             } else {
                 None
@@ -6494,7 +6499,7 @@ fn tb303_trace_small_signal() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                 Some(k)
             } else {
                 None
@@ -6571,7 +6576,7 @@ fn tb303_cap_state_bounded_during_warmup() {
         // Every 480 samples (10ms), check block states
         if sample % 480 == 479 {
             let bkm = proc.stages.iter().find_map(|s| {
-                if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref k) = s {
+                if let pedalkernel_rt::processor::Stage::Blockwise(ref k) = s {
                     Some(k)
                 } else {
                     None
@@ -6607,7 +6612,7 @@ fn tb303_cap_state_bounded_during_warmup() {
         .stages
         .iter()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(ref k) = s {
                 Some(k)
             } else {
                 None
@@ -6733,7 +6738,7 @@ fn tb303_vco_port_path_is_lowpass() {
             .expect("vco_in Q12 boundary drive")
             .clone();
         let stage = proc.stages.get_mut(route.stage_idx).expect("BKM stage");
-        let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage else {
+        let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage else {
             panic!("routed stage should be BKM");
         };
         let vs_signals = vec![0.0; bkm.vs_port_map.len()];
@@ -6800,7 +6805,7 @@ fn tb303_vco_port_path_is_lowpass() {
         let pedalkernel_rt::processor::Stage::Wdf(q12) = q12_stage else {
             panic!("Q12 source stage should be WDF");
         };
-        let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = bkm_stage else {
+        let pedalkernel_rt::processor::Stage::Blockwise(bkm) = bkm_stage else {
             panic!("routed stage should be BKM");
         };
         let vs_signals = vec![0.0; bkm.vs_port_map.len()];
@@ -6854,7 +6859,7 @@ fn tb303_vco_port_path_is_lowpass() {
             .expect("vco_in Q12 boundary drive")
             .clone();
         let stage = proc.stages.get_mut(route.stage_idx).expect("BKM stage");
-        let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage else {
+        let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage else {
             panic!("routed stage should be BKM");
         };
         bkm.output_extraction_coeffs.fill(0.0);
@@ -6897,7 +6902,7 @@ fn tb303_vco_port_path_is_lowpass() {
             .clone()
             .expect("BKM route");
         let stage = proc.stages.get_mut(route.stage_idx).expect("BKM stage");
-        let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage else {
+        let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage else {
             panic!("routed stage should be BKM");
         };
         let vs_signals = vec![0.0; bkm.vs_port_map.len()];
@@ -7102,7 +7107,7 @@ fn tb303_serial_path_ordering_check() {
                     w.tree.port_resistance()
                 )
             }
-            pedalkernel_rt::processor::Stage::BlockwiseKMethod(k) => {
+            pedalkernel_rt::processor::Stage::Blockwise(k) => {
                 format!("BKM({}blocks, {}ports)", k.blocks.len(), k.n_ports)
             }
             _ => format!("other"),
@@ -7114,7 +7119,7 @@ fn tb303_serial_path_ordering_check() {
     let bkm_idx = proc
         .stages
         .iter()
-        .position(|s| matches!(s, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_)));
+        .position(|s| matches!(s, pedalkernel_rt::processor::Stage::Blockwise(_)));
     let cout_idx = proc
         .stages
         .iter()
@@ -7147,7 +7152,7 @@ fn tb303_stage_ordering_debug() {
                     w.tree.port_resistance()
                 );
             }
-            pedalkernel_rt::processor::Stage::BlockwiseKMethod(k) => {
+            pedalkernel_rt::processor::Stage::Blockwise(k) => {
                 eprintln!(
                     "  Stage {i}: BKM flow_dist={} blocks={}",
                     k.signal_flow_distance,
@@ -7192,7 +7197,7 @@ fn tb303_per_block_signal_trace() {
         .stages
         .iter_mut()
         .find_map(|s| {
-            if let pedalkernel_rt::processor::Stage::BlockwiseKMethod(ref mut k) = s {
+            if let pedalkernel_rt::processor::Stage::Blockwise(ref mut k) = s {
                 Some(k)
             } else {
                 None

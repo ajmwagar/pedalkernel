@@ -6323,7 +6323,7 @@ pub struct CouplingVcvs {
 /// Reusable scratch space for coupled blockwise solves.
 ///
 /// This keeps the realtime Newton path allocation-free without spreading a
-/// set of parallel temporary vectors across `BlockwiseKMethodStage` itself.
+/// set of parallel temporary vectors across `BlockwiseStage` itself.
 #[derive(Clone, Default)]
 pub struct CoupledSolveScratch {
     pub a: Vec<crate::Wave>,
@@ -6397,7 +6397,7 @@ pub struct SolveDiagnostics {
 /// for Arbitrary Topologies and Multiport Linear Elements"
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct BlockwiseKMethodStage {
+pub struct BlockwiseStage {
     /// NL blocks in signal-flow order.
     pub blocks: Vec<KMethodBlock>,
     /// Coupling scattering matrix (n_ports × n_ports, row-major).
@@ -6527,18 +6527,21 @@ impl core::fmt::Debug for KMethodBlock {
     }
 }
 
-impl core::fmt::Debug for BlockwiseKMethodStage {
+#[deprecated(note = "Use BlockwiseStage; K-method is a per-block solver, not the topology")]
+pub type BlockwiseKMethodStage = BlockwiseStage;
+
+impl core::fmt::Debug for BlockwiseStage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "BlockwiseKMethodStage({}blocks, {}ports)",
+            "BlockwiseStage({}blocks, {}ports)",
             self.blocks.len(),
             self.n_ports
         )
     }
 }
 
-impl BlockwiseKMethodStage {
+impl BlockwiseStage {
     /// Maximum Newton iterations per sample.
     const MAX_ITER: usize = 8;
     /// Convergence tolerance on wave variables.
@@ -7982,7 +7985,7 @@ impl BlockwiseKMethodStage {
             .map(|c| c.abs())
             .fold(0.0 as crate::Wave, crate::Wave::max);
         format!(
-            "BlockwiseKMethod({}blocks, {}ports, mode={:?}, vs_ports={}, feedback_ports={}, output_coeff_max={:.3e})",
+            "Blockwise({}blocks, {}ports, mode={:?}, vs_ports={}, feedback_ports={}, output_coeff_max={:.3e})",
             self.blocks.len(),
             self.n_ports,
             self.solve_mode,
@@ -7994,7 +7997,7 @@ impl BlockwiseKMethodStage {
 }
 
 #[cfg(test)]
-mod blockwise_k_method_tests {
+mod blockwise_stage_tests {
     use super::*;
     use crate::dyn_node::DynNode;
 
@@ -8059,51 +8062,8 @@ mod blockwise_k_method_tests {
         }
     }
 
-    #[test]
-    fn bkm_2d_k_table_uses_runtime_drive_control_coordinate() {
-        let mut block = test_block(1.0);
-
-        let a_root = BlockwiseKMethodStage::block_root_incident(&mut block, 0.5, 0.25);
-
-        assert!(
-            (a_root - 3.0).abs() < 1e-9,
-            "2D BKM K-table lookup must use the runtime drive as the control coordinate"
-        );
-    }
-
-    #[test]
-    fn bkm_control_coordinate_is_independent_from_tree_source_polarity() {
-        let mut block = test_block(1.0);
-        block.source_polarity = -1.0;
-        block.k_table_control_polarity = 1.0;
-
-        let drive = BlockwiseKMethodStage::block_drive_voltage(&block, 0.25);
-        let control = BlockwiseKMethodStage::block_control_voltage(&block, 0.25);
-
-        assert!(
-            (drive + 0.25).abs() < 1e-9 && (control - 0.25).abs() < 1e-9,
-            "BKM must allow WDF source orientation to differ from K-table bias/control orientation"
-        );
-    }
-
-    #[test]
-    fn bkm_can_decouple_k_table_control_from_drive_voltage() {
-        let mut block = test_block(1.0);
-        block.control_from_drive = false;
-
-        let drive = BlockwiseKMethodStage::block_drive_voltage(&block, 0.75);
-        let control = BlockwiseKMethodStage::block_control_voltage(&block, 0.75);
-
-        assert!((drive - 0.75).abs() < 1e-12);
-        assert!(
-            control.abs() < 1e-12,
-            "differential ladder rung K-table control is shared tail current, not local drive voltage"
-        );
-    }
-
-    #[test]
-    fn bkm_serial_input_drives_first_block_when_audio_port_is_split_out() {
-        let mut stage = BlockwiseKMethodStage {
+    fn single_block_stage() -> BlockwiseStage {
+        BlockwiseStage {
             blocks: vec![{
                 let mut block = test_block(1.0);
                 block.k_table = one_dimensional_table();
@@ -8145,7 +8105,68 @@ mod blockwise_k_method_tests {
             work_a: vec![0.0],
             coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
-        };
+        }
+    }
+
+    #[test]
+    fn blockwise_stage_debug_names_topology_not_solver() {
+        let stage = single_block_stage();
+
+        let debug = format!("{stage:?}");
+        let label = stage.debug_label();
+
+        assert!(debug.starts_with("BlockwiseStage("), "debug={debug}");
+        assert!(
+            !debug.contains("KMethod") && !label.contains("KMethod"),
+            "K-method is a per-block solver detail, not the topology name: debug={debug}, label={label}"
+        );
+    }
+
+    #[test]
+    fn bkm_2d_k_table_uses_runtime_drive_control_coordinate() {
+        let mut block = test_block(1.0);
+
+        let a_root = BlockwiseStage::block_root_incident(&mut block, 0.5, 0.25);
+
+        assert!(
+            (a_root - 3.0).abs() < 1e-9,
+            "2D BKM K-table lookup must use the runtime drive as the control coordinate"
+        );
+    }
+
+    #[test]
+    fn bkm_control_coordinate_is_independent_from_tree_source_polarity() {
+        let mut block = test_block(1.0);
+        block.source_polarity = -1.0;
+        block.k_table_control_polarity = 1.0;
+
+        let drive = BlockwiseStage::block_drive_voltage(&block, 0.25);
+        let control = BlockwiseStage::block_control_voltage(&block, 0.25);
+
+        assert!(
+            (drive + 0.25).abs() < 1e-9 && (control - 0.25).abs() < 1e-9,
+            "BKM must allow WDF source orientation to differ from K-table bias/control orientation"
+        );
+    }
+
+    #[test]
+    fn bkm_can_decouple_k_table_control_from_drive_voltage() {
+        let mut block = test_block(1.0);
+        block.control_from_drive = false;
+
+        let drive = BlockwiseStage::block_drive_voltage(&block, 0.75);
+        let control = BlockwiseStage::block_control_voltage(&block, 0.75);
+
+        assert!((drive - 0.75).abs() < 1e-12);
+        assert!(
+            control.abs() < 1e-12,
+            "differential ladder rung K-table control is shared tail current, not local drive voltage"
+        );
+    }
+
+    #[test]
+    fn bkm_serial_input_drives_first_block_when_audio_port_is_split_out() {
+        let mut stage = single_block_stage();
 
         let silent = stage.process(&[]);
         let driven = stage.process_with_serial_input(0.5, &[]);
@@ -8171,7 +8192,7 @@ mod blockwise_k_method_tests {
         });
         block.tree = DynNode::VoltageSource(0.0, 1.5);
 
-        let a_root = BlockwiseKMethodStage::block_root_incident(&mut block, 0.5, 0.25);
+        let a_root = BlockwiseStage::block_root_incident(&mut block, 0.5, 0.25);
 
         assert!(
             (a_root - 0.5).abs() < 1e-9,
@@ -8182,7 +8203,7 @@ mod blockwise_k_method_tests {
 
     #[test]
     fn bkm_cutoff_cv_write_does_not_recompute_block_port_resistance() {
-        let mut stage = BlockwiseKMethodStage {
+        let mut stage = BlockwiseStage {
             blocks: vec![{
                 let mut block = test_block(1.0);
                 block.explicit_diode_root = Some(ExplicitDiodeRoot::new(DiodeModel::silicon()));
@@ -8245,7 +8266,7 @@ mod blockwise_k_method_tests {
 
     #[test]
     fn bkm_voltage_sources_reflect_incident_coupling_wave() {
-        let mut stage = BlockwiseKMethodStage {
+        let mut stage = BlockwiseStage {
             blocks: vec![test_block(1.0)],
             coupling_s: vec![1.0],
             coupling_rp: vec![1.0],
@@ -8295,7 +8316,7 @@ mod blockwise_k_method_tests {
 
     #[test]
     fn bkm_inactive_feedback_port_clears_stale_wave() {
-        let mut stage = BlockwiseKMethodStage {
+        let mut stage = BlockwiseStage {
             blocks: vec![test_block(1.0)],
             coupling_s: vec![1.0, 0.0, 0.0, 1.0],
             coupling_rp: vec![1.0, 1.0],
@@ -8363,7 +8384,7 @@ mod blockwise_k_method_tests {
 
     #[test]
     fn bkm_active_feedback_port_reflects_incident_coupling_wave() {
-        let mut stage = BlockwiseKMethodStage {
+        let mut stage = BlockwiseStage {
             blocks: vec![test_block(1.0)],
             coupling_s: vec![1.0],
             coupling_rp: vec![1.0],
@@ -8423,7 +8444,7 @@ mod blockwise_k_method_tests {
 
     #[test]
     fn bkm_coupling_cap_uses_wdf_passive_port_state() {
-        let mut stage = BlockwiseKMethodStage {
+        let mut stage = BlockwiseStage {
             blocks: vec![],
             coupling_s: vec![1.0],
             coupling_rp: vec![104.1666666667],
@@ -8488,7 +8509,7 @@ mod blockwise_k_method_tests {
 
     #[test]
     fn bkm_coupling_recompute_preserves_static_vcvs_stamps() {
-        let base = BlockwiseKMethodStage {
+        let base = BlockwiseStage {
             blocks: vec![],
             coupling_s: vec![0.0; 4],
             coupling_rp: vec![1.0, 1.0],
@@ -8570,7 +8591,7 @@ mod blockwise_k_method_tests {
 
     #[test]
     fn bkm_sparse_coupled_jacobian_matches_dense_finite_difference() {
-        let mut stage = BlockwiseKMethodStage {
+        let mut stage = BlockwiseStage {
             blocks: vec![{
                 let mut block = test_block(1.0);
                 block.k_table = one_dimensional_table();
@@ -8677,8 +8698,7 @@ mod blockwise_k_method_tests {
         block.k_table = one_dimensional_table();
         block.dc_offset = 0.75;
 
-        let (_, _, raw, ac) =
-            BlockwiseKMethodStage::solve_block_without_state_update(&mut block, 0.25);
+        let (_, _, raw, ac) = BlockwiseStage::solve_block_without_state_update(&mut block, 0.25);
 
         assert!(
             (raw - ac - 0.75).abs() < 1e-12,
@@ -8697,7 +8717,7 @@ mod blockwise_k_method_tests {
             min_rp: 10.0,
             max_rp: 100_000.0,
         };
-        let mut stage = BlockwiseKMethodStage {
+        let mut stage = BlockwiseStage {
             blocks: vec![
                 {
                     let mut block = test_block(1.0);
