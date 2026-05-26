@@ -757,6 +757,73 @@ fn tb303_q12_compiles_as_multi_binding_wdf_boundary_block() {
 }
 
 #[test]
+fn tb303_stage_graph_connects_q12_collectors_to_bkm_ladder_ports() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+
+    let graph = &compiled.stage_graph;
+    assert!(
+        !graph.stages.is_empty(),
+        "compiled pedal should expose an emitted stage graph"
+    );
+
+    let q12_stage_idx = graph
+        .stages
+        .iter()
+        .position(|stage| {
+            stage.kind == "Wdf"
+                && stage
+                    .ports
+                    .iter()
+                    .any(|port| port.label == "collector_left")
+                && stage
+                    .ports
+                    .iter()
+                    .any(|port| port.label == "collector_right")
+        })
+        .expect("Q12 should appear as a WDF stage graph node with collector boundary ports");
+
+    let bkm_stage_idx = graph
+        .stages
+        .iter()
+        .position(|stage| stage.kind == "BlockwiseKMethod")
+        .expect("TB303 ladder should appear as a BKM stage graph node");
+
+    for collector_label in ["collector_left", "collector_right"] {
+        let q12_port_idx = graph.stages[q12_stage_idx]
+            .ports
+            .iter()
+            .position(|port| port.label == collector_label)
+            .expect("Q12 collector port should be present");
+        let q12_node = graph.stages[q12_stage_idx].ports[q12_port_idx].node_id;
+
+        assert!(
+            graph.stages[bkm_stage_idx]
+                .ports
+                .iter()
+                .any(|port| port.node_id == q12_node),
+            "BKM stage graph ports should include Q12 {collector_label} node {q12_node}"
+        );
+        assert!(
+            graph.connections.iter().any(|connection| {
+                connection.node_id == q12_node
+                    && ((connection.from_stage == q12_stage_idx
+                        && connection.from_port == q12_port_idx
+                        && connection.to_stage == bkm_stage_idx)
+                        || (connection.to_stage == q12_stage_idx
+                            && connection.to_port == q12_port_idx
+                            && connection.from_stage == bkm_stage_idx))
+            }),
+            "stage graph should connect Q12 {collector_label} node {q12_node} to the BKM ladder"
+        );
+    }
+}
+
+#[test]
 fn tb303_diode_connected_bjts_reduce_to_diode_roots_in_multinl_fallback() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");

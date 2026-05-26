@@ -2511,8 +2511,14 @@ pub(super) fn try_build_blockwise(
             .and_then(|block| block_cascade_output_node(&block.nl_edges, &block.port_nodes, graph));
 
         let mut coupling_elements = Vec::new();
-        let mut coupling_passive_specs: Vec<(String, Option<usize>, Option<usize>, f64)> =
-            Vec::new();
+        let mut coupling_passive_specs: Vec<(
+            String,
+            Option<usize>,
+            Option<usize>,
+            Option<usize>,
+            Option<usize>,
+            f64,
+        )> = Vec::new();
         let mut coupling_vcvss = Vec::new();
         for &comp_idx in &coupling_vcvs_comps {
             let comp = &graph.components[comp_idx];
@@ -2596,7 +2602,16 @@ pub(super) fn try_build_blockwise(
                         } else {
                             node_to_mna.get(&e.node_b).copied()
                         };
-                        coupling_passive_specs.push((comp.id.clone(), n1, n2, capacitance));
+                        let graph_n1 = (!ground_rails.contains(&e.node_a)).then_some(e.node_a);
+                        let graph_n2 = (!ground_rails.contains(&e.node_b)).then_some(e.node_b);
+                        coupling_passive_specs.push((
+                            comp.id.clone(),
+                            n1,
+                            n2,
+                            graph_n1,
+                            graph_n2,
+                            capacitance,
+                        ));
                         continue;
                     }
                 }
@@ -2669,6 +2684,7 @@ pub(super) fn try_build_blockwise(
         // ── Define WDF ports ────────────────────────────────────────────
         // One port per block (at the block's coupling node) + one adapted VS port
         let mut ports = Vec::new();
+        let mut coupling_port_nodes: Vec<(Option<usize>, Option<usize>)> = Vec::new();
         let mut block_port_indices: Vec<Vec<usize>> = vec![Vec::new(); n_blocks];
 
         // Block ports: find each block's UNIQUE coupling node.
@@ -2703,6 +2719,7 @@ pub(super) fn try_build_blockwise(
                         node_neg: None,
                         resistance: rp,
                     });
+                    coupling_port_nodes.push((Some(node), None));
                     #[cfg(test)]
                     eprintln!(
                         "    block {bi}: {label}=Some({node}) → mna_node={:?}, scattering_port={port_idx}",
@@ -2720,6 +2737,8 @@ pub(super) fn try_build_blockwise(
                         node_neg: Some(right_idx),
                         resistance: rp,
                     });
+                    coupling_port_nodes
+                        .push((Some(rung_ports.top_left), Some(rung_ports.top_right)));
                     #[cfg(test)]
                     eprintln!(
                         "    block {bi}: top_diff=Some(({},{})) → mna_node=Some(({left_idx},{right_idx})), scattering_port={port_idx}",
@@ -2728,7 +2747,6 @@ pub(super) fn try_build_blockwise(
                 }
                 continue;
             }
-
             let preferred_node =
                 block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph).filter(|pn| {
                     node_to_mna.contains_key(pn)
@@ -2757,6 +2775,7 @@ pub(super) fn try_build_blockwise(
                     node_neg: None,
                     resistance: rp,
                 });
+                coupling_port_nodes.push((Some(pn), None));
                 block_port_indices[kbi].push(ports.len() - 1);
                 used_ports.insert(pn);
                 #[cfg(test)]
@@ -2768,6 +2787,7 @@ pub(super) fn try_build_blockwise(
                     node_neg: None,
                     resistance: 1000.0,
                 });
+                coupling_port_nodes.push((None, None));
                 block_port_indices[kbi].push(ports.len() - 1);
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=None (no unique coupling node)");
@@ -2812,6 +2832,7 @@ pub(super) fn try_build_blockwise(
                 node_neg: None,
                 resistance: rp,
             });
+            coupling_port_nodes.push((Some(output_node), None));
             feedback_port_map.push((bi, scattering_idx));
             used_ports.insert(output_node);
             #[cfg(test)]
@@ -2877,6 +2898,7 @@ pub(super) fn try_build_blockwise(
                     node_neg: None,
                     resistance: rp,
                 });
+                coupling_port_nodes.push((Some(port_node), None));
                 vs_port_map.push((port_def.name.clone(), scattering_idx));
                 #[cfg(test)]
                 eprintln!("    VS port '{}': mna_node={mna_idx}, Rp={rp:.0}Ω, scattering_port={scattering_idx}",
@@ -2892,6 +2914,7 @@ pub(super) fn try_build_blockwise(
                 node_neg: None,
                 resistance: 1.0,
             });
+            coupling_port_nodes.push((Some(graph.in_node), None));
             vs_port_map.push(("audio_in".to_string(), ports.len() - 1));
         }
 
@@ -2906,6 +2929,7 @@ pub(super) fn try_build_blockwise(
                     node_neg: None,
                     resistance: 1.0, // ideal supply
                 });
+                coupling_port_nodes.push((Some(*supply_node), None));
                 let name = format!("_supply_{}", supply_node);
                 vs_port_map.push((name, scattering_idx));
                 #[cfg(test)]
@@ -2914,7 +2938,9 @@ pub(super) fn try_build_blockwise(
         }
 
         let mut coupling_passives = Vec::new();
-        for (comp_id, node_a, node_b, capacitance) in coupling_passive_specs {
+        for (comp_id, node_a, node_b, graph_node_a, graph_node_b, capacitance) in
+            coupling_passive_specs
+        {
             let rp = 1.0 / (2.0 * sample_rate * capacitance);
             let scattering_idx = ports.len();
             ports.push(pedalkernel_rt::tree::WdfPort {
@@ -2922,6 +2948,7 @@ pub(super) fn try_build_blockwise(
                 node_neg: node_b,
                 resistance: rp,
             });
+            coupling_port_nodes.push((graph_node_a, graph_node_b));
             coupling_passives.push(pedalkernel_rt::stage::CouplingPassive {
                 comp_id: comp_id.clone(),
                 port_idx: scattering_idx,
@@ -3132,11 +3159,19 @@ pub(super) fn try_build_blockwise(
         // is implemented and ready to use.
 
         // ── Package as BlockwiseKMethodStage ─────────────────────────────
-        let output_block = n_blocks - 1; // Last block is the output
-                                         // Keep the specialized diode ladder core disabled by default. The real
-                                         // BKM path must use the coupled block solve and coupling matrix; the
-                                         // core shortcut bypasses resonance/feedback coupling and is only a
-                                         // future explicit optimization target.
+        let output_block = if use_coupled_solve {
+            // Differential diode ladder blocks are ordered from the top/output
+            // rung toward the bottom/input rung. The coupled solve is not a
+            // serial cascade, so the observable ladder tap is the first rung,
+            // not the last one.
+            0
+        } else {
+            n_blocks - 1
+        };
+        // Keep the specialized diode ladder core disabled by default. The real
+        // BKM path must use the coupled block solve and coupling matrix; the
+        // core shortcut bypasses resonance/feedback coupling and is only a
+        // future explicit optimization target.
         let diode_ladder_core = None;
         let bkm = pedalkernel_rt::stage::BlockwiseKMethodStage {
             blocks: k_blocks,
@@ -3144,6 +3179,7 @@ pub(super) fn try_build_blockwise(
             coupling_rp,
             coupling_n_mna: n_mna,
             coupling_ports: ports,
+            coupling_port_nodes,
             block_port_indices,
             coupling_elements,
             coupling_passives,

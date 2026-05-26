@@ -287,6 +287,7 @@ fn compile_subcircuit_equipment(
     // 4. Assemble routing-only CompiledPedal shell
     Ok(CompiledPedal {
         stages: Vec::new(),
+        stage_graph: pedalkernel_rt::processor::StageGraph::default(),
         push_pull_stages: Vec::new(),
         pre_gain: 1.0,
         output_gain: 1.0,

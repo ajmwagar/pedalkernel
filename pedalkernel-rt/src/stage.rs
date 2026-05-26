@@ -6403,6 +6403,13 @@ pub struct BlockwiseKMethodStage {
     pub coupling_n_mna: usize,
     /// Ports used to derive the coupling scattering matrix.
     pub coupling_ports: Vec<crate::tree::WdfPort>,
+    /// Original circuit graph node pair for each coupling port.
+    ///
+    /// `coupling_ports` stores MNA-local node indices, which are useful for
+    /// solving but not enough to connect BKM ports back to preserved WDF
+    /// boundary stages. This parallel vector keeps the source graph identity.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub coupling_port_nodes: Vec<(Option<usize>, Option<usize>)>,
     /// Coupling port indices owned by each nonlinear block.
     ///
     /// Legacy BKM stages use one port per block: `[[0], [1], ...]`.
@@ -6534,13 +6541,22 @@ impl BlockwiseKMethodStage {
     /// normal audio/circuit rails as solver failure so they cannot poison the
     /// next sample's warm start.
     const MAX_STABLE_OUTPUT: crate::Wave = 32.0;
+    /// Physical voltages entering one local K-method block must stay inside
+    /// plausible circuit rails. The coupled adaptor may transiently propose a
+    /// larger wave during Newton/fixed-point iteration; letting that value
+    /// charge the local WDF caps creates artificial energy and audible blowups.
+    const MAX_BLOCK_INCIDENT_VOLTAGE: crate::Wave = 4.0;
     /// One-sample coupled mode trades delay-free accuracy for real-time cost.
     /// Relaxing the adaptor wave update prevents high-bias diode ladders from
     /// turning the explicit delay into an artificial energy source.
     const DELAYED_COUPLING_RELAXATION: crate::Wave = 0.25;
 
     fn block_drive_voltage(block: &KMethodBlock, physical_voltage: crate::Wave) -> crate::Wave {
-        block.source_polarity * physical_voltage
+        block.source_polarity
+            * physical_voltage.clamp(
+                -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+                Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+            )
     }
 
     fn block_control_voltage(block: &KMethodBlock, physical_voltage: crate::Wave) -> crate::Wave {
@@ -6590,8 +6606,12 @@ impl BlockwiseKMethodStage {
         let Some(primary_port) = self.primary_port_for_block(block_idx) else {
             return 0.0;
         };
-        let incident = a.get(primary_port).copied().unwrap_or(0.0)
-            + if block_idx == 0 { serial_input } else { 0.0 };
+        let incident = (a.get(primary_port).copied().unwrap_or(0.0)
+            + if block_idx == 0 { serial_input } else { 0.0 })
+        .clamp(
+            -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+            Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+        );
 
         if let Some(port_indices) = self.block_port_indices.get(block_idx) {
             if port_indices.len() == 3 {
@@ -6600,8 +6620,12 @@ impl BlockwiseKMethodStage {
                 let top_diff = port_indices[2];
                 let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0);
                 let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0);
-                let differential_incident = a_bottom_left - a_bottom_right
-                    + if block_idx == 0 { serial_input } else { 0.0 };
+                let differential_incident = (a_bottom_left - a_bottom_right
+                    + if block_idx == 0 { serial_input } else { 0.0 })
+                .clamp(
+                    -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+                    Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+                );
                 let (output_voltage, _) = Self::solve_block_port(
                     &mut self.blocks[block_idx],
                     differential_incident,
@@ -7017,8 +7041,12 @@ impl BlockwiseKMethodStage {
                 continue;
             }
 
-            let incident = a.get(primary_port).copied().unwrap_or(0.0)
-                + if block_idx == 0 { serial_input } else { 0.0 };
+            let incident = (a.get(primary_port).copied().unwrap_or(0.0)
+                + if block_idx == 0 { serial_input } else { 0.0 })
+            .clamp(
+                -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+                Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+            );
             let (_, d_refl, d_out) = Self::solve_block_without_state_update_with_derivative(
                 &mut self.blocks[block_idx],
                 incident,
@@ -7036,8 +7064,12 @@ impl BlockwiseKMethodStage {
                     let top_diff = port_indices[2];
                     let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0);
                     let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0);
-                    let differential_incident = a_bottom_left - a_bottom_right
-                        + if block_idx == 0 { serial_input } else { 0.0 };
+                    let differential_incident = (a_bottom_left - a_bottom_right
+                        + if block_idx == 0 { serial_input } else { 0.0 })
+                    .clamp(
+                        -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+                        Self::MAX_BLOCK_INCIDENT_VOLTAGE,
+                    );
                     let (_, _, d_out) = Self::solve_block_without_state_update_with_derivative(
                         &mut self.blocks[block_idx],
                         differential_incident,
@@ -8024,6 +8056,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
             coupling_passives: vec![],
@@ -8109,6 +8142,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
             coupling_passives: vec![],
@@ -8160,6 +8194,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![],
             coupling_passives: vec![],
@@ -8216,6 +8251,7 @@ mod blockwise_k_method_tests {
                     resistance: 1.0,
                 },
             ],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![CouplingElement {
                 comp_id: alloc::string::String::from("Resonance"),
@@ -8274,6 +8310,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![vec![0]],
             coupling_elements: vec![CouplingElement {
                 comp_id: alloc::string::String::from("Resonance"),
@@ -8331,6 +8368,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 104.1666666667,
             }],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![],
             coupling_elements: vec![],
             coupling_passives: vec![CouplingPassive {
@@ -8402,6 +8440,7 @@ mod blockwise_k_method_tests {
                     resistance: 1.0,
                 },
             ],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![],
             coupling_elements: vec![CouplingElement {
                 comp_id: alloc::string::String::from("Rload"),
@@ -8490,6 +8529,7 @@ mod blockwise_k_method_tests {
                     resistance: 1.0,
                 },
             ],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![vec![0, 1]],
             coupling_elements: vec![CouplingElement {
                 comp_id: alloc::string::String::from("Resonance"),
@@ -8611,6 +8651,7 @@ mod blockwise_k_method_tests {
                 node_neg: None,
                 resistance: 1.0,
             }],
+            coupling_port_nodes: vec![],
             block_port_indices: vec![vec![0], vec![0]],
             coupling_elements: vec![CouplingElement {
                 comp_id: alloc::string::String::from("Cutoff"),

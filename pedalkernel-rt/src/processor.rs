@@ -405,6 +405,57 @@ pub struct PortBinding {
     pub stage_idx: usize,
 }
 
+/// Direction/role of one compiled-stage boundary port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum StageGraphPortDirection {
+    Input,
+    Output,
+    Control,
+    Bidirectional,
+}
+
+/// One named boundary on an emitted DSP stage, tied back to the original
+/// circuit graph node when known.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageGraphPort {
+    pub label: String,
+    pub node_id: usize,
+    pub direction: StageGraphPortDirection,
+}
+
+/// One emitted DSP stage in the compiled stage graph.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageGraphNode {
+    pub stage_idx: usize,
+    pub kind: String,
+    pub label: String,
+    pub component_ids: Vec<String>,
+    pub ports: Vec<StageGraphPort>,
+}
+
+/// Electrical adjacency between two emitted stage ports through one circuit
+/// node. This is metadata for validation/routing; it is not yet the solver.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageGraphConnection {
+    pub node_id: usize,
+    pub from_stage: usize,
+    pub from_port: usize,
+    pub to_stage: usize,
+    pub to_port: usize,
+}
+
+/// Full emitted-stage connectivity graph.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageGraph {
+    pub stages: Vec<StageGraphNode>,
+    pub connections: Vec<StageGraphConnection>,
+}
+
 /// Control binding: maps a knob label to a parameter in the processing chain.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ControlBinding {
@@ -870,6 +921,11 @@ impl RailSaturation {
 pub struct CompiledPedal {
     /// All processing stages in signal-flow order. One vec, no index indirection.
     pub stages: Vec<Stage>,
+    /// Metadata graph of emitted stages, their boundary ports, and shared-node
+    /// adjacencies. This makes serial routing, BKM coupling, and preserved WDF
+    /// boundary stages inspectable from one place.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stage_graph: StageGraph,
     /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
     /// These are processed after regular stages.
     pub push_pull_stages: Vec<PushPullStage>,

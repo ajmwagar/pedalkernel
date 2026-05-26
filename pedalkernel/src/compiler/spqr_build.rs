@@ -186,6 +186,7 @@ pub fn compile_via_spqr_with_options(
         )?;
         let mut compiled = CompiledPedal {
             stages: vec![Stage::MultiNl(stage)],
+            stage_graph: pedalkernel_rt::processor::StageGraph::default(),
             push_pull_stages: Vec::new(),
             pre_gain: 1.0,
             output_gain: 1.0,
@@ -1437,6 +1438,7 @@ pub fn compile_via_spqr_with_options(
 
     let mut compiled = CompiledPedal {
         stages,
+        stage_graph: pedalkernel_rt::processor::StageGraph::default(),
         push_pull_stages: Vec::new(),
         pre_gain: 1.0,
         output_gain: 1.0,
@@ -1564,6 +1566,8 @@ pub fn compile_via_spqr_with_options(
     // Cache raw pointers to all VS leaves for zero-cost runtime access.
     // Must be after port binding (wrap_leaf_with_vs) and recompute.
     compiled.cache_all_vs_pointers();
+    compiled.stage_graph =
+        build_compiled_stage_graph(&compiled.stages, &stage_comp_ids, &compiled.ports);
 
     Ok(compiled)
 }
@@ -1571,6 +1575,199 @@ pub fn compile_via_spqr_with_options(
 // ═══════════════════════════════════════════════════════════════════════════
 // Stage construction helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+fn build_compiled_stage_graph(
+    stages: &[Stage],
+    stage_comp_ids: &[Vec<String>],
+    external_ports: &[pedalkernel_rt::processor::PortBinding],
+) -> pedalkernel_rt::processor::StageGraph {
+    use pedalkernel_rt::processor::{
+        StageGraph, StageGraphConnection, StageGraphNode, StageGraphPort, StageGraphPortDirection,
+    };
+
+    fn wdf_dir(direction: pedalkernel_rt::stage::WdfBoundaryDirection) -> StageGraphPortDirection {
+        match direction {
+            pedalkernel_rt::stage::WdfBoundaryDirection::Input => StageGraphPortDirection::Input,
+            pedalkernel_rt::stage::WdfBoundaryDirection::Output => StageGraphPortDirection::Output,
+            pedalkernel_rt::stage::WdfBoundaryDirection::Control => {
+                StageGraphPortDirection::Control
+            }
+        }
+    }
+
+    let mut graph = StageGraph::default();
+
+    for (stage_idx, stage) in stages.iter().enumerate() {
+        let component_ids = stage_comp_ids.get(stage_idx).cloned().unwrap_or_default();
+        let mut ports = Vec::new();
+        let (kind, label) = match stage {
+            Stage::Wdf(wdf) => {
+                for binding in &wdf.boundary_bindings {
+                    ports.push(StageGraphPort {
+                        label: binding.label.clone(),
+                        node_id: binding.node_id,
+                        direction: wdf_dir(binding.direction),
+                    });
+                }
+                if ports.is_empty() {
+                    if wdf.injection_node_id != usize::MAX {
+                        ports.push(StageGraphPort {
+                            label: "input".into(),
+                            node_id: wdf.injection_node_id,
+                            direction: StageGraphPortDirection::Input,
+                        });
+                    }
+                    if wdf.output_node_id != usize::MAX {
+                        ports.push(StageGraphPort {
+                            label: "output".into(),
+                            node_id: wdf.output_node_id,
+                            direction: StageGraphPortDirection::Output,
+                        });
+                    }
+                }
+                ("Wdf".to_string(), wdf.root_comp_id.clone())
+            }
+            Stage::MultiNl(mnl) => {
+                if mnl.injection_node_id != usize::MAX {
+                    ports.push(StageGraphPort {
+                        label: "input".into(),
+                        node_id: mnl.injection_node_id,
+                        direction: StageGraphPortDirection::Input,
+                    });
+                }
+                if mnl.output_node_id != usize::MAX {
+                    ports.push(StageGraphPort {
+                        label: "output".into(),
+                        node_id: mnl.output_node_id,
+                        direction: StageGraphPortDirection::Output,
+                    });
+                }
+                ("MultiNl".to_string(), "multi-nl".to_string())
+            }
+            Stage::BlackFeedback(bf) => {
+                if bf.output_node_id != usize::MAX {
+                    ports.push(StageGraphPort {
+                        label: "output".into(),
+                        node_id: bf.output_node_id,
+                        direction: StageGraphPortDirection::Output,
+                    });
+                }
+                ("BlackFeedback".to_string(), "black-feedback".to_string())
+            }
+            Stage::BlockwiseKMethod(bkm) => {
+                let mut labels: Vec<String> = (0..bkm.n_ports)
+                    .map(|idx| format!("coupling_{idx}"))
+                    .collect();
+                for (block_idx, owned_ports) in bkm.block_port_indices.iter().enumerate() {
+                    for (local_idx, &port_idx) in owned_ports.iter().enumerate() {
+                        if let Some(label) = labels.get_mut(port_idx) {
+                            *label = format!("block{block_idx}_port{local_idx}");
+                        }
+                    }
+                }
+                for (name, port_idx) in &bkm.vs_port_map {
+                    if let Some(label) = labels.get_mut(*port_idx) {
+                        *label = format!("vs:{name}");
+                    }
+                }
+                for passive in &bkm.coupling_passives {
+                    if let Some(label) = labels.get_mut(passive.port_idx) {
+                        *label = format!("passive:{}", passive.comp_id);
+                    }
+                }
+                for (port_idx, &(node_pos, node_neg)) in bkm.coupling_port_nodes.iter().enumerate()
+                {
+                    if let Some(node_id) = node_pos {
+                        ports.push(StageGraphPort {
+                            label: labels
+                                .get(port_idx)
+                                .cloned()
+                                .unwrap_or_else(|| format!("coupling_{port_idx}")),
+                            node_id,
+                            direction: StageGraphPortDirection::Bidirectional,
+                        });
+                    }
+                    if let Some(node_id) = node_neg {
+                        ports.push(StageGraphPort {
+                            label: format!(
+                                "{}:neg",
+                                labels
+                                    .get(port_idx)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("coupling_{port_idx}"))
+                            ),
+                            node_id,
+                            direction: StageGraphPortDirection::Bidirectional,
+                        });
+                    }
+                }
+                ("BlockwiseKMethod".to_string(), "blockwise".to_string())
+            }
+            Stage::Iir(_) => ("Iir".to_string(), "iir".to_string()),
+            Stage::StateSpace(_) => ("StateSpace".to_string(), "state-space".to_string()),
+            Stage::SerialDelayedFeedback(_) => (
+                "SerialDelayedFeedback".to_string(),
+                "serial-feedback".to_string(),
+            ),
+        };
+
+        graph.stages.push(StageGraphNode {
+            stage_idx,
+            kind,
+            label,
+            component_ids,
+            ports,
+        });
+    }
+
+    for port in external_ports {
+        graph.stages.push(StageGraphNode {
+            stage_idx: usize::MAX,
+            kind: "ExternalPort".to_string(),
+            label: port.name.clone(),
+            component_ids: Vec::new(),
+            ports: vec![StageGraphPort {
+                label: port.name.clone(),
+                node_id: port.node_id,
+                direction: match port.direction {
+                    pedalkernel_rt::PortDirection::Input => StageGraphPortDirection::Output,
+                    pedalkernel_rt::PortDirection::Output => StageGraphPortDirection::Input,
+                },
+            }],
+        });
+    }
+
+    let mut endpoints_by_node: std::collections::BTreeMap<usize, Vec<(usize, usize)>> =
+        std::collections::BTreeMap::new();
+    for (graph_stage_idx, stage) in graph.stages.iter().enumerate() {
+        for (port_idx, port) in stage.ports.iter().enumerate() {
+            if port.node_id != usize::MAX {
+                endpoints_by_node
+                    .entry(port.node_id)
+                    .or_default()
+                    .push((graph_stage_idx, port_idx));
+            }
+        }
+    }
+
+    for (node_id, endpoints) in endpoints_by_node {
+        for i in 0..endpoints.len() {
+            for j in (i + 1)..endpoints.len() {
+                let (from_stage, from_port) = endpoints[i];
+                let (to_stage, to_port) = endpoints[j];
+                graph.connections.push(StageGraphConnection {
+                    node_id,
+                    from_stage,
+                    from_port,
+                    to_stage,
+                    to_port,
+                });
+            }
+        }
+    }
+
+    graph
+}
 
 /// Check if a group is a merged pot pair (aw + wb of same component).
 fn is_pot_divider_group(group: &super::signal_flow::FlowGroup, graph: &CircuitGraph) -> bool {
