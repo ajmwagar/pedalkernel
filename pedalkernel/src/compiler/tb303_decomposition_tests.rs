@@ -849,13 +849,27 @@ fn tb303_stage_route_plan_maps_external_ports_to_bkm_vs_boundaries() {
         "route plan should identify the graph-routed BKM stage, debug={debug:?}"
     );
 
-    for input_name in ["audio_in", "vco_in", "cv_cutoff"] {
+    assert!(
+        debug
+            .primary_bkm_vs_bindings
+            .iter()
+            .any(|binding| binding.starts_with("cv_cutoff")),
+        "route plan should map cutoff CV into a BKM VS boundary, debug={debug:?}"
+    );
+    for input_name in ["audio_in", "vco_in"] {
         assert!(
             debug
+                .primary_bkm_boundary_drives
+                .iter()
+                .any(|binding| binding.contains(input_name)),
+            "route plan should route `{input_name}` through the Q12 WDF boundary handoff, debug={debug:?}"
+        );
+        assert!(
+            !debug
                 .primary_bkm_vs_bindings
                 .iter()
                 .any(|binding| binding.starts_with(input_name)),
-            "route plan should map external `{input_name}` into a BKM VS boundary, debug={debug:?}"
+            "route plan should not also inject `{input_name}` directly into BKM once Q12 owns it, debug={debug:?}"
         );
     }
 
@@ -6642,6 +6656,8 @@ fn tb303_vco_port_path_is_lowpass() {
     )
     .expect("compile failed");
 
+    const TB303_SMALL_SIGNAL_VCO_PORT_VOLTS: f64 = 0.003;
+
     let measure_port = |freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
@@ -6654,7 +6670,8 @@ fn tb303_vco_port_path_is_lowpass() {
         }
         let mut peak = 0.0f64;
         for i in 0..4800 {
-            let vco = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let vco = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
             let mut ports = vec![0.0; proc.port_count()];
             if let Some(idx) = vco_idx {
                 ports[idx] = vco;

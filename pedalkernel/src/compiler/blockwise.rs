@@ -2667,6 +2667,8 @@ pub(super) fn try_build_blockwise(
                 comp_id: comp.id.clone(),
                 node_a: n1,
                 node_b: n2,
+                graph_node_a: (!ground_rails.contains(&e.node_a)).then_some(e.node_a),
+                graph_node_b: (!ground_rails.contains(&e.node_b)).then_some(e.node_b),
                 resistance: r,
                 pot_max_resistance: pot_meta.map(|(max_r, _)| max_r),
                 taper: pot_meta
@@ -3121,6 +3123,8 @@ pub(super) fn try_build_blockwise(
                             comp_id: comp.id.clone(),
                             node_a: None,
                             node_b: None,
+                            graph_node_a: None,
+                            graph_node_b: None,
                             resistance: (pot.max_r * 0.5).max(1.0e-3),
                             pot_max_resistance: Some(pot.max_r),
                             taper: pot.taper,

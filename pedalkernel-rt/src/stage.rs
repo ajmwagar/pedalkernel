@@ -6283,8 +6283,14 @@ impl DiodeLadderCore {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CouplingElement {
     pub comp_id: String,
+    /// MNA-local node endpoints used for scattering recomputation.
     pub node_a: Option<usize>,
     pub node_b: Option<usize>,
+    /// Original circuit graph node endpoints used for route/debug derivation.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub graph_node_a: Option<usize>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub graph_node_b: Option<usize>,
     pub resistance: crate::Wave,
     pub pot_max_resistance: Option<crate::Wave>,
     pub taper: crate::pot_taper::PotTaper,
@@ -6600,6 +6606,7 @@ impl BlockwiseKMethodStage {
         block_idx: usize,
         a: &[crate::Wave],
         serial_input: crate::Wave,
+        port_incident_offsets: &[(usize, crate::Wave)],
         update_state: bool,
         b_out: &mut [crate::Wave],
     ) -> crate::Wave {
@@ -6618,8 +6625,10 @@ impl BlockwiseKMethodStage {
                 let bottom_left = port_indices[0];
                 let bottom_right = port_indices[1];
                 let top_diff = port_indices[2];
-                let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0);
-                let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0);
+                let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0)
+                    + Self::port_incident_offset(bottom_left, port_incident_offsets);
+                let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0)
+                    + Self::port_incident_offset(bottom_right, port_incident_offsets);
                 let differential_incident = (a_bottom_left - a_bottom_right
                     + if block_idx == 0 { serial_input } else { 0.0 })
                 .clamp(
@@ -6937,11 +6946,22 @@ impl BlockwiseKMethodStage {
             })
     }
 
+    fn port_incident_offset(
+        port_idx: usize,
+        port_incident_offsets: &[(usize, crate::Wave)],
+    ) -> crate::Wave {
+        port_incident_offsets
+            .iter()
+            .filter_map(|&(idx, value)| (idx == port_idx && value.is_finite()).then_some(value))
+            .sum()
+    }
+
     fn coupled_eval_b_for_a(
         &mut self,
         a: &[crate::Wave],
         vs_signals: &[crate::Wave],
         serial_input: crate::Wave,
+        port_incident_offsets: &[(usize, crate::Wave)],
         update_state: bool,
         b_out: &mut [crate::Wave],
     ) -> crate::Wave {
@@ -6950,8 +6970,14 @@ impl BlockwiseKMethodStage {
             *v = 0.0;
         }
         for block_idx in 0..self.blocks.len() {
-            let block_output =
-                self.scatter_owned_block_ports(block_idx, a, serial_input, update_state, b_out);
+            let block_output = self.scatter_owned_block_ports(
+                block_idx,
+                a,
+                serial_input,
+                port_incident_offsets,
+                update_state,
+                b_out,
+            );
             if block_idx == self.output_block {
                 output = block_output;
             }
@@ -7011,6 +7037,7 @@ impl BlockwiseKMethodStage {
         &mut self,
         a: &[crate::Wave],
         serial_input: crate::Wave,
+        port_incident_offsets: &[(usize, crate::Wave)],
         db_da: &mut [crate::Wave],
     ) {
         let n = self.n_ports;
@@ -7062,8 +7089,10 @@ impl BlockwiseKMethodStage {
                     let bottom_left = port_indices[0];
                     let bottom_right = port_indices[1];
                     let top_diff = port_indices[2];
-                    let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0);
-                    let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0);
+                    let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0)
+                        + Self::port_incident_offset(bottom_left, port_incident_offsets);
+                    let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0)
+                        + Self::port_incident_offset(bottom_right, port_incident_offsets);
                     let differential_incident = (a_bottom_left - a_bottom_right
                         + if block_idx == 0 { serial_input } else { 0.0 })
                     .clamp(
@@ -7135,6 +7164,7 @@ impl BlockwiseKMethodStage {
         &mut self,
         vs_signals: &[crate::Wave],
         serial_input: crate::Wave,
+        port_incident_offsets: &[(usize, crate::Wave)],
     ) -> (crate::Wave, bool) {
         let n = self.n_ports;
         if n == 0 {
@@ -7156,6 +7186,7 @@ impl BlockwiseKMethodStage {
                 &scratch.a,
                 vs_signals,
                 serial_input,
+                port_incident_offsets,
                 false,
                 &mut scratch.b,
             );
@@ -7172,7 +7203,12 @@ impl BlockwiseKMethodStage {
                 break;
             }
 
-            self.coupled_fill_sparse_db_da(&scratch.a, serial_input, &mut scratch.db_da);
+            self.coupled_fill_sparse_db_da(
+                &scratch.a,
+                serial_input,
+                port_incident_offsets,
+                &mut scratch.db_da,
+            );
 
             for row in 0..n {
                 for col in 0..n {
@@ -7216,6 +7252,7 @@ impl BlockwiseKMethodStage {
                 &scratch.a,
                 vs_signals,
                 serial_input,
+                port_incident_offsets,
                 false,
                 &mut scratch.b,
             );
@@ -7249,6 +7286,7 @@ impl BlockwiseKMethodStage {
                 i,
                 &scratch.a,
                 serial_input,
+                &[],
                 update_state,
                 &mut scratch.b,
             );
@@ -7288,7 +7326,7 @@ impl BlockwiseKMethodStage {
             BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
         ) {
             if self.solve_mode == BlockwiseSolveMode::CoupledNewton {
-                let _ = self.coupled_solve_newton(vs_signals, 0.0);
+                let _ = self.coupled_solve_newton(vs_signals, 0.0, &[]);
             } else {
                 self.write_vs_ports(vs_signals);
                 self.scatter_coupling();
@@ -7567,14 +7605,14 @@ impl BlockwiseKMethodStage {
         // Run 2000 samples of silence — enough for caps to reach DC equilibrium
         let zeros = vec![0.0; self.vs_port_map.len()];
         for _ in 0..2000 {
-            self.process_inner(&zeros, false, 0.0);
+            self.process_inner(&zeros, false, 0.0, &[]);
         }
         // Record the converged DC state — use the same extraction method
         // as the cascade (cap voltage for cascade_from_passive, root port otherwise).
         // This ensures the DC offset matches what process() subtracts.
         //
         // Run one more sample at DC to get the final voltages.
-        self.process_inner(&zeros, false, 0.0);
+        self.process_inner(&zeros, false, 0.0, &[]);
         let n_blocks = self.blocks.len();
         for i in 0..n_blocks {
             // Re-extract at the current converged state
@@ -7666,7 +7704,15 @@ impl BlockwiseKMethodStage {
         serial_input: crate::Wave,
         vs_signals: &[crate::Wave],
     ) -> crate::Wave {
-        self.process_inner(vs_signals, true, serial_input)
+        self.process_inner(vs_signals, true, serial_input, &[])
+    }
+
+    pub fn process_with_port_incident_offsets(
+        &mut self,
+        port_incident_offsets: &[(usize, crate::Wave)],
+        vs_signals: &[crate::Wave],
+    ) -> crate::Wave {
+        self.process_inner(vs_signals, true, 0.0, port_incident_offsets)
     }
 
     pub fn debug_process_without_feedback_ports(
@@ -7699,6 +7745,7 @@ impl BlockwiseKMethodStage {
         vs_signals: &[crate::Wave],
         include_cascade: bool,
         serial_input: crate::Wave,
+        port_incident_offsets: &[(usize, crate::Wave)],
     ) -> crate::Wave {
         if self.work_b.len() != self.n_ports {
             self.init_buffers();
@@ -7712,7 +7759,11 @@ impl BlockwiseKMethodStage {
             self.solve_mode,
             BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
         ) {
-            return self.process_coupled_fixed_point(vs_signals, serial_input);
+            return self.process_coupled_fixed_point(
+                vs_signals,
+                serial_input,
+                port_incident_offsets,
+            );
         }
 
         self.update_shared_diode_cutoff_bias_from_ports(vs_signals);
@@ -7808,6 +7859,7 @@ impl BlockwiseKMethodStage {
         &mut self,
         vs_signals: &[crate::Wave],
         serial_input: crate::Wave,
+        port_incident_offsets: &[(usize, crate::Wave)],
     ) -> crate::Wave {
         let previous_output = self.b_warm[0];
         let mut scratch = core::mem::take(&mut self.coupled_scratch);
@@ -7815,8 +7867,14 @@ impl BlockwiseKMethodStage {
         scratch.load_a_from(&self.work_a, self.n_ports);
         scratch.b.resize(self.n_ports, 0.0);
 
-        let block_output =
-            self.coupled_eval_b_for_a(&scratch.a, vs_signals, serial_input, true, &mut scratch.b);
+        let block_output = self.coupled_eval_b_for_a(
+            &scratch.a,
+            vs_signals,
+            serial_input,
+            port_incident_offsets,
+            true,
+            &mut scratch.b,
+        );
         self.work_b.copy_from_slice(&scratch.b);
         self.coupled_scatter_from_b(&scratch.b, &mut scratch.f);
         let relaxation = Self::DELAYED_COUPLING_RELAXATION.clamp(0.0, 1.0);
@@ -7879,11 +7937,13 @@ impl BlockwiseKMethodStage {
         &mut self,
         vs_signals: &[crate::Wave],
         serial_input: crate::Wave,
+        port_incident_offsets: &[(usize, crate::Wave)],
     ) -> crate::Wave {
         self.update_shared_diode_cutoff_bias_from_ports(vs_signals);
 
         if self.solve_mode == BlockwiseSolveMode::CoupledNewton {
-            let (_output, _converged) = self.coupled_solve_newton(vs_signals, serial_input);
+            let (_output, _converged) =
+                self.coupled_solve_newton(vs_signals, serial_input, port_incident_offsets);
             let mut scratch = core::mem::take(&mut self.coupled_scratch);
             scratch.load_a_from(&self.work_a, self.n_ports);
             scratch.b.resize(self.n_ports, 0.0);
@@ -7891,6 +7951,7 @@ impl BlockwiseKMethodStage {
                 &scratch.a,
                 vs_signals,
                 serial_input,
+                port_incident_offsets,
                 true,
                 &mut scratch.b,
             );
@@ -7901,7 +7962,7 @@ impl BlockwiseKMethodStage {
             return if output.is_finite() { output } else { 0.0 };
         }
 
-        self.process_coupled_one_step_delay(vs_signals, serial_input)
+        self.process_coupled_one_step_delay(vs_signals, serial_input, port_incident_offsets)
     }
 
     pub fn solve_diagnostics(&self) -> SolveDiagnostics {
@@ -8257,6 +8318,8 @@ mod blockwise_k_method_tests {
                 comp_id: alloc::string::String::from("Resonance"),
                 node_a: Some(0),
                 node_b: None,
+                graph_node_a: Some(0),
+                graph_node_b: None,
                 resistance: 100_000.0,
                 pot_max_resistance: Some(100_000.0),
                 taper: crate::pot_taper::PotTaper::B,
@@ -8316,6 +8379,8 @@ mod blockwise_k_method_tests {
                 comp_id: alloc::string::String::from("Resonance"),
                 node_a: Some(0),
                 node_b: None,
+                graph_node_a: Some(0),
+                graph_node_b: None,
                 resistance: 10_000.0,
                 pot_max_resistance: Some(100_000.0),
                 taper: crate::pot_taper::PotTaper::B,
@@ -8407,14 +8472,14 @@ mod blockwise_k_method_tests {
         };
 
         let mut b = vec![0.0];
-        let output = stage.coupled_eval_b_for_a(&[1.25], &[], 0.0, true, &mut b);
+        let output = stage.coupled_eval_b_for_a(&[1.25], &[], 0.0, &[], true, &mut b);
         assert_eq!(output, 0.0);
         assert!(
             b[0].abs() < 1.0e-12,
             "a WDF capacitor reflects its previous state before accepting the new incident wave"
         );
 
-        stage.coupled_eval_b_for_a(&[0.0], &[], 0.0, false, &mut b);
+        stage.coupled_eval_b_for_a(&[0.0], &[], 0.0, &[], false, &mut b);
         assert!(
             (b[0] - 1.25).abs() < 1.0e-12,
             "BKM coupling caps must behave as passive WDF ports: b_C[n+1] = a_C[n]"
@@ -8446,6 +8511,8 @@ mod blockwise_k_method_tests {
                 comp_id: alloc::string::String::from("Rload"),
                 node_a: Some(1),
                 node_b: None,
+                graph_node_a: Some(1),
+                graph_node_b: None,
                 resistance: 10_000.0,
                 pot_max_resistance: None,
                 taper: crate::pot_taper::PotTaper::B,
@@ -8535,6 +8602,8 @@ mod blockwise_k_method_tests {
                 comp_id: alloc::string::String::from("Resonance"),
                 node_a: Some(0),
                 node_b: None,
+                graph_node_a: Some(0),
+                graph_node_b: None,
                 resistance: 10_000.0,
                 pot_max_resistance: Some(100_000.0),
                 taper: crate::pot_taper::PotTaper::B,
@@ -8570,7 +8639,7 @@ mod blockwise_k_method_tests {
         let vs = vec![0.75];
         let n = stage.n_ports;
         let mut sparse = vec![0.0; n * n];
-        stage.coupled_fill_sparse_db_da(&a, 0.0, &mut sparse);
+        stage.coupled_fill_sparse_db_da(&a, 0.0, &[], &mut sparse);
 
         let mut dense = vec![0.0; n * n];
         for col in 0..n {
@@ -8584,8 +8653,8 @@ mod blockwise_k_method_tests {
             let mut lo_stage = stage.clone();
             let mut b_hi = vec![0.0; n];
             let mut b_lo = vec![0.0; n];
-            hi_stage.coupled_eval_b_for_a(&a_hi, &vs, 0.0, false, &mut b_hi);
-            lo_stage.coupled_eval_b_for_a(&a_lo, &vs, 0.0, false, &mut b_lo);
+            hi_stage.coupled_eval_b_for_a(&a_hi, &vs, 0.0, &[], false, &mut b_hi);
+            lo_stage.coupled_eval_b_for_a(&a_lo, &vs, 0.0, &[], false, &mut b_lo);
 
             for row in 0..n {
                 dense[row * n + col] = (b_hi[row] - b_lo[row]) / (2.0 * h);
@@ -8657,6 +8726,8 @@ mod blockwise_k_method_tests {
                 comp_id: alloc::string::String::from("Cutoff"),
                 node_a: Some(0),
                 node_b: None,
+                graph_node_a: Some(0),
+                graph_node_b: None,
                 resistance: 50_000.0,
                 pot_max_resistance: Some(100_000.0),
                 taper: crate::pot_taper::PotTaper::B,

@@ -75,6 +75,7 @@ pub struct GraphRoutedBkm {
     pub stage_idx: usize,
     pub vs_bindings: Vec<BkmVsRouteBinding>,
     pub output_port_indices: Vec<usize>,
+    pub boundary_drives: Vec<BkmBoundaryDrive>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -84,6 +85,24 @@ pub struct BkmVsRouteBinding {
     pub port_index: usize,
     pub coupling_port_index: usize,
     pub port_name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BkmBoundaryDrive {
+    pub source_stage_idx: usize,
+    pub positive_input_port_indices: Vec<usize>,
+    pub negative_input_port_indices: Vec<usize>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub positive_input_port_names: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub negative_input_port_names: Vec<String>,
+    pub target_coupling_port_indices: Vec<usize>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub positive_target_coupling_port_indices: Vec<usize>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub negative_target_coupling_port_indices: Vec<usize>,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +143,7 @@ pub struct StageRouteDebug {
     pub primary_bkm_stage_idx: Option<usize>,
     pub primary_bkm_vs_bindings: Vec<String>,
     pub primary_bkm_output_ports: Vec<usize>,
+    pub primary_bkm_boundary_drives: Vec<String>,
 }
 
 impl StageRoutePlan {
@@ -158,11 +178,24 @@ impl StageRoutePlan {
             };
         };
 
+        let boundary_drives = Self::bkm_boundary_drives(graph, ports, stages, bkm_graph_idx, bkm);
+        let consumed_port_indices = boundary_drives
+            .iter()
+            .flat_map(|drive| {
+                drive
+                    .positive_input_port_indices
+                    .iter()
+                    .chain(drive.negative_input_port_indices.iter())
+            })
+            .copied()
+            .collect::<Vec<_>>();
+
         let mut vs_bindings = Vec::new();
         for (signal_index, (name, coupling_port_index)) in bkm.vs_port_map.iter().enumerate() {
             if let Some(port) = ports.iter().find(|port| {
                 port.direction == crate::PortDirection::Input
                     && port.name.eq_ignore_ascii_case(name)
+                    && !consumed_port_indices.contains(&port.index)
             }) {
                 vs_bindings.push(BkmVsRouteBinding {
                     signal_index,
@@ -203,6 +236,7 @@ impl StageRoutePlan {
                 stage_idx: bkm_stage_idx,
                 vs_bindings,
                 output_port_indices,
+                boundary_drives,
             }),
             connections,
         }
@@ -233,12 +267,255 @@ impl StageRoutePlan {
             .as_ref()
             .map(|route| route.output_port_indices.clone())
             .unwrap_or_default();
+        let primary_bkm_boundary_drives = self
+            .primary_bkm
+            .as_ref()
+            .map(|route| {
+                route
+                    .boundary_drives
+                    .iter()
+                    .map(|drive| {
+                        alloc::format!(
+                            "{}@stage{} +{:?} -{:?} -> {:?}",
+                            drive.label,
+                            drive.source_stage_idx,
+                            drive.positive_input_port_names,
+                            drive.negative_input_port_names,
+                            drive.target_coupling_port_indices
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         StageRouteDebug {
             connection_count: self.connections.len(),
             primary_bkm_stage_idx,
             primary_bkm_vs_bindings,
             primary_bkm_output_ports,
+            primary_bkm_boundary_drives,
         }
+    }
+
+    fn bkm_boundary_drives(
+        graph: &StageGraph,
+        ports: &[PortBinding],
+        stages: &[Stage],
+        bkm_graph_idx: usize,
+        bkm: &crate::stage::BlockwiseKMethodStage,
+    ) -> Vec<BkmBoundaryDrive> {
+        let mut drives = Vec::new();
+        for graph_stage in &graph.stages {
+            if graph_stage.kind != "Wdf" || graph_stage.stage_idx == usize::MAX {
+                continue;
+            }
+
+            let has_input_pair_boundaries = graph_stage
+                .ports
+                .iter()
+                .any(|port| port.label == "base_left")
+                && graph_stage
+                    .ports
+                    .iter()
+                    .any(|port| port.label == "collector_left")
+                && graph_stage
+                    .ports
+                    .iter()
+                    .any(|port| port.label == "collector_right");
+            if !has_input_pair_boundaries {
+                continue;
+            }
+            if !matches!(stages.get(graph_stage.stage_idx), Some(Stage::Wdf(_))) {
+                continue;
+            }
+
+            let base_left = graph_stage
+                .ports
+                .iter()
+                .find(|port| port.label == "base_left")
+                .map(|port| port.node_id);
+            let base_right = graph_stage
+                .ports
+                .iter()
+                .find(|port| port.label == "base_right")
+                .map(|port| port.node_id);
+            let collector_nodes = graph_stage
+                .ports
+                .iter()
+                .filter(|port| port.label == "collector_left" || port.label == "collector_right")
+                .map(|port| port.node_id)
+                .collect::<Vec<_>>();
+            let collector_left = graph_stage
+                .ports
+                .iter()
+                .find(|port| port.label == "collector_left")
+                .map(|port| port.node_id);
+            let collector_right = graph_stage
+                .ports
+                .iter()
+                .find(|port| port.label == "collector_right")
+                .map(|port| port.node_id);
+
+            let mut positive_input_port_indices =
+                Self::external_ports_reaching_node(ports, bkm, base_left);
+            let mut negative_input_port_indices =
+                Self::external_ports_reaching_node(ports, bkm, base_right);
+            positive_input_port_indices.sort_unstable();
+            positive_input_port_indices.dedup();
+            negative_input_port_indices.sort_unstable();
+            negative_input_port_indices.dedup();
+            if positive_input_port_indices.is_empty() && negative_input_port_indices.is_empty() {
+                continue;
+            }
+
+            let mut target_coupling_port_indices = Vec::new();
+            for node in collector_nodes {
+                let connected_to_bkm = graph.connections.iter().any(|connection| {
+                    connection.node_id == node
+                        && (connection.from_stage == bkm_graph_idx
+                            || connection.to_stage == bkm_graph_idx)
+                }) || graph.stages[bkm_graph_idx]
+                    .ports
+                    .iter()
+                    .any(|port| port.node_id == node);
+                if !connected_to_bkm {
+                    continue;
+                }
+                for (port_idx, &(node_pos, node_neg)) in bkm.coupling_port_nodes.iter().enumerate()
+                {
+                    if node_pos == Some(node) || node_neg == Some(node) {
+                        target_coupling_port_indices.push(port_idx);
+                    }
+                }
+            }
+            target_coupling_port_indices.sort_unstable();
+            target_coupling_port_indices.dedup();
+            if target_coupling_port_indices.is_empty() {
+                continue;
+            }
+            let mut positive_target_coupling_port_indices =
+                Self::bkm_coupling_ports_for_node(bkm, collector_left);
+            let mut negative_target_coupling_port_indices =
+                Self::bkm_coupling_ports_for_node(bkm, collector_right);
+            positive_target_coupling_port_indices.sort_unstable();
+            positive_target_coupling_port_indices.dedup();
+            negative_target_coupling_port_indices.sort_unstable();
+            negative_target_coupling_port_indices.dedup();
+
+            drives.push(BkmBoundaryDrive {
+                source_stage_idx: graph_stage.stage_idx,
+                positive_input_port_names: Self::port_names_for_indices(
+                    ports,
+                    &positive_input_port_indices,
+                ),
+                negative_input_port_names: Self::port_names_for_indices(
+                    ports,
+                    &negative_input_port_indices,
+                ),
+                positive_input_port_indices,
+                negative_input_port_indices,
+                target_coupling_port_indices,
+                positive_target_coupling_port_indices,
+                negative_target_coupling_port_indices,
+                label: graph_stage.label.clone(),
+            });
+        }
+        drives
+    }
+
+    fn bkm_coupling_ports_for_node(
+        bkm: &crate::stage::BlockwiseKMethodStage,
+        node: Option<usize>,
+    ) -> Vec<usize> {
+        let Some(node) = node else {
+            return Vec::new();
+        };
+        bkm.coupling_port_nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(port_idx, &(node_pos, node_neg))| {
+                (node_pos == Some(node) || node_neg == Some(node)).then_some(port_idx)
+            })
+            .collect()
+    }
+
+    fn external_ports_reaching_node(
+        ports: &[PortBinding],
+        bkm: &crate::stage::BlockwiseKMethodStage,
+        node: Option<usize>,
+    ) -> Vec<usize> {
+        let Some(node) = node else {
+            return Vec::new();
+        };
+        let mut adjacency = Vec::new();
+        for element in &bkm.coupling_elements {
+            if let (Some(a), Some(b)) = (element.graph_node_a, element.graph_node_b) {
+                adjacency.push((a, b));
+            }
+        }
+        for passive in &bkm.coupling_passives {
+            if let Some(&(Some(a), Some(b))) = bkm.coupling_port_nodes.get(passive.port_idx) {
+                adjacency.push((a, b));
+            }
+        }
+
+        let mut out = Vec::new();
+        for port in ports {
+            if port.direction != crate::PortDirection::Input {
+                continue;
+            }
+            if !Self::is_audio_boundary_drive_port(&port.name) {
+                continue;
+            }
+            if Self::nodes_connected_by_coupling(port.node_id, node, &adjacency) {
+                out.push(port.index);
+            }
+        }
+        out
+    }
+
+    fn is_audio_boundary_drive_port(name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        (name.contains("audio") || name.contains("vco"))
+            && !name.starts_with("cv_")
+            && !name.contains("gate")
+    }
+
+    fn port_names_for_indices(ports: &[PortBinding], indices: &[usize]) -> Vec<String> {
+        indices
+            .iter()
+            .filter_map(|index| {
+                ports
+                    .iter()
+                    .find(|port| port.index == *index)
+                    .map(|port| port.name.clone())
+            })
+            .collect()
+    }
+
+    fn nodes_connected_by_coupling(start: usize, target: usize, edges: &[(usize, usize)]) -> bool {
+        if start == target {
+            return true;
+        }
+        let mut stack = Vec::new();
+        let mut seen = Vec::new();
+        stack.push(start);
+        while let Some(node) = stack.pop() {
+            if node == target {
+                return true;
+            }
+            if seen.contains(&node) {
+                continue;
+            }
+            seen.push(node);
+            for &(a, b) in edges {
+                if a == node && !seen.contains(&b) {
+                    stack.push(b);
+                } else if b == node && !seen.contains(&a) {
+                    stack.push(a);
+                }
+            }
+        }
+        false
     }
 
     fn endpoint_kind(stage: &StageGraphNode) -> StageRouteEndpointKind {

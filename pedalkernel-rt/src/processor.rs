@@ -1287,10 +1287,36 @@ impl CompiledPedal {
 
     fn process_stage_route_plan(&mut self) -> Option<crate::Wave> {
         let route = self.stage_route_plan.primary_bkm.clone()?;
+        let mut port_incident_offsets = alloc::vec::Vec::new();
+        for drive in &route.boundary_drives {
+            let mut input = 0.0 as crate::Wave;
+            for &port_idx in &drive.positive_input_port_indices {
+                if port_idx < self.port_values.len() {
+                    input += self.port_values[port_idx];
+                }
+            }
+            for &port_idx in &drive.negative_input_port_indices {
+                if port_idx < self.port_values.len() {
+                    input -= self.port_values[port_idx];
+                }
+            }
+
+            if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(drive.source_stage_idx) {
+                let out = wdf.process(input);
+                if out.is_finite() {
+                    for &port_idx in &drive.positive_target_coupling_port_indices {
+                        port_incident_offsets.push((port_idx, out));
+                    }
+                    for &port_idx in &drive.negative_target_coupling_port_indices {
+                        port_incident_offsets.push((port_idx, -out));
+                    }
+                }
+            }
+        }
+
         let Stage::BlockwiseKMethod(bkm_stage) = self.stages.get_mut(route.stage_idx)? else {
             return None;
         };
-
         let n_vs = bkm_stage.vs_port_map.len();
         let mut vs_signals = alloc::vec![0.0 as crate::Wave; n_vs];
         for binding in &route.vs_bindings {
@@ -1301,7 +1327,8 @@ impl CompiledPedal {
             }
         }
 
-        let output = bkm_stage.process(&vs_signals);
+        let output =
+            bkm_stage.process_with_port_incident_offsets(&port_incident_offsets, &vs_signals);
         let output = if output.is_finite() { output } else { 0.0 };
         for port_idx in route.output_port_indices {
             if port_idx < self.port_values.len() {
