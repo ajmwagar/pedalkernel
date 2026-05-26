@@ -457,6 +457,88 @@ impl KTable {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonlinearSolverKind {
+    Newton,
+    KTable,
+}
+
+/// Contract for audio-rate nonlinear root solvers.
+///
+/// Implementations must be allocation-free and callable from realtime code.
+/// The runtime uses a concrete enum implementation (`NonlinearSolver`) rather
+/// than `dyn` dispatch; the trait documents the solver contract shared by WDF
+/// stages and blockwise stages.
+pub trait NonlinearSolverContract {
+    fn kind(&self) -> NonlinearSolverKind;
+    fn solve_root_incident(&self, b_tree: crate::Wave, control: crate::Wave)
+        -> Option<crate::Wave>;
+    fn solve_root_incident_with_derivatives(
+        &self,
+        b_tree: crate::Wave,
+        control: crate::Wave,
+    ) -> Option<(crate::Wave, crate::Wave, crate::Wave)>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum NonlinearSolver<'a> {
+    Newton,
+    KTable(&'a KTable),
+}
+
+impl<'a> NonlinearSolver<'a> {
+    #[inline(always)]
+    pub fn from_k_table(table: Option<&'a KTable>) -> Self {
+        match table {
+            Some(table) => Self::KTable(table),
+            None => Self::Newton,
+        }
+    }
+}
+
+impl NonlinearSolverContract for NonlinearSolver<'_> {
+    #[inline(always)]
+    fn kind(&self) -> NonlinearSolverKind {
+        match self {
+            Self::Newton => NonlinearSolverKind::Newton,
+            Self::KTable(_) => NonlinearSolverKind::KTable,
+        }
+    }
+
+    #[inline(always)]
+    fn solve_root_incident(
+        &self,
+        b_tree: crate::Wave,
+        control: crate::Wave,
+    ) -> Option<crate::Wave> {
+        match self {
+            Self::Newton => None,
+            Self::KTable(table) => Some(if table.dims == 1 {
+                table.lookup_1d(b_tree)
+            } else {
+                table.lookup_2d(b_tree, control)
+            }),
+        }
+    }
+
+    #[inline(always)]
+    fn solve_root_incident_with_derivatives(
+        &self,
+        b_tree: crate::Wave,
+        control: crate::Wave,
+    ) -> Option<(crate::Wave, crate::Wave, crate::Wave)> {
+        match self {
+            Self::Newton => None,
+            Self::KTable(table) => Some(if table.dims == 1 {
+                let (value, d_b) = table.lookup_1d_with_derivative(b_tree);
+                (value, d_b, 0.0)
+            } else {
+                table.lookup_2d_with_derivatives(b_tree, control)
+            }),
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ADAA (Antiderivative Antialiasing) for K-tables
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1897,29 +1979,21 @@ impl WdfStage {
 
             let b_tree = b1;
 
-            // K-method fast path: use precomputed table lookup instead of NR
-            let a_root = if let Some(ref table) = k_table {
-                if table.dims == 1 {
-                    table.lookup_1d(b_tree)
-                } else {
-                    // 2D: use the AC signal portion of the control voltage.
-                    // The table was swept with set_control_voltage(ctrl, 1.0, 0.0)
-                    // which adds the DC bias internally. So the table's ctrl axis
-                    // represents the raw signal input, not the absolute voltage.
-                    // We subtract the bias to get back to the signal domain.
-                    let ctrl = match root {
-                        RootKind::Bjt(b) => b.vbe() - b.vbe_bias(),
-                        RootKind::Triode(t) => t.vgk() - t.vgk_bias(),
-                        RootKind::Jfet(j) => j.vgs(), // no DC bias added
-                        RootKind::Mosfet(m) => m.vgs(), // no DC bias added
-                        RootKind::DiffPair(dp) => {
-                            // Ctrl axis = I_tail modulation relative to bias
-                            (dp.i_tail / dp.i_tail_bias()) - 1.0
-                        }
-                        _ => 0.0,
-                    };
-                    table.lookup_2d(b_tree, ctrl)
+            let solver = NonlinearSolver::from_k_table(k_table.as_ref());
+            let solver_control = match root {
+                RootKind::Bjt(b) => b.vbe() - b.vbe_bias(),
+                RootKind::Triode(t) => t.vgk() - t.vgk_bias(),
+                RootKind::Jfet(j) => j.vgs(),   // no DC bias added
+                RootKind::Mosfet(m) => m.vgs(), // no DC bias added
+                RootKind::DiffPair(dp) => {
+                    // Ctrl axis = I_tail modulation relative to bias
+                    (dp.i_tail / dp.i_tail_bias()) - 1.0
                 }
+                _ => 0.0,
+            };
+
+            let a_root = if let Some(a_root) = solver.solve_root_incident(b_tree, solver_control) {
+                a_root
             } else {
                 // NR fallback — rp only needed here, not for K-table path
                 let rp = tree.port_resistance();
@@ -6694,11 +6768,9 @@ impl BlockwiseStage {
         b_tree: crate::Wave,
         ctrl: crate::Wave,
     ) -> crate::Wave {
-        if block.k_table.dims == 1 {
-            block.k_table.lookup_1d(b_tree)
-        } else {
-            block.k_table.lookup_2d(b_tree, ctrl)
-        }
+        NonlinearSolver::KTable(&block.k_table)
+            .solve_root_incident(b_tree, ctrl)
+            .unwrap_or(0.0)
     }
 
     fn block_root_incident_with_derivatives(
@@ -6706,12 +6778,9 @@ impl BlockwiseStage {
         b_tree: crate::Wave,
         ctrl: crate::Wave,
     ) -> (crate::Wave, crate::Wave, crate::Wave) {
-        if block.k_table.dims == 1 {
-            let (value, d_b) = block.k_table.lookup_1d_with_derivative(b_tree);
-            (value, d_b, 0.0)
-        } else {
-            block.k_table.lookup_2d_with_derivatives(b_tree, ctrl)
-        }
+        NonlinearSolver::KTable(&block.k_table)
+            .solve_root_incident_with_derivatives(b_tree, ctrl)
+            .unwrap_or((0.0, 0.0, 0.0))
     }
 
     fn solve_block_without_state_update(
@@ -8106,6 +8175,35 @@ mod blockwise_stage_tests {
             coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         }
+    }
+
+    #[test]
+    fn nonlinear_solver_enum_uses_k_table_without_dyn_dispatch() {
+        let table = control_sensitive_table();
+        let solver = NonlinearSolver::from_k_table(Some(&table));
+
+        assert_eq!(solver.kind(), NonlinearSolverKind::KTable);
+        assert_eq!(
+            core::mem::size_of_val(&solver),
+            core::mem::size_of::<Option<&KTable>>(),
+            "solver dispatch should stay a concrete pointer-sized enum, not a boxed dyn trait"
+        );
+
+        let value = solver
+            .solve_root_incident(1.0, 2.0)
+            .expect("K-table solver should produce a root incident wave");
+        assert!((value - 21.0).abs() < 1e-9, "value={value}");
+    }
+
+    #[test]
+    fn nonlinear_solver_enum_reports_newton_fallback() {
+        let solver = NonlinearSolver::from_k_table(None);
+
+        assert_eq!(solver.kind(), NonlinearSolverKind::Newton);
+        assert!(
+            solver.solve_root_incident(1.0, 2.0).is_none(),
+            "Newton is the concrete fallback strategy handled by the root device"
+        );
     }
 
     #[test]
