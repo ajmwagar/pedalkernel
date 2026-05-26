@@ -824,6 +824,52 @@ fn tb303_stage_graph_connects_q12_collectors_to_bkm_ladder_ports() {
 }
 
 #[test]
+fn tb303_stage_route_plan_maps_external_ports_to_bkm_vs_boundaries() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let mut compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+    compiled.cache_all_vs_pointers();
+
+    let bkm_stage_idx = compiled
+        .stages
+        .iter()
+        .position(|stage| matches!(stage, pedalkernel_rt::processor::Stage::BlockwiseKMethod(_)))
+        .expect("TB303 ladder should compile to a BKM stage");
+    let audio_out_idx = compiled
+        .resolve_port("audio_out")
+        .expect("TB303 should expose audio_out");
+
+    let debug = compiled.stage_route_plan.debug();
+    assert_eq!(
+        debug.primary_bkm_stage_idx,
+        Some(bkm_stage_idx),
+        "route plan should identify the graph-routed BKM stage, debug={debug:?}"
+    );
+
+    for input_name in ["audio_in", "vco_in", "cv_cutoff"] {
+        assert!(
+            debug
+                .primary_bkm_vs_bindings
+                .iter()
+                .any(|binding| binding.starts_with(input_name)),
+            "route plan should map external `{input_name}` into a BKM VS boundary, debug={debug:?}"
+        );
+    }
+
+    assert!(
+        debug.primary_bkm_output_ports.contains(&audio_out_idx),
+        "route plan should publish BKM output to audio_out ({audio_out_idx}), debug={debug:?}"
+    );
+    assert!(
+        debug.connection_count > 0,
+        "route plan should retain stage graph connectivity for diagnostics"
+    );
+}
+
+#[test]
 fn tb303_diode_connected_bjts_reduce_to_diode_roots_in_multinl_fallback() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");

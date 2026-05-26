@@ -405,56 +405,11 @@ pub struct PortBinding {
     pub stage_idx: usize,
 }
 
-/// Direction/role of one compiled-stage boundary port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum StageGraphPortDirection {
-    Input,
-    Output,
-    Control,
-    Bidirectional,
-}
-
-/// One named boundary on an emitted DSP stage, tied back to the original
-/// circuit graph node when known.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StageGraphPort {
-    pub label: String,
-    pub node_id: usize,
-    pub direction: StageGraphPortDirection,
-}
-
-/// One emitted DSP stage in the compiled stage graph.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StageGraphNode {
-    pub stage_idx: usize,
-    pub kind: String,
-    pub label: String,
-    pub component_ids: Vec<String>,
-    pub ports: Vec<StageGraphPort>,
-}
-
-/// Electrical adjacency between two emitted stage ports through one circuit
-/// node. This is metadata for validation/routing; it is not yet the solver.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StageGraphConnection {
-    pub node_id: usize,
-    pub from_stage: usize,
-    pub from_port: usize,
-    pub to_stage: usize,
-    pub to_port: usize,
-}
-
-/// Full emitted-stage connectivity graph.
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StageGraph {
-    pub stages: Vec<StageGraphNode>,
-    pub connections: Vec<StageGraphConnection>,
-}
+pub use crate::routing::{
+    BkmVsRouteBinding, GraphRoutedBkm, StageGraph, StageGraphConnection, StageGraphNode,
+    StageGraphPort, StageGraphPortDirection, StageRouteConnection, StageRouteDebug,
+    StageRouteEndpoint, StageRouteEndpointKind, StageRoutePlan,
+};
 
 /// Control binding: maps a knob label to a parameter in the processing chain.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -926,6 +881,9 @@ pub struct CompiledPedal {
     /// boundary stages inspectable from one place.
     #[cfg_attr(feature = "serde", serde(default))]
     pub stage_graph: StageGraph,
+    /// Runtime execution plan derived from `stage_graph`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub stage_route_plan: StageRoutePlan,
     /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
     /// These are processed after regular stages.
     pub push_pull_stages: Vec<PushPullStage>,
@@ -1275,6 +1233,8 @@ impl CompiledPedal {
     /// - Precomputes K-table inverse scales (eliminates per-sample division)
     /// - Precomputes StateSpace v_rail (eliminates per-sample division)
     pub fn cache_all_vs_pointers(&mut self) {
+        self.stage_route_plan =
+            StageRoutePlan::from_compiled_parts(&self.stage_graph, &self.ports, &self.stages);
         for stage_idx in 0..self.stages.len() {
             match &mut self.stages[stage_idx] {
                 Stage::Wdf(ref mut wdf) => {
@@ -1323,6 +1283,32 @@ impl CompiledPedal {
                 _ => {}
             }
         }
+    }
+
+    fn process_stage_route_plan(&mut self) -> Option<crate::Wave> {
+        let route = self.stage_route_plan.primary_bkm.clone()?;
+        let Stage::BlockwiseKMethod(bkm_stage) = self.stages.get_mut(route.stage_idx)? else {
+            return None;
+        };
+
+        let n_vs = bkm_stage.vs_port_map.len();
+        let mut vs_signals = alloc::vec![0.0 as crate::Wave; n_vs];
+        for binding in &route.vs_bindings {
+            if binding.signal_index < vs_signals.len()
+                && binding.port_index < self.port_values.len()
+            {
+                vs_signals[binding.signal_index] = self.port_values[binding.port_index];
+            }
+        }
+
+        let output = bkm_stage.process(&vs_signals);
+        let output = if output.is_finite() { output } else { 0.0 };
+        for port_idx in route.output_port_indices {
+            if port_idx < self.port_values.len() {
+                self.port_values[port_idx] = output;
+            }
+        }
+        Some(output)
     }
 
     /// Get the tolerance seed for this pedal unit (for diagnostics/UI).
@@ -2575,6 +2561,10 @@ impl PedalProcessor for CompiledPedal {
         // circuit's input impedance.
         if let Some(ref mut loading) = self.input_loading {
             signal = loading.process(signal);
+        }
+
+        if let Some(output) = self.process_stage_route_plan() {
+            return output as Wave;
         }
 
         // Process all stages in topological (signal-flow) order.

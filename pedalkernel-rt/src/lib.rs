@@ -51,6 +51,9 @@ pub mod loading;
 // ── Metering (lock-free audio->UI metrics) ──────────────────────────────
 pub mod metering;
 
+// ── Stage graph routing (compiled topology → runtime route plan) ─────────
+pub mod routing;
+
 // ── Thermal drift (temperature-dependent component behavior) ────────────
 pub mod thermal;
 

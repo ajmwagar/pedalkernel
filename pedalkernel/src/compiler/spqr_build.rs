@@ -187,6 +187,7 @@ pub fn compile_via_spqr_with_options(
         let mut compiled = CompiledPedal {
             stages: vec![Stage::MultiNl(stage)],
             stage_graph: pedalkernel_rt::processor::StageGraph::default(),
+            stage_route_plan: pedalkernel_rt::processor::StageRoutePlan::default(),
             push_pull_stages: Vec::new(),
             pre_gain: 1.0,
             output_gain: 1.0,
@@ -1439,6 +1440,7 @@ pub fn compile_via_spqr_with_options(
     let mut compiled = CompiledPedal {
         stages,
         stage_graph: pedalkernel_rt::processor::StageGraph::default(),
+        stage_route_plan: pedalkernel_rt::processor::StageRoutePlan::default(),
         push_pull_stages: Vec::new(),
         pre_gain: 1.0,
         output_gain: 1.0,
@@ -1568,6 +1570,11 @@ pub fn compile_via_spqr_with_options(
     compiled.cache_all_vs_pointers();
     compiled.stage_graph =
         build_compiled_stage_graph(&compiled.stages, &stage_comp_ids, &compiled.ports);
+    compiled.stage_route_plan = pedalkernel_rt::processor::StageRoutePlan::from_compiled_parts(
+        &compiled.stage_graph,
+        &compiled.ports,
+        &compiled.stages,
+    );
 
     Ok(compiled)
 }
