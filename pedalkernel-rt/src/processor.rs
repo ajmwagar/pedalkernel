@@ -1322,27 +1322,8 @@ impl CompiledPedal {
             }
         }
 
-        let primary_ports = bkm_stage
-            .block_port_indices
-            .first()
-            .cloned()
-            .unwrap_or_default();
-        let mut serial_input = 0.0 as crate::Wave;
         let mut port_incident_offsets = alloc::vec::Vec::new();
         for (drive, out) in boundary_outputs {
-            let targets_primary_input = !drive.target_coupling_port_indices.is_empty()
-                && drive
-                    .target_coupling_port_indices
-                    .iter()
-                    .all(|port_idx| primary_ports.contains(port_idx));
-            if targets_primary_input
-                && !drive.positive_target_coupling_port_indices.is_empty()
-                && !drive.negative_target_coupling_port_indices.is_empty()
-            {
-                serial_input += out;
-                continue;
-            }
-
             for &port_idx in &drive.positive_target_coupling_port_indices {
                 port_incident_offsets.push((port_idx, out));
             }
@@ -1351,11 +1332,8 @@ impl CompiledPedal {
             }
         }
 
-        let output = bkm_stage.process_with_serial_input_and_port_incident_offsets(
-            serial_input,
-            &port_incident_offsets,
-            &vs_signals,
-        );
+        let output =
+            bkm_stage.process_with_port_incident_offsets(&port_incident_offsets, &vs_signals);
         let output = if output.is_finite() { output } else { 0.0 };
         for port_idx in route.output_port_indices {
             if port_idx < self.port_values.len() {
@@ -1914,6 +1892,39 @@ impl CompiledPedal {
             // the sidechain's own CompiledPedal and handled there.
             for sc in &mut self.sidechains {
                 sc.set_control(label, value);
+            }
+        }
+    }
+
+    pub fn set_control_immediate(&mut self, label: &str, value: crate::Wave) {
+        let value = value.clamp(0.0, 1.0);
+        for i in 0..self.controls.len() {
+            if !self.controls[i].label.eq_ignore_ascii_case(label) {
+                continue;
+            }
+            let (r0, r1) = self.controls[i].range;
+            let value = (r0 + value * (r1 - r0)).clamp(0.0, 1.0);
+            match &self.controls[i].target {
+                ControlTarget::PotInStage(_)
+                | ControlTarget::PotInIirStage(_)
+                | ControlTarget::PotInMultiNlStage(_, _)
+                | ControlTarget::PotInBlackFeedbackStage(_) => {
+                    if let Some(smoother) =
+                        self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
+                    {
+                        smoother.current = value;
+                        smoother.target = value;
+                    }
+                    let comp_id = self.controls[i].component_id.clone();
+                    for stage in &mut self.stages {
+                        stage.set_control_pot(&comp_id, value);
+                    }
+                    if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+                        self.bbd_wet_mix = value;
+                    }
+                    self.apply_pot_mirrors(&comp_id, value);
+                }
+                _ => self.set_control(label, value),
             }
         }
     }

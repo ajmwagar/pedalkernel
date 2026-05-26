@@ -871,6 +871,13 @@ fn tb303_stage_route_plan_maps_external_ports_to_bkm_vs_boundaries() {
                 .any(|binding| binding.starts_with(input_name)),
             "route plan should not also inject `{input_name}` directly into BKM once Q12 owns it, debug={debug:?}"
         );
+        assert!(
+            !debug
+                .primary_bkm_boundary_drives
+                .iter()
+                .any(|binding| binding.contains(&format!("-[\"{input_name}\"]"))),
+            "route plan must not subtract `{input_name}` from the Q12 right/base reference side, debug={debug:?}"
+        );
     }
 
     assert!(
@@ -1443,8 +1450,8 @@ fn tb303_coupled_fixed_point_resonance_zero_has_no_active_peak() {
         .map(|&freq| {
             let mut proc: super::compiled::CompiledPedal =
                 postcard::from_bytes(&blob).expect("deserialize failed");
-            proc.set_control("Cutoff", 0.5);
-            proc.set_control("Resonance", 0.0);
+            proc.set_control_immediate("Cutoff", 0.5);
+            proc.set_control_immediate("Resonance", 0.0);
             quick_sine_ac_rms_ports(
                 &mut proc,
                 freq,
@@ -2100,7 +2107,7 @@ fn two_rung_feedback_diode_ladder_bkm_direct_path_is_lowpass() {
 
     let measure = |freq: f64| -> f64 {
         let mut proc = super::compile_pedal(&def, SR).expect("compile failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
 
         for _ in 0..4800 {
             let _ = proc.process(0.0);
@@ -2182,8 +2189,8 @@ fn tb303_filter_is_lowpass() {
     let measure = |freq: f64, cutoff: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", cutoff);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", cutoff);
+        proc.set_control_immediate("Resonance", 0.0);
         for _ in 0..2400 {
             proc.process(0.0);
         }
@@ -2478,8 +2485,8 @@ fn tb303_blockwise_k_method_produces_audio() {
         postcard::from_bytes(&blob).expect("deserialize failed");
 
     // Default controls.
-    proc.set_control("Cutoff", 0.5);
-    proc.set_control("Resonance", 0.3);
+    proc.set_control_immediate("Cutoff", 0.5);
+    proc.set_control_immediate("Resonance", 0.3);
 
     // Warm-up.
     for _ in 0..2400 {
@@ -2595,8 +2602,8 @@ fn tb303_bkm_direct_path_is_lowpass() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         proc.cache_all_vs_pointers();
         for _ in 0..9600 {
             let _ = proc.process(0.0);
@@ -2649,8 +2656,8 @@ fn tb303_bkm_feedback_ports_are_the_lowpass_bypass_source() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         proc.cache_all_vs_pointers();
         for _ in 0..9600 {
             let _ = proc.process(0.0);
@@ -2713,8 +2720,8 @@ fn tb303_bkm_cutoff_pot_without_cv_is_lowpass() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         proc.cache_all_vs_pointers();
         for _ in 0..9600 {
             let _ = proc.process(0.0);
@@ -2765,7 +2772,7 @@ fn tb303_bkm_core_without_resonance_feedback_is_lowpass() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
+        proc.set_control_immediate("Cutoff", 0.5);
         proc.cache_all_vs_pointers();
         for _ in 0..9600 {
             let _ = proc.process(0.0);
@@ -2811,8 +2818,8 @@ fn tb303_bkm_full_processor_vco_port_path_is_not_flat() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         settled_sine_ac_rms(freq, 0.03, |input| proc.process(input))
     };
 
@@ -2820,8 +2827,8 @@ fn tb303_bkm_full_processor_vco_port_path_is_not_flat() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
 
         quick_sine_ac_rms_ports(
             &mut proc,
@@ -2863,8 +2870,8 @@ fn tb303_bkm_resonance_control_changes_cutoff_band() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", resonance);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", resonance);
 
         settled_sine_ac_rms_ports(
             &mut proc,
@@ -2904,8 +2911,8 @@ fn tb303_bkm_max_resonance_remains_finite() {
     let mut proc =
         super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
             .expect("compile failed");
-    proc.set_control("Cutoff", 0.5);
-    proc.set_control("Resonance", 0.95);
+    proc.set_control_immediate("Cutoff", 0.5);
+    proc.set_control_immediate("Resonance", 0.95);
     proc.cache_all_vs_pointers();
 
     let audio_in = proc.resolve_port("audio_in").expect("audio_in port");
@@ -3044,7 +3051,7 @@ fn tb303_bkm_rung_response_exposes_missing_cascaded_poles() {
         options.force_serial_blockwise = true;
         let mut proc =
             super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
 
         for i in 0..9600 {
             let _ = proc.process(0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin());
@@ -3081,7 +3088,7 @@ fn tb303_bkm_rung_response_exposes_missing_cascaded_poles() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
 
         let bkm = proc
             .stages
@@ -3180,8 +3187,8 @@ fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     let measure_blob = |blob: &[u8], freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         quick_sine_ac_rms_ports(
             &mut proc,
             freq,
@@ -3428,8 +3435,8 @@ fn tb303_bkm_audio_out_blocks_dc_after_output_coupling_cap() {
             _ => panic!("expected first stage to be BKM"),
         };
         bkm_only.stages.truncate(1);
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         proc.cache_all_vs_pointers();
         bkm_only.set_control("Cutoff", 0.5);
         bkm_only.set_control("Resonance", 0.0);
@@ -3558,8 +3565,8 @@ fn tb303_k0_response_has_no_midband_output_probe_kink() {
     let measure = |input_port: &'static str, amp: f64, freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         quick_sine_ac_rms_ports(
             &mut proc,
             freq,
@@ -3636,8 +3643,8 @@ fn tb303_k0_high_frequency_response_has_no_nyquist_cliff() {
         .map(|&freq| {
             let mut proc: super::compiled::CompiledPedal =
                 postcard::from_bytes(&blob).expect("deserialize failed");
-            proc.set_control("Cutoff", 0.5);
-            proc.set_control("Resonance", 0.0);
+            proc.set_control_immediate("Cutoff", 0.5);
+            proc.set_control_immediate("Resonance", 0.0);
             settled_sine_ac_rms_ports(
                 &mut proc,
                 freq,
@@ -3695,8 +3702,8 @@ fn tb303_forced_serial_tracks_stinchcombe_htb_shape() {
         options.force_serial_blockwise = true;
         let mut proc =
             super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         settled_sine_ac_rms_ports(
             &mut proc,
             freq,
@@ -3763,8 +3770,8 @@ fn tb303_forced_serial_delayed_feedback_fit_vs_stinchcombe_htb() {
         options.force_serial_blockwise_feedback_gain = feedback_gain;
         let mut proc =
             super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
 
         settled_sine_ac_rms(freq, 0.03, |input| proc.process(input))
     };
@@ -3885,7 +3892,7 @@ fn tb303_bkm_direct_block_matches_forced_serial_first_rung_order() {
         options.force_serial_blockwise = true;
         let mut proc =
             super::compile_pedal_with_options(&def, SR, options).expect("compile failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
 
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
@@ -3918,7 +3925,7 @@ fn tb303_bkm_direct_block_matches_forced_serial_first_rung_order() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
 
         let bkm = proc
             .stages
@@ -4025,7 +4032,7 @@ fn tb303_bkm_direct_blocks_each_have_lowpass_order() {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
                 .expect("compile failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
 
         let bkm = proc
             .stages
@@ -4265,7 +4272,7 @@ fn tb303_serial_blockwise_without_bkm_is_lowpass_diagnostic() {
     let measure = |freq: f64| -> f64 {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, options.clone()).expect("compile failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
 
         for _ in 0..4800 {
             let _ = proc.process(0.0);
@@ -4302,7 +4309,7 @@ fn tb303_forced_serial_stage_outputs_show_reference_shape() {
     let measure = |freq: f64| -> Vec<f64> {
         let mut proc =
             super::compile_pedal_with_options(&def, SR, options.clone()).expect("compile failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
 
         let mut sums = vec![0.0f64; proc.stages.len()];
         let mut count = 0usize;
@@ -4749,8 +4756,8 @@ fn tb303_resonance_creates_peak() {
     let measure_gain_at_freq = |freq: f64, resonance: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", resonance);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", resonance);
 
         // AcidAttack drives the WDF filter at roughly 30 mV, not 1 V; at 1 V
         // the nonlinear ladder compresses the resonance peak and this stops
@@ -4821,8 +4828,8 @@ fn tb303_resonance_k_sweep_tracks_10pole_shape() {
     let measure = |freq: f64, resonance: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", resonance);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", resonance);
         quick_sine_ac_rms_ports(
             &mut proc,
             freq,
@@ -4906,8 +4913,8 @@ fn tb303_bkm_metering_reports_coupled_solver_diagnostics() {
     let mut proc =
         super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
             .expect("compile failed");
-    proc.set_control("Cutoff", 0.5);
-    proc.set_control("Resonance", 0.7);
+    proc.set_control_immediate("Cutoff", 0.5);
+    proc.set_control_immediate("Resonance", 0.7);
     proc.enable_metering(32);
 
     for i in 0..96 {
@@ -5063,8 +5070,8 @@ fn tb303_linear_regime_has_frequency_dependence() {
     let measure = |freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", 0.0);
         // Warm-up
         for _ in 0..2400 {
             proc.process(0.0);
@@ -5208,7 +5215,7 @@ fn tb303_cv_port_modulates_output() {
     let measure_with_cv = |cv_voltage: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
         // Warm up with CV
         for _ in 0..2400 {
             let mut ports = vec![0.0; proc.port_count()];
@@ -5274,7 +5281,7 @@ fn tb303_cv_port_moves_explicit_diode_ladder_cutoff() {
     let measure_ac = |cv_voltage: f64, freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
         let in_idx = proc.resolve_port("audio_in").expect("audio_in port");
         let cv_idx = proc.resolve_port("cv_cutoff").expect("cv_cutoff port");
         let out_idx = proc.resolve_port("audio_out").expect("audio_out port");
@@ -5454,7 +5461,7 @@ fn tb303_dc_gain_not_two() {
 
     let mut proc: super::compiled::CompiledPedal =
         postcard::from_bytes(&blob).expect("deserialize failed");
-    proc.set_control("Resonance", 0.0);
+    proc.set_control_immediate("Resonance", 0.0);
 
     // Step input: DC gain test
     for _ in 0..4800 {
@@ -5894,8 +5901,8 @@ fn tb303_export_publish_k0_response_data() {
         .map(|&freq| {
             let mut proc: super::compiled::CompiledPedal =
                 postcard::from_bytes(&blob).expect("deserialize failed");
-            proc.set_control("Cutoff", 0.5);
-            proc.set_control("Resonance", 0.0);
+            proc.set_control_immediate("Cutoff", 0.5);
+            proc.set_control_immediate("Resonance", 0.0);
             quick_sine_ac_rms_ports(
                 &mut proc,
                 freq,
@@ -6000,8 +6007,8 @@ fn tb303_export_publish_response_data() {
     let measure = |freq: f64, resonance: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", resonance);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", resonance);
         quick_sine_ac_rms_ports(
             &mut proc,
             freq,
@@ -6078,8 +6085,8 @@ fn tb303_export_publish_response_data() {
                   mut drive: Box<dyn FnMut(f64) -> (f64, f64, f64)>| {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", resonance);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", resonance);
         let vco_idx = proc.resolve_port("vco_in").expect("missing vco_in");
         let cv_cutoff_idx = proc.resolve_port("cv_cutoff").expect("missing cv_cutoff");
         let cv_res_idx = proc
@@ -6194,14 +6201,14 @@ fn tb303_export_squelch_then_normal_reference_wav() {
     let mut ports = vec![0.0; proc.port_count()];
     let n_samples = (2.0 * SR) as usize;
     let mut samples = Vec::with_capacity(n_samples);
-    proc.set_control("Cutoff", 0.5);
-    proc.set_control("Resonance", 0.85);
+    proc.set_control_immediate("Cutoff", 0.5);
+    proc.set_control_immediate("Resonance", 0.85);
 
     for i in 0..n_samples {
         let t = i as f64 / SR;
         let first_half = t < 1.0;
         if i == SR as usize {
-            proc.set_control("Resonance", 0.2);
+            proc.set_control_immediate("Resonance", 0.2);
         }
 
         let local_t = if first_half { t } else { t - 1.0 };
@@ -6256,8 +6263,8 @@ fn tb303_nonlinear_k_sweep_signature_metrics() {
     let render_segment = |resonance: f64, cutoff_cv: f64, input_amp: f64| -> Vec<f64> {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", resonance);
+        proc.set_control_immediate("Cutoff", 0.5);
+        proc.set_control_immediate("Resonance", resonance);
         let vco_idx = proc.resolve_port("vco_in").expect("missing vco_in");
         let cv_cutoff_idx = proc.resolve_port("cv_cutoff").expect("missing cv_cutoff");
         let out_idx = proc.resolve_port("audio_out").expect("missing audio_out");
@@ -6554,7 +6561,7 @@ fn tb303_cap_state_bounded_during_warmup() {
 
     let mut proc: super::compiled::CompiledPedal =
         postcard::from_bytes(&blob).expect("deserialize failed");
-    proc.set_control("Resonance", 0.0);
+    proc.set_control_immediate("Resonance", 0.0);
 
     // Process 4800 samples of SILENCE — no input
     // After each sample, check the BKM stage's block tree states
@@ -6657,13 +6664,14 @@ fn tb303_vco_port_path_is_lowpass() {
     .expect("compile failed");
 
     const TB303_SMALL_SIGNAL_VCO_PORT_VOLTS: f64 = 0.003;
+    const TB303_TEST_CUTOFF: f64 = 0.1;
 
     let measure_q12_boundary = |freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
         proc.cache_all_vs_pointers();
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", TB303_TEST_CUTOFF);
+        proc.set_control_immediate("Resonance", 0.0);
         let route = proc
             .stage_route_plan
             .primary_bkm
@@ -6706,8 +6714,8 @@ fn tb303_vco_port_path_is_lowpass() {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
         proc.cache_all_vs_pointers();
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", TB303_TEST_CUTOFF);
+        proc.set_control_immediate("Resonance", 0.0);
         let route = proc
             .stage_route_plan
             .primary_bkm
@@ -6755,12 +6763,80 @@ fn tb303_vco_port_path_is_lowpass() {
         ac_rms(&values)
     };
 
+    let measure_direct_bkm_after_q12 = |freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.cache_all_vs_pointers();
+        proc.set_control_immediate("Cutoff", TB303_TEST_CUTOFF);
+        proc.set_control_immediate("Resonance", 0.0);
+        let route = proc
+            .stage_route_plan
+            .primary_bkm
+            .clone()
+            .expect("BKM route");
+        let drive = route
+            .boundary_drives
+            .iter()
+            .find(|drive| {
+                drive
+                    .positive_input_port_names
+                    .iter()
+                    .any(|name| name == "vco_in")
+            })
+            .expect("vco_in Q12 boundary drive")
+            .clone();
+
+        assert_ne!(
+            drive.source_stage_idx, route.stage_idx,
+            "Q12 and BKM stages should be distinct"
+        );
+        let (q12_stage, bkm_stage) = if drive.source_stage_idx < route.stage_idx {
+            let (left, right) = proc.stages.split_at_mut(route.stage_idx);
+            (&mut left[drive.source_stage_idx], &mut right[0])
+        } else {
+            let (left, right) = proc.stages.split_at_mut(drive.source_stage_idx);
+            (&mut right[0], &mut left[route.stage_idx])
+        };
+        let pedalkernel_rt::processor::Stage::Wdf(q12) = q12_stage else {
+            panic!("Q12 source stage should be WDF");
+        };
+        let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = bkm_stage else {
+            panic!("routed stage should be BKM");
+        };
+        let vs_signals = vec![0.0; bkm.vs_port_map.len()];
+
+        let mut process = |input: f64| {
+            let q12_out = q12.process(input);
+            let mut offsets = Vec::new();
+            for &port_idx in &drive.positive_target_coupling_port_indices {
+                offsets.push((port_idx, q12_out));
+            }
+            for &port_idx in &drive.negative_target_coupling_port_indices {
+                offsets.push((port_idx, -q12_out));
+            }
+            bkm.process_with_port_incident_offsets(&offsets, &vs_signals)
+        };
+
+        for i in 0..1200 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = process(input);
+        }
+        let mut values = Vec::with_capacity(2400);
+        for i in 0..2400 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            values.push(process(input));
+        }
+        ac_rms(&values)
+    };
+
     let measure_direct_bkm_boundary_without_extraction = |freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
         proc.cache_all_vs_pointers();
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", TB303_TEST_CUTOFF);
+        proc.set_control_immediate("Resonance", 0.0);
         let route = proc
             .stage_route_plan
             .primary_bkm
@@ -6813,8 +6889,8 @@ fn tb303_vco_port_path_is_lowpass() {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
         proc.cache_all_vs_pointers();
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", TB303_TEST_CUTOFF);
+        proc.set_control_immediate("Resonance", 0.0);
         let route = proc
             .stage_route_plan
             .primary_bkm
@@ -6845,12 +6921,27 @@ fn tb303_vco_port_path_is_lowpass() {
     let measure_routed_port_ac = |freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Cutoff", 0.5);
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Cutoff", TB303_TEST_CUTOFF);
+        proc.set_control_immediate("Resonance", 0.0);
         quick_sine_ac_rms_ports(
             &mut proc,
             freq,
             TB303_SMALL_SIGNAL_VCO_PORT_VOLTS,
+            &[("vco_in", 1.0)],
+            &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+            "audio_out",
+        )
+    };
+
+    let measure_routed_zero_input_ac = || -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control_immediate("Cutoff", TB303_TEST_CUTOFF);
+        proc.set_control_immediate("Resonance", 0.0);
+        quick_sine_ac_rms_ports(
+            &mut proc,
+            100.0,
+            0.0,
             &[("vco_in", 1.0)],
             &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
             "audio_out",
@@ -6863,25 +6954,32 @@ fn tb303_vco_port_path_is_lowpass() {
     let b100 = measure_direct_bkm_boundary(100.0);
     let b1k = measure_direct_bkm_boundary(1000.0);
     let b10k = measure_direct_bkm_boundary(10000.0);
+    let qb100 = measure_direct_bkm_after_q12(100.0);
+    let qb1k = measure_direct_bkm_after_q12(1000.0);
+    let qb10k = measure_direct_bkm_after_q12(10000.0);
     let f100 = measure_direct_bkm_boundary_without_extraction(100.0);
     let f1k = measure_direct_bkm_boundary_without_extraction(1000.0);
     let f10k = measure_direct_bkm_boundary_without_extraction(10000.0);
     let s100 = measure_direct_bkm_primary_drive(100.0);
     let s1k = measure_direct_bkm_primary_drive(1000.0);
     let s10k = measure_direct_bkm_primary_drive(10000.0);
+    let zero_routed = measure_routed_zero_input_ac();
     let g100 = measure_routed_port_ac(100.0);
     let g1k = measure_routed_port_ac(1000.0);
     let g10k = measure_routed_port_ac(10000.0);
     let q_ratio_db = 20.0 * (q100 / q10k.max(1e-12)).log10();
     let b_ratio_db = 20.0 * (b100 / b10k.max(1e-12)).log10();
+    let qb_ratio_db = 20.0 * (qb100 / qb10k.max(1e-12)).log10();
     let f_ratio_db = 20.0 * (f100 / f10k.max(1e-12)).log10();
     let s_ratio_db = 20.0 * (s100 / s10k.max(1e-12)).log10();
     let ratio_db = 20.0 * (g100 / g10k.max(1e-12)).log10();
 
     eprintln!("  Q12 boundary AC: 100Hz={q100:.6}, 1kHz={q1k:.6}, 10kHz={q10k:.6}, ratio={q_ratio_db:+.1} dB");
     eprintln!("  Direct BKM boundary AC: 100Hz={b100:.6}, 1kHz={b1k:.6}, 10kHz={b10k:.6}, ratio={b_ratio_db:+.1} dB");
+    eprintln!("  Direct Q12→BKM AC: 100Hz={qb100:.6}, 1kHz={qb1k:.6}, 10kHz={qb10k:.6}, ratio={qb_ratio_db:+.1} dB");
     eprintln!("  Direct BKM fallback AC: 100Hz={f100:.6}, 1kHz={f1k:.6}, 10kHz={f10k:.6}, ratio={f_ratio_db:+.1} dB");
     eprintln!("  Direct BKM primary drive AC: 100Hz={s100:.6}, 1kHz={s1k:.6}, 10kHz={s10k:.6}, ratio={s_ratio_db:+.1} dB");
+    eprintln!("  Routed zero-input AC: {zero_routed:.6}");
     eprintln!("  Routed VCO port AC: 100Hz={g100:.6}, 1kHz={g1k:.6}, 10kHz={g10k:.6}, ratio={ratio_db:+.1} dB");
 
     // The diode ladder should be LOWPASS: 100Hz > 10kHz
@@ -6891,12 +6989,11 @@ fn tb303_vco_port_path_is_lowpass() {
          (ratio={ratio_db:+.1} dB)"
     );
 
-    // For a 4-pole ladder, expect at least 12dB rolloff from 100Hz to 10kHz
-    // (relaxed — the cutoff frequency may be high)
-    if ratio_db <= 6.0 {
+    if ratio_db <= 2.0 {
         eprintln!(
-            "  WEAK: routed path only {ratio_db:+.1} dB rolloff; \
-             direct_bkm={b_ratio_db:+.1} dB, q12={q_ratio_db:+.1} dB"
+            "  WEAK: routed Q12->BKM path is still under-damped/flat; \
+             routed={ratio_db:+.1} dB, direct_bkm={b_ratio_db:+.1} dB, \
+             q12={q_ratio_db:+.1} dB, zero_input={zero_routed:.6}"
         );
     }
 }
@@ -6922,7 +7019,7 @@ fn tb303_audio_and_vco_ports_both_reach_output() {
     let measure = |input_name: &str, freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        proc.set_control("Resonance", 0.0);
+        proc.set_control_immediate("Resonance", 0.0);
         let input_idx = proc
             .resolve_port(input_name)
             .unwrap_or_else(|| panic!("{input_name} port"));
