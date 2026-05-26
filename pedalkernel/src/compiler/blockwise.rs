@@ -466,6 +466,55 @@ fn differential_rung_port_nodes(block: &Block, graph: &CircuitGraph) -> Option<(
     Some((ports.bottom_left, ports.bottom_right))
 }
 
+fn differential_rung_bottom_to_top_order(
+    blocks: &[Block],
+    graph: &CircuitGraph,
+) -> Option<Vec<usize>> {
+    if blocks.is_empty() {
+        return None;
+    }
+
+    let ports: Vec<DifferentialRungPorts> = blocks
+        .iter()
+        .map(|block| differential_rung_ports(block, graph))
+        .collect::<Option<Vec<_>>>()?;
+
+    let top_pairs: HashSet<(NodeId, NodeId)> = ports
+        .iter()
+        .map(|port| (port.top_left, port.top_right))
+        .collect();
+    let mut starts: Vec<usize> = ports
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, port)| {
+            let bottom = (port.bottom_left, port.bottom_right);
+            (!top_pairs.contains(&bottom)).then_some(idx)
+        })
+        .collect();
+    if starts.len() != 1 {
+        return None;
+    }
+
+    let mut order = Vec::with_capacity(blocks.len());
+    let mut used = HashSet::new();
+    let mut current = starts.remove(0);
+    loop {
+        order.push(current);
+        used.insert(current);
+        let current_top = (ports[current].top_left, ports[current].top_right);
+        let next = ports.iter().enumerate().find_map(|(idx, port)| {
+            let bottom = (port.bottom_left, port.bottom_right);
+            (!used.contains(&idx) && bottom == current_top).then_some(idx)
+        });
+        let Some(next) = next else {
+            break;
+        };
+        current = next;
+    }
+
+    (order.len() == blocks.len()).then_some(order)
+}
+
 fn bjt_model_name_for_comp(comp_idx: usize, graph: &CircuitGraph) -> Option<String> {
     let comp = &graph.components[comp_idx];
     let eidx = graph
@@ -1622,6 +1671,41 @@ pub(super) fn analyze_blockwise(
             port_nodes: nl_block.nodes.clone(),
             topology,
         });
+    }
+
+    let differential_prefix_len = blocks
+        .iter()
+        .take_while(|block| matches!(block.topology, BlockTopology::DifferentialDiodeRung { .. }))
+        .count();
+    if differential_prefix_len > 1 {
+        let order =
+            differential_rung_bottom_to_top_order(&blocks[..differential_prefix_len], graph);
+        if let Some(order) = order {
+            let mut old_blocks = blocks.into_iter().map(Some).collect::<Vec<_>>();
+            let mut reordered = Vec::with_capacity(old_blocks.len());
+            for idx in order {
+                if let Some(block) = old_blocks.get_mut(idx).and_then(Option::take) {
+                    reordered.push(block);
+                }
+            }
+            for block in old_blocks.into_iter().flatten() {
+                reordered.push(block);
+            }
+            blocks = reordered;
+        }
+        #[cfg(test)]
+        {
+            let order_names: Vec<&str> = blocks
+                .iter()
+                .filter_map(|block| {
+                    block
+                        .nl_edges
+                        .first()
+                        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+                })
+                .collect();
+            eprintln!("  differential rung bottom-to-top order: {:?}", order_names);
+        }
     }
 
     let all_port_nodes: Vec<NodeId> = blocks
@@ -3163,15 +3247,7 @@ pub(super) fn try_build_blockwise(
         // is implemented and ready to use.
 
         // ── Package as BlockwiseKMethodStage ─────────────────────────────
-        let output_block = if use_coupled_solve {
-            // Differential diode ladder blocks are ordered from the top/output
-            // rung toward the bottom/input rung. The coupled solve is not a
-            // serial cascade, so the observable ladder tap is the first rung,
-            // not the last one.
-            0
-        } else {
-            n_blocks - 1
-        };
+        let output_block = n_blocks - 1;
         // Keep the specialized diode ladder core disabled by default. The real
         // BKM path must use the coupled block solve and coupling matrix; the
         // core shortcut bypasses resonance/feedback coupling and is only a

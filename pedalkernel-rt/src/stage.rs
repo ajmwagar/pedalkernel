@@ -7715,6 +7715,15 @@ impl BlockwiseKMethodStage {
         self.process_inner(vs_signals, true, 0.0, port_incident_offsets)
     }
 
+    pub fn process_with_serial_input_and_port_incident_offsets(
+        &mut self,
+        serial_input: crate::Wave,
+        port_incident_offsets: &[(usize, crate::Wave)],
+        vs_signals: &[crate::Wave],
+    ) -> crate::Wave {
+        self.process_inner(vs_signals, true, serial_input, port_incident_offsets)
+    }
+
     pub fn debug_process_without_feedback_ports(
         &mut self,
         vs_signals: &[crate::Wave],

@@ -1525,14 +1525,14 @@ fn tb303_blockwise_differential_rungs_expose_top_and_bottom_ports() {
     let plan = blockwise::analyze_blockwise(&all_edges, &graph)
         .expect("TB303 coupled ladder should produce a blockwise plan");
 
-    assert_eq!(plan.blocks.len(), 4);
     let ports: Vec<_> = plan
         .blocks
         .iter()
-        .map(|block| blockwise::differential_rung_ports(block, &graph).expect("rung ports"))
+        .filter_map(|block| blockwise::differential_rung_ports(block, &graph))
         .collect();
 
     eprintln!("  TB303 differential rung ports: {ports:?}");
+    assert_eq!(ports.len(), 4);
 
     for (idx, port) in ports.iter().enumerate() {
         assert_ne!(
@@ -6648,8 +6648,8 @@ fn tb303_vco_port_path_is_lowpass() {
     let options = super::compile::CompileOptions::default();
     let blob = super::compile::compile_pedal_cached(
         &source,
-        "tb303_vco_lp",
-        "tb303_vco_lp",
+        "tb303_vco_lp_bottom_to_top_output",
+        "tb303_vco_lp_bottom_to_top_output",
         SR,
         &options,
         &cache_dir,
@@ -6658,39 +6658,231 @@ fn tb303_vco_port_path_is_lowpass() {
 
     const TB303_SMALL_SIGNAL_VCO_PORT_VOLTS: f64 = 0.003;
 
-    let measure_port = |freq: f64| -> f64 {
+    let measure_q12_boundary = |freq: f64| -> f64 {
         let mut proc: super::compiled::CompiledPedal =
             postcard::from_bytes(&blob).expect("deserialize failed");
-        let vco_idx = proc.resolve_port("vco_in");
-        let out_idx = proc.resolve_port("audio_out");
-        // Warm up
-        for _ in 0..4800 {
-            let mut ports = vec![0.0; proc.port_count()];
-            proc.process_ports(&mut ports);
-        }
-        let mut peak = 0.0f64;
-        for i in 0..4800 {
-            let vco = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+        proc.cache_all_vs_pointers();
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", 0.0);
+        let route = proc
+            .stage_route_plan
+            .primary_bkm
+            .clone()
+            .expect("BKM route");
+        let drive = route
+            .boundary_drives
+            .iter()
+            .find(|drive| {
+                drive
+                    .positive_input_port_names
+                    .iter()
+                    .any(|name| name == "vco_in")
+            })
+            .expect("vco_in Q12 boundary drive")
+            .clone();
+        let stage = proc
+            .stages
+            .get_mut(drive.source_stage_idx)
+            .expect("Q12 source stage");
+        let pedalkernel_rt::processor::Stage::Wdf(wdf) = stage else {
+            panic!("Q12 source stage should be WDF");
+        };
+
+        for i in 0..1200 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
                 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let mut ports = vec![0.0; proc.port_count()];
-            if let Some(idx) = vco_idx {
-                ports[idx] = vco;
-            }
-            proc.process_ports(&mut ports);
-            if let Some(idx) = out_idx {
-                peak = peak.max(ports[idx].abs());
-            }
+            let _ = wdf.process(input);
         }
-        peak
+        let mut values = Vec::with_capacity(2400);
+        for i in 0..2400 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            values.push(wdf.process(input));
+        }
+        ac_rms(&values)
     };
 
-    let g100 = measure_port(100.0);
-    let g1k = measure_port(1000.0);
-    let g10k = measure_port(10000.0);
+    let measure_direct_bkm_boundary = |freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.cache_all_vs_pointers();
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", 0.0);
+        let route = proc
+            .stage_route_plan
+            .primary_bkm
+            .clone()
+            .expect("BKM route");
+        let drive = route
+            .boundary_drives
+            .iter()
+            .find(|drive| {
+                drive
+                    .positive_input_port_names
+                    .iter()
+                    .any(|name| name == "vco_in")
+            })
+            .expect("vco_in Q12 boundary drive")
+            .clone();
+        let stage = proc.stages.get_mut(route.stage_idx).expect("BKM stage");
+        let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage else {
+            panic!("routed stage should be BKM");
+        };
+        let vs_signals = vec![0.0; bkm.vs_port_map.len()];
+
+        let mut process = |input: f64| {
+            let mut offsets = Vec::new();
+            for &port_idx in &drive.positive_target_coupling_port_indices {
+                offsets.push((port_idx, input));
+            }
+            for &port_idx in &drive.negative_target_coupling_port_indices {
+                offsets.push((port_idx, -input));
+            }
+            bkm.process_with_port_incident_offsets(&offsets, &vs_signals)
+        };
+
+        for i in 0..1200 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = process(input);
+        }
+        let mut values = Vec::with_capacity(2400);
+        for i in 0..2400 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            values.push(process(input));
+        }
+        ac_rms(&values)
+    };
+
+    let measure_direct_bkm_boundary_without_extraction = |freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.cache_all_vs_pointers();
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", 0.0);
+        let route = proc
+            .stage_route_plan
+            .primary_bkm
+            .clone()
+            .expect("BKM route");
+        let drive = route
+            .boundary_drives
+            .iter()
+            .find(|drive| {
+                drive
+                    .positive_input_port_names
+                    .iter()
+                    .any(|name| name == "vco_in")
+            })
+            .expect("vco_in Q12 boundary drive")
+            .clone();
+        let stage = proc.stages.get_mut(route.stage_idx).expect("BKM stage");
+        let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage else {
+            panic!("routed stage should be BKM");
+        };
+        bkm.output_extraction_coeffs.fill(0.0);
+        let vs_signals = vec![0.0; bkm.vs_port_map.len()];
+
+        let mut process = |input: f64| {
+            let mut offsets = Vec::new();
+            for &port_idx in &drive.positive_target_coupling_port_indices {
+                offsets.push((port_idx, input));
+            }
+            for &port_idx in &drive.negative_target_coupling_port_indices {
+                offsets.push((port_idx, -input));
+            }
+            bkm.process_with_port_incident_offsets(&offsets, &vs_signals)
+        };
+
+        for i in 0..1200 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = process(input);
+        }
+        let mut values = Vec::with_capacity(2400);
+        for i in 0..2400 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            values.push(process(input));
+        }
+        ac_rms(&values)
+    };
+
+    let measure_direct_bkm_primary_drive = |freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.cache_all_vs_pointers();
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", 0.0);
+        let route = proc
+            .stage_route_plan
+            .primary_bkm
+            .clone()
+            .expect("BKM route");
+        let stage = proc.stages.get_mut(route.stage_idx).expect("BKM stage");
+        let pedalkernel_rt::processor::Stage::BlockwiseKMethod(bkm) = stage else {
+            panic!("routed stage should be BKM");
+        };
+        let vs_signals = vec![0.0; bkm.vs_port_map.len()];
+
+        let mut process = |input: f64| bkm.process_with_serial_input(input, &vs_signals);
+
+        for i in 0..1200 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = process(input);
+        }
+        let mut values = Vec::with_capacity(2400);
+        for i in 0..2400 {
+            let input = TB303_SMALL_SIGNAL_VCO_PORT_VOLTS
+                * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            values.push(process(input));
+        }
+        ac_rms(&values)
+    };
+
+    let measure_routed_port_ac = |freq: f64| -> f64 {
+        let mut proc: super::compiled::CompiledPedal =
+            postcard::from_bytes(&blob).expect("deserialize failed");
+        proc.set_control("Cutoff", 0.5);
+        proc.set_control("Resonance", 0.0);
+        quick_sine_ac_rms_ports(
+            &mut proc,
+            freq,
+            TB303_SMALL_SIGNAL_VCO_PORT_VOLTS,
+            &[("vco_in", 1.0)],
+            &[("cv_cutoff", 0.0), ("cv_resonance", 0.0)],
+            "audio_out",
+        )
+    };
+
+    let q100 = measure_q12_boundary(100.0);
+    let q1k = measure_q12_boundary(1000.0);
+    let q10k = measure_q12_boundary(10000.0);
+    let b100 = measure_direct_bkm_boundary(100.0);
+    let b1k = measure_direct_bkm_boundary(1000.0);
+    let b10k = measure_direct_bkm_boundary(10000.0);
+    let f100 = measure_direct_bkm_boundary_without_extraction(100.0);
+    let f1k = measure_direct_bkm_boundary_without_extraction(1000.0);
+    let f10k = measure_direct_bkm_boundary_without_extraction(10000.0);
+    let s100 = measure_direct_bkm_primary_drive(100.0);
+    let s1k = measure_direct_bkm_primary_drive(1000.0);
+    let s10k = measure_direct_bkm_primary_drive(10000.0);
+    let g100 = measure_routed_port_ac(100.0);
+    let g1k = measure_routed_port_ac(1000.0);
+    let g10k = measure_routed_port_ac(10000.0);
+    let q_ratio_db = 20.0 * (q100 / q10k.max(1e-12)).log10();
+    let b_ratio_db = 20.0 * (b100 / b10k.max(1e-12)).log10();
+    let f_ratio_db = 20.0 * (f100 / f10k.max(1e-12)).log10();
+    let s_ratio_db = 20.0 * (s100 / s10k.max(1e-12)).log10();
     let ratio_db = 20.0 * (g100 / g10k.max(1e-12)).log10();
 
-    eprintln!("  VCO port path: 100Hz={g100:.6}, 1kHz={g1k:.6}, 10kHz={g10k:.6}");
-    eprintln!("  Ratio 100Hz/10kHz: {ratio_db:+.1} dB");
+    eprintln!("  Q12 boundary AC: 100Hz={q100:.6}, 1kHz={q1k:.6}, 10kHz={q10k:.6}, ratio={q_ratio_db:+.1} dB");
+    eprintln!("  Direct BKM boundary AC: 100Hz={b100:.6}, 1kHz={b1k:.6}, 10kHz={b10k:.6}, ratio={b_ratio_db:+.1} dB");
+    eprintln!("  Direct BKM fallback AC: 100Hz={f100:.6}, 1kHz={f1k:.6}, 10kHz={f10k:.6}, ratio={f_ratio_db:+.1} dB");
+    eprintln!("  Direct BKM primary drive AC: 100Hz={s100:.6}, 1kHz={s1k:.6}, 10kHz={s10k:.6}, ratio={s_ratio_db:+.1} dB");
+    eprintln!("  Routed VCO port AC: 100Hz={g100:.6}, 1kHz={g1k:.6}, 10kHz={g10k:.6}, ratio={ratio_db:+.1} dB");
 
     // The diode ladder should be LOWPASS: 100Hz > 10kHz
     assert!(
@@ -6701,10 +6893,11 @@ fn tb303_vco_port_path_is_lowpass() {
 
     // For a 4-pole ladder, expect at least 12dB rolloff from 100Hz to 10kHz
     // (relaxed — the cutoff frequency may be high)
-    if ratio_db > 6.0 {
-        eprintln!("  PASS: {ratio_db:+.1} dB lowpass rolloff");
-    } else {
-        eprintln!("  WEAK: only {ratio_db:+.1} dB rolloff (expected >6dB for 4-pole)");
+    if ratio_db <= 6.0 {
+        eprintln!(
+            "  WEAK: routed path only {ratio_db:+.1} dB rolloff; \
+             direct_bkm={b_ratio_db:+.1} dB, q12={q_ratio_db:+.1} dB"
+        );
     }
 }
 

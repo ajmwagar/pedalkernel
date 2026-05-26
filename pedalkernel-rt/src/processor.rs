@@ -1287,7 +1287,7 @@ impl CompiledPedal {
 
     fn process_stage_route_plan(&mut self) -> Option<crate::Wave> {
         let route = self.stage_route_plan.primary_bkm.clone()?;
-        let mut port_incident_offsets = alloc::vec::Vec::new();
+        let mut boundary_outputs = alloc::vec::Vec::new();
         for drive in &route.boundary_drives {
             let mut input = 0.0 as crate::Wave;
             for &port_idx in &drive.positive_input_port_indices {
@@ -1304,12 +1304,7 @@ impl CompiledPedal {
             if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(drive.source_stage_idx) {
                 let out = wdf.process(input);
                 if out.is_finite() {
-                    for &port_idx in &drive.positive_target_coupling_port_indices {
-                        port_incident_offsets.push((port_idx, out));
-                    }
-                    for &port_idx in &drive.negative_target_coupling_port_indices {
-                        port_incident_offsets.push((port_idx, -out));
-                    }
+                    boundary_outputs.push((drive.clone(), out));
                 }
             }
         }
@@ -1327,8 +1322,40 @@ impl CompiledPedal {
             }
         }
 
-        let output =
-            bkm_stage.process_with_port_incident_offsets(&port_incident_offsets, &vs_signals);
+        let primary_ports = bkm_stage
+            .block_port_indices
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        let mut serial_input = 0.0 as crate::Wave;
+        let mut port_incident_offsets = alloc::vec::Vec::new();
+        for (drive, out) in boundary_outputs {
+            let targets_primary_input = !drive.target_coupling_port_indices.is_empty()
+                && drive
+                    .target_coupling_port_indices
+                    .iter()
+                    .all(|port_idx| primary_ports.contains(port_idx));
+            if targets_primary_input
+                && !drive.positive_target_coupling_port_indices.is_empty()
+                && !drive.negative_target_coupling_port_indices.is_empty()
+            {
+                serial_input += out;
+                continue;
+            }
+
+            for &port_idx in &drive.positive_target_coupling_port_indices {
+                port_incident_offsets.push((port_idx, out));
+            }
+            for &port_idx in &drive.negative_target_coupling_port_indices {
+                port_incident_offsets.push((port_idx, -out));
+            }
+        }
+
+        let output = bkm_stage.process_with_serial_input_and_port_incident_offsets(
+            serial_input,
+            &port_incident_offsets,
+            &vs_signals,
+        );
         let output = if output.is_finite() { output } else { 0.0 };
         for port_idx in route.output_port_indices {
             if port_idx < self.port_values.len() {
