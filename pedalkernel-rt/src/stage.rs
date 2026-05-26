@@ -1414,6 +1414,28 @@ pub struct WdfStage {
     /// to eliminate per-sample tree walking + string comparison.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub port_vs_ptrs: Vec<(alloc::string::String, VsPtr)>,
+
+    /// Boundary bindings expose multiple physical terminals from one WDF
+    /// block to a surrounding adaptor/coupling solve. Ordinary WDF stages
+    /// leave this empty and continue to behave as one-input/one-output stages.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub boundary_bindings: Vec<WdfBoundaryBinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum WdfBoundaryDirection {
+    Input,
+    Output,
+    Control,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct WdfBoundaryBinding {
+    pub label: alloc::string::String,
+    pub node_id: usize,
+    pub direction: WdfBoundaryDirection,
 }
 
 impl WdfStage {
@@ -1480,6 +1502,7 @@ impl WdfStage {
             opamp_wdf_adaptor: None,
             main_vs_ptr: None,
             port_vs_ptrs: Vec::new(),
+            boundary_bindings: Vec::new(),
         }
     }
 

@@ -28,6 +28,11 @@ pub(super) enum BlockTopology {
         right_comp_idx: usize,
         reactive_edge: usize,
     },
+    InputDifferentialPair {
+        left_comp_idx: usize,
+        right_comp_idx: usize,
+        shared_emitter: NodeId,
+    },
 }
 
 /// A block in the blockwise decomposition — one NL device + its local state.
@@ -133,8 +138,6 @@ fn merge_differential_reactive_rungs(
     for (bi, block) in nl_blocks.iter().enumerate() {
         if let Some((_, emitter)) = diode_connected_bjt_nodes(block.comp_idx, graph) {
             output_node_to_block.insert(emitter, bi);
-        } else if let Some((_, output)) = nl_block_direction_nodes(block, graph) {
-            output_node_to_block.insert(output, bi);
         }
     }
 
@@ -216,6 +219,70 @@ fn merge_differential_reactive_rungs(
     (merged, preassigned_reactive, preassigned_set)
 }
 
+fn merge_shared_emitter_input_pairs(nl_blocks: Vec<NlBlock>, graph: &CircuitGraph) -> Vec<NlBlock> {
+    if nl_blocks.len() < 2 {
+        return nl_blocks;
+    }
+
+    let mut parent: Vec<usize> = (0..nl_blocks.len()).collect();
+    for a in 0..nl_blocks.len() {
+        let Some(a_terms) = bjt_terminal_nodes(nl_blocks[a].comp_idx, graph) else {
+            continue;
+        };
+        if a_terms.base == a_terms.collector {
+            continue;
+        }
+        for b in (a + 1)..nl_blocks.len() {
+            let Some(b_terms) = bjt_terminal_nodes(nl_blocks[b].comp_idx, graph) else {
+                continue;
+            };
+            if b_terms.base == b_terms.collector {
+                continue;
+            }
+            if a_terms.emitter == b_terms.emitter
+                && a_terms.base != b_terms.base
+                && a_terms.collector != b_terms.collector
+            {
+                union_roots(&mut parent, a, b);
+            }
+        }
+    }
+
+    let mut root_to_new: HashMap<usize, usize> = HashMap::new();
+    let mut merged = Vec::<NlBlock>::new();
+    for (old_idx, block) in nl_blocks.iter().enumerate() {
+        let root = find_root(&mut parent, old_idx);
+        let new_idx = *root_to_new.entry(root).or_insert_with(|| {
+            let idx = merged.len();
+            merged.push(NlBlock {
+                nl_edges: Vec::new(),
+                nodes: Vec::new(),
+                comp_idx: block.comp_idx,
+            });
+            idx
+        });
+        merged[new_idx]
+            .nl_edges
+            .extend(block.nl_edges.iter().copied());
+        for &node in &block.nodes {
+            if !merged[new_idx].nodes.contains(&node) {
+                merged[new_idx].nodes.push(node);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    if merged.len() != nl_blocks.len() {
+        eprintln!(
+            "  [blockwise] merged shared-emitter input pairs: {} NL blocks → {} blocks",
+            nl_blocks.len(),
+            merged.len()
+        );
+    }
+
+    merged
+}
+
 fn component_pin_node(graph: &CircuitGraph, comp_id: &str, pin: &str) -> Option<NodeId> {
     graph.node_names.get(&format!("{comp_id}.{pin}")).copied()
 }
@@ -267,6 +334,18 @@ fn nl_block_direction_nodes(block: &NlBlock, graph: &CircuitGraph) -> Option<(No
 }
 
 fn diode_connected_bjt_nodes(comp_idx: usize, graph: &CircuitGraph) -> Option<(NodeId, NodeId)> {
+    let terms = bjt_terminal_nodes(comp_idx, graph)?;
+    (terms.base == terms.collector).then_some((terms.base, terms.emitter))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BjtTerminalNodes {
+    base: NodeId,
+    collector: NodeId,
+    emitter: NodeId,
+}
+
+fn bjt_terminal_nodes(comp_idx: usize, graph: &CircuitGraph) -> Option<BjtTerminalNodes> {
     let comp = &graph.components[comp_idx];
     let eidx = graph
         .edges
@@ -293,7 +372,11 @@ fn diode_connected_bjt_nodes(comp_idx: usize, graph: &CircuitGraph) -> Option<(N
             collector_node,
             emitter_node,
             ..
-        } if base_node == collector_node => Some((base_node, emitter_node)),
+        } => Some(BjtTerminalNodes {
+            base: base_node,
+            collector: collector_node,
+            emitter: emitter_node,
+        }),
         _ => None,
     }
 }
@@ -312,6 +395,24 @@ fn classify_block_topology(
 
     if comp_indices.len() != 2 {
         return BlockTopology::Generic;
+    }
+
+    if let (Some(left), Some(right)) = (
+        bjt_terminal_nodes(comp_indices[0], graph),
+        bjt_terminal_nodes(comp_indices[1], graph),
+    ) {
+        if left.base != left.collector
+            && right.base != right.collector
+            && left.emitter == right.emitter
+            && left.base != right.base
+            && left.collector != right.collector
+        {
+            return BlockTopology::InputDifferentialPair {
+                left_comp_idx: comp_indices[0],
+                right_comp_idx: comp_indices[1],
+                shared_emitter: left.emitter,
+            };
+        }
     }
 
     let Some((_, left_emitter)) = diode_connected_bjt_nodes(comp_indices[0], graph) else {
@@ -432,6 +533,75 @@ fn build_differential_diode_rung_stage(
     let mut stage = pedalkernel_rt::stage::WdfStage::new(tree, root, oversampler);
     stage.output_probe = Some(cap_comp.id.clone());
     stage.root_comp_id = graph.components[left_comp_idx].id.clone();
+    Some(stage)
+}
+
+fn build_input_differential_pair_stage(
+    block: &Block,
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<pedalkernel_rt::stage::WdfStage> {
+    let BlockTopology::InputDifferentialPair {
+        left_comp_idx,
+        right_comp_idx,
+        shared_emitter,
+    } = block.topology
+    else {
+        return None;
+    };
+
+    let left = bjt_terminal_nodes(left_comp_idx, graph)?;
+    let right = bjt_terminal_nodes(right_comp_idx, graph)?;
+    let model_name = bjt_model_name_for_comp(left_comp_idx, graph)?;
+    let model = super::helpers::gummel_poon_model(&model_name);
+    let i_tail = (supply_voltage.max(1.0) / 100_000.0).max(1.0e-9);
+    let root = pedalkernel_rt::stage::RootKind::DiffPair(
+        pedalkernel_rt::elements::DiffPairRoot::from_gummel_poon(&model, i_tail),
+    );
+    let oversampler = pedalkernel_rt::oversampling::Oversampler::new(
+        pedalkernel_rt::oversampling::OversamplingFactor::X1,
+    );
+    let mut stage = pedalkernel_rt::stage::WdfStage::new(
+        pedalkernel_rt::dyn_node::DynNode::VoltageSource(0.0, 1_000.0),
+        root,
+        oversampler,
+    );
+    stage.root_comp_id = graph.components[left_comp_idx].id.clone();
+    stage.bypass_serial = true;
+    #[cfg(debug_assertions)]
+    {
+        stage.debug_label = format!(
+            "{}/{} input differential pair",
+            graph.components[left_comp_idx].id, graph.components[right_comp_idx].id
+        );
+    }
+    stage.boundary_bindings = vec![
+        pedalkernel_rt::stage::WdfBoundaryBinding {
+            label: "base_left".into(),
+            node_id: left.base,
+            direction: pedalkernel_rt::stage::WdfBoundaryDirection::Input,
+        },
+        pedalkernel_rt::stage::WdfBoundaryBinding {
+            label: "base_right".into(),
+            node_id: right.base,
+            direction: pedalkernel_rt::stage::WdfBoundaryDirection::Input,
+        },
+        pedalkernel_rt::stage::WdfBoundaryBinding {
+            label: "collector_left".into(),
+            node_id: left.collector,
+            direction: pedalkernel_rt::stage::WdfBoundaryDirection::Output,
+        },
+        pedalkernel_rt::stage::WdfBoundaryBinding {
+            label: "collector_right".into(),
+            node_id: right.collector,
+            direction: pedalkernel_rt::stage::WdfBoundaryDirection::Output,
+        },
+        pedalkernel_rt::stage::WdfBoundaryBinding {
+            label: "emitter_tail".into(),
+            node_id: shared_emitter,
+            direction: pedalkernel_rt::stage::WdfBoundaryDirection::Control,
+        },
+    ];
     Some(stage)
 }
 
@@ -1064,6 +1234,7 @@ pub(super) fn analyze_blockwise(
         return None;
     }
 
+    let nl_blocks = merge_shared_emitter_input_pairs(nl_blocks, graph);
     let (nl_blocks, preassigned_reactive, preassigned_reactive_set) =
         merge_differential_reactive_rungs(nl_blocks, edge_indices, graph);
 
@@ -1671,6 +1842,22 @@ pub(super) fn try_build_blockwise(
             }
         }
 
+        if matches!(block.topology, BlockTopology::InputDifferentialPair { .. }) {
+            if let Some(mut wdf) = build_input_differential_pair_stage(block, graph, supply_voltage)
+            {
+                #[cfg(test)]
+                eprintln!(
+                    "  Block {bi}: {} edges → 1 stage, topology={:?}",
+                    block_edges.len(),
+                    block.topology
+                );
+                wdf.k_table = super::k_method::generate_k_table(&mut wdf);
+                all_stages.push(BuiltStage::Wdf(wdf));
+                all_stage_plan_blocks.push(bi);
+                continue;
+            }
+        }
+
         let block_terminals =
             super::spqr_build::compute_group_terminals(&block_edges, graph, terminals);
         let spqr_tree = spqr_decompose(&block_edges, &block_terminals, graph, graph.gnd_node);
@@ -1970,9 +2157,20 @@ pub(super) fn try_build_blockwise(
                     )
                 {
                     #[cfg(test)]
-                    eprintln!(
-                        "  block {bi}: auxiliary memoryless/control WDF omitted from differential-rung BKM blocks"
-                    );
+                    {
+                        if matches!(
+                            plan.blocks.get(bi).map(|block| &block.topology),
+                            Some(BlockTopology::InputDifferentialPair { .. })
+                        ) {
+                            eprintln!(
+                                "  block {bi}: input differential pair kept as a WDF boundary block outside rung BKM"
+                            );
+                        } else {
+                            eprintln!(
+                                "  block {bi}: auxiliary memoryless/control WDF omitted from differential-rung BKM blocks"
+                            );
+                        }
+                    }
                     continue;
                 }
                 let block_port_node = plan.blocks.get(bi).and_then(|block| {
@@ -2991,8 +3189,19 @@ pub(super) fn try_build_blockwise(
             bkm.n_ports
         );
 
-        // Replace the individual block stages with the single BKM stage
-        all_stages.clear();
+        // Replace the rung-local stages with the single BKM stage, but keep
+        // explicit multi-boundary WDF blocks such as input differential pairs.
+        let mut boundary_wdf_stages = Vec::new();
+        for (stage, bi) in all_stages.drain(..).zip(all_stage_plan_blocks.drain(..)) {
+            let keep_boundary_wdf = matches!(
+                plan.blocks.get(bi).map(|block| &block.topology),
+                Some(BlockTopology::InputDifferentialPair { .. })
+            ) && matches!(&stage, BuiltStage::Wdf(wdf) if !wdf.boundary_bindings.is_empty());
+            if keep_boundary_wdf {
+                boundary_wdf_stages.push(stage);
+            }
+        }
+        all_stages = boundary_wdf_stages;
         all_stages.push(BuiltStage::BlockwiseKMethod(bkm));
     }
 

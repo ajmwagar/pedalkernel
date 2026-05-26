@@ -703,6 +703,60 @@ fn tb303_filter_uses_q12_input_differential_pair() {
 }
 
 #[test]
+fn tb303_q12_compiles_as_multi_binding_wdf_boundary_block() {
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
+
+    let compiled =
+        super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
+            .expect("compile failed");
+
+    let q12 = compiled.stages.iter().find_map(|stage| {
+        if let super::compiled::Stage::Wdf(wdf) = stage {
+            let label = {
+                #[cfg(debug_assertions)]
+                {
+                    wdf.debug_label.as_str()
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    ""
+                }
+            };
+            if wdf.root_comp_id == "Q12L"
+                || wdf.root_comp_id == "Q12R"
+                || label.contains("Q12L")
+                || label.contains("Q12R")
+            {
+                return Some(wdf);
+            }
+        }
+        None
+    });
+
+    let q12 = q12.expect(
+        "Q12 input differential pair should compile as one WDF boundary block, not be omitted from BKM",
+    );
+    let labels: Vec<&str> = q12
+        .boundary_bindings
+        .iter()
+        .map(|binding| binding.label.as_str())
+        .collect();
+    for expected in [
+        "base_left",
+        "base_right",
+        "collector_left",
+        "collector_right",
+        "emitter_tail",
+    ] {
+        assert!(
+            labels.contains(&expected),
+            "Q12 WDF boundary bindings should include `{expected}`, got {labels:?}"
+        );
+    }
+}
+
+#[test]
 fn tb303_diode_connected_bjts_reduce_to_diode_roots_in_multinl_fallback() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
