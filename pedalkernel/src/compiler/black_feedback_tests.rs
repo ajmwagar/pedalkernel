@@ -131,8 +131,17 @@ fn bf_pure_resistive_stage_declares_no_one_port_state_slots() {
     let stage = BlackFeedbackStage::new_test(100_000.0, 10_000.0, false, 48000.0);
 
     assert!(
+        stage.runtime_state().is_empty(),
+        "pure resistive BlackFeedback should own an empty shared RuntimeState"
+    );
+    assert!(
         stage.one_port_states().is_empty(),
         "pure resistive BlackFeedback should not hide reactive one-port state"
+    );
+    assert_eq!(
+        stage.runtime_state().states.len(),
+        stage.runtime_state().wave_cache.len(),
+        "BlackFeedback RuntimeState must preserve dense state/cache slot alignment"
     );
 }
 

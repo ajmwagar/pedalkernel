@@ -4534,12 +4534,13 @@ pub struct BlackFeedbackStage {
     pub ri_fixed_r: crate::Wave,
     /// Max resistance of the Ri pot (e.g. Gain_A max_r = 100k).
     pub ri_pot_max_r: crate::Wave,
-    /// Shared one-port state slots owned by this stage.
+    /// Shared one-port runtime state owned by this stage.
     ///
     /// Pure resistive BlackFeedback stages have no physical one-port state; reactive
-    /// feedback/network variants can attach explicit state here instead of hiding it
-    /// behind stage-specific fields.
-    pub one_port_states: Vec<OnePortState>,
+    /// feedback/network variants can attach explicit state here using the same
+    /// physical-state plus WDF-cache sidecar shape as WDF and BKM.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub runtime_state: RuntimeState,
 }
 
 impl BlackFeedbackStage {
@@ -4582,7 +4583,7 @@ impl BlackFeedbackStage {
             ri_pot_comp_id: None,
             ri_fixed_r: 0.0,
             ri_pot_max_r: 0.0,
-            one_port_states: Vec::new(),
+            runtime_state: RuntimeState::new(),
         }
     }
 
@@ -4616,11 +4617,19 @@ impl BlackFeedbackStage {
     }
 
     pub fn one_port_states(&self) -> &[OnePortState] {
-        &self.one_port_states
+        &self.runtime_state.states
     }
 
     pub fn one_port_states_mut(&mut self) -> &mut [OnePortState] {
-        &mut self.one_port_states
+        &mut self.runtime_state.states
+    }
+
+    pub fn runtime_state(&self) -> &RuntimeState {
+        &self.runtime_state
+    }
+
+    pub fn runtime_state_mut(&mut self) -> &mut RuntimeState {
+        &mut self.runtime_state
     }
 
     /// Check if this stage owns a pot with the given component ID.
