@@ -187,6 +187,144 @@ pub(super) fn select_formulations(
     FormulationSelection { blocks, coupling }
 }
 
+struct LoweredBlockStages {
+    stages: Vec<BuiltStage>,
+    stage_plan_blocks: Vec<usize>,
+}
+
+fn lower_block_stages(
+    plan: &BlockwisePlan,
+    selection: &FormulationSelection,
+    graph: &CircuitGraph,
+    terminals: &[NodeId],
+    sample_rate: f64,
+    bias_node_voltages: &BTreeMap<NodeId, f64>,
+    supply_voltage: f64,
+    disable_iir: bool,
+    init_hints: &[crate::dsl::InitHint],
+) -> Option<LoweredBlockStages> {
+    let mut stages = Vec::new();
+    let mut stage_plan_blocks = Vec::new();
+
+    for (bi, block) in plan.blocks.iter().enumerate() {
+        let block_edges = block.all_edges();
+        if block_edges.is_empty() {
+            continue;
+        }
+
+        if matches!(
+            selection.blocks.get(bi),
+            Some(BlockFormulation::DifferentialDiodeRungWdf)
+        ) {
+            if let Some(mut wdf) =
+                build_differential_diode_rung_stage(block, graph, sample_rate, supply_voltage)
+            {
+                #[cfg(test)]
+                eprintln!(
+                    "  Block {bi}: {} edges -> 1 stage, topology={:?}",
+                    block_edges.len(),
+                    block.topology
+                );
+                wdf.k_table = super::k_method::generate_k_table(&mut wdf);
+                stages.push(BuiltStage::Wdf(wdf));
+                stage_plan_blocks.push(bi);
+                continue;
+            }
+        }
+
+        if matches!(
+            selection.blocks.get(bi),
+            Some(BlockFormulation::InputDifferentialPairWdf)
+        ) {
+            if let Some(mut wdf) = build_input_differential_pair_stage(block, graph, supply_voltage)
+            {
+                #[cfg(test)]
+                eprintln!(
+                    "  Block {bi}: {} edges -> 1 stage, topology={:?}",
+                    block_edges.len(),
+                    block.topology
+                );
+                wdf.k_table = super::k_method::generate_k_table(&mut wdf);
+                stages.push(BuiltStage::Wdf(wdf));
+                stage_plan_blocks.push(bi);
+                continue;
+            }
+        }
+
+        let block_terminals =
+            super::spqr_build::compute_group_terminals(&block_edges, graph, terminals);
+        let spqr_tree = spqr_decompose(&block_edges, &block_terminals, graph, graph.gnd_node);
+        let spqr_stages = spqr_to_stages(&spqr_tree, graph, sample_rate);
+
+        #[cfg(test)]
+        {
+            let class = super::spqr::classify_sp_subtree(&spqr_tree, graph);
+            eprintln!(
+                "  Block {bi}: {} edges -> {} stages, class={:?}",
+                block_edges.len(),
+                spqr_stages.len(),
+                class,
+            );
+        }
+
+        for (si, stage) in spqr_stages.into_iter().enumerate() {
+            eprintln!("  [blockwise] block {bi} stage {si}: building...");
+            let mut built = super::spqr_build::build_spqr_stage_with_options(
+                stage,
+                graph,
+                sample_rate,
+                disable_iir,
+                init_hints,
+                supply_voltage,
+            )
+            .ok()?;
+            eprintln!("  [blockwise] block {bi} stage {si}: built");
+
+            if let BuiltStage::Wdf(ref mut wdf) = built {
+                if wdf.output_probe.is_none() {
+                    if let Some(&reactive_edge) = block.reactive_edges.first() {
+                        let comp = &graph.components[graph.edges[reactive_edge].comp_idx];
+                        wdf.output_probe = Some(comp.id.clone());
+                    }
+                }
+            }
+
+            if let BuiltStage::Wdf(ref mut wdf) = built {
+                if let pedalkernel_rt::stage::RootKind::Bjt(ref mut bjt) = wdf.root {
+                    let base_bias = block.nl_edges.iter().find_map(|&eidx| {
+                        let e = &graph.edges[eidx];
+                        let comp = &graph.components[e.comp_idx];
+                        let base_key = format!("{}.base", comp.id);
+                        let base_node = graph.node_names.get(&base_key)?;
+                        bias_node_voltages.get(base_node).copied()
+                    });
+
+                    if let Some(v_base) = base_bias {
+                        bjt.set_bias(v_base.min(0.8));
+                        #[cfg(test)]
+                        eprintln!("  Block {bi}: BJT bias = {v_base:.3}V (from circuit)");
+                    } else {
+                        let default_vbe = if supply_voltage > 1.0 { 0.6 } else { 0.3 };
+                        bjt.set_bias(default_vbe);
+                        #[cfg(test)]
+                        eprintln!("  Block {bi}: BJT bias = {default_vbe:.1}V (default)");
+                    }
+
+                    bjt.set_v_max(supply_voltage.abs().max(1.0));
+                }
+            }
+
+            stages.push(built);
+            stage_plan_blocks.push(bi);
+        }
+    }
+
+    Some(LoweredBlockStages {
+        stages,
+        stage_plan_blocks,
+    })
+}
+
 /// External electrical boundary of a compiler-recognized differential rung.
 ///
 /// A diode-connected BJT rung is not a one-port element. The top pair is the
@@ -2079,122 +2217,20 @@ pub(super) fn try_build_blockwise(
         coupled_newton,
     );
 
-    let mut all_stages = Vec::new();
-    let mut all_stage_plan_blocks = Vec::new();
-
-    for (bi, block) in plan.blocks.iter().enumerate() {
-        let block_edges = block.all_edges();
-        if block_edges.is_empty() {
-            continue;
-        }
-
-        if matches!(
-            formulation_selection.blocks.get(bi),
-            Some(BlockFormulation::DifferentialDiodeRungWdf)
-        ) {
-            if let Some(mut wdf) =
-                build_differential_diode_rung_stage(block, graph, sample_rate, supply_voltage)
-            {
-                #[cfg(test)]
-                eprintln!(
-                    "  Block {bi}: {} edges → 1 stage, topology={:?}",
-                    block_edges.len(),
-                    block.topology
-                );
-                wdf.k_table = super::k_method::generate_k_table(&mut wdf);
-                all_stages.push(BuiltStage::Wdf(wdf));
-                all_stage_plan_blocks.push(bi);
-                continue;
-            }
-        }
-
-        if matches!(
-            formulation_selection.blocks.get(bi),
-            Some(BlockFormulation::InputDifferentialPairWdf)
-        ) {
-            if let Some(mut wdf) = build_input_differential_pair_stage(block, graph, supply_voltage)
-            {
-                #[cfg(test)]
-                eprintln!(
-                    "  Block {bi}: {} edges → 1 stage, topology={:?}",
-                    block_edges.len(),
-                    block.topology
-                );
-                wdf.k_table = super::k_method::generate_k_table(&mut wdf);
-                all_stages.push(BuiltStage::Wdf(wdf));
-                all_stage_plan_blocks.push(bi);
-                continue;
-            }
-        }
-
-        let block_terminals =
-            super::spqr_build::compute_group_terminals(&block_edges, graph, terminals);
-        let spqr_tree = spqr_decompose(&block_edges, &block_terminals, graph, graph.gnd_node);
-        let spqr_stages = spqr_to_stages(&spqr_tree, graph, sample_rate);
-
-        #[cfg(test)]
-        {
-            let class = super::spqr::classify_sp_subtree(&spqr_tree, graph);
-            eprintln!(
-                "  Block {bi}: {} edges → {} stages, class={:?}",
-                block_edges.len(),
-                spqr_stages.len(),
-                class,
-            );
-        }
-
-        for (si, stage) in spqr_stages.into_iter().enumerate() {
-            eprintln!("  [blockwise] block {bi} stage {si}: building...");
-            let mut built = super::spqr_build::build_spqr_stage_with_options(
-                stage,
-                graph,
-                sample_rate,
-                disable_iir,
-                init_hints,
-                supply_voltage,
-            )
-            .ok()?;
-            eprintln!("  [blockwise] block {bi} stage {si}: built");
-
-            if let BuiltStage::Wdf(ref mut wdf) = built {
-                if wdf.output_probe.is_none() {
-                    if let Some(&reactive_edge) = block.reactive_edges.first() {
-                        let comp = &graph.components[graph.edges[reactive_edge].comp_idx];
-                        wdf.output_probe = Some(comp.id.clone());
-                    }
-                }
-            }
-
-            // Set BJT bias from circuit analysis
-            if let BuiltStage::Wdf(ref mut wdf) = built {
-                if let pedalkernel_rt::stage::RootKind::Bjt(ref mut bjt) = wdf.root {
-                    let base_bias = block.nl_edges.iter().find_map(|&eidx| {
-                        let e = &graph.edges[eidx];
-                        let comp = &graph.components[e.comp_idx];
-                        let base_key = format!("{}.base", comp.id);
-                        let base_node = graph.node_names.get(&base_key)?;
-                        bias_node_voltages.get(base_node).copied()
-                    });
-
-                    if let Some(v_base) = base_bias {
-                        bjt.set_bias(v_base.min(0.8));
-                        #[cfg(test)]
-                        eprintln!("  Block {bi}: BJT bias = {v_base:.3}V (from circuit)");
-                    } else {
-                        let default_vbe = if supply_voltage > 1.0 { 0.6 } else { 0.3 };
-                        bjt.set_bias(default_vbe);
-                        #[cfg(test)]
-                        eprintln!("  Block {bi}: BJT bias = {default_vbe:.1}V (default)");
-                    }
-
-                    bjt.set_v_max(supply_voltage.abs().max(1.0));
-                }
-            }
-
-            all_stages.push(built);
-            all_stage_plan_blocks.push(bi);
-        }
-    }
+    let LoweredBlockStages {
+        stages: mut all_stages,
+        stage_plan_blocks: mut all_stage_plan_blocks,
+    } = lower_block_stages(
+        &plan,
+        &formulation_selection,
+        graph,
+        terminals,
+        sample_rate,
+        bias_node_voltages,
+        supply_voltage,
+        disable_iir,
+        init_hints,
+    )?;
 
     // ── Build coupling scattering matrix + package as BlockwiseStage ────────
     //
