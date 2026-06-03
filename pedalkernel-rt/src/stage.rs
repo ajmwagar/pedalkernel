@@ -6382,6 +6382,55 @@ pub struct CouplingPassive {
     pub node: DynNode,
 }
 
+impl CouplingPassive {
+    pub fn capacitor(
+        comp_id: String,
+        port_idx: usize,
+        capacitance: crate::Wave,
+        rp: crate::Wave,
+    ) -> Self {
+        Self {
+            node: DynNode::Capacitor(Some(comp_id.clone()), capacitance, rp),
+            comp_id,
+            port_idx,
+        }
+    }
+
+    #[inline]
+    pub fn reflected(&mut self) -> crate::Wave {
+        self.node.reflected()
+    }
+
+    #[inline]
+    pub fn set_incident(&mut self, incident: crate::Wave) {
+        self.node.set_incident(incident);
+    }
+
+    pub fn reset_incident(&mut self) {
+        self.set_incident(0.0);
+    }
+
+    pub fn runtime_state_len(&self) -> usize {
+        self.node
+            .runtime_state()
+            .map(|runtime_state| runtime_state.len())
+            .unwrap_or(0)
+    }
+
+    pub fn one_port_state(&self) -> Option<OnePortState> {
+        let (runtime, runtime_state) = self.node.one_port_runtime_state(&self.comp_id)?;
+        runtime.wdf_one_port_state(runtime_state)
+    }
+
+    pub fn set_one_port_state(&mut self, state: OnePortState) -> bool {
+        let Some((runtime, runtime_state)) = self.node.one_port_runtime_state_mut(&self.comp_id)
+        else {
+            return false;
+        };
+        runtime.wdf_set_one_port_state(state, runtime_state)
+    }
+}
+
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CouplingVcvs {
@@ -7124,10 +7173,9 @@ impl BlockwiseStage {
             if self.port_is_block_owned(i) {
                 continue;
             } else if let Some(passive_idx) = self.coupling_passive_index(i) {
-                b_out[i] = self.coupling_passives[passive_idx].node.reflected();
+                b_out[i] = self.coupling_passives[passive_idx].reflected();
                 if update_state {
                     self.coupling_passives[passive_idx]
-                        .node
                         .set_incident(a.get(i).copied().unwrap_or(0.0));
                 }
             } else if self.output_port_index == Some(i) {
@@ -7732,7 +7780,7 @@ impl BlockwiseStage {
                 block.dc_offset = 0.0;
             }
             for passive in &mut self.coupling_passives {
-                passive.node.set_incident(0.0);
+                passive.reset_incident();
             }
             for v in &mut self.work_a {
                 *v = 0.0;
@@ -8593,15 +8641,12 @@ mod blockwise_stage_tests {
             )],
             block_ports: vec![],
             coupling_elements: vec![],
-            coupling_passives: vec![CouplingPassive {
-                comp_id: alloc::string::String::from("C_out"),
-                port_idx: 0,
-                node: DynNode::Capacitor(
-                    Some(alloc::string::String::from("C_out")),
-                    100e-9,
-                    104.1666666667,
-                ),
-            }],
+            coupling_passives: vec![CouplingPassive::capacitor(
+                alloc::string::String::from("C_out"),
+                0,
+                100e-9,
+                104.1666666667,
+            )],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
@@ -8635,11 +8680,26 @@ mod blockwise_stage_tests {
             b[0].abs() < 1.0e-12,
             "a WDF capacitor reflects its previous state before accepting the new incident wave"
         );
+        assert_eq!(stage.coupling_passives[0].runtime_state_len(), 1);
+        assert_eq!(
+            stage.coupling_passives[0].one_port_state(),
+            Some(OnePortState::CapacitorVoltage(0.625)),
+            "BKM coupling cap state should be inspectable as shared OnePortState"
+        );
 
         stage.coupled_eval_b_for_a(&[0.0], &[], 0.0, &[], false, &mut b);
         assert!(
             (b[0] - 1.25).abs() < 1.0e-12,
             "BKM coupling caps must behave as passive WDF ports: b_C[n+1] = a_C[n]"
+        );
+        assert!(
+            stage.coupling_passives[0].set_one_port_state(OnePortState::CapacitorVoltage(-0.25)),
+            "BKM coupling cap should update through shared OnePortState"
+        );
+        stage.coupled_eval_b_for_a(&[0.5], &[], 0.0, &[], false, &mut b);
+        assert!(
+            (b[0] + 0.5).abs() < 1.0e-12,
+            "setting shared capacitor voltage should update the WDF wave cache"
         );
     }
 

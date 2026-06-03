@@ -3063,15 +3063,12 @@ pub(super) fn try_build_blockwise(
                 WdfPortTerminals::maybe_differential(node_a, node_b),
                 rp,
             );
-            coupling_passives.push(pedalkernel_rt::stage::CouplingPassive {
-                comp_id: comp_id.clone(),
-                port_idx: scattering_idx,
-                node: pedalkernel_rt::dyn_node::DynNode::Capacitor(
-                    Some(comp_id.clone()),
-                    capacitance,
-                    rp,
-                ),
-            });
+            coupling_passives.push(pedalkernel_rt::stage::CouplingPassive::capacitor(
+                comp_id.clone(),
+                scattering_idx,
+                capacitance,
+                rp,
+            ));
             #[cfg(test)]
             eprintln!(
                 "    passive coupling cap {comp_id}: node={node_a:?}->{node_b:?}, C={capacitance:.3e}, Rp={rp:.1}Ω, scattering_port={scattering_idx}"
