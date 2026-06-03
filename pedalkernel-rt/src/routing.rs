@@ -215,7 +215,7 @@ impl StageRoutePlan {
         ports: &[NamedPortBinding],
         stages: &[Stage],
     ) -> Self {
-        let connections = Self::route_connections(graph);
+        let connections = Self::route_connections(graph, stages);
         let Some(bkm_graph_idx) = graph
             .stages
             .iter()
@@ -241,7 +241,8 @@ impl StageRoutePlan {
             };
         };
 
-        let boundary_drives = Self::bkm_boundary_drives(graph, ports, stages, bkm_graph_idx, bkm);
+        let bkm_stage = &stages[bkm_stage_idx];
+        let boundary_drives = Self::bkm_boundary_drives(graph, ports, stages, bkm_stage, bkm);
         let consumed_port_indices = boundary_drives
             .iter()
             .flat_map(|drive| {
@@ -274,14 +275,16 @@ impl StageRoutePlan {
             if port.node_id == usize::MAX {
                 continue;
             }
-            let touches_bkm = graph.connections.iter().any(|connection| {
-                connection.node_id == port.node_id
-                    && (connection.from_stage == bkm_graph_idx
-                        || connection.to_stage == bkm_graph_idx)
-            }) || graph.stages[bkm_graph_idx]
-                .ports
-                .iter()
-                .any(|graph_port| graph_port.node_id == port.node_id);
+            let touches_bkm = Self::stage_has_binding_for_node(bkm_stage, port.node_id) || {
+                graph.connections.iter().any(|connection| {
+                    connection.node_id == port.node_id
+                        && (connection.from_stage == bkm_graph_idx
+                            || connection.to_stage == bkm_graph_idx)
+                }) || graph.stages[bkm_graph_idx]
+                    .ports
+                    .iter()
+                    .any(|graph_port| graph_port.node_id == port.node_id)
+            };
             if port.direction == crate::PortDirection::Output && touches_bkm {
                 output_port_indices.push(port.index);
             }
@@ -363,7 +366,7 @@ impl StageRoutePlan {
         graph: &StageGraph,
         ports: &[NamedPortBinding],
         stages: &[Stage],
-        bkm_graph_idx: usize,
+        bkm_stage: &Stage,
         bkm: &crate::stage::BlockwiseStage,
     ) -> Vec<BkmBoundaryDrive> {
         let mut drives = Vec::new();
@@ -432,26 +435,8 @@ impl StageRoutePlan {
 
             let mut target_coupling_port_indices = Vec::new();
             for node in collector_nodes {
-                let connected_to_bkm = graph.connections.iter().any(|connection| {
-                    connection.node_id == node
-                        && (connection.from_stage == bkm_graph_idx
-                            || connection.to_stage == bkm_graph_idx)
-                }) || graph.stages[bkm_graph_idx]
-                    .ports
-                    .iter()
-                    .any(|port| port.node_id == node);
-                if !connected_to_bkm {
-                    continue;
-                }
-                for port_idx in 0..bkm.coupling_ports.len() {
-                    let Some(terminals) = bkm.coupling_port_graph_terminals(port_idx) else {
-                        continue;
-                    };
-                    let (node_pos, node_neg) = terminals.as_tuple();
-                    if node_pos == Some(node) || node_neg == Some(node) {
-                        target_coupling_port_indices.push(port_idx);
-                    }
-                }
+                target_coupling_port_indices
+                    .extend(Self::stage_port_indices_for_node(bkm_stage, node));
             }
             target_coupling_port_indices.sort_unstable();
             target_coupling_port_indices.dedup();
@@ -564,6 +549,28 @@ impl StageRoutePlan {
             .collect()
     }
 
+    fn stage_has_binding_for_node(stage: &Stage, node_id: usize) -> bool {
+        let binding_id = BindingId::new(node_id);
+        stage
+            .ins()
+            .into_iter()
+            .chain(stage.outs())
+            .any(|binding| binding.binding_id == binding_id)
+    }
+
+    fn stage_port_indices_for_node(stage: &Stage, node_id: usize) -> Vec<usize> {
+        let binding_id = BindingId::new(node_id);
+        let mut indices = stage
+            .ins()
+            .into_iter()
+            .chain(stage.outs())
+            .filter_map(|binding| (binding.binding_id == binding_id).then_some(binding.local_port))
+            .collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+
     fn nodes_connected_by_coupling(start: usize, target: usize, edges: &[(usize, usize)]) -> bool {
         if start == target {
             return true;
@@ -606,11 +613,72 @@ impl StageRoutePlan {
         }
     }
 
-    fn route_connections(graph: &StageGraph) -> Vec<StageRouteConnection> {
+    fn runtime_binding_connection(
+        graph: &StageGraph,
+        stages: &[Stage],
+        node_id: usize,
+        from_graph_stage_idx: usize,
+        to_graph_stage_idx: usize,
+    ) -> Option<StageRouteConnection> {
+        let from_graph_stage = graph.stages.get(from_graph_stage_idx)?;
+        let to_graph_stage = graph.stages.get(to_graph_stage_idx)?;
+        let from_stage_idx = from_graph_stage.stage_idx;
+        let to_stage_idx = to_graph_stage.stage_idx;
+        if from_stage_idx == usize::MAX || to_stage_idx == usize::MAX {
+            return None;
+        }
+        let from_stage = stages.get(from_stage_idx)?;
+        let to_stage = stages.get(to_stage_idx)?;
+        let binding_id = BindingId::new(node_id);
+        let from_port = from_stage
+            .outs()
+            .into_iter()
+            .find(|binding| binding.binding_id == binding_id)?;
+        let to_port = to_stage
+            .ins()
+            .into_iter()
+            .find(|binding| binding.binding_id == binding_id)?;
+
+        Some(StageRouteConnection {
+            node_id,
+            from: StageRouteEndpoint {
+                kind: StageRouteEndpointKind::Stage,
+                graph_stage_index: from_graph_stage_idx,
+                stage_idx: from_stage_idx,
+                port_idx: from_port.local_port,
+            },
+            to: StageRouteEndpoint {
+                kind: StageRouteEndpointKind::Stage,
+                graph_stage_index: to_graph_stage_idx,
+                stage_idx: to_stage_idx,
+                port_idx: to_port.local_port,
+            },
+        })
+    }
+
+    fn route_connections(graph: &StageGraph, stages: &[Stage]) -> Vec<StageRouteConnection> {
         graph
             .connections
             .iter()
             .map(|connection| {
+                if let Some(runtime_connection) = Self::runtime_binding_connection(
+                    graph,
+                    stages,
+                    connection.node_id,
+                    connection.from_stage,
+                    connection.to_stage,
+                ) {
+                    return runtime_connection;
+                }
+                if let Some(runtime_connection) = Self::runtime_binding_connection(
+                    graph,
+                    stages,
+                    connection.node_id,
+                    connection.to_stage,
+                    connection.from_stage,
+                ) {
+                    return runtime_connection;
+                }
                 let from_stage = graph.stages.get(connection.from_stage);
                 let to_stage = graph.stages.get(connection.to_stage);
                 StageRouteConnection {
