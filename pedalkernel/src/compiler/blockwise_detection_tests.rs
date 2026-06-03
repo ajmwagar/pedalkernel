@@ -1777,6 +1777,59 @@ fn analyze_blockwise_coupling_is_sparse() {
     );
 }
 
+#[test]
+fn analyze_blockwise_exposes_typed_coupling_network() {
+    let (graph, edges) = make_graph_all(BJT_LADDER_4);
+    let plan = blockwise::analyze_blockwise(&edges, &graph).expect("Should decompose");
+
+    let typed_edges = plan.coupling.edge_indices();
+    assert_eq!(
+        typed_edges, plan.coupling_edges,
+        "typed coupling network must mirror legacy coupling edge list while callers migrate"
+    );
+    assert_eq!(
+        plan.coupling.boundary_nodes.len(),
+        plan.port_nodes.len(),
+        "coupling boundary nodes should be the typed form of plan port nodes"
+    );
+    assert!(
+        plan.coupling
+            .edges
+            .iter()
+            .all(|edge| plan.coupling_edges.contains(&edge.edge_idx)),
+        "every typed coupling edge must refer to an analyzed residual edge"
+    );
+}
+
+#[test]
+fn formulation_selection_keeps_generic_cascade_separate_from_ladder_specialization() {
+    let (graph, edges) = make_graph_all(BJT_CASCADE_2);
+    let plan = blockwise::analyze_blockwise(&edges, &graph).expect("Should decompose");
+    let selection = blockwise::select_formulations(&plan, false, 0.0, true);
+
+    assert_eq!(
+        selection.blocks.len(),
+        plan.blocks.len(),
+        "selector should classify every structural block"
+    );
+    assert!(
+        selection
+            .blocks
+            .iter()
+            .all(|formulation| matches!(formulation, blockwise::BlockFormulation::SpqrSubgraph)),
+        "plain cascades should use generic SPQR block lowering, not ladder-specific primitives"
+    );
+    assert!(
+        matches!(
+            selection.coupling,
+            blockwise::CouplingFormulation::BlockwiseCoupled {
+                coupled_newton: true
+            }
+        ),
+        "residual coupling selection should be explicit and independent of block topology"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Feedback path must be coupling, not assigned to a block
 // ═══════════════════════════════════════════════════════════════════════════

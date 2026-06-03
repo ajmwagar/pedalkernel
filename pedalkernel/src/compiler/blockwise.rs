@@ -69,6 +69,124 @@ pub struct Block {
     pub topology: BlockTopology,
 }
 
+/// Why an edge belongs to the residual coupling network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CouplingEdgeRole {
+    /// Structural path between two nonlinear blocks.
+    InterBlock,
+    /// Unclaimed passive/control edge left after block-local ownership.
+    Residual,
+    /// Input-side edge or short chain that must drive the coupling network.
+    BoundaryInput,
+    /// Output-side load/probe edge that must remain in the coupling network.
+    BoundaryOutput,
+}
+
+/// A typed residual coupling edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CouplingEdge {
+    pub edge_idx: usize,
+    pub role: CouplingEdgeRole,
+}
+
+/// Neutral coupling-network description produced by blockwise analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CouplingNetwork {
+    pub edges: Vec<CouplingEdge>,
+    pub boundary_nodes: Vec<NodeId>,
+}
+
+impl CouplingNetwork {
+    fn new(boundary_nodes: Vec<NodeId>) -> Self {
+        Self {
+            edges: Vec::new(),
+            boundary_nodes,
+        }
+    }
+
+    fn push_edge(&mut self, edge_idx: usize, role: CouplingEdgeRole) -> bool {
+        if self.contains_edge(edge_idx) {
+            return false;
+        }
+        self.edges.push(CouplingEdge { edge_idx, role });
+        true
+    }
+
+    fn contains_edge(&self, edge_idx: usize) -> bool {
+        self.edges.iter().any(|edge| edge.edge_idx == edge_idx)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub(super) fn edge_indices(&self) -> Vec<usize> {
+        self.edges.iter().map(|edge| edge.edge_idx).collect()
+    }
+}
+
+/// Runtime formulation selected for one structural block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlockFormulation {
+    DifferentialDiodeRungWdf,
+    InputDifferentialPairWdf,
+    SpqrSubgraph,
+}
+
+/// Runtime formulation selected for the residual coupling network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CouplingFormulation {
+    None,
+    Serial,
+    SerialDelayedFeedback,
+    BlockwiseCoupled { coupled_newton: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FormulationSelection {
+    pub blocks: Vec<BlockFormulation>,
+    pub coupling: CouplingFormulation,
+}
+
+pub(super) fn select_formulations(
+    plan: &BlockwisePlan,
+    force_serial: bool,
+    force_serial_feedback_gain: f64,
+    coupled_newton: bool,
+) -> FormulationSelection {
+    let blocks = plan
+        .blocks
+        .iter()
+        .map(|block| match block.topology {
+            BlockTopology::DifferentialDiodeRung { .. } => {
+                BlockFormulation::DifferentialDiodeRungWdf
+            }
+            BlockTopology::InputDifferentialPair { .. } => {
+                BlockFormulation::InputDifferentialPairWdf
+            }
+            BlockTopology::Generic => BlockFormulation::SpqrSubgraph,
+        })
+        .collect();
+
+    let coupling = if plan.coupling.is_empty() {
+        CouplingFormulation::None
+    } else if force_serial {
+        if force_serial_feedback_gain.abs() > 0.0 {
+            CouplingFormulation::SerialDelayedFeedback
+        } else {
+            CouplingFormulation::Serial
+        }
+    } else {
+        CouplingFormulation::BlockwiseCoupled { coupled_newton }
+    };
+
+    FormulationSelection { blocks, coupling }
+}
+
 /// External electrical boundary of a compiler-recognized differential rung.
 ///
 /// A diode-connected BJT rung is not a one-port element. The top pair is the
@@ -100,7 +218,12 @@ impl Block {
 pub struct BlockwisePlan {
     /// The chained blocks, in signal-flow order.
     pub blocks: Vec<Block>,
+    /// Typed residual coupling network.
+    pub(super) coupling: CouplingNetwork,
     /// Coupling edges — the residual connecting blocks.
+    ///
+    /// Kept as a compatibility mirror for existing structural tests and call
+    /// sites while lowering moves to `coupling`.
     pub coupling_edges: Vec<usize>,
     /// Port nodes shared between blocks and coupling network.
     pub port_nodes: Vec<NodeId>,
@@ -109,6 +232,14 @@ pub struct BlockwisePlan {
 impl BlockwisePlan {
     pub fn num_blocks(&self) -> usize {
         self.blocks.len()
+    }
+
+    fn add_coupling_edge(&mut self, edge_idx: usize, role: CouplingEdgeRole) -> bool {
+        let added = self.coupling.push_edge(edge_idx, role);
+        if added && !self.coupling_edges.contains(&edge_idx) {
+            self.coupling_edges.push(edge_idx);
+        }
+        added
     }
 }
 
@@ -1738,8 +1869,19 @@ pub(super) fn analyze_blockwise(
         .into_iter()
         .collect();
 
+    let mut coupling = CouplingNetwork::new(all_port_nodes.clone());
+    for &edge_idx in &coupling_edges {
+        let role = if coupling_set.contains(&edge_idx) {
+            CouplingEdgeRole::InterBlock
+        } else {
+            CouplingEdgeRole::Residual
+        };
+        coupling.push_edge(edge_idx, role);
+    }
+
     let plan = BlockwisePlan {
         blocks,
+        coupling,
         coupling_edges,
         port_nodes: all_port_nodes,
     };
@@ -1788,7 +1930,7 @@ pub(super) fn try_build_blockwise(
     eprintln!(
         "  Blockwise: {} blocks, {} coupling edges",
         plan.num_blocks(),
-        plan.coupling_edges.len()
+        plan.coupling.len()
     );
 
     let mut early_block_boundary_nodes: HashSet<NodeId> = HashSet::new();
@@ -1809,6 +1951,7 @@ pub(super) fn try_build_blockwise(
         .filter_map(|port_def| graph.node_names.get(&port_def.name).copied())
         .collect();
     let mut early_extra_coupling = Vec::new();
+    let mut early_extra_coupling_roles: HashMap<usize, CouplingEdgeRole> = HashMap::new();
     for port_def in port_defs {
         if port_def.direction != pedalkernel_rt::PortDirection::Input {
             continue;
@@ -1851,6 +1994,8 @@ pub(super) fn try_build_blockwise(
                             && !early_extra_coupling.contains(&path_eidx)
                         {
                             early_extra_coupling.push(path_eidx);
+                            early_extra_coupling_roles
+                                .insert(path_eidx, CouplingEdgeRole::BoundaryInput);
                         }
                     }
                     continue;
@@ -1880,7 +2025,7 @@ pub(super) fn try_build_blockwise(
         }
     }
     for (eidx, edge) in graph.edges.iter().enumerate() {
-        if plan.coupling_edges.contains(&eidx) || early_extra_coupling.contains(&eidx) {
+        if plan.coupling.contains_edge(eidx) || early_extra_coupling.contains(&eidx) {
             continue;
         }
         if !matches!(
@@ -1900,6 +2045,7 @@ pub(super) fn try_build_blockwise(
         };
         if other_node == graph.gnd_node || graph.ac_ground_nodes.contains(&other_node) {
             early_extra_coupling.push(eidx);
+            early_extra_coupling_roles.insert(eidx, CouplingEdgeRole::BoundaryOutput);
         }
     }
 
@@ -1912,16 +2058,26 @@ pub(super) fn try_build_blockwise(
                 .retain(|eidx| !early_set.contains(eidx));
         }
         for eidx in early_extra_coupling {
-            if !plan.coupling_edges.contains(&eidx) {
+            let role = early_extra_coupling_roles
+                .get(&eidx)
+                .copied()
+                .unwrap_or(CouplingEdgeRole::Residual);
+            if plan.add_coupling_edge(eidx, role) {
                 #[cfg(test)]
                 eprintln!(
                     "  [blockwise] preclaimed boundary edge {} into coupling",
                     graph.components[graph.edges[eidx].comp_idx].id
                 );
-                plan.coupling_edges.push(eidx);
             }
         }
     }
+
+    let formulation_selection = select_formulations(
+        &plan,
+        force_serial,
+        force_serial_feedback_gain,
+        coupled_newton,
+    );
 
     let mut all_stages = Vec::new();
     let mut all_stage_plan_blocks = Vec::new();
@@ -1932,7 +2088,10 @@ pub(super) fn try_build_blockwise(
             continue;
         }
 
-        if matches!(block.topology, BlockTopology::DifferentialDiodeRung { .. }) {
+        if matches!(
+            formulation_selection.blocks.get(bi),
+            Some(BlockFormulation::DifferentialDiodeRungWdf)
+        ) {
             if let Some(mut wdf) =
                 build_differential_diode_rung_stage(block, graph, sample_rate, supply_voltage)
             {
@@ -1949,7 +2108,10 @@ pub(super) fn try_build_blockwise(
             }
         }
 
-        if matches!(block.topology, BlockTopology::InputDifferentialPair { .. }) {
+        if matches!(
+            formulation_selection.blocks.get(bi),
+            Some(BlockFormulation::InputDifferentialPairWdf)
+        ) {
             if let Some(mut wdf) = build_input_differential_pair_stage(block, graph, supply_voltage)
             {
                 #[cfg(test)]
@@ -2041,8 +2203,8 @@ pub(super) fn try_build_blockwise(
     // that connects all blocks' ports. The BlockwiseStage uses
     // wave-domain Newton iteration to solve the algebraic feedback loop
     // each sample — no unit delay, correct resonance tracking.
-    if !plan.coupling_edges.is_empty() && !all_stages.is_empty() {
-        let mut coupling_edges = plan.coupling_edges.clone();
+    if !plan.coupling.is_empty() && !all_stages.is_empty() {
+        let mut coupling_edges = plan.coupling.edge_indices();
         let mut block_boundary_nodes: HashSet<NodeId> = HashSet::new();
         for block in &plan.blocks {
             if let Some(ports) = differential_rung_ports(block, graph) {
@@ -2453,8 +2615,8 @@ pub(super) fn try_build_blockwise(
             }
         }
 
-        if force_serial {
-            if force_serial_feedback_gain.abs() > 0.0 {
+        match formulation_selection.coupling {
+            CouplingFormulation::SerialDelayedFeedback => {
                 let mut rung_stages = Vec::with_capacity(all_stages.len());
                 for built in all_stages {
                     match built {
@@ -2473,11 +2635,14 @@ pub(super) fn try_build_blockwise(
                     ),
                 )]);
             }
-            eprintln!(
+            CouplingFormulation::Serial => {
+                eprintln!(
                 "  [blockwise] force_serial: returning {} rung stages without coupled blockwise solve",
                 all_stages.len()
             );
-            return Some(all_stages);
+                return Some(all_stages);
+            }
+            CouplingFormulation::None | CouplingFormulation::BlockwiseCoupled { .. } => {}
         }
 
         let n_blocks = k_blocks.len();
@@ -3343,12 +3508,16 @@ pub(super) fn try_build_blockwise(
             // front without outrunning the input port conditioning stage.
             signal_flow_distance: 1,
             bypass_serial: false,
-            solve_mode: if use_coupled_solve && coupled_newton {
-                pedalkernel_rt::stage::BlockwiseSolveMode::CoupledNewton
-            } else if use_coupled_solve {
-                pedalkernel_rt::stage::BlockwiseSolveMode::CoupledFixedPoint
-            } else {
-                pedalkernel_rt::stage::BlockwiseSolveMode::Cascade
+            solve_mode: match formulation_selection.coupling {
+                CouplingFormulation::BlockwiseCoupled { coupled_newton }
+                    if use_coupled_solve && coupled_newton =>
+                {
+                    pedalkernel_rt::stage::BlockwiseSolveMode::CoupledNewton
+                }
+                CouplingFormulation::BlockwiseCoupled { .. } if use_coupled_solve => {
+                    pedalkernel_rt::stage::BlockwiseSolveMode::CoupledFixedPoint
+                }
+                _ => pedalkernel_rt::stage::BlockwiseSolveMode::Cascade,
             },
             diode_ladder_core,
             b_warm: vec![0.0; n_ports],
