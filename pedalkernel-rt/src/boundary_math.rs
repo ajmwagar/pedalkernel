@@ -4,7 +4,7 @@
 //! routing code does not hand-roll signs or `2V - a` source math.
 
 use crate::Wave;
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -72,8 +72,6 @@ pub type ScatteringPortTerminals = PortTerminals<ScatteringPortId>;
 pub type CircuitMappedPort = MappedPort<GraphNodeId, MnaNodeId>;
 pub type MnaOnePort = OnePort<MnaNodeId>;
 pub type MnaVariableResistorBinding = VariableResistorBinding<MnaNodeId>;
-pub type NamedScatteringPortBinding = NamedPortBinding<ScatteringPortId>;
-pub type FeedbackScatteringPortBinding = FeedbackPortBinding<ScatteringPortId>;
 pub type Ohms = Wave;
 pub type Farads = Wave;
 pub type Henries = Wave;
@@ -620,56 +618,6 @@ impl<R> RolePortBinding<R, usize> {
     }
 }
 
-/// Named runtime/source binding to a network port.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct NamedPortBinding<P = usize> {
-    pub name: String,
-    pub port: P,
-}
-
-impl<P> NamedPortBinding<P> {
-    pub fn new(name: String, port: P) -> Self {
-        Self { name, port }
-    }
-}
-
-impl NamedPortBinding<usize> {
-    pub fn typed(self) -> NamedPortBinding<ScatteringPortId> {
-        NamedPortBinding {
-            name: self.name,
-            port: ScatteringPortId::new(self.port),
-        }
-    }
-}
-
-/// Internal feedback/source binding from a producer block to a network port.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct FeedbackPortBinding<P = usize> {
-    pub source_idx: usize,
-    pub port: P,
-}
-
-impl<P> FeedbackPortBinding<P> {
-    pub const fn new(source_idx: usize, port: P) -> Self {
-        Self { source_idx, port }
-    }
-}
-
-impl FeedbackPortBinding<usize> {
-    pub const fn port_idx(self) -> usize {
-        self.port
-    }
-
-    pub fn typed(self) -> FeedbackPortBinding<ScatteringPortId> {
-        FeedbackPortBinding {
-            source_idx: self.source_idx,
-            port: ScatteringPortId::new(self.port),
-        }
-    }
-}
-
 /// Read-only node extraction from a reflected-wave vector.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -707,15 +655,13 @@ impl<N> ExtractionProbe<N> {
 /// Shared descriptor for linear multiport networks derived from MNA.
 ///
 /// Consumers still own their hot-path work buffers and solver details. This
-/// carries the common stable pieces: port mapping, scattering matrix, source
-/// drives, variable resistors, and read-only extraction probes.
+/// carries the common stable pieces: port mapping, scattering matrix, variable
+/// resistors, and read-only extraction probes.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LinearMultiportNetwork<G = GraphNodeId, M = MnaNodeId> {
     pub scattering: Vec<Wave>,
     pub ports: Vec<MappedPort<G, M>>,
-    pub source_drives: Vec<NamedPortBinding<ScatteringPortId>>,
-    pub feedback_drives: Vec<FeedbackPortBinding<ScatteringPortId>>,
     pub variable_resistors: Vec<VariableResistorBinding<M>>,
     pub extraction: Option<ExtractionProbe<M>>,
 }
@@ -725,8 +671,6 @@ impl<G, M> LinearMultiportNetwork<G, M> {
         Self {
             scattering,
             ports,
-            source_drives: Vec::new(),
-            feedback_drives: Vec::new(),
             variable_resistors: Vec::new(),
             extraction: None,
         }
@@ -1172,17 +1116,6 @@ mod tests {
     }
 
     #[test]
-    fn named_and_feedback_bindings_name_source_ports() {
-        let named = NamedPortBinding::new(alloc::string::String::from("audio_in"), 3usize).typed();
-        let feedback = FeedbackPortBinding::new(1, 7usize).typed();
-
-        assert_eq!(named.name, "audio_in");
-        assert_eq!(named.port, ScatteringPortId::new(3));
-        assert_eq!(feedback.source_idx, 1);
-        assert_eq!(feedback.port, ScatteringPortId::new(7));
-    }
-
-    #[test]
     fn extraction_probe_reads_reflected_wave_vector() {
         let probe = ExtractionProbe::new(vec![0.25, -0.5, 0.0], Some(WdfPortTerminals::grounded()));
         let reflected = [2.0, -1.0, 9.0];
@@ -1205,10 +1138,6 @@ mod tests {
             ),
         ];
         let mut network = LinearMultiportNetwork::new(vec![0.0, 1.0, 1.0, 0.0], ports);
-        network.source_drives.push(NamedPortBinding::new(
-            alloc::string::String::from("cv"),
-            ScatteringPortId::new(1),
-        ));
         network.extraction = Some(ExtractionProbe::new(
             vec![0.5, 0.5],
             Some(MnaPortTerminals::single_ended(MnaNodeId::new(2))),

@@ -10,10 +10,9 @@ use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
     scatter_matrix_into, sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort,
-    ExtractionProbe, FeedbackPortBinding, GraphNodeId, LinearMultiportNetwork, LtiStateMap,
-    MnaNodeId, MnaOnePort, MnaPortTerminals, MnaVariableResistorBinding, NamedPortBinding,
-    OnePortKind, OnePortState, RolePortBinding, RuntimeOnePort, RuntimeState, ScatteringPortId,
-    WdfPortTerminals, WdfWaveCache,
+    ExtractionProbe, GraphNodeId, LinearMultiportNetwork, LtiStateMap, MnaNodeId, MnaOnePort,
+    MnaPortTerminals, MnaVariableResistorBinding, OnePortKind, OnePortState, RolePortBinding,
+    RuntimeOnePort, RuntimeState, ScatteringPortId, WdfPortTerminals, WdfWaveCache,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -7049,20 +7048,6 @@ impl BlockwiseStage {
     pub fn coupling_network_model(&self) -> LinearMultiportNetwork<GraphNodeId, MnaNodeId> {
         let mut network =
             LinearMultiportNetwork::new(self.coupling_s.clone(), self.coupling_ports.clone());
-        network.source_drives = self
-            .vs_port_map
-            .iter()
-            .map(|(name, port_idx)| {
-                NamedPortBinding::new(name.clone(), ScatteringPortId::new(*port_idx))
-            })
-            .collect();
-        network.feedback_drives = self
-            .feedback_port_map
-            .iter()
-            .map(|(source_idx, port_idx)| {
-                FeedbackPortBinding::new(*source_idx, ScatteringPortId::new(*port_idx))
-            })
-            .collect();
         network.variable_resistors = self
             .coupling_elements
             .iter()
@@ -8986,10 +8971,6 @@ mod blockwise_stage_tests {
         assert!(network.has_square_scattering());
         assert!(network.scatter_into(&[2.0, 3.0], &mut incident));
         assert_eq!(incident, vec![3.0, -2.0]);
-        assert_eq!(network.source_drives[0].name, "cv_cutoff");
-        assert_eq!(network.source_drives[0].port, ScatteringPortId::new(1));
-        assert_eq!(network.feedback_drives[0].source_idx, 0);
-        assert_eq!(network.feedback_drives[0].port, ScatteringPortId::new(0));
         assert_eq!(network.variable_resistors[0].child_idx, 0);
         assert_eq!(
             network.variable_resistors[0].terminals,
