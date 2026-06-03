@@ -37,13 +37,7 @@ fn wdf_resistor_is_not_dynamic() {
 
 #[test]
 fn wdf_capacitor_is_not_dynamic() {
-    let c = WdfCapacitor {
-        comp_id: Some("C1".to_string()),
-        capacitance: 100e-9,
-        rp: 1.0 / (2.0 * 48000.0 * 100e-9),
-        state: 0.0,
-        last_b: 0.0,
-    };
+    let c = WdfCapacitor::new(Some("C1".to_string()), 100e-9, 48_000.0);
     assert!(!c.is_dynamic(), "WdfCapacitor should NOT be dynamic");
 }
 

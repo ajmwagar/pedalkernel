@@ -164,13 +164,11 @@ impl DynNode {
     }
 
     pub fn Capacitor(comp_id: Option<String>, capacitance: crate::Wave, rp: crate::Wave) -> Self {
-        Self::Leaf(LeafKind::Capacitor(WdfCapacitor {
+        Self::Leaf(LeafKind::Capacitor(WdfCapacitor::from_rp(
             comp_id,
             capacitance,
             rp,
-            state: 0.0,
-            last_b: 0.0,
-        }))
+        )))
     }
 
     pub fn LeakyCapacitor(
@@ -195,12 +193,9 @@ impl DynNode {
     }
 
     pub fn Inductor(comp_id: Option<String>, inductance: crate::Wave, rp: crate::Wave) -> Self {
-        Self::Leaf(LeafKind::Inductor(WdfInductor {
-            comp_id,
-            inductance,
-            rp,
-            state: 0.0,
-        }))
+        Self::Leaf(LeafKind::Inductor(WdfInductor::from_rp(
+            comp_id, inductance, rp,
+        )))
     }
 
     pub fn VoltageSource(voltage: crate::Wave, rp: crate::Wave) -> Self {

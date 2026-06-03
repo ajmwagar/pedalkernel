@@ -129,6 +129,14 @@ impl OnePortKind {
     pub const fn is_stateful(self) -> bool {
         matches!(self, Self::Capacitor(_) | Self::Inductor(_))
     }
+
+    pub fn rp(self, sample_rate: Wave) -> Wave {
+        match self {
+            Self::Resistor(ohms) => ohms,
+            Self::Capacitor(farads) => 1.0 / (2.0 * sample_rate * farads),
+            Self::Inductor(henries) => 2.0 * sample_rate * henries,
+        }
+    }
 }
 
 /// A two-terminal one-port in node domain `N`.
@@ -158,6 +166,24 @@ impl<N> OnePort<N> {
 impl OnePort<MnaNodeId> {
     pub fn raw_terminals(self) -> WdfPortTerminals {
         self.terminals.raw()
+    }
+}
+
+/// A one-port runtime binding: physical spec plus optional shared state slot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RuntimeOnePort<N> {
+    pub spec: OnePort<N>,
+    pub state_idx: Option<usize>,
+}
+
+impl<N> RuntimeOnePort<N> {
+    pub const fn new(spec: OnePort<N>, state_idx: Option<usize>) -> Self {
+        Self { spec, state_idx }
+    }
+
+    pub fn rp(&self, sample_rate: Wave) -> Wave {
+        self.spec.kind.rp(sample_rate)
     }
 }
 
@@ -618,6 +644,34 @@ mod tests {
             OnePortState::InductorScaledCurrent(0.5),
             OnePortState::InductorScaledCurrent(0.5)
         );
+    }
+
+    #[test]
+    fn runtime_one_port_derives_port_resistance_from_physical_spec() {
+        let sample_rate = 48_000.0;
+        let cap = RuntimeOnePort::new(
+            OnePort::new(
+                PortTerminals::<()>::grounded(),
+                OnePortKind::Capacitor(100e-9),
+            ),
+            Some(2),
+        );
+        let inductor = RuntimeOnePort::new(
+            OnePort::new(PortTerminals::<()>::grounded(), OnePortKind::Inductor(1e-3)),
+            Some(3),
+        );
+        let resistor = RuntimeOnePort::new(
+            OnePort::new(
+                PortTerminals::<()>::grounded(),
+                OnePortKind::Resistor(1_000.0),
+            ),
+            None,
+        );
+
+        assert_eq!(cap.state_idx, Some(2));
+        assert!((cap.rp(sample_rate) - 104.166_666_666_666_67).abs() < 1e-9);
+        assert_eq!(inductor.rp(sample_rate), 96.0);
+        assert_eq!(resistor.rp(sample_rate), 1_000.0);
     }
 
     #[test]

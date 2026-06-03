@@ -1511,7 +1511,7 @@ fn tb303_coupling_caps_land_near_stinchcombe_shelf_corners() {
                     pedalkernel_rt::wdf_leaf::LeafKind::Capacitor(cap),
                 ) = &passive.node
                 {
-                    Some(cap.capacitance)
+                    Some(cap.capacitance())
                 } else {
                     None
                 }
