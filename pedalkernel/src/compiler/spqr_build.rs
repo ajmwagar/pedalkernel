@@ -1668,7 +1668,7 @@ fn build_compiled_stage_graph(
                     .collect();
                 for (block_idx, owned_ports) in bkm.block_ports.iter().enumerate() {
                     for (local_idx, binding) in owned_ports.iter().enumerate() {
-                        let port_idx = binding.port_idx;
+                        let port_idx = binding.port_idx();
                         if let Some(label) = labels.get_mut(port_idx) {
                             *label = format!("block{block_idx}_{:?}_{local_idx}", binding.role);
                         }

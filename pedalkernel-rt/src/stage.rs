@@ -9,9 +9,11 @@ use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort
 use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
-    sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, LtiStateMap, MnaNodeId,
-    MnaOnePort, MnaPortTerminals, MnaVariableResistorBinding, OnePortKind, OnePortState,
-    RuntimeOnePort, RuntimeState, ScatteringPortId, WdfPortTerminals, WdfWaveCache,
+    sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, ExtractionProbe,
+    FeedbackPortBinding, GraphNodeId, LinearMultiportNetwork, LtiStateMap, MnaNodeId, MnaOnePort,
+    MnaPortTerminals, MnaVariableResistorBinding, NamedPortBinding, OnePortKind, OnePortState,
+    RolePortBinding, RuntimeOnePort, RuntimeState, ScatteringPortId, WdfPortTerminals,
+    WdfWaveCache,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -6808,23 +6810,11 @@ pub enum BlockPortRole {
     TopDifferential,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct BlockPortBinding {
-    pub port_idx: usize,
-    pub role: BlockPortRole,
-}
+pub type BlockPortBinding = RolePortBinding<BlockPortRole>;
 
 impl BlockPortBinding {
     pub const fn primary(port_idx: usize) -> Self {
-        Self {
-            port_idx,
-            role: BlockPortRole::Primary,
-        }
-    }
-
-    pub const fn new(port_idx: usize, role: BlockPortRole) -> Self {
-        Self { port_idx, role }
+        Self::new(port_idx, BlockPortRole::Primary)
     }
 }
 
@@ -7013,14 +7003,14 @@ impl BlockwiseStage {
             .get(block_idx)?
             .iter()
             .find(|binding| binding.role == role)
-            .map(|binding| binding.port_idx)
+            .map(|binding| binding.port)
             .or_else(|| {
                 (role == BlockPortRole::Primary)
                     .then(|| {
                         self.block_ports
                             .get(block_idx)?
                             .first()
-                            .map(|binding| binding.port_idx)
+                            .map(|binding| binding.port)
                     })
                     .flatten()
             })
@@ -7031,7 +7021,7 @@ impl BlockwiseStage {
             .get(block_idx)
             .into_iter()
             .flatten()
-            .map(|binding| binding.port_idx)
+            .map(|binding| binding.port)
     }
 
     pub fn differential_rung_ports(&self, block_idx: usize) -> Option<(usize, usize, usize)> {
@@ -7054,6 +7044,48 @@ impl BlockwiseStage {
             .copied()
             .map(CircuitMappedPort::to_wdf_port)
             .collect()
+    }
+
+    pub fn coupling_network_model(&self) -> LinearMultiportNetwork<GraphNodeId, MnaNodeId> {
+        let mut network =
+            LinearMultiportNetwork::new(self.coupling_s.clone(), self.coupling_ports.clone());
+        network.source_drives = self
+            .vs_port_map
+            .iter()
+            .map(|(name, port_idx)| {
+                NamedPortBinding::new(name.clone(), ScatteringPortId::new(*port_idx))
+            })
+            .collect();
+        network.feedback_drives = self
+            .feedback_port_map
+            .iter()
+            .map(|(source_idx, port_idx)| {
+                FeedbackPortBinding::new(*source_idx, ScatteringPortId::new(*port_idx))
+            })
+            .collect();
+        network.variable_resistors = self
+            .coupling_elements
+            .iter()
+            .enumerate()
+            .filter_map(|(element_idx, element)| {
+                element
+                    .pot_max_resistance
+                    .map(|_| crate::boundary_math::VariableResistorBinding {
+                        child_idx: element_idx,
+                        terminals: MnaPortTerminals::maybe_differential(
+                            element.node_a.map(MnaNodeId::new),
+                            element.node_b.map(MnaNodeId::new),
+                        ),
+                        conductance: 1.0 / element.resistance.max(1.0e-12),
+                    })
+            })
+            .collect();
+        network.extraction = Some(ExtractionProbe::new(
+            self.output_extraction_coeffs.clone(),
+            self.output_extraction_terminals
+                .map(|terminals| terminals.map(MnaNodeId::new)),
+        ));
+        network
     }
 
     fn block_drive_voltage(block: &KMethodBlock, physical_voltage: crate::Wave) -> crate::Wave {
@@ -7162,7 +7194,7 @@ impl BlockwiseStage {
         self.block_ports
             .iter()
             .flatten()
-            .any(|binding| binding.port_idx == port_idx)
+            .any(|binding| binding.port == port_idx)
             || port_idx < self.blocks.len()
     }
 
@@ -7233,7 +7265,7 @@ impl BlockwiseStage {
 
             for port_idx in port_bindings
                 .iter()
-                .map(|binding| binding.port_idx)
+                .map(|binding| binding.port)
                 .filter(|&port_idx| port_idx != primary_port)
             {
                 if port_idx < b_out.len() {
@@ -7434,21 +7466,10 @@ impl BlockwiseStage {
     }
 
     fn output_probe_voltage(&self, fallback: crate::Wave) -> crate::Wave {
-        if self.output_extraction_coeffs.len() == self.n_ports
-            && self
-                .output_extraction_coeffs
-                .iter()
-                .any(|c| c.abs() > 1.0e-15)
+        if let Some(v) =
+            ExtractionProbe::<usize>::read_coeffs(&self.output_extraction_coeffs, &self.work_b)
         {
-            let v = self
-                .output_extraction_coeffs
-                .iter()
-                .zip(self.work_b.iter())
-                .map(|(coeff, b)| coeff * b)
-                .sum::<crate::Wave>();
-            if v.is_finite() {
-                return v;
-            }
+            return v;
         }
 
         let Some(port_idx) = self.output_port_index else {
@@ -7736,7 +7757,7 @@ impl BlockwiseStage {
                 };
                 for port_idx in port_bindings
                     .iter()
-                    .map(|binding| binding.port_idx)
+                    .map(|binding| binding.port)
                     .filter(|&port_idx| port_idx != primary_port)
                 {
                     if port_idx < n {
@@ -7907,7 +7928,7 @@ impl BlockwiseStage {
             }
         }
         for block_ports in &self.block_ports {
-            for port_idx in block_ports.iter().map(|binding| binding.port_idx) {
+            for port_idx in block_ports.iter().map(|binding| binding.port) {
                 if port_idx < self.work_b.len() && port_idx < scratch.b.len() {
                     self.work_b[port_idx] = if update_state {
                         scratch.b[port_idx]
@@ -8927,6 +8948,66 @@ mod blockwise_stage_tests {
         assert!(
             (stage.work_b[0] - 4.75).abs() < 1e-12,
             "BKM voltage-source ports must use b=2V-a so source impedance participates in coupling"
+        );
+    }
+
+    #[test]
+    fn blockwise_stage_exposes_neutral_coupling_network_model() {
+        let mut stage = blockwise_stage_fixture(
+            vec![test_block(1.0)],
+            vec![
+                mapped_port(WdfPortTerminals::single_ended(0), 100.0),
+                mapped_port(WdfPortTerminals::single_ended(1), 200.0),
+            ],
+            vec![vec![BlockPortBinding::primary(0)]],
+        );
+        stage.coupling_s = vec![0.0, 1.0, -1.0, 0.0];
+        stage.vs_port_map = vec![(alloc::string::String::from("cv_cutoff"), 1)];
+        stage.feedback_port_map = vec![(0, 0)];
+        stage.coupling_elements = vec![CouplingElement {
+            comp_id: alloc::string::String::from("Cutoff"),
+            node_a: Some(0),
+            node_b: Some(1),
+            graph_node_a: Some(0),
+            graph_node_b: Some(1),
+            resistance: 50_000.0,
+            pot_max_resistance: Some(100_000.0),
+            taper: crate::pot_taper::PotTaper::B,
+            invert_control: false,
+        }];
+        stage.output_extraction_coeffs = vec![0.25, -0.5];
+        stage.output_extraction_terminals = Some(WdfPortTerminals::single_ended(1));
+
+        let network = stage.coupling_network_model();
+        let mut incident = vec![0.0; 2];
+
+        assert_eq!(network.n_ports(), 2);
+        assert!(network.has_square_scattering());
+        assert!(network.scatter_into(&[2.0, 3.0], &mut incident));
+        assert_eq!(incident, vec![3.0, -2.0]);
+        assert_eq!(network.source_drives[0].name, "cv_cutoff");
+        assert_eq!(network.source_drives[0].port, ScatteringPortId::new(1));
+        assert_eq!(network.feedback_drives[0].source_idx, 0);
+        assert_eq!(network.feedback_drives[0].port, ScatteringPortId::new(0));
+        assert_eq!(network.variable_resistors[0].child_idx, 0);
+        assert_eq!(
+            network.variable_resistors[0].terminals,
+            MnaPortTerminals::differential(MnaNodeId::new(0), MnaNodeId::new(1))
+        );
+        assert_eq!(
+            network
+                .extraction
+                .as_ref()
+                .and_then(|probe| probe.read_reflected(&[2.0, 3.0])),
+            Some(-1.0)
+        );
+        assert_eq!(
+            network
+                .extraction
+                .as_ref()
+                .and_then(|probe| probe.terminals)
+                .map(|terminals| terminals.raw()),
+            Some(WdfPortTerminals::single_ended(1))
         );
     }
 
