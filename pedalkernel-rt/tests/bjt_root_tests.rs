@@ -662,7 +662,7 @@ fn single_diode_cap_rung_is_lowpass() {
     // Feed sine at 100Hz and 10kHz. The cap voltage (lowpass) must
     // show 100Hz > 10kHz. If we see 100Hz < 10kHz, the output
     // extraction is at the wrong node.
-    use pedalkernel_rt::dyn_node::{BinaryKind, DynNode};
+    use pedalkernel_rt::dyn_node::DynNode;
     use pedalkernel_rt::elements::nonlinear::{DiodeModel, DiodeRoot};
 
     let sr = 48_000.0;
@@ -678,7 +678,7 @@ fn single_diode_cap_rung_is_lowpass() {
 
     let measure_at_root = |freq: f64| -> f64 {
         let vs = DynNode::VoltageSource(0.0, vs_rp);
-        let cap = DynNode::Capacitor(None, cap_c, cap_rp);
+        let cap = DynNode::Capacitor(Some("C1".to_string()), cap_c, cap_rp);
         let mut tree = DynNode::Series(Box::new(vs), Box::new(cap));
         let mut root = DiodeRoot::new(diode);
 
@@ -706,7 +706,7 @@ fn single_diode_cap_rung_is_lowpass() {
 
     let measure_at_cap = |freq: f64| -> f64 {
         let vs = DynNode::VoltageSource(0.0, vs_rp);
-        let cap = DynNode::Capacitor(None, cap_c, cap_rp);
+        let cap = DynNode::Capacitor(Some("C1".to_string()), cap_c, cap_rp);
         let mut tree = DynNode::Series(Box::new(vs), Box::new(cap));
         let mut root = DiodeRoot::new(diode);
 
@@ -724,21 +724,7 @@ fn single_diode_cap_rung_is_lowpass() {
             let b = tree.reflected();
             let a = root.process(b, tree.port_resistance());
             tree.set_incident(a);
-            // Extract cap voltage (right child of Series)
-            let v_cap = if let DynNode::Binary {
-                kind: BinaryKind::Series,
-                gamma,
-                b1,
-                b2,
-                ..
-            } = &tree
-            {
-                let sum = *b1 + *b2 + a;
-                let a_right = *b2 - (1.0 - *gamma) * sum;
-                (a_right + *b2) / 2.0
-            } else {
-                0.0
-            };
+            let v_cap = tree.leaf_voltage("C1").unwrap_or(0.0);
             peak = peak.max(v_cap.abs());
         }
         peak
@@ -775,7 +761,7 @@ fn single_rung_ktable_vs_nr_comparison() {
     // Compare: does a single rung with K-table give the same lowpass
     // as a single rung with direct NR? If K-table is flat but NR isn't,
     // the K-table resolution is the problem.
-    use pedalkernel_rt::dyn_node::{BinaryKind, DynNode};
+    use pedalkernel_rt::dyn_node::DynNode;
     use pedalkernel_rt::elements::nonlinear::{DiodeModel, DiodeRoot};
     use pedalkernel_rt::stage::KTable;
 
@@ -817,7 +803,7 @@ fn single_rung_ktable_vs_nr_comparison() {
     // Measure with NR at two frequencies
     let measure_nr = |freq: f64| -> f64 {
         let vs = DynNode::VoltageSource(0.0, vs_rp);
-        let cap = DynNode::Capacitor(None, cap_c, cap_rp);
+        let cap = DynNode::Capacitor(Some("C1".to_string()), cap_c, cap_rp);
         let mut tree = DynNode::Series(Box::new(vs), Box::new(cap));
         let mut root = DiodeRoot::new(diode);
         for _ in 0..2400 {
@@ -833,18 +819,7 @@ fn single_rung_ktable_vs_nr_comparison() {
             let b = tree.reflected();
             let a = root.process(b, tree.port_resistance());
             tree.set_incident(a);
-            if let DynNode::Binary {
-                kind: BinaryKind::Series,
-                gamma,
-                b1,
-                b2,
-                ..
-            } = &tree
-            {
-                let sum = *b1 + *b2 + a;
-                let a_right = *b2 - (1.0 - *gamma) * sum;
-                peak = peak.max(((a_right + *b2) / 2.0).abs());
-            }
+            peak = peak.max(tree.leaf_voltage("C1").unwrap_or(0.0).abs());
         }
         peak
     };
@@ -852,7 +827,7 @@ fn single_rung_ktable_vs_nr_comparison() {
     // Measure with K-table at two frequencies
     let measure_kt = |freq: f64| -> f64 {
         let vs = DynNode::VoltageSource(0.0, vs_rp);
-        let cap = DynNode::Capacitor(None, cap_c, cap_rp);
+        let cap = DynNode::Capacitor(Some("C1".to_string()), cap_c, cap_rp);
         let mut tree = DynNode::Series(Box::new(vs), Box::new(cap));
         for _ in 0..2400 {
             tree.set_voltage(0.6);
@@ -867,18 +842,7 @@ fn single_rung_ktable_vs_nr_comparison() {
             let b = tree.reflected();
             let a = kt.lookup_1d(b);
             tree.set_incident(a);
-            if let DynNode::Binary {
-                kind: BinaryKind::Series,
-                gamma,
-                b1,
-                b2,
-                ..
-            } = &tree
-            {
-                let sum = *b1 + *b2 + a;
-                let a_right = *b2 - (1.0 - *gamma) * sum;
-                peak = peak.max(((a_right + *b2) / 2.0).abs());
-            }
+            peak = peak.max(tree.leaf_voltage("C1").unwrap_or(0.0).abs());
         }
         peak
     };

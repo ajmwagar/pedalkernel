@@ -126,6 +126,8 @@ pub enum OnePortKind {
 }
 
 impl OnePortKind {
+    const DEFAULT_SAMPLE_RATE: Wave = 48_000.0;
+
     pub const fn is_stateful(self) -> bool {
         matches!(self, Self::Capacitor(_) | Self::Inductor(_))
     }
@@ -135,6 +137,15 @@ impl OnePortKind {
             Self::Resistor(ohms) => ohms,
             Self::Capacitor(farads) => 1.0 / (2.0 * sample_rate * farads),
             Self::Inductor(henries) => 2.0 * sample_rate * henries,
+        }
+    }
+
+    pub fn sample_rate_for_rp(self, rp: Wave) -> Wave {
+        match self {
+            Self::Resistor(_) => Self::DEFAULT_SAMPLE_RATE,
+            Self::Capacitor(farads) if farads > 0.0 && rp > 0.0 => 1.0 / (2.0 * rp * farads),
+            Self::Inductor(henries) if henries > 0.0 => rp / (2.0 * henries),
+            Self::Capacitor(_) | Self::Inductor(_) => Self::DEFAULT_SAMPLE_RATE,
         }
     }
 }
@@ -371,6 +382,22 @@ impl RuntimeState {
                 Some(self.allocate(OnePortState::InductorScaledCurrent(0.0)))
             }
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        debug_assert_eq!(self.states.len(), self.wave_cache.len());
+        self.states.len()
+    }
+
+    pub fn append(&mut self, mut other: Self) {
+        debug_assert_eq!(self.states.len(), self.wave_cache.len());
+        debug_assert_eq!(other.states.len(), other.wave_cache.len());
+        self.states.append(&mut other.states);
+        self.wave_cache.append(&mut other.wave_cache);
     }
 }
 
