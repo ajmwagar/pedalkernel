@@ -318,10 +318,9 @@ fn big_muff_sustain_control_affects_output() {
 /// Step 1: Verify AC128 model parameters are in realistic germanium range.
 #[test]
 fn fuzz_face_ac128_model_params() {
-    use pedalkernel::elements::GummelPoonModel;
+    use pedalkernel::model_lookup::bjt_try_by_name;
 
-    let gp =
-        GummelPoonModel::try_by_name("ac128").expect("AC128 model should exist in SPICE library");
+    let gp = bjt_try_by_name("ac128").expect("AC128 model should exist in SPICE library");
 
     eprintln!("=== AC128 Gummel-Poon Model ===");
     eprintln!("IS  = {:.4e} A", gp.is);

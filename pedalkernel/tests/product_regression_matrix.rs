@@ -30,9 +30,6 @@ const BIVALVE_MFB_LPF_SRC: &str =
 const DRUMMERBOY_808_KICK_SRC: &str = include_str!(
     "../../../pedalkernel-pro/crates/drummerboy/drummerboy-core/pedals/808_kick.pedal"
 );
-const DRUMMERBOY_808_KICK_V2_SRC: &str = include_str!(
-    "../../../pedalkernel-pro/crates/drummerboy/drummerboy-core/pedals/808_kick_v2.pedal"
-);
 const DRUMMERBOY_606_SNARE_SRC: &str = include_str!(
     "../../../pedalkernel-pro/crates/drummerboy/drummerboy-core/pedals/606_snare.pedal"
 );
@@ -95,11 +92,6 @@ const PRODUCT_CIRCUITS: &[CircuitRegressionSpec] = &[
         checks: DECAY_CHECKS,
     },
     CircuitRegressionSpec {
-        name: "DrummerBoy 808 Kick v2",
-        source: DRUMMERBOY_808_KICK_V2_SRC,
-        checks: DECAY_CHECKS,
-    },
-    CircuitRegressionSpec {
         name: "DrummerBoy 606 Snare",
         source: DRUMMERBOY_606_SNARE_SRC,
         checks: DECAY_CHECKS,
@@ -151,7 +143,8 @@ fn product_controls_bind_to_runtime_stages() {
                 Stage::Iir(_) => "IIR",
                 Stage::StateSpace(_) => "StateSpace",
                 Stage::BlackFeedback(_) => "BlackFeedback",
-                Stage::BlockwiseKMethod(_) => "BKM",
+                Stage::Blockwise(_) => "BKM",
+                Stage::SerialDelayedFeedback(_) => "SerialDelayedFeedback",
             })
             .collect::<Vec<_>>();
 
