@@ -742,19 +742,30 @@ impl<G, M> LinearMultiportNetwork<G, M> {
     }
 
     pub fn scatter_into(&self, reflected: &[Wave], incident: &mut [Wave]) -> bool {
-        let n = self.n_ports();
-        if !self.has_square_scattering() || reflected.len() != n || incident.len() != n {
-            return false;
-        }
-        for i in 0..n {
-            let mut sum = 0.0;
-            for j in 0..n {
-                sum += self.scattering[i * n + j] * reflected[j];
-            }
-            incident[i] = sum;
-        }
-        true
+        scatter_matrix_into(&self.scattering, self.n_ports(), reflected, incident)
     }
+}
+
+pub fn scatter_matrix_into(
+    scattering: &[Wave],
+    n_ports: usize,
+    reflected: &[Wave],
+    incident: &mut [Wave],
+) -> bool {
+    if scattering.len() != n_ports * n_ports
+        || reflected.len() != n_ports
+        || incident.len() != n_ports
+    {
+        return false;
+    }
+    for i in 0..n_ports {
+        let mut sum = 0.0;
+        for j in 0..n_ports {
+            sum += scattering[i * n_ports + j] * reflected[j];
+        }
+        incident[i] = sum;
+    }
+    true
 }
 
 impl PortVoltage {
@@ -1214,5 +1225,18 @@ mod tests {
                 .read_reflected(&incident),
             Some(-0.25)
         );
+    }
+
+    #[test]
+    fn scatter_matrix_into_rejects_mismatched_dimensions() {
+        let mut incident = [123.0, 456.0];
+
+        assert!(!scatter_matrix_into(
+            &[1.0, 0.0, 0.0],
+            2,
+            &[1.0, 2.0],
+            &mut incident
+        ));
+        assert_eq!(incident, [123.0, 456.0]);
     }
 }

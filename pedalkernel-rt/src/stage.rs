@@ -9,11 +9,11 @@ use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort
 use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
-    sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, ExtractionProbe,
-    FeedbackPortBinding, GraphNodeId, LinearMultiportNetwork, LtiStateMap, MnaNodeId, MnaOnePort,
-    MnaPortTerminals, MnaVariableResistorBinding, NamedPortBinding, OnePortKind, OnePortState,
-    RolePortBinding, RuntimeOnePort, RuntimeState, ScatteringPortId, WdfPortTerminals,
-    WdfWaveCache,
+    scatter_matrix_into, sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort,
+    ExtractionProbe, FeedbackPortBinding, GraphNodeId, LinearMultiportNetwork, LtiStateMap,
+    MnaNodeId, MnaOnePort, MnaPortTerminals, MnaVariableResistorBinding, NamedPortBinding,
+    OnePortKind, OnePortState, RolePortBinding, RuntimeOnePort, RuntimeState, ScatteringPortId,
+    WdfPortTerminals, WdfWaveCache,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -7487,13 +7487,13 @@ impl BlockwiseStage {
     }
 
     fn scatter_coupling(&mut self) {
-        let n = self.n_ports;
-        for i in 0..n {
-            let mut sum = 0.0;
-            for j in 0..n {
-                sum += self.coupling_s[i * n + j] * self.work_b[j];
-            }
-            self.work_a[i] = sum;
+        if !scatter_matrix_into(
+            &self.coupling_s,
+            self.n_ports,
+            &self.work_b,
+            &mut self.work_a,
+        ) {
+            self.work_a.fill(0.0);
         }
     }
 
@@ -7650,13 +7650,14 @@ impl BlockwiseStage {
     }
 
     fn coupled_scatter_from_b(&self, b: &[crate::Wave], a_out: &mut [crate::Wave]) {
-        let n = self.n_ports;
-        for i in 0..n {
-            let mut sum = 0.0;
-            for j in 0..n {
-                sum += self.coupling_s[i * n + j] * b[j];
+        if !scatter_matrix_into(&self.coupling_s, self.n_ports, b, a_out) {
+            a_out.fill(0.0);
+            return;
+        }
+        for incident in a_out {
+            if !incident.is_finite() {
+                *incident = 0.0;
             }
-            a_out[i] = if sum.is_finite() { sum } else { 0.0 };
         }
     }
 
