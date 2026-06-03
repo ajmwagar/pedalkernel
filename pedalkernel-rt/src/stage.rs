@@ -9,9 +9,9 @@ use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort
 use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
-    sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, MnaNodeId, MnaOnePort,
-    MnaPortTerminals, MnaVariableResistorBinding, OnePortKind, OnePortState, RuntimeOnePort,
-    RuntimeState, ScatteringPortId, WdfPortTerminals, WdfWaveCache,
+    sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, LtiStateMap, MnaNodeId,
+    MnaOnePort, MnaPortTerminals, MnaVariableResistorBinding, OnePortKind, OnePortState,
+    RuntimeOnePort, RuntimeState, ScatteringPortId, WdfPortTerminals, WdfWaveCache,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -1223,8 +1223,14 @@ impl ResonatorFeedback {
 pub struct OpAmpWdfAdaptor {
     /// Zi subtree (input network for inverting, ground-leg for non-inverting).
     pub zi: DynNode,
+    /// Runtime state for reactive one-ports owned by `zi`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub zi_runtime_state: RuntimeState,
     /// Zf subtree (feedback network: caps, pots, resistors between neg and output).
     pub zf: DynNode,
+    /// Runtime state for reactive one-ports owned by `zf`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub zf_runtime_state: RuntimeState,
     /// True for inverting topology, false for non-inverting.
     pub is_inverting: bool,
     /// Op-amp model for GBW rolloff and slew rate limiting.
@@ -1238,6 +1244,28 @@ pub struct OpAmpWdfAdaptor {
 }
 
 impl OpAmpWdfAdaptor {
+    pub fn new(
+        mut zi: DynNode,
+        mut zf: DynNode,
+        is_inverting: bool,
+        opamp: OpAmpRoot,
+        feedback_pot_id: Option<String>,
+    ) -> Self {
+        let zi_runtime_state = zi.bind_runtime_state();
+        let zf_runtime_state = zf.bind_runtime_state();
+        Self {
+            zi,
+            zi_runtime_state,
+            zf,
+            zf_runtime_state,
+            is_inverting,
+            opamp,
+            gbw_state: 0.0,
+            prev_out: 0.0,
+            feedback_pot_id,
+        }
+    }
+
     /// Process one sample through the op-amp adaptor.
     ///
     /// `v_plus`: non-inverting input voltage (bias for inverting, signal for non-inv).
@@ -1245,8 +1273,8 @@ impl OpAmpWdfAdaptor {
     #[inline]
     pub fn process(&mut self, v_plus: crate::Wave, v_in: crate::Wave) -> crate::Wave {
         // Up-sweep: get reflected waves from both subtrees
-        let b1 = self.zi.reflected();
-        let b2 = self.zf.reflected();
+        let b1 = self.zi.reflected_with_state(&mut self.zi_runtime_state);
+        let b2 = self.zf.reflected_with_state(&mut self.zf_runtime_state);
         let r1 = self.zi.port_resistance();
         let r2 = self.zf.port_resistance();
 
@@ -1270,8 +1298,10 @@ impl OpAmpWdfAdaptor {
         };
 
         // Down-sweep: send incident waves back into subtrees (state update)
-        self.zi.set_incident(a1);
-        self.zf.set_incident(a2);
+        self.zi
+            .set_incident_with_state(a1, &mut self.zi_runtime_state);
+        self.zf
+            .set_incident_with_state(a2, &mut self.zf_runtime_state);
 
         // Apply op-amp non-idealities: GBW rolloff + slew rate + rail clipping
         let v_max = self.opamp.v_max();
@@ -1303,8 +1333,8 @@ impl OpAmpWdfAdaptor {
     pub fn reset(&mut self) {
         self.gbw_state = 0.0;
         self.prev_out = 0.0;
-        self.zi.reset();
-        self.zf.reset();
+        self.zi.reset_with_state(&mut self.zi_runtime_state);
+        self.zf.reset_with_state(&mut self.zf_runtime_state);
         self.opamp.reset();
     }
 }
@@ -1470,8 +1500,12 @@ pub struct WdfStage {
     /// Feedback (Zf) subtree for the 3-port linear opamp adaptor (NonInverting).
     /// Used with `zg_child` + `opamp_adaptor` when Zf/Zg split cleanly (e.g. RAT).
     pub zf_child: Option<DynNode>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub zf_child_runtime_state: RuntimeState,
     /// Ground-leg (Zg) subtree for the 3-port linear opamp adaptor (NonInverting).
     pub zg_child: Option<DynNode>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub zg_child_runtime_state: RuntimeState,
     /// R-type adaptor scattering matrix. Used by BOTH the 3-port path (zf/zg)
     /// and the MNA path (opamp_children). When Some, process() uses the adaptor.
     pub opamp_adaptor: Option<crate::tree::RTypeAdaptor>,
@@ -1488,6 +1522,8 @@ pub struct WdfStage {
     /// for Inverting opamps — the scattering matrix encodes the full Rf/Ri gain
     /// so the OpAmpRoot gain is set to 1.0 and gain comes from impedance ratios.
     pub opamp_input_child_idx: Option<usize>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub opamp_child_runtime_states: Vec<RuntimeState>,
     /// Custom WDF adaptor for op-amp circuits with reactive feedback.
     /// When `Some`, the stage uses the V_neg = V+ constraint-based scattering
     /// instead of the MNA/RType adaptor or precomputed scalar gain.
@@ -1596,11 +1632,14 @@ impl WdfStage {
             negate_vs: false,
             input_photocouplers: Vec::new(),
             zf_child: None,
+            zf_child_runtime_state: RuntimeState::new(),
             zg_child: None,
+            zg_child_runtime_state: RuntimeState::new(),
             opamp_adaptor: None,
             opamp_children: Vec::new(),
             opamp_recompute: None,
             opamp_input_child_idx: None,
+            opamp_child_runtime_states: Vec::new(),
             opamp_wdf_adaptor: None,
             main_vs_ptr: None,
             port_vs_ptrs: Vec::new(),
@@ -1708,6 +1747,36 @@ impl WdfStage {
         }
     }
 
+    fn ensure_opamp_adaptor_runtime_states(&mut self) {
+        if self.opamp_child_runtime_states.len() != self.opamp_children.len() {
+            self.opamp_child_runtime_states.clear();
+            self.opamp_child_runtime_states
+                .reserve(self.opamp_children.len());
+            for child in &mut self.opamp_children {
+                self.opamp_child_runtime_states
+                    .push(child.bind_runtime_state());
+            }
+        }
+
+        if let Some(ref mut zf) = self.zf_child {
+            if self.zf_child_runtime_state.is_empty()
+                || self.zf_child_runtime_state.states.len()
+                    != self.zf_child_runtime_state.wave_cache.len()
+            {
+                self.zf_child_runtime_state = zf.bind_runtime_state();
+            }
+        }
+
+        if let Some(ref mut zg) = self.zg_child {
+            if self.zg_child_runtime_state.is_empty()
+                || self.zg_child_runtime_state.states.len()
+                    != self.zg_child_runtime_state.wave_cache.len()
+            {
+                self.zg_child_runtime_state = zg.bind_runtime_state();
+            }
+        }
+    }
+
     /// Check if any DynNode tree in this stage contains a pot with the given ID.
     pub fn has_pot(&self, pot_id: &str) -> bool {
         use crate::helpers::has_pot;
@@ -1793,6 +1862,7 @@ impl WdfStage {
         // graph_reduce subtrees (zf/zg); the MNA path has individual
         // component leaves (caps, pots) with resistors in the MNA.
         if self.opamp_adaptor.is_some() {
+            self.ensure_opamp_adaptor_runtime_states();
             let adaptor = self.opamp_adaptor.as_mut().unwrap();
 
             // Collect reflected waves from children (3-port or MNA)
@@ -1807,11 +1877,18 @@ impl WdfStage {
                 let b: Vec<crate::Wave> = self
                     .opamp_children
                     .iter_mut()
-                    .map(|c| c.reflected())
+                    .zip(self.opamp_child_runtime_states.iter_mut())
+                    .map(|(child, state)| child.reflected_with_state(state))
                     .collect();
                 (b, true)
             } else if let (Some(zf), Some(zg)) = (self.zf_child.as_mut(), self.zg_child.as_mut()) {
-                (vec![zf.reflected(), zg.reflected()], false)
+                (
+                    vec![
+                        zf.reflected_with_state(&mut self.zf_child_runtime_state),
+                        zg.reflected_with_state(&mut self.zg_child_runtime_state),
+                    ],
+                    false,
+                )
             } else {
                 unreachable!("opamp adaptor requires children");
             };
@@ -1830,12 +1907,23 @@ impl WdfStage {
             // Down-sweep: distribute to children
             let a_children = adaptor.scatter_down(a_adapted);
             if use_mna {
-                for (i, child) in self.opamp_children.iter_mut().enumerate() {
-                    child.set_incident(a_children[i]);
+                for (i, (child, state)) in self
+                    .opamp_children
+                    .iter_mut()
+                    .zip(self.opamp_child_runtime_states.iter_mut())
+                    .enumerate()
+                {
+                    child.set_incident_with_state(a_children[i], state);
                 }
             } else {
-                self.zf_child.as_mut().unwrap().set_incident(a_children[0]);
-                self.zg_child.as_mut().unwrap().set_incident(a_children[1]);
+                self.zf_child
+                    .as_mut()
+                    .unwrap()
+                    .set_incident_with_state(a_children[0], &mut self.zf_child_runtime_state);
+                self.zg_child
+                    .as_mut()
+                    .unwrap()
+                    .set_incident_with_state(a_children[1], &mut self.zg_child_runtime_state);
             }
 
             // Output = voltage at adapted port (out→gnd = V_out)
@@ -2411,6 +2499,20 @@ impl WdfStage {
             for (child, state) in children.iter_mut().zip(child_runtime_states.iter_mut()) {
                 child.reset_with_state(state);
             }
+        }
+        self.ensure_opamp_adaptor_runtime_states();
+        for (child, state) in self
+            .opamp_children
+            .iter_mut()
+            .zip(self.opamp_child_runtime_states.iter_mut())
+        {
+            child.reset_with_state(state);
+        }
+        if let Some(ref mut zf) = self.zf_child {
+            zf.reset_with_state(&mut self.zf_child_runtime_state);
+        }
+        if let Some(ref mut zg) = self.zg_child {
+            zg.reset_with_state(&mut self.zg_child_runtime_state);
         }
     }
 
@@ -3251,8 +3353,12 @@ impl TubeRoot {
 pub struct PushPullStage {
     /// WDF tree for push half (plate load + cathode passives).
     pub push_tree: DynNode,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub push_runtime_state: RuntimeState,
     /// WDF tree for pull half (plate load + cathode passives).
     pub pull_tree: DynNode,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub pull_runtime_state: RuntimeState,
     /// Push tube model (Koren triode or Raffensperger variable-mu).
     pub push_root: TubeRoot,
     /// Pull tube model (Koren triode or Raffensperger variable-mu).
@@ -3289,6 +3395,8 @@ pub struct PushPullHalfAdaptor {
     pub device: NlDeviceGroupKind,
     pub scattering: MultiNlScattering,
     pub passive_children: Vec<DynNode>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub passive_child_runtime_states: Vec<RuntimeState>,
     pub nl_port_resistances: Vec<crate::Wave>,
     pub v_prev: Vec<crate::Wave>,
     pub dc_bias: Vec<crate::Wave>,
@@ -3300,11 +3408,25 @@ pub struct PushPullHalfAdaptor {
 }
 
 impl PushPullStage {
+    fn ensure_tree_runtime_states(&mut self) {
+        if self.push_runtime_state.is_empty()
+            || self.push_runtime_state.states.len() != self.push_runtime_state.wave_cache.len()
+        {
+            self.push_runtime_state = self.push_tree.bind_runtime_state();
+        }
+        if self.pull_runtime_state.is_empty()
+            || self.pull_runtime_state.states.len() != self.pull_runtime_state.wave_cache.len()
+        {
+            self.pull_runtime_state = self.pull_tree.bind_runtime_state();
+        }
+    }
+
     /// Process one sample through the push-pull stage.
     /// Input is applied with opposite polarity to push and pull halves.
     /// Output is the differential plate voltage divided by turns ratio.
     #[inline]
     pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
+        self.ensure_tree_runtime_states();
         // Check for 3-port R-type adaptor path
         if self.push_adaptor.is_some() {
             return self.process_three_port(input);
@@ -3327,10 +3449,13 @@ impl PushPullStage {
         let push_out = self.push_oversampler.process(input, |_| {
             let vs = self.push_root.v_max();
             self.push_tree.set_voltage(vs);
-            let b = self.push_tree.reflected();
+            let b = self
+                .push_tree
+                .reflected_with_state(&mut self.push_runtime_state);
             let rp = self.push_tree.port_resistance();
             let a = self.push_root.process(b, rp);
-            self.push_tree.set_incident(a);
+            self.push_tree
+                .set_incident_with_state(a, &mut self.push_runtime_state);
             #[cfg(feature = "debug-trace")]
             {
                 push_b.set(b);
@@ -3342,10 +3467,13 @@ impl PushPullStage {
         let pull_out = self.pull_oversampler.process(-input, |_| {
             let vs = self.pull_root.v_max();
             self.pull_tree.set_voltage(vs);
-            let b = self.pull_tree.reflected();
+            let b = self
+                .pull_tree
+                .reflected_with_state(&mut self.pull_runtime_state);
             let rp = self.pull_tree.port_resistance();
             let a = self.pull_root.process(b, rp);
-            self.pull_tree.set_incident(a);
+            self.pull_tree
+                .set_incident_with_state(a, &mut self.pull_runtime_state);
             (a + b) / 2.0
         });
 
@@ -3437,6 +3565,17 @@ impl PushPullStage {
     fn process_adaptor_half(adaptor: &mut PushPullHalfAdaptor, sample: crate::Wave) -> crate::Wave {
         let n_nl = adaptor.n_nl;
         let n_passive = adaptor.passive_children.len();
+        if adaptor.passive_child_runtime_states.len() != n_passive {
+            adaptor.passive_child_runtime_states.clear();
+            adaptor
+                .passive_child_runtime_states
+                .reserve(adaptor.passive_children.len());
+            for child in &mut adaptor.passive_children {
+                adaptor
+                    .passive_child_runtime_states
+                    .push(child.bind_runtime_state());
+            }
+        }
 
         // DC ramp: gradually increase VCC bias over DC_RAMP_SAMPLES to let
         // the NR solver converge to the correct operating point without diverging.
@@ -3450,8 +3589,12 @@ impl PushPullStage {
 
         // 1. Scatter-up passive children
         let mut b_passive = Vec::with_capacity(n_passive);
-        for child in &mut adaptor.passive_children {
-            b_passive.push(child.reflected());
+        for (child, state) in adaptor
+            .passive_children
+            .iter_mut()
+            .zip(adaptor.passive_child_runtime_states.iter_mut())
+        {
+            b_passive.push(child.reflected_with_state(state));
         }
 
         // 2. Compute known_a for each NL port
@@ -3514,8 +3657,13 @@ impl PushPullStage {
         }
 
         // 5. Set incident waves on passive children
-        for (k, child) in adaptor.passive_children.iter_mut().enumerate() {
-            child.set_incident(a_all[n_nl + k]);
+        for (k, (child, state)) in adaptor
+            .passive_children
+            .iter_mut()
+            .zip(adaptor.passive_child_runtime_states.iter_mut())
+            .enumerate()
+        {
+            child.set_incident_with_state(a_all[n_nl + k], state);
         }
 
         // 6. Output: (a + b) / 2 at plate port (port 1)
@@ -3883,6 +4031,9 @@ pub struct MultiNlStage {
     pub nl_port_resistances: Vec<crate::Wave>,
     /// Passive child nodes (capacitors, inductors) needing WDF state updates.
     pub passive_children: Vec<DynNode>,
+    /// Runtime state for `passive_children`, indexed in the same order.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub passive_child_runtime_states: Vec<RuntimeState>,
     /// Pot DynNodes stored separately — pots are G-matrix conductances, not WDF ports.
     pub pot_children: Vec<DynNode>,
     /// Runtime variable-resistor bindings for MNA G-matrix updates.
@@ -4197,34 +4348,7 @@ pub struct IirPotBinding {
 }
 
 /// How an IIR stage's direct-form state relates to physical reactive one-ports.
-///
-/// The IIR histories are not capacitor voltages or inductor scaled currents.
-/// They are a transformed LTI basis derived from the physical one-port set.
-/// Keep that relationship explicit so compiler/runtime code can reason about
-/// folded or eliminated states without pretending the delay slots are physical.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct IirStateMap {
-    /// Physical reactive one-ports that contributed to this IIR reduction.
-    pub physical_one_ports: Vec<RuntimeOnePort<MnaNodeId>>,
-    /// Number of canonical physical state slots allocated in `runtime_state`.
-    pub physical_state_count: usize,
-    /// Mathematical order of the transformed IIR denominator state.
-    pub transformed_state_count: usize,
-    /// Number of physical states removed by reduction/pole cancellation.
-    pub folded_or_eliminated_count: usize,
-}
-
-impl IirStateMap {
-    pub fn empty(transformed_state_count: usize) -> Self {
-        Self {
-            physical_one_ports: Vec::new(),
-            physical_state_count: 0,
-            transformed_state_count,
-            folded_or_eliminated_count: 0,
-        }
-    }
-}
+pub type IirStateMap = LtiStateMap<MnaNodeId>;
 
 /// Precomputed biquad coefficient lookup table for pot-controlled IIR stages.
 ///
@@ -4401,16 +4525,13 @@ impl IirStage {
 
         let physical_state_count = runtime_state.len();
         let transformed_state_count = self.iir.a_coeffs.len().saturating_sub(1);
-        let folded_or_eliminated_count =
-            physical_state_count.saturating_sub(transformed_state_count);
 
         self.runtime_state = runtime_state;
-        self.state_map = IirStateMap {
+        self.state_map = IirStateMap::new(
             physical_one_ports,
             physical_state_count,
             transformed_state_count,
-            folded_or_eliminated_count,
-        };
+        );
     }
 
     pub fn one_port_states(&self) -> &[OnePortState] {
@@ -4945,39 +5066,7 @@ pub struct StateSpacePotBinding {
 }
 
 /// How a StateSpace stage's vector relates to physical reactive one-ports.
-///
-/// The MNA-derived state vector may contain node voltages, voltage-source
-/// currents, or a transformed basis. This map keeps the physical reactive
-/// one-port vocabulary attached without requiring a one-to-one assumption.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StateSpaceStateMap {
-    /// Physical reactive one-ports that contributed to this state-space form.
-    pub physical_one_ports: Vec<RuntimeOnePort<MnaNodeId>>,
-    /// Number of canonical physical one-port slots allocated in `runtime_state`.
-    pub physical_state_count: usize,
-    /// Number of entries in the state-space vector.
-    pub vector_state_count: usize,
-    /// Number of physical states folded, transformed, or eliminated by this form.
-    pub folded_or_eliminated_count: usize,
-}
-
-impl StateSpaceStateMap {
-    pub fn empty(vector_state_count: usize) -> Self {
-        Self {
-            physical_one_ports: Vec::new(),
-            physical_state_count: 0,
-            vector_state_count,
-            folded_or_eliminated_count: 0,
-        }
-    }
-}
-
-impl Default for StateSpaceStateMap {
-    fn default() -> Self {
-        Self::empty(0)
-    }
-}
+pub type StateSpaceStateMap = LtiStateMap<MnaNodeId>;
 
 impl StateSpaceStage {
     pub fn new(ss: StateSpaceData, supply_voltage: crate::Wave) -> Self {
@@ -5014,16 +5103,14 @@ impl StateSpaceStage {
         }
 
         let physical_state_count = runtime_state.len();
-        let vector_state_count = self.ss.n_states;
-        let folded_or_eliminated_count = physical_state_count.saturating_sub(vector_state_count);
+        let transformed_state_count = self.ss.n_states;
 
         self.runtime_state = runtime_state;
-        self.state_map = StateSpaceStateMap {
+        self.state_map = StateSpaceStateMap::new(
             physical_one_ports,
             physical_state_count,
-            vector_state_count,
-            folded_or_eliminated_count,
-        };
+            transformed_state_count,
+        );
     }
 
     pub fn one_port_states(&self) -> &[OnePortState] {
@@ -5197,6 +5284,25 @@ pub struct LinearizedOtaData {
 }
 
 impl MultiNlStage {
+    fn ensure_passive_child_runtime_states(&mut self) {
+        if self.passive_child_runtime_states.len() == self.passive_children.len()
+            && self
+                .passive_child_runtime_states
+                .iter()
+                .all(|state| state.states.len() == state.wave_cache.len())
+        {
+            return;
+        }
+
+        self.passive_child_runtime_states.clear();
+        self.passive_child_runtime_states
+            .reserve(self.passive_children.len());
+        for child in &mut self.passive_children {
+            self.passive_child_runtime_states
+                .push(child.bind_runtime_state());
+        }
+    }
+
     /// Process one sample through the multi-NL stage.
     ///
     /// 1. Set control voltages (Vbe/Vgk) on each NL device
@@ -5210,6 +5316,7 @@ impl MultiNlStage {
     pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
+        self.ensure_passive_child_runtime_states();
 
         // ── IIR path: compiled from linear R-node MNA ────────────────────
         // Takes priority over state-space. Correct Q for oscillators,
@@ -5338,8 +5445,13 @@ impl MultiNlStage {
 
             // 1. Scatter-up passive children (always — caps need state updates)
             let b_passive = &mut self.work_b_passive[..n_passive];
-            for (k, child) in self.passive_children.iter_mut().enumerate() {
-                b_passive[k] = child.reflected();
+            for (k, (child, state)) in self
+                .passive_children
+                .iter_mut()
+                .zip(self.passive_child_runtime_states.iter_mut())
+                .enumerate()
+            {
+                b_passive[k] = child.reflected_with_state(state);
             }
 
             // Adaptive X2: on odd sub-samples, skip known_a + NR solve.
@@ -5476,8 +5588,13 @@ impl MultiNlStage {
             }
 
             // 5. Set incident waves on passive children
-            for (k, child) in self.passive_children.iter_mut().enumerate() {
-                child.set_incident(a_all[n_nl + k]);
+            for (k, (child, state)) in self
+                .passive_children
+                .iter_mut()
+                .zip(self.passive_child_runtime_states.iter_mut())
+                .enumerate()
+            {
+                child.set_incident_with_state(a_all[n_nl + k], state);
             }
 
             // 6. Output extraction
@@ -5631,8 +5748,13 @@ impl MultiNlStage {
 
     /// Reset all internal state.
     pub fn reset(&mut self) {
-        for child in &mut self.passive_children {
-            child.reset();
+        self.ensure_passive_child_runtime_states();
+        for (child, state) in self
+            .passive_children
+            .iter_mut()
+            .zip(self.passive_child_runtime_states.iter_mut())
+        {
+            child.reset_with_state(state);
         }
         // Restore physics-based initial guesses instead of zeroing.
         // Zeroing v_prev causes the NR solver to start far from the operating

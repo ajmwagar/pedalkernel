@@ -1104,15 +1104,13 @@ fn try_build_linear_feedback_wdf_adaptor(
         RootKind::Passthrough,
         Oversampler::new(OversamplingFactor::X1),
     );
-    stage.opamp_wdf_adaptor = Some(OpAmpWdfAdaptor {
+    stage.opamp_wdf_adaptor = Some(OpAmpWdfAdaptor::new(
         zi,
         zf,
-        is_inverting: true,
+        true,
         opamp,
-        gbw_state: 0.0,
-        prev_out: 0.0,
-        feedback_pot_id: Some(pot_id.to_string()),
-    });
+        Some(pot_id.to_string()),
+    ));
     Some(stage)
 }
 

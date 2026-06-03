@@ -427,13 +427,35 @@ mod tests {
 
         assert_eq!(stage.one_port_states().len(), 2);
         assert_eq!(stage.state_map.physical_state_count, 2);
-        assert_eq!(stage.state_map.vector_state_count, 2);
+        assert_eq!(stage.state_map.transformed_state_count, 2);
         assert_eq!(stage.state_map.folded_or_eliminated_count, 0);
         assert!(stage
             .state_map
             .physical_one_ports
             .iter()
             .all(|one_port| matches!(one_port.spec.kind, OnePortKind::Capacitor(_))));
+    }
+
+    #[test]
+    fn lti_state_map_reports_folded_or_eliminated_physical_states() {
+        let iir = IirData::new(alloc::vec![0.1, 0.0], alloc::vec![1.0, -0.5], 48_000.0);
+        let mut iir_stage = IirStage::new(iir);
+        let reactive_one_ports = alloc::vec![
+            OnePort::new(
+                PortTerminals::single_ended(MnaNodeId::new(0)),
+                OnePortKind::Capacitor(68e-9),
+            ),
+            OnePort::new(
+                PortTerminals::single_ended(MnaNodeId::new(1)),
+                OnePortKind::Capacitor(68e-9),
+            ),
+        ];
+
+        iir_stage.bind_physical_one_ports(&reactive_one_ports);
+
+        assert_eq!(iir_stage.state_map.physical_state_count, 2);
+        assert_eq!(iir_stage.state_map.transformed_state_count, 1);
+        assert_eq!(iir_stage.state_map.folded_or_eliminated_count, 1);
     }
 }
 

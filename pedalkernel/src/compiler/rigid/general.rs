@@ -981,11 +981,18 @@ fn assemble_multi_nl_stage(
         crate::elements::nonlinear::solver::NrWorkspace::new(n_nl)
     };
 
+    let mut passive_children = passive_children;
+    let passive_child_runtime_states = passive_children
+        .iter_mut()
+        .map(|child| child.bind_runtime_state())
+        .collect();
+
     Ok(MultiNlStage {
         adaptor,
         nl_devices,
         nl_port_resistances,
         passive_children,
+        passive_child_runtime_states,
         pot_children: variable_resistor_candidates
             .iter()
             .map(|ps| ps.leaf.clone())

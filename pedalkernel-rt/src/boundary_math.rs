@@ -315,6 +315,57 @@ impl<N> RuntimeOnePort<N> {
     }
 }
 
+/// Relationship between physical one-port memory and a transformed LTI state basis.
+///
+/// IIR and state-space reductions do not generally keep a one-to-one vector
+/// of capacitor voltages or inductor scaled currents. They project the same
+/// physical one-port set into a solver-specific basis, and may fold or
+/// eliminate states when the linear model permits it.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LtiStateMap<N> {
+    /// Physical reactive one-ports that contributed to this LTI form.
+    pub physical_one_ports: Vec<RuntimeOnePort<N>>,
+    /// Number of canonical physical one-port slots allocated in runtime state.
+    pub physical_state_count: usize,
+    /// Number of entries in the transformed solver state vector.
+    pub transformed_state_count: usize,
+    /// Number of physical states folded, transformed away, or eliminated.
+    pub folded_or_eliminated_count: usize,
+}
+
+impl<N> LtiStateMap<N> {
+    pub fn empty(transformed_state_count: usize) -> Self {
+        Self {
+            physical_one_ports: Vec::new(),
+            physical_state_count: 0,
+            transformed_state_count,
+            folded_or_eliminated_count: 0,
+        }
+    }
+
+    pub fn new(
+        physical_one_ports: Vec<RuntimeOnePort<N>>,
+        physical_state_count: usize,
+        transformed_state_count: usize,
+    ) -> Self {
+        let folded_or_eliminated_count =
+            physical_state_count.saturating_sub(transformed_state_count);
+        Self {
+            physical_one_ports,
+            physical_state_count,
+            transformed_state_count,
+            folded_or_eliminated_count,
+        }
+    }
+}
+
+impl<N> Default for LtiStateMap<N> {
+    fn default() -> Self {
+        Self::empty(0)
+    }
+}
+
 /// Dense index into one-port runtime state arrays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
