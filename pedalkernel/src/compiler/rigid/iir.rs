@@ -12,6 +12,7 @@ use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use super::super::stage::IirData;
 use super::mna_builder::build_mna;
+use pedalkernel_rt::boundary_math::MnaOnePort;
 
 struct FeedbackParams {
     rf: f64,
@@ -50,7 +51,7 @@ pub(in crate::compiler) fn build_iir_stage(
     pendant_trees: &[(DynNode, NodeId)],
     graph: &CircuitGraph,
     sample_rate: f64,
-) -> Result<IirData, String> {
+) -> Result<(IirData, Vec<MnaOnePort>), String> {
     let built = build_mna(edge_indices, pendant_trees, graph, sample_rate)?;
     let mna = built.mna;
     let reactive_one_ports = built.reactive_one_ports;
@@ -64,10 +65,9 @@ pub(in crate::compiler) fn build_iir_stage(
         let dc_gain = mna.dc_gain(vs_idx, out_mna);
         #[cfg(test)]
         eprintln!("IIR dc_gain={dc_gain:.4} vs_idx={vs_idx} out_mna={out_mna:?}");
-        return Ok(IirData::new(
-            vec![dc_gain, 0.0, 0.0],
-            vec![1.0, 0.0, 0.0],
-            sample_rate,
+        return Ok((
+            IirData::new(vec![dc_gain, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate),
+            reactive_one_ports,
         ));
     }
 
@@ -91,7 +91,7 @@ pub(in crate::compiler) fn build_iir_stage(
                 iir.r_series_product = params.r_series[0] * params.r_series[1];
                 iir.c_shunt_product = params.c_shunt[0] * params.c_shunt[1];
             }
-            return Ok(iir);
+            return Ok((iir, reactive_one_ports));
         }
         #[cfg(test)]
         eprintln!("IIR: rejected unstable/non-finite direct coeffs b={b_coeffs:?} a={a_coeffs:?}");
@@ -124,7 +124,7 @@ pub(in crate::compiler) fn build_iir_stage(
             let b = vec![b0, b1];
             let a = vec![1.0, -a_val];
             if iir_coeffs_are_stable_and_finite(&b, &a) {
-                return Ok(IirData::new(b, a, sample_rate));
+                return Ok((IirData::new(b, a, sample_rate), reactive_one_ports));
             }
         } else {
             let a11 = a_d[0];
@@ -157,7 +157,7 @@ pub(in crate::compiler) fn build_iir_stage(
             let b = vec![b0, b1, b2];
             let a = vec![1.0, da1, da2];
             if iir_coeffs_are_stable_and_finite(&b, &a) {
-                return Ok(IirData::new(b, a, sample_rate));
+                return Ok((IirData::new(b, a, sample_rate), reactive_one_ports));
             }
         }
     }

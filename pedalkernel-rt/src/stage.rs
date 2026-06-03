@@ -4196,6 +4196,36 @@ pub struct IirPotBinding {
     pub non_inverting: bool,
 }
 
+/// How an IIR stage's direct-form state relates to physical reactive one-ports.
+///
+/// The IIR histories are not capacitor voltages or inductor scaled currents.
+/// They are a transformed LTI basis derived from the physical one-port set.
+/// Keep that relationship explicit so compiler/runtime code can reason about
+/// folded or eliminated states without pretending the delay slots are physical.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct IirStateMap {
+    /// Physical reactive one-ports that contributed to this IIR reduction.
+    pub physical_one_ports: Vec<RuntimeOnePort<MnaNodeId>>,
+    /// Number of canonical physical state slots allocated in `runtime_state`.
+    pub physical_state_count: usize,
+    /// Mathematical order of the transformed IIR denominator state.
+    pub transformed_state_count: usize,
+    /// Number of physical states removed by reduction/pole cancellation.
+    pub folded_or_eliminated_count: usize,
+}
+
+impl IirStateMap {
+    pub fn empty(transformed_state_count: usize) -> Self {
+        Self {
+            physical_one_ports: Vec::new(),
+            physical_state_count: 0,
+            transformed_state_count,
+            folded_or_eliminated_count: 0,
+        }
+    }
+}
+
 /// Precomputed biquad coefficient lookup table for pot-controlled IIR stages.
 ///
 /// Built at compile time by sweeping pot positions over an N-dimensional grid.
@@ -4308,6 +4338,10 @@ pub struct IirStage {
     pub nonideal_fx: Vec<crate::nonideal_fx::NonIdealFx>,
     /// Pot bindings for runtime coefficient recomputation.
     pub pot_bindings: Vec<IirPotBinding>,
+    /// Canonical physical reactive state slots for this IIR's source network.
+    pub runtime_state: RuntimeState,
+    /// Explicit mapping from physical one-port state to transformed IIR state.
+    pub state_map: IirStateMap,
     /// Precomputed biquad lookup table (compile-time sweeps over pot positions).
     /// When present, `set_pot` interpolates from this instead of the DC gain formula.
     #[cfg(feature = "biquad-table")]
@@ -4332,6 +4366,7 @@ pub struct IirStage {
 impl IirStage {
     pub fn new(iir: IirData) -> Self {
         let sample_rate = iir.sample_rate;
+        let transformed_state_count = iir.a_coeffs.len().saturating_sub(1);
         Self {
             iir,
             compensation: 1.0,
@@ -4341,6 +4376,8 @@ impl IirStage {
             bypass_serial: false,
             nonideal_fx: Vec::new(),
             pot_bindings: Vec::new(),
+            runtime_state: RuntimeState::new(),
+            state_map: IirStateMap::empty(transformed_state_count),
             #[cfg(feature = "biquad-table")]
             biquad_table: None,
             sample_rate,
@@ -4351,6 +4388,37 @@ impl IirStage {
             v_max: crate::Wave::MAX,
             stored_gbw: 0.0,
         }
+    }
+
+    pub fn bind_physical_one_ports(&mut self, reactive_one_ports: &[MnaOnePort]) {
+        let mut runtime_state = RuntimeState::new();
+        let mut physical_one_ports = Vec::new();
+
+        for one_port in reactive_one_ports {
+            let state_slot = runtime_state.allocate_one_port(one_port.kind);
+            physical_one_ports.push(RuntimeOnePort::new(*one_port, state_slot));
+        }
+
+        let physical_state_count = runtime_state.len();
+        let transformed_state_count = self.iir.a_coeffs.len().saturating_sub(1);
+        let folded_or_eliminated_count =
+            physical_state_count.saturating_sub(transformed_state_count);
+
+        self.runtime_state = runtime_state;
+        self.state_map = IirStateMap {
+            physical_one_ports,
+            physical_state_count,
+            transformed_state_count,
+            folded_or_eliminated_count,
+        };
+    }
+
+    pub fn one_port_states(&self) -> &[OnePortState] {
+        &self.runtime_state.states
+    }
+
+    pub fn one_port_states_mut(&mut self) -> &mut [OnePortState] {
+        &mut self.runtime_state.states
     }
 
     /// Configure NonIdealFx post-processing from component declarations.
