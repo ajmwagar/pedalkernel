@@ -5,6 +5,67 @@
 
 use crate::Wave;
 use alloc::vec::Vec;
+use core::marker::PhantomData;
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DomainIndex<D> {
+    raw: usize,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    _domain: PhantomData<fn() -> D>,
+}
+
+impl<D> Copy for DomainIndex<D> {}
+
+impl<D> Clone for DomainIndex<D> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<D> DomainIndex<D> {
+    pub const fn new(raw: usize) -> Self {
+        Self {
+            raw,
+            _domain: PhantomData,
+        }
+    }
+
+    pub const fn get(self) -> usize {
+        self.raw
+    }
+
+    pub const fn is_unresolved(self) -> bool {
+        self.raw == usize::MAX
+    }
+}
+
+impl<D> From<usize> for DomainIndex<D> {
+    fn from(raw: usize) -> Self {
+        Self::new(raw)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum GraphNodeDomain {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum MnaNodeDomain {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ScatteringPortDomain {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ProcessorPortDomain {}
+
+pub type GraphNodeId = DomainIndex<GraphNodeDomain>;
+pub type MnaNodeId = DomainIndex<MnaNodeDomain>;
+pub type ScatteringPortId = DomainIndex<ScatteringPortDomain>;
+pub type ProcessorPortId = DomainIndex<ProcessorPortDomain>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -82,6 +143,16 @@ impl<N> PortTerminals<N> {
 
     pub fn as_tuple(self) -> (Option<N>, Option<N>) {
         (self.pos, self.neg)
+    }
+
+    pub fn map<M, F>(self, mut f: F) -> PortTerminals<M>
+    where
+        F: FnMut(N) -> M,
+    {
+        PortTerminals {
+            pos: self.pos.map(&mut f),
+            neg: self.neg.map(f),
+        }
     }
 
     pub fn voltage_with<F>(self, mut node_voltage: F) -> PortVoltage
@@ -195,16 +266,27 @@ impl IncidentWave {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BoundaryIncidentDrive {
-    pub port_idx: usize,
+    pub port: ScatteringPortId,
     pub incident_offset: IncidentWave,
 }
 
 impl BoundaryIncidentDrive {
     pub const fn new(port_idx: usize, incident_offset: IncidentWave) -> Self {
         Self {
-            port_idx,
+            port: ScatteringPortId::new(port_idx),
             incident_offset,
         }
+    }
+
+    pub const fn for_port(port: ScatteringPortId, incident_offset: IncidentWave) -> Self {
+        Self {
+            port,
+            incident_offset,
+        }
+    }
+
+    pub const fn port_idx(self) -> usize {
+        self.port.get()
     }
 
     pub fn from_port_voltage(
@@ -214,13 +296,28 @@ impl BoundaryIncidentDrive {
     ) -> Self {
         Self::new(port_idx, voltage.as_boundary_incident_offset(orientation))
     }
+
+    pub fn from_typed_port_voltage(
+        port: ScatteringPortId,
+        voltage: PortVoltage,
+        orientation: PortOrientation,
+    ) -> Self {
+        Self::for_port(port, voltage.as_boundary_incident_offset(orientation))
+    }
 }
 
 pub fn sum_incident_offsets(port_idx: usize, drives: &[BoundaryIncidentDrive]) -> Wave {
+    sum_incident_offsets_for_port(ScatteringPortId::new(port_idx), drives)
+}
+
+pub fn sum_incident_offsets_for_port(
+    port: ScatteringPortId,
+    drives: &[BoundaryIncidentDrive],
+) -> Wave {
     drives
         .iter()
         .filter_map(|drive| {
-            (drive.port_idx == port_idx && drive.incident_offset.0.is_finite())
+            (drive.port == port && drive.incident_offset.0.is_finite())
                 .then_some(drive.incident_offset.0)
         })
         .sum()
@@ -232,16 +329,35 @@ pub fn push_differential_voltage_drives(
     negative_ports: &[usize],
     voltage: PortVoltage,
 ) {
-    for &port_idx in positive_ports {
-        drives.push(BoundaryIncidentDrive::from_port_voltage(
-            port_idx,
+    let positive: Vec<_> = positive_ports
+        .iter()
+        .copied()
+        .map(ScatteringPortId::new)
+        .collect();
+    let negative: Vec<_> = negative_ports
+        .iter()
+        .copied()
+        .map(ScatteringPortId::new)
+        .collect();
+    push_differential_voltage_drives_for_ports(drives, &positive, &negative, voltage);
+}
+
+pub fn push_differential_voltage_drives_for_ports(
+    drives: &mut Vec<BoundaryIncidentDrive>,
+    positive_ports: &[ScatteringPortId],
+    negative_ports: &[ScatteringPortId],
+    voltage: PortVoltage,
+) {
+    for &port in positive_ports {
+        drives.push(BoundaryIncidentDrive::from_typed_port_voltage(
+            port,
             voltage,
             PortOrientation::NonInverting,
         ));
     }
-    for &port_idx in negative_ports {
-        drives.push(BoundaryIncidentDrive::from_port_voltage(
-            port_idx,
+    for &port in negative_ports {
+        drives.push(BoundaryIncidentDrive::from_typed_port_voltage(
+            port,
             voltage,
             PortOrientation::Inverting,
         ));
@@ -251,6 +367,31 @@ pub fn push_differential_voltage_drives(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_indices_keep_raw_ids_in_separate_type_domains() {
+        let graph_node = GraphNodeId::new(7);
+        let mna_node = MnaNodeId::new(7);
+        let scattering_port = ScatteringPortId::new(7);
+        let processor_port = ProcessorPortId::new(7);
+
+        assert_eq!(graph_node.get(), 7);
+        assert_eq!(mna_node.get(), 7);
+        assert_eq!(scattering_port.get(), 7);
+        assert_eq!(processor_port.get(), 7);
+        assert!(GraphNodeId::new(usize::MAX).is_unresolved());
+    }
+
+    #[test]
+    fn port_terminals_map_between_index_domains() {
+        let graph_terminals = PortTerminals::differential(GraphNodeId::new(2), GraphNodeId::new(5));
+        let mna_terminals = graph_terminals.map(|node| MnaNodeId::new(node.get() + 10));
+
+        assert_eq!(
+            mna_terminals.as_tuple(),
+            (Some(MnaNodeId::new(12)), Some(MnaNodeId::new(15)))
+        );
+    }
 
     #[test]
     fn ideal_voltage_source_reflection_uses_two_v_minus_a() {
@@ -285,10 +426,15 @@ mod tests {
     fn repeated_boundary_offsets_sum_per_port() {
         let drives = [
             BoundaryIncidentDrive::new(7, IncidentWave::new(0.2)),
-            BoundaryIncidentDrive::new(7, IncidentWave::new(-0.05)),
+            BoundaryIncidentDrive::for_port(ScatteringPortId::new(7), IncidentWave::new(-0.05)),
             BoundaryIncidentDrive::new(8, IncidentWave::new(1.0)),
         ];
         assert_eq!(sum_incident_offsets(7, &drives), 0.15000000000000002);
+        assert_eq!(
+            sum_incident_offsets_for_port(ScatteringPortId::new(7), &drives),
+            0.15000000000000002
+        );
+        assert_eq!(drives[0].port_idx(), 7);
     }
 
     #[test]

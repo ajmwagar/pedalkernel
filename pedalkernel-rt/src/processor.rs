@@ -8,7 +8,9 @@ use alloc::{
     vec::Vec,
 };
 
-use crate::boundary_math::{push_differential_voltage_drives, BoundaryIncidentDrive, PortVoltage};
+use crate::boundary_math::{
+    push_differential_voltage_drives_for_ports, BoundaryIncidentDrive, PortVoltage,
+};
 use crate::elements::*;
 use crate::loading::{ImpedanceModel, InterstageLoading};
 use crate::metering::{MetricsAccumulator, MetricsRingBuffer, UiMetrics};
@@ -1292,12 +1294,14 @@ impl CompiledPedal {
         let mut boundary_outputs = alloc::vec::Vec::new();
         for drive in &route.boundary_drives {
             let mut input = 0.0 as crate::Wave;
-            for &port_idx in &drive.positive_input_port_indices {
+            for port in drive.positive_processor_ports() {
+                let port_idx = port.get();
                 if port_idx < self.port_values.len() {
                     input += self.port_values[port_idx];
                 }
             }
-            for &port_idx in &drive.negative_input_port_indices {
+            for port in drive.negative_processor_ports() {
+                let port_idx = port.get();
                 if port_idx < self.port_values.len() {
                     input -= self.port_values[port_idx];
                 }
@@ -1317,19 +1321,22 @@ impl CompiledPedal {
         let n_vs = bkm_stage.vs_port_map.len();
         let mut vs_signals = alloc::vec![0.0 as crate::Wave; n_vs];
         for binding in &route.vs_bindings {
-            if binding.signal_index < vs_signals.len()
-                && binding.port_index < self.port_values.len()
-            {
-                vs_signals[binding.signal_index] = self.port_values[binding.port_index];
+            let port_idx = binding.processor_port().get();
+            if binding.signal_index < vs_signals.len() && port_idx < self.port_values.len() {
+                vs_signals[binding.signal_index] = self.port_values[port_idx];
             }
         }
 
         let mut boundary_drives: alloc::vec::Vec<BoundaryIncidentDrive> = alloc::vec::Vec::new();
         for (drive, out) in boundary_outputs {
-            push_differential_voltage_drives(
+            let positive_ports: alloc::vec::Vec<_> =
+                drive.positive_target_scattering_ports().collect();
+            let negative_ports: alloc::vec::Vec<_> =
+                drive.negative_target_scattering_ports().collect();
+            push_differential_voltage_drives_for_ports(
                 &mut boundary_drives,
-                &drive.positive_target_coupling_port_indices,
-                &drive.negative_target_coupling_port_indices,
+                &positive_ports,
+                &negative_ports,
                 PortVoltage::new(out),
             );
         }

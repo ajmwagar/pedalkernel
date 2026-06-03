@@ -8,6 +8,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::boundary_math::{ProcessorPortId, ScatteringPortId};
 use crate::processor::{PortBinding, Stage};
 
 /// Direction/role of one compiled-stage boundary port.
@@ -87,6 +88,30 @@ pub struct BkmVsRouteBinding {
     pub port_name: String,
 }
 
+impl BkmVsRouteBinding {
+    pub fn new(
+        signal_index: usize,
+        processor_port: ProcessorPortId,
+        scattering_port: ScatteringPortId,
+        port_name: String,
+    ) -> Self {
+        Self {
+            signal_index,
+            port_index: processor_port.get(),
+            coupling_port_index: scattering_port.get(),
+            port_name,
+        }
+    }
+
+    pub const fn processor_port(&self) -> ProcessorPortId {
+        ProcessorPortId::new(self.port_index)
+    }
+
+    pub const fn scattering_port(&self) -> ScatteringPortId {
+        ScatteringPortId::new(self.coupling_port_index)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BkmBoundaryDrive {
@@ -103,6 +128,43 @@ pub struct BkmBoundaryDrive {
     #[cfg_attr(feature = "serde", serde(default))]
     pub negative_target_coupling_port_indices: Vec<usize>,
     pub label: String,
+}
+
+impl BkmBoundaryDrive {
+    pub fn positive_processor_ports(&self) -> impl Iterator<Item = ProcessorPortId> + '_ {
+        self.positive_input_port_indices
+            .iter()
+            .copied()
+            .map(ProcessorPortId::new)
+    }
+
+    pub fn negative_processor_ports(&self) -> impl Iterator<Item = ProcessorPortId> + '_ {
+        self.negative_input_port_indices
+            .iter()
+            .copied()
+            .map(ProcessorPortId::new)
+    }
+
+    pub fn target_scattering_ports(&self) -> impl Iterator<Item = ScatteringPortId> + '_ {
+        self.target_coupling_port_indices
+            .iter()
+            .copied()
+            .map(ScatteringPortId::new)
+    }
+
+    pub fn positive_target_scattering_ports(&self) -> impl Iterator<Item = ScatteringPortId> + '_ {
+        self.positive_target_coupling_port_indices
+            .iter()
+            .copied()
+            .map(ScatteringPortId::new)
+    }
+
+    pub fn negative_target_scattering_ports(&self) -> impl Iterator<Item = ScatteringPortId> + '_ {
+        self.negative_target_coupling_port_indices
+            .iter()
+            .copied()
+            .map(ScatteringPortId::new)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,12 +259,12 @@ impl StageRoutePlan {
                     && port.name.eq_ignore_ascii_case(name)
                     && !consumed_port_indices.contains(&port.index)
             }) {
-                vs_bindings.push(BkmVsRouteBinding {
+                vs_bindings.push(BkmVsRouteBinding::new(
                     signal_index,
-                    port_index: port.index,
-                    coupling_port_index: *coupling_port_index,
-                    port_name: port.name.clone(),
-                });
+                    ProcessorPortId::new(port.index),
+                    ScatteringPortId::new(*coupling_port_index),
+                    port.name.clone(),
+                ));
             }
         }
 
