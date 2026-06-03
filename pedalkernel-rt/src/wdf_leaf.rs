@@ -7,6 +7,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 
+use crate::boundary_math::OnePortState;
 use crate::pot_taper::PotTaper;
 // Import the elements::WdfLeaf trait to call port_resistance/set_sample_rate/reset
 // on Photocoupler and JfetVariableResistor. Renamed to avoid conflict with our WdfLeaf.
@@ -73,6 +74,20 @@ pub trait WdfLeaf: Send {
         false
     }
     fn is_reactive(&self) -> bool {
+        false
+    }
+
+    /// Export this leaf's runtime one-port state, when it has explicit reactive memory.
+    ///
+    /// This is the bridge toward shared `Vec<OnePortState>` ownership. Some
+    /// legacy WDF leaves still store wave-delay memory internally, so callers
+    /// should treat this as the physical-state view of the current leaf state.
+    fn one_port_state(&self) -> Option<OnePortState> {
+        None
+    }
+
+    /// Import a shared one-port state into this leaf.
+    fn set_one_port_state(&mut self, _state: OnePortState) -> bool {
         false
     }
     fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
@@ -200,6 +215,18 @@ impl WdfLeaf for WdfCapacitor {
     }
     fn is_reactive(&self) -> bool {
         true
+    }
+    fn one_port_state(&self) -> Option<OnePortState> {
+        Some(OnePortState::CapacitorVoltage(self.leaf_voltage()))
+    }
+    fn set_one_port_state(&mut self, state: OnePortState) -> bool {
+        match state {
+            OnePortState::CapacitorVoltage(voltage) => {
+                self.state = 2.0 * voltage - self.last_b;
+                true
+            }
+            OnePortState::InductorScaledCurrent(_) => false,
+        }
     }
     fn update_sample_rate(&mut self, fs: crate::Wave) {
         self.rp = 1.0 / (2.0 * fs * self.capacitance);
@@ -349,6 +376,18 @@ impl WdfLeaf for WdfInductor {
     }
     fn is_reactive(&self) -> bool {
         true
+    }
+    fn one_port_state(&self) -> Option<OnePortState> {
+        Some(OnePortState::InductorScaledCurrent(self.state))
+    }
+    fn set_one_port_state(&mut self, state: OnePortState) -> bool {
+        match state {
+            OnePortState::InductorScaledCurrent(scaled_current) => {
+                self.state = scaled_current;
+                true
+            }
+            OnePortState::CapacitorVoltage(_) => false,
+        }
     }
     fn update_sample_rate(&mut self, fs: crate::Wave) {
         self.rp = 2.0 * fs * self.inductance;
@@ -892,6 +931,12 @@ impl WdfLeaf for LeafKind {
     fn is_reactive(&self) -> bool {
         delegate_leaf!(self, is_reactive)
     }
+    fn one_port_state(&self) -> Option<OnePortState> {
+        delegate_leaf!(self, one_port_state)
+    }
+    fn set_one_port_state(&mut self, state: OnePortState) -> bool {
+        delegate_leaf!(self, set_one_port_state, state)
+    }
     fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
         delegate_leaf!(self, editable_info)
     }
@@ -930,5 +975,68 @@ pub fn leaf_matches_id(leaf: &dyn WdfLeaf, target_id: &str) -> bool {
                 || (id.starts_with(target_id) && id[target_id.len()..].starts_with("__"))
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacitor_exports_and_imports_one_port_voltage_state() {
+        let mut cap = WdfCapacitor {
+            comp_id: Some(String::from("C1")),
+            capacitance: 100e-9,
+            rp: 1_000.0,
+            state: 0.0,
+            last_b: 0.0,
+        };
+
+        cap.set_incident(0.6);
+        assert_eq!(
+            cap.one_port_state(),
+            Some(OnePortState::CapacitorVoltage(0.3))
+        );
+
+        assert!(cap.set_one_port_state(OnePortState::CapacitorVoltage(0.5)));
+        assert_eq!(
+            cap.one_port_state(),
+            Some(OnePortState::CapacitorVoltage(0.5))
+        );
+        assert!(!cap.set_one_port_state(OnePortState::InductorScaledCurrent(0.1)));
+    }
+
+    #[test]
+    fn inductor_exports_and_imports_scaled_current_state() {
+        let mut inductor = WdfInductor {
+            comp_id: Some(String::from("L1")),
+            inductance: 1e-3,
+            rp: 96.0,
+            state: 0.0,
+        };
+
+        inductor.set_incident(0.25);
+        assert_eq!(
+            inductor.one_port_state(),
+            Some(OnePortState::InductorScaledCurrent(0.25))
+        );
+
+        assert!(inductor.set_one_port_state(OnePortState::InductorScaledCurrent(-0.4)));
+        assert_eq!(
+            inductor.one_port_state(),
+            Some(OnePortState::InductorScaledCurrent(-0.4))
+        );
+        assert!(!inductor.set_one_port_state(OnePortState::CapacitorVoltage(0.2)));
+    }
+
+    #[test]
+    fn resistor_has_no_one_port_runtime_state() {
+        let resistor = WdfResistor {
+            comp_id: Some(String::from("R1")),
+            rp: 1_000.0,
+            last_a: 0.0,
+        };
+
+        assert_eq!(resistor.one_port_state(), None);
     }
 }

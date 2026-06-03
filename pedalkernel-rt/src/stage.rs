@@ -10,7 +10,7 @@ use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
     sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, MnaNodeId, MnaOnePort,
-    MnaPortTerminals, MnaVariableResistorBinding, WdfPortTerminals,
+    MnaPortTerminals, MnaVariableResistorBinding, OnePortState, WdfPortTerminals,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -4520,6 +4520,12 @@ pub struct BlackFeedbackStage {
     pub ri_fixed_r: crate::Wave,
     /// Max resistance of the Ri pot (e.g. Gain_A max_r = 100k).
     pub ri_pot_max_r: crate::Wave,
+    /// Shared one-port state slots owned by this stage.
+    ///
+    /// Pure resistive BlackFeedback stages have no physical one-port state; reactive
+    /// feedback/network variants can attach explicit state here instead of hiding it
+    /// behind stage-specific fields.
+    pub one_port_states: Vec<OnePortState>,
 }
 
 impl BlackFeedbackStage {
@@ -4562,6 +4568,7 @@ impl BlackFeedbackStage {
             ri_pot_comp_id: None,
             ri_fixed_r: 0.0,
             ri_pot_max_r: 0.0,
+            one_port_states: Vec::new(),
         }
     }
 
@@ -4592,6 +4599,14 @@ impl BlackFeedbackStage {
         } else {
             1.0 + self.rf / self.ri.max(1.0)
         }
+    }
+
+    pub fn one_port_states(&self) -> &[OnePortState] {
+        &self.one_port_states
+    }
+
+    pub fn one_port_states_mut(&mut self) -> &mut [OnePortState] {
+        &mut self.one_port_states
     }
 
     /// Check if this stage owns a pot with the given component ID.

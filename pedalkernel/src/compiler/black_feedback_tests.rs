@@ -126,6 +126,17 @@ fn bf_noninverting_gain_11x() {
 }
 
 #[test]
+fn bf_pure_resistive_stage_declares_no_one_port_state_slots() {
+    use super::stage::BlackFeedbackStage;
+    let stage = BlackFeedbackStage::new_test(100_000.0, 10_000.0, false, 48000.0);
+
+    assert!(
+        stage.one_port_states().is_empty(),
+        "pure resistive BlackFeedback should not hide reactive one-port state"
+    );
+}
+
+#[test]
 fn bf_process_amplifies_signal() {
     // Process a small signal — should come out amplified.
     use super::stage::BlackFeedbackStage;
