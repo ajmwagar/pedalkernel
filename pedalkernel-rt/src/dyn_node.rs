@@ -270,7 +270,7 @@ impl DynNode {
         }
     }
 
-    fn into_node_and_runtime_state(self) -> (DynNode, RuntimeState) {
+    pub(crate) fn into_node_and_runtime_state(self) -> (DynNode, RuntimeState) {
         match self {
             Self::Runtime {
                 node,
@@ -670,7 +670,11 @@ impl DynNode {
     }
 
     #[inline]
-    fn reflected_with_state(&mut self, runtime_state: &mut RuntimeState) -> crate::Wave {
+    /// Scatter-up using an explicit runtime state owner.
+    ///
+    /// This is the stateful form used by stage-owned runtime state and by
+    /// compiler helpers that operate on a cloned tree plus cloned state.
+    pub fn reflected_with_state(&mut self, runtime_state: &mut RuntimeState) -> crate::Wave {
         match self {
             Self::Runtime {
                 node,
@@ -767,7 +771,11 @@ impl DynNode {
     }
 
     #[inline]
-    fn set_incident_with_state(&mut self, a: crate::Wave, runtime_state: &mut RuntimeState) {
+    /// Scatter-down using an explicit runtime state owner.
+    ///
+    /// Call this after `reflected_with_state` when the tree has state-slot
+    /// bindings but no embedded `Runtime` wrapper.
+    pub fn set_incident_with_state(&mut self, a: crate::Wave, runtime_state: &mut RuntimeState) {
         match self {
             Self::Runtime {
                 node,
@@ -1105,7 +1113,8 @@ impl DynNode {
         self.leaf_voltage_with_state(target_id, &RuntimeState::new())
     }
 
-    fn leaf_voltage_with_state(
+    /// Extract a named leaf voltage using an explicit runtime state owner.
+    pub fn leaf_voltage_with_state(
         &self,
         target_id: &str,
         runtime_state: &RuntimeState,
@@ -1595,7 +1604,7 @@ impl DynNode {
         self.reset_with_state(&mut RuntimeState::new());
     }
 
-    fn reset_with_state(&mut self, runtime_state: &mut RuntimeState) {
+    pub(crate) fn reset_with_state(&mut self, runtime_state: &mut RuntimeState) {
         match self {
             Self::Runtime {
                 node,

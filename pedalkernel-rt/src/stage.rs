@@ -1306,6 +1306,13 @@ impl OpAmpWdfAdaptor {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfStage {
     pub tree: DynNode,
+    /// Shared physical one-port state owned by this WDF stage's main tree.
+    ///
+    /// The tree keeps topology and state-slot bindings; physical state and WDF
+    /// wave sidecars live here so WDF uses the same owner pattern as BKM
+    /// coupling passives.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub runtime_state: RuntimeState,
     pub root: RootKind,
     /// Compensates for passive attenuation in the tree topology.
     /// Computed automatically from the tree's impedance structure.
@@ -1533,13 +1540,15 @@ impl WdfStage {
     /// WdfStage { feedback_pot_id: Some("Gain".into()), ..WdfStage::new(tree, root, os) }
     /// ```
     pub fn new(
-        mut tree: DynNode,
+        tree: DynNode,
         root: RootKind,
         oversampler: crate::oversampling::Oversampler,
     ) -> Self {
+        let (mut tree, runtime_state) = tree.into_node_and_runtime_state();
         tree.compute_dynamic_flags();
         Self {
             tree,
+            runtime_state,
             root,
             compensation: 1.0,
             oversampler,
@@ -1812,6 +1821,7 @@ impl WdfStage {
 
         // Borrow fields individually to satisfy the borrow checker
         let tree = &mut self.tree;
+        let runtime_state = &mut self.runtime_state;
         let root = &mut self.root;
         let k_table = &self.k_table;
         let compensation = self.compensation;
@@ -1946,7 +1956,7 @@ impl WdfStage {
             // pattern match, ~2 ops). Using the cached raw pointer here would
             // alias with the live &mut tree borrow — technically UB.
             tree.set_voltage(vs_voltage);
-            let b1 = tree.reflected();
+            let b1 = tree.reflected_with_state(runtime_state);
 
             // For coupling-cap stages: after tree.reflected(), the capacitor's WDF
             // state encodes its DC charge (the DC component of previous input samples).
@@ -1957,7 +1967,9 @@ impl WdfStage {
                 if let Some(ref cap_id) = coupling_cap_id {
                     // cap_voltage is the voltage across the coupling cap from the
                     // previous down-sweep (one-sample delay, negligible at audio rates).
-                    let cap_v = tree.leaf_voltage(cap_id).unwrap_or(0.0);
+                    let cap_v = tree
+                        .leaf_voltage_with_state(cap_id, runtime_state)
+                        .unwrap_or(0.0);
                     // AC grid voltage = total input minus cap's stored DC
                     let vgk_ac = sample * compensation - cap_v;
                     root.set_control_voltage(vgk_ac, 1.0, 0.0);
@@ -2035,10 +2047,10 @@ impl WdfStage {
                     RootKind::Passthrough => {
                         // Open-circuit termination: a_root = b_tree (total reflection).
                         // Port voltage V = (a + b) / 2 = (b_tree + b_tree) / 2 = b_tree.
-                        tree.set_incident(b_tree);
+                        tree.set_incident_with_state(b_tree, runtime_state);
                         // Check output_probe BEFORE fallback
                         if let Some(ref probe_id) = output_probe {
-                            if let Some(v) = tree.leaf_voltage(probe_id) {
+                            if let Some(v) = tree.leaf_voltage_with_state(probe_id, runtime_state) {
                                 return v;
                             }
                         }
@@ -2051,11 +2063,11 @@ impl WdfStage {
                     RootKind::ShortCircuit => {
                         // Short-circuit reflection: a = -b
                         let a_root = -b_tree;
-                        tree.set_incident(a_root);
+                        tree.set_incident_with_state(a_root, runtime_state);
 
                         // Check output_probe first (for SP-reduced orphan stages)
                         if let Some(ref probe_id) = output_probe {
-                            if let Some(v) = tree.leaf_voltage(probe_id) {
+                            if let Some(v) = tree.leaf_voltage_with_state(probe_id, runtime_state) {
                                 return v;
                             }
                         }
@@ -2080,11 +2092,11 @@ impl WdfStage {
                     RootKind::VoltageSourceDriver => {
                         let v_in = sample * compensation;
                         let a_root = 2.0 * v_in - b_tree;
-                        tree.set_incident(a_root);
+                        tree.set_incident_with_state(a_root, runtime_state);
 
                         // Check output_probe first (for SP-reduced feedforward stages)
                         if let Some(ref probe_id) = output_probe {
-                            if let Some(v) = tree.leaf_voltage(probe_id) {
+                            if let Some(v) = tree.leaf_voltage_with_state(probe_id, runtime_state) {
                                 return v;
                             }
                         }
@@ -2158,12 +2170,12 @@ impl WdfStage {
                 } // end NR fallback else
             }; // end K-table if/else
                // ── Down-sweep ────────────────────────────────────────────
-            tree.set_incident(a_root);
+            tree.set_incident_with_state(a_root, runtime_state);
 
             // If an output probe is set, extract voltage at that leaf
             // after the down-sweep instead of the root junction.
             if let Some(ref probe_id) = output_probe {
-                if let Some(v) = tree.leaf_voltage(probe_id) {
+                if let Some(v) = tree.leaf_voltage_with_state(probe_id, runtime_state) {
                     return v;
                 }
             }
@@ -2328,7 +2340,7 @@ impl WdfStage {
     }
 
     pub fn reset(&mut self) {
-        self.tree.reset();
+        self.tree.reset_with_state(&mut self.runtime_state);
         self.oversampler.reset();
         if let Some(ref mut opamp) = self.paired_opamp {
             opamp.reset();
@@ -6084,6 +6096,9 @@ impl SubcircuitProcessor {
 pub struct KMethodBlock {
     /// WDF tree: VS + passives (R_e_floor, C, Cutoff pot).
     pub tree: DynNode,
+    /// Shared physical one-port state for this block's WDF tree.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub runtime_state: RuntimeState,
     /// Precomputed K-table: b_tree × ctrl → a_root.
     pub k_table: KTable,
     /// Direct explicit diode root for one-port diode ladders.
@@ -6877,7 +6892,7 @@ impl BlockwiseStage {
         let drive_voltage = Self::block_drive_voltage(block, physical_voltage);
         let control_voltage = Self::block_control_voltage(block, physical_voltage);
         block.tree.set_voltage(drive_voltage);
-        let b_tree = block.tree.reflected();
+        let b_tree = block.tree.reflected_with_state(&mut block.runtime_state);
         let a_root = Self::block_root_incident(block, b_tree, control_voltage);
         let raw_cascade = Self::block_output_voltage(block, a_root, b_tree);
         (a_root, b_tree, raw_cascade, raw_cascade - block.dc_offset)
@@ -6890,7 +6905,7 @@ impl BlockwiseStage {
         let drive_voltage = Self::block_drive_voltage(block, physical_voltage);
         let control_voltage = Self::block_control_voltage(block, physical_voltage);
         block.tree.set_voltage(drive_voltage);
-        let b_tree = block.tree.reflected();
+        let b_tree = block.tree.reflected_with_state(&mut block.runtime_state);
         let (a_root, da_db_tree, da_dctrl) =
             Self::block_root_incident_with_derivatives(block, b_tree, control_voltage);
         let raw_cascade = Self::block_output_voltage(block, a_root, b_tree);
@@ -6917,7 +6932,9 @@ impl BlockwiseStage {
     ) -> (crate::Wave, crate::Wave, crate::Wave, crate::Wave) {
         let (a_root, b_tree, raw_cascade, ac_cascade) =
             Self::solve_block_without_state_update(block, physical_voltage);
-        block.tree.set_incident(a_root);
+        block
+            .tree
+            .set_incident_with_state(a_root, &mut block.runtime_state);
         (a_root, b_tree, raw_cascade, ac_cascade)
     }
 
@@ -7823,10 +7840,11 @@ impl BlockwiseStage {
         let n_blocks = self.blocks.len();
         for i in 0..n_blocks {
             // Re-extract at the current converged state
-            let b_tree = self.blocks[i].tree.reflected();
-            let a_root = Self::block_root_incident(&mut self.blocks[i], b_tree, 0.0);
-            self.blocks[i].dc_offset = if self.blocks[i].cascade_from_passive {
-                Self::block_output_voltage(&self.blocks[i], a_root, b_tree)
+            let block = &mut self.blocks[i];
+            let b_tree = block.tree.reflected_with_state(&mut block.runtime_state);
+            let a_root = Self::block_root_incident(block, b_tree, 0.0);
+            block.dc_offset = if block.cascade_from_passive {
+                Self::block_output_voltage(block, a_root, b_tree)
             } else {
                 (a_root + b_tree) / 2.0
             };
@@ -7850,8 +7868,9 @@ impl BlockwiseStage {
         {
             for (i, block) in self.blocks.iter().enumerate() {
                 let mut t = block.tree.clone();
+                let mut runtime_state = block.runtime_state.clone();
                 t.set_voltage(0.0);
-                let b = t.reflected();
+                let b = t.reflected_with_state(&mut runtime_state);
                 std::eprintln!(
                     "  DC op: block {i} b_tree={b:.4}, dc_offset={:.4}",
                     block.dc_offset
@@ -8255,6 +8274,7 @@ mod blockwise_stage_tests {
     fn test_block(vbe_bias: crate::Wave) -> KMethodBlock {
         KMethodBlock {
             tree: DynNode::VoltageSource(0.0, 1.0),
+            runtime_state: RuntimeState::new(),
             k_table: control_sensitive_table(),
             explicit_diode_root: None,
             nominal_vs_rp: 1.0,
@@ -8271,24 +8291,25 @@ mod blockwise_stage_tests {
         }
     }
 
-    fn single_block_stage() -> BlockwiseStage {
+    fn blockwise_stage_fixture(
+        blocks: Vec<KMethodBlock>,
+        coupling_ports: Vec<CircuitMappedPort>,
+        block_ports: Vec<Vec<BlockPortBinding>>,
+    ) -> BlockwiseStage {
+        let n_ports = coupling_ports.len();
         BlockwiseStage {
-            blocks: vec![{
-                let mut block = test_block(1.0);
-                block.k_table = one_dimensional_table();
-                block
-            }],
-            coupling_s: vec![0.0],
+            blocks,
+            coupling_s: vec![0.0; n_ports * n_ports],
             coupling_n_mna: 0,
-            coupling_ports: vec![mapped_port(WdfPortTerminals::grounded(), 1.0)],
-            block_ports: vec![vec![BlockPortBinding::primary(0)]],
+            coupling_ports,
+            block_ports,
             coupling_elements: vec![],
             coupling_passives: vec![],
             coupling_one_ports: vec![],
             coupling_runtime_state: RuntimeState::new(),
             coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
-            n_ports: 1,
+            n_ports,
             output_block: 0,
             output_port_index: None,
             supply_voltage: 9.0,
@@ -8312,6 +8333,16 @@ mod blockwise_stage_tests {
             coupled_scratch: CoupledSolveScratch::default(),
             port_index_cache: vec![],
         }
+    }
+
+    fn single_block_stage() -> BlockwiseStage {
+        let mut block = test_block(1.0);
+        block.k_table = one_dimensional_table();
+        blockwise_stage_fixture(
+            vec![block],
+            vec![mapped_port(WdfPortTerminals::grounded(), 1.0)],
+            vec![vec![BlockPortBinding::primary(0)]],
+        )
     }
 
     #[test]
@@ -8438,53 +8469,23 @@ mod blockwise_stage_tests {
 
     #[test]
     fn bkm_cutoff_cv_write_does_not_recompute_block_port_resistance() {
-        let mut stage = BlockwiseStage {
-            blocks: vec![{
-                let mut block = test_block(1.0);
-                block.explicit_diode_root = Some(ExplicitDiodeRoot::new(DiodeModel::silicon()));
-                block.diode_cutoff = Some(DiodeCutoffCalibration {
-                    bias_voltage: 9.0,
-                    bias_resistance: 100_000.0,
-                    cv_resistance: Some(47_000.0),
-                    min_rp: 1.0,
-                    max_rp: 100_000.0,
-                });
-                block
-            }],
-            coupling_s: vec![1.0],
-            coupling_n_mna: 0,
-            coupling_ports: vec![mapped_port(WdfPortTerminals::grounded(), 1.0)],
-            block_ports: vec![vec![BlockPortBinding::primary(0)]],
-            coupling_elements: vec![],
-            coupling_passives: vec![],
-            coupling_one_ports: vec![],
-            coupling_runtime_state: RuntimeState::new(),
-            coupling_passive_by_port: vec![],
-            coupling_vcvss: vec![],
-            n_ports: 1,
-            output_block: 0,
-            output_port_index: None,
-            supply_voltage: 9.0,
-            vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
-            cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
-            shared_diode_cutoff_pot: None,
-            feedback_port_map: vec![],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
-            compensation: 1.0,
-            oversampler: crate::oversampling::Oversampler::new(
-                crate::oversampling::OversamplingFactor::X1,
-            ),
-            signal_flow_distance: 0,
-            bypass_serial: false,
-            solve_mode: BlockwiseSolveMode::Cascade,
-            diode_ladder_core: None,
-            b_warm: vec![0.0],
-            work_b: vec![0.0],
-            work_a: vec![0.0],
-            coupled_scratch: CoupledSolveScratch::default(),
-            port_index_cache: vec![],
-        };
+        let mut block = test_block(1.0);
+        block.explicit_diode_root = Some(ExplicitDiodeRoot::new(DiodeModel::silicon()));
+        block.diode_cutoff = Some(DiodeCutoffCalibration {
+            bias_voltage: 9.0,
+            bias_resistance: 100_000.0,
+            cv_resistance: Some(47_000.0),
+            min_rp: 1.0,
+            max_rp: 100_000.0,
+        });
+        let mut stage = blockwise_stage_fixture(
+            vec![block],
+            vec![mapped_port(WdfPortTerminals::grounded(), 1.0)],
+            vec![vec![BlockPortBinding::primary(0)]],
+        );
+        stage.coupling_s = vec![1.0];
+        stage.vs_port_map = vec![(alloc::string::String::from("cv_cutoff"), 0)];
+        stage.cutoff_cv_port = Some(alloc::string::String::from("cv_cutoff"));
         let rp_before = stage.blocks[0].tree.port_resistance();
 
         stage.write_vs_ports(&[3.0]);
@@ -8498,42 +8499,15 @@ mod blockwise_stage_tests {
 
     #[test]
     fn bkm_voltage_sources_reflect_incident_coupling_wave() {
-        let mut stage = BlockwiseStage {
-            blocks: vec![test_block(1.0)],
-            coupling_s: vec![1.0],
-            coupling_n_mna: 0,
-            coupling_ports: vec![mapped_port(WdfPortTerminals::grounded(), 1.0)],
-            block_ports: vec![vec![BlockPortBinding::primary(0)]],
-            coupling_elements: vec![],
-            coupling_passives: vec![],
-            coupling_one_ports: vec![],
-            coupling_runtime_state: RuntimeState::new(),
-            coupling_passive_by_port: vec![],
-            coupling_vcvss: vec![],
-            n_ports: 1,
-            output_block: 0,
-            output_port_index: None,
-            supply_voltage: 9.0,
-            vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
-            cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
-            shared_diode_cutoff_pot: None,
-            feedback_port_map: vec![],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
-            compensation: 1.0,
-            oversampler: crate::oversampling::Oversampler::new(
-                crate::oversampling::OversamplingFactor::X1,
-            ),
-            signal_flow_distance: 0,
-            bypass_serial: false,
-            solve_mode: BlockwiseSolveMode::Cascade,
-            diode_ladder_core: None,
-            b_warm: vec![0.0],
-            work_b: vec![0.0],
-            work_a: vec![1.25],
-            coupled_scratch: CoupledSolveScratch::default(),
-            port_index_cache: vec![],
-        };
+        let mut stage = blockwise_stage_fixture(
+            vec![test_block(1.0)],
+            vec![mapped_port(WdfPortTerminals::grounded(), 1.0)],
+            vec![vec![BlockPortBinding::primary(0)]],
+        );
+        stage.coupling_s = vec![1.0];
+        stage.vs_port_map = vec![(alloc::string::String::from("cv_cutoff"), 0)];
+        stage.cutoff_cv_port = Some(alloc::string::String::from("cv_cutoff"));
+        stage.work_a = vec![1.25];
 
         stage.write_vs_ports(&[3.0]);
 

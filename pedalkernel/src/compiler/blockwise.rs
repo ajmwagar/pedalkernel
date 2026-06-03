@@ -2369,8 +2369,9 @@ pub(super) fn try_build_blockwise(
                     // Tracked at runtime via 1-pole LPF to extract the AC
                     // component for the K-table ctrl axis.
                     let mut dc_tree = wdf.tree.clone();
+                    let mut dc_runtime_state = wdf.runtime_state.clone();
                     dc_tree.set_voltage(0.0);
-                    let b0 = dc_tree.reflected();
+                    let b0 = dc_tree.reflected_with_state(&mut dc_runtime_state);
                     let mut dc_kt = k_table.clone();
                     dc_kt.precompute_scales();
                     let a0 = if dc_kt.dims == 1 {
@@ -2378,11 +2379,11 @@ pub(super) fn try_build_blockwise(
                     } else {
                         dc_kt.lookup_2d(b0, 0.0)
                     };
-                    dc_tree.set_incident(a0);
+                    dc_tree.set_incident_with_state(a0, &mut dc_runtime_state);
                     let dc_offset = wdf
                         .output_probe
                         .as_ref()
-                        .and_then(|probe| dc_tree.leaf_voltage(probe))
+                        .and_then(|probe| dc_tree.leaf_voltage_with_state(probe, &dc_runtime_state))
                         .unwrap_or((a0 + b0) / 2.0);
 
                     #[cfg(test)]
@@ -2424,6 +2425,7 @@ pub(super) fn try_build_blockwise(
                     }
                     k_blocks.push(pedalkernel_rt::stage::KMethodBlock {
                         tree: wdf.tree.clone(),
+                        runtime_state: wdf.runtime_state.clone(),
                         k_table: k_table.clone(),
                         explicit_diode_root: match &wdf.root {
                             pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => {
