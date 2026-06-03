@@ -8,6 +8,7 @@ use alloc::{
     vec::Vec,
 };
 
+use crate::boundary_math::{push_differential_voltage_drives, BoundaryIncidentDrive, PortVoltage};
 use crate::elements::*;
 use crate::loading::{ImpedanceModel, InterstageLoading};
 use crate::metering::{MetricsAccumulator, MetricsRingBuffer, UiMetrics};
@@ -1323,18 +1324,17 @@ impl CompiledPedal {
             }
         }
 
-        let mut port_incident_offsets = alloc::vec::Vec::new();
+        let mut boundary_drives: alloc::vec::Vec<BoundaryIncidentDrive> = alloc::vec::Vec::new();
         for (drive, out) in boundary_outputs {
-            for &port_idx in &drive.positive_target_coupling_port_indices {
-                port_incident_offsets.push((port_idx, out));
-            }
-            for &port_idx in &drive.negative_target_coupling_port_indices {
-                port_incident_offsets.push((port_idx, -out));
-            }
+            push_differential_voltage_drives(
+                &mut boundary_drives,
+                &drive.positive_target_coupling_port_indices,
+                &drive.negative_target_coupling_port_indices,
+                PortVoltage::new(out),
+            );
         }
 
-        let output =
-            bkm_stage.process_with_port_incident_offsets(&port_incident_offsets, &vs_signals);
+        let output = bkm_stage.process_with_boundary_drives(&boundary_drives, &vs_signals);
         let output = if output.is_finite() { output } else { 0.0 };
         for port_idx in route.output_port_indices {
             if port_idx < self.port_values.len() {

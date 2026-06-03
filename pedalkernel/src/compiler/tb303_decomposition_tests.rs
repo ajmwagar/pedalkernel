@@ -555,6 +555,57 @@ pedal "Two Rung Differential Diode Ladder" { supply 9V
 }
 "#;
 
+const Q12_TO_TWO_RUNG_DIFFERENTIAL_DIODE_LADDER: &str = r#"
+pedal "Q12 To Two Rung Differential Diode Ladder" { supply 9V
+  ports {
+    audio_in: input(10k)
+    audio_out: output
+  }
+  components {
+    Q12L: npn(2sc945)
+    Q12R: npn(2sc945)
+    QL1: npn(2sc945)
+    QR1: npn(2sc945)
+    QL2: npn(2sc945)
+    QR2: npn(2sc945)
+    R_top_l: resistor(10k)
+    R_top_r: resistor(10k)
+    R_in: resistor(10k)
+    R_ref: resistor(10k)
+    R_tail: resistor(6.8k)
+    C1: cap(33n)
+    C2: cap(33n)
+  }
+  nets {
+    audio_in -> R_in.a
+    R_in.b -> Q12L.base
+    gnd -> R_ref.a
+    R_ref.b -> Q12R.base
+    Q12L.emitter -> Q12R.emitter, R_tail.a
+    R_tail.b -> gnd
+
+    Q12L.collector -> QL1.emitter
+    Q12R.collector -> QR1.emitter
+
+    vcc -> R_top_l.a
+    R_top_l.b -> QL2.base, QL2.collector
+    vcc -> R_top_r.a
+    R_top_r.b -> QR2.base, QR2.collector
+
+    QL2.emitter -> QL1.base, QL1.collector
+    QR2.emitter -> QR1.base, QR1.collector
+
+    QL1.emitter -> C1.a
+    QR1.emitter -> C1.b
+    QL2.emitter -> C2.a
+    QR2.emitter -> C2.b
+
+    QL2.emitter -> audio_out
+  }
+  controls {}
+}
+"#;
+
 /// Try to load a .pedal file from the pro crate's acidattack-core directory.
 fn load_pro_pedal(filename: &str) -> Option<String> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -2256,6 +2307,332 @@ fn two_rung_differential_diode_ladder_runtime_is_lowpass() {
         "minimal differential fixture should isolate a BKM lowpass response: \
          100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
     );
+}
+
+#[test]
+fn q12_to_two_rung_differential_diode_ladder_routes_into_bkm_boundary() {
+    let def = crate::dsl::parse_pedal_file(Q12_TO_TWO_RUNG_DIFFERENTIAL_DIODE_LADDER)
+        .expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let built = blockwise::try_build_blockwise(
+        &all_edges,
+        &graph,
+        &[graph.in_node, graph.out_node],
+        SR,
+        &std::collections::BTreeMap::new(),
+        9.0,
+        &def.ports,
+        false,
+        0.0,
+        false,
+        true,
+        &def.init_hints,
+    )
+    .expect("Q12 handoff fixture should build through direct BKM");
+
+    let q12 = built
+        .iter()
+        .find_map(|stage| {
+            if let super::spqr_build::BuiltStage::Wdf(wdf) = stage {
+                let has_q12_collectors = wdf
+                    .boundary_bindings
+                    .iter()
+                    .any(|binding| binding.label == "collector_left")
+                    && wdf
+                        .boundary_bindings
+                        .iter()
+                        .any(|binding| binding.label == "collector_right");
+                has_q12_collectors.then_some(wdf)
+            } else {
+                None
+            }
+        })
+        .expect("Q12 should build as a WDF boundary source");
+    assert!(
+        q12.boundary_bindings
+            .iter()
+            .any(|binding| binding.label == "base_left"),
+        "Q12 handoff source should expose its driven base boundary"
+    );
+
+    let bkm = built
+        .iter()
+        .find_map(|stage| {
+            if let super::spqr_build::BuiltStage::Blockwise(bkm) = stage {
+                Some(bkm)
+            } else {
+                None
+            }
+        })
+        .expect("Q12 handoff fixture should build the ladder as BKM");
+    assert_eq!(
+        bkm.blocks.len(),
+        2,
+        "Q12 handoff fixture should keep the two diode rungs in one BKM ladder"
+    );
+
+    let q12_left = graph.node_names["Q12L.collector"];
+    let q12_right = graph.node_names["Q12R.collector"];
+    assert!(
+        bkm.coupling_port_nodes
+            .iter()
+            .any(|(pos, neg)| *pos == Some(q12_left) || *neg == Some(q12_left)),
+        "Q12 left collector node should be a BKM coupling boundary"
+    );
+    assert!(
+        bkm.coupling_port_nodes
+            .iter()
+            .any(|(pos, neg)| *pos == Some(q12_right) || *neg == Some(q12_right)),
+        "Q12 right collector node should be a BKM coupling boundary"
+    );
+}
+
+#[test]
+#[ignore = "documents current Q12 collector boundary runtime-coupling gap; enable when bead 5 fixes per-boundary BKM drive"]
+fn q12_to_two_rung_differential_diode_ladder_handoff_is_lowpass() {
+    let def = crate::dsl::parse_pedal_file(Q12_TO_TWO_RUNG_DIFFERENTIAL_DIODE_LADDER)
+        .expect("parse failed");
+
+    let measure = |freq: f64| -> f64 {
+        let graph = CircuitGraph::from_pedal(&def);
+        let active_set: std::collections::HashSet<usize> =
+            graph.active_edge_indices.iter().copied().collect();
+        let all_edges: Vec<usize> = (0..graph.edges.len())
+            .filter(|i| !active_set.contains(i))
+            .collect();
+        let q12_left = graph.node_names["Q12L.collector"];
+        let q12_right = graph.node_names["Q12R.collector"];
+
+        let built = blockwise::try_build_blockwise(
+            &all_edges,
+            &graph,
+            &[graph.in_node, graph.out_node],
+            SR,
+            &std::collections::BTreeMap::new(),
+            9.0,
+            &def.ports,
+            false,
+            0.0,
+            false,
+            true,
+            &def.init_hints,
+        )
+        .expect("Q12 handoff fixture should build through direct BKM");
+
+        let mut bkm = None;
+        for stage in built {
+            match stage {
+                super::spqr_build::BuiltStage::Blockwise(stage) => {
+                    bkm = Some(stage);
+                }
+                _ => {}
+            }
+        }
+        let mut bkm = bkm.expect("routed target stage should be BKM");
+        let left_port_indices: Vec<usize> = bkm
+            .coupling_port_nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(port_idx, (pos, neg))| {
+                (*pos == Some(q12_left) || *neg == Some(q12_left)).then_some(port_idx)
+            })
+            .collect();
+        let right_port_indices: Vec<usize> = bkm
+            .coupling_port_nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(port_idx, (pos, neg))| {
+                (*pos == Some(q12_right) || *neg == Some(q12_right)).then_some(port_idx)
+            })
+            .collect();
+        assert!(
+            !left_port_indices.is_empty() && !right_port_indices.is_empty(),
+            "Q12 collector nodes should map to left/right BKM coupling ports"
+        );
+        let vs_signals = vec![0.0; bkm.vs_port_map.len()];
+
+        let mut process = |input: f64| {
+            let mut drives = Vec::new();
+            pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                &mut drives,
+                &left_port_indices,
+                &right_port_indices,
+                pedalkernel_rt::boundary_math::PortVoltage::new(input),
+            );
+            bkm.process_with_boundary_drives(&drives, &vs_signals)
+        };
+
+        for i in 0..1200 {
+            let input = 0.003 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = process(input);
+        }
+        let mut values = Vec::with_capacity(2400);
+        for i in 0..2400 {
+            let input = 0.003 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            values.push(process(input));
+        }
+        ac_rms(&values)
+    };
+
+    let gain_100 = measure(100.0);
+    let gain_10k = measure(10_000.0);
+    let ratio_db = db_norm(gain_100, gain_10k);
+
+    eprintln!(
+        "  Q12 collector boundary -> two-rung differential ladder: 100Hz={gain_100:.6}, \
+         10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
+    );
+
+    assert!(
+        gain_100.is_finite() && gain_10k.is_finite(),
+        "Q12 handoff fixture must stay finite: 100Hz={gain_100}, 10kHz={gain_10k}"
+    );
+    assert!(
+        gain_100 > 1.0e-10,
+        "Q12 collector boundary handoff should produce nonzero output at 100Hz"
+    );
+    assert!(
+        gain_100 > gain_10k * 1.25,
+        "Q12 collector boundary handoff into BKM should preserve a lowpass response: \
+         100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
+    );
+}
+
+#[test]
+fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
+    #[derive(Clone, Copy)]
+    enum Probe {
+        SerialFirstRung,
+        Q12CollectorBoundary,
+    }
+
+    let def = crate::dsl::parse_pedal_file(Q12_TO_TWO_RUNG_DIFFERENTIAL_DIODE_LADDER)
+        .expect("parse failed");
+
+    let measure = |probe: Probe, freq: f64| -> f64 {
+        let graph = CircuitGraph::from_pedal(&def);
+        let active_set: std::collections::HashSet<usize> =
+            graph.active_edge_indices.iter().copied().collect();
+        let all_edges: Vec<usize> = (0..graph.edges.len())
+            .filter(|i| !active_set.contains(i))
+            .collect();
+        let q12_left = graph.node_names["Q12L.collector"];
+        let q12_right = graph.node_names["Q12R.collector"];
+
+        let built = blockwise::try_build_blockwise(
+            &all_edges,
+            &graph,
+            &[graph.in_node, graph.out_node],
+            SR,
+            &std::collections::BTreeMap::new(),
+            9.0,
+            &def.ports,
+            false,
+            0.0,
+            false,
+            true,
+            &def.init_hints,
+        )
+        .expect("Q12 handoff fixture should build through direct BKM");
+
+        let mut bkm = built
+            .into_iter()
+            .find_map(|stage| {
+                if let super::spqr_build::BuiltStage::Blockwise(stage) = stage {
+                    Some(stage)
+                } else {
+                    None
+                }
+            })
+            .expect("BKM stage");
+        let left_port_indices: Vec<usize> = bkm
+            .coupling_port_nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(port_idx, (pos, neg))| {
+                (*pos == Some(q12_left) || *neg == Some(q12_left)).then_some(port_idx)
+            })
+            .collect();
+        let right_port_indices: Vec<usize> = bkm
+            .coupling_port_nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(port_idx, (pos, neg))| {
+                (*pos == Some(q12_right) || *neg == Some(q12_right)).then_some(port_idx)
+            })
+            .collect();
+        assert!(
+            !left_port_indices.is_empty() && !right_port_indices.is_empty(),
+            "Q12 collector nodes should map to left/right BKM coupling ports"
+        );
+        let vs_signals = vec![0.0; bkm.vs_port_map.len()];
+
+        let mut process = |input: f64| match probe {
+            Probe::SerialFirstRung => bkm.process_with_serial_input(input, &vs_signals),
+            Probe::Q12CollectorBoundary => {
+                let mut drives = Vec::new();
+                pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                    &mut drives,
+                    &left_port_indices,
+                    &right_port_indices,
+                    pedalkernel_rt::boundary_math::PortVoltage::new(input),
+                );
+                bkm.process_with_boundary_drives(&drives, &vs_signals)
+            }
+        };
+
+        for i in 0..1200 {
+            let input = 0.003 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let _ = process(input);
+        }
+        let mut values = Vec::with_capacity(2400);
+        for i in 0..2400 {
+            let input = 0.003 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            values.push(process(input));
+        }
+        ac_rms(&values)
+    };
+
+    let serial_100 = measure(Probe::SerialFirstRung, 100.0);
+    let serial_10k = measure(Probe::SerialFirstRung, 10_000.0);
+    let q12_100 = measure(Probe::Q12CollectorBoundary, 100.0);
+    let q12_10k = measure(Probe::Q12CollectorBoundary, 10_000.0);
+    let serial_ratio_db = db_norm(serial_100, serial_10k);
+    let q12_ratio_db = db_norm(q12_100, q12_10k);
+
+    eprintln!(
+        "  boundary probes: serial_first_rung 100Hz={serial_100:.6}, \
+         10kHz={serial_10k:.6}, ratio={serial_ratio_db:+.1} dB"
+    );
+    eprintln!(
+        "  boundary probes: q12_collector_boundary 100Hz={q12_100:.6}, \
+         10kHz={q12_10k:.6}, ratio={q12_ratio_db:+.1} dB"
+    );
+
+    assert!(
+        serial_100.is_finite()
+            && serial_10k.is_finite()
+            && q12_100.is_finite()
+            && q12_10k.is_finite(),
+        "boundary probes should stay finite"
+    );
+    if serial_100 <= serial_10k * 1.25 {
+        eprintln!(
+            "  GAP: serial first-rung drive is not lowpass in the Q12 handoff fixture; \
+             this points at BKM output extraction/coupled multiport drive before Q12 routing"
+        );
+    } else if q12_100 <= q12_10k * 1.25 {
+        eprintln!(
+            "  GAP: Q12 collector boundary drive is not yet lowpass; \
+             this localizes the remaining issue to per-boundary BKM drive/output extraction"
+        );
+    }
 }
 
 #[test]
@@ -7089,14 +7466,14 @@ fn tb303_vco_port_path_is_lowpass() {
         let vs_signals = vec![0.0; bkm.vs_port_map.len()];
 
         let mut process = |input: f64| {
-            let mut offsets = Vec::new();
-            for &port_idx in &drive.positive_target_coupling_port_indices {
-                offsets.push((port_idx, input));
-            }
-            for &port_idx in &drive.negative_target_coupling_port_indices {
-                offsets.push((port_idx, -input));
-            }
-            bkm.process_with_port_incident_offsets(&offsets, &vs_signals)
+            let mut drives = Vec::new();
+            pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                &mut drives,
+                &drive.positive_target_coupling_port_indices,
+                &drive.negative_target_coupling_port_indices,
+                pedalkernel_rt::boundary_math::PortVoltage::new(input),
+            );
+            bkm.process_with_boundary_drives(&drives, &vs_signals)
         };
 
         for i in 0..1200 {
@@ -7157,14 +7534,14 @@ fn tb303_vco_port_path_is_lowpass() {
 
         let mut process = |input: f64| {
             let q12_out = q12.process(input);
-            let mut offsets = Vec::new();
-            for &port_idx in &drive.positive_target_coupling_port_indices {
-                offsets.push((port_idx, q12_out));
-            }
-            for &port_idx in &drive.negative_target_coupling_port_indices {
-                offsets.push((port_idx, -q12_out));
-            }
-            bkm.process_with_port_incident_offsets(&offsets, &vs_signals)
+            let mut drives = Vec::new();
+            pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                &mut drives,
+                &drive.positive_target_coupling_port_indices,
+                &drive.negative_target_coupling_port_indices,
+                pedalkernel_rt::boundary_math::PortVoltage::new(q12_out),
+            );
+            bkm.process_with_boundary_drives(&drives, &vs_signals)
         };
 
         for i in 0..1200 {
@@ -7211,14 +7588,14 @@ fn tb303_vco_port_path_is_lowpass() {
         let vs_signals = vec![0.0; bkm.vs_port_map.len()];
 
         let mut process = |input: f64| {
-            let mut offsets = Vec::new();
-            for &port_idx in &drive.positive_target_coupling_port_indices {
-                offsets.push((port_idx, input));
-            }
-            for &port_idx in &drive.negative_target_coupling_port_indices {
-                offsets.push((port_idx, -input));
-            }
-            bkm.process_with_port_incident_offsets(&offsets, &vs_signals)
+            let mut drives = Vec::new();
+            pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                &mut drives,
+                &drive.positive_target_coupling_port_indices,
+                &drive.negative_target_coupling_port_indices,
+                pedalkernel_rt::boundary_math::PortVoltage::new(input),
+            );
+            bkm.process_with_boundary_drives(&drives, &vs_signals)
         };
 
         for i in 0..1200 {

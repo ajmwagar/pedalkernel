@@ -54,6 +54,9 @@ pub mod metering;
 // ── Stage graph routing (compiled topology → runtime route plan) ─────────
 pub mod routing;
 
+// ── Typed WDF boundary-drive math ──────────────────────────────────────
+pub mod boundary_math;
+
 // ── Thermal drift (temperature-dependent component behavior) ────────────
 pub mod thermal;
 

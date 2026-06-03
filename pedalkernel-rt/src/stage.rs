@@ -8,6 +8,7 @@ use crate::oversampling::Oversampler;
 use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
 use crate::{PedalProcessor, Wave};
 
+use crate::boundary_math::{sum_incident_offsets, BoundaryIncidentDrive};
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
 
@@ -6683,7 +6684,7 @@ impl BlockwiseStage {
         block_idx: usize,
         a: &[crate::Wave],
         serial_input: crate::Wave,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
         update_state: bool,
         b_out: &mut [crate::Wave],
     ) -> crate::Wave {
@@ -6703,9 +6704,9 @@ impl BlockwiseStage {
                 let bottom_right = port_indices[1];
                 let top_diff = port_indices[2];
                 let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0)
-                    + Self::port_incident_offset(bottom_left, port_incident_offsets);
+                    + sum_incident_offsets(bottom_left, boundary_drives);
                 let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0)
-                    + Self::port_incident_offset(bottom_right, port_incident_offsets);
+                    + sum_incident_offsets(bottom_right, boundary_drives);
                 let differential_incident = (a_bottom_left - a_bottom_right
                     + if block_idx == 0 { serial_input } else { 0.0 })
                 .clamp(
@@ -7020,12 +7021,9 @@ impl BlockwiseStage {
 
     fn port_incident_offset(
         port_idx: usize,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
     ) -> crate::Wave {
-        port_incident_offsets
-            .iter()
-            .filter_map(|&(idx, value)| (idx == port_idx && value.is_finite()).then_some(value))
-            .sum()
+        sum_incident_offsets(port_idx, boundary_drives)
     }
 
     fn coupled_eval_b_for_a(
@@ -7033,7 +7031,7 @@ impl BlockwiseStage {
         a: &[crate::Wave],
         vs_signals: &[crate::Wave],
         serial_input: crate::Wave,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
         update_state: bool,
         b_out: &mut [crate::Wave],
     ) -> crate::Wave {
@@ -7046,7 +7044,7 @@ impl BlockwiseStage {
                 block_idx,
                 a,
                 serial_input,
-                port_incident_offsets,
+                boundary_drives,
                 update_state,
                 b_out,
             );
@@ -7109,7 +7107,7 @@ impl BlockwiseStage {
         &mut self,
         a: &[crate::Wave],
         serial_input: crate::Wave,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
         db_da: &mut [crate::Wave],
     ) {
         let n = self.n_ports;
@@ -7162,9 +7160,9 @@ impl BlockwiseStage {
                     let bottom_right = port_indices[1];
                     let top_diff = port_indices[2];
                     let a_bottom_left = a.get(bottom_left).copied().unwrap_or(0.0)
-                        + Self::port_incident_offset(bottom_left, port_incident_offsets);
+                        + Self::port_incident_offset(bottom_left, boundary_drives);
                     let a_bottom_right = a.get(bottom_right).copied().unwrap_or(0.0)
-                        + Self::port_incident_offset(bottom_right, port_incident_offsets);
+                        + Self::port_incident_offset(bottom_right, boundary_drives);
                     let differential_incident = (a_bottom_left - a_bottom_right
                         + if block_idx == 0 { serial_input } else { 0.0 })
                     .clamp(
@@ -7236,7 +7234,7 @@ impl BlockwiseStage {
         &mut self,
         vs_signals: &[crate::Wave],
         serial_input: crate::Wave,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
     ) -> (crate::Wave, bool) {
         let n = self.n_ports;
         if n == 0 {
@@ -7258,7 +7256,7 @@ impl BlockwiseStage {
                 &scratch.a,
                 vs_signals,
                 serial_input,
-                port_incident_offsets,
+                boundary_drives,
                 false,
                 &mut scratch.b,
             );
@@ -7278,7 +7276,7 @@ impl BlockwiseStage {
             self.coupled_fill_sparse_db_da(
                 &scratch.a,
                 serial_input,
-                port_incident_offsets,
+                boundary_drives,
                 &mut scratch.db_da,
             );
 
@@ -7324,7 +7322,7 @@ impl BlockwiseStage {
                 &scratch.a,
                 vs_signals,
                 serial_input,
-                port_incident_offsets,
+                boundary_drives,
                 false,
                 &mut scratch.b,
             );
@@ -7779,12 +7777,12 @@ impl BlockwiseStage {
         self.process_inner(vs_signals, true, serial_input, &[])
     }
 
-    pub fn process_with_port_incident_offsets(
+    pub fn process_with_boundary_drives(
         &mut self,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
         vs_signals: &[crate::Wave],
     ) -> crate::Wave {
-        self.process_inner(vs_signals, true, 0.0, port_incident_offsets)
+        self.process_inner(vs_signals, true, 0.0, boundary_drives)
     }
 
     pub fn debug_process_without_feedback_ports(
@@ -7817,7 +7815,7 @@ impl BlockwiseStage {
         vs_signals: &[crate::Wave],
         include_cascade: bool,
         serial_input: crate::Wave,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
     ) -> crate::Wave {
         if self.work_b.len() != self.n_ports {
             self.init_buffers();
@@ -7831,11 +7829,7 @@ impl BlockwiseStage {
             self.solve_mode,
             BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
         ) {
-            return self.process_coupled_fixed_point(
-                vs_signals,
-                serial_input,
-                port_incident_offsets,
-            );
+            return self.process_coupled_fixed_point(vs_signals, serial_input, boundary_drives);
         }
 
         self.update_shared_diode_cutoff_bias_from_ports(vs_signals);
@@ -7931,7 +7925,7 @@ impl BlockwiseStage {
         &mut self,
         vs_signals: &[crate::Wave],
         serial_input: crate::Wave,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
     ) -> crate::Wave {
         let previous_output = self.b_warm[0];
         let mut scratch = core::mem::take(&mut self.coupled_scratch);
@@ -7943,7 +7937,7 @@ impl BlockwiseStage {
             &scratch.a,
             vs_signals,
             serial_input,
-            port_incident_offsets,
+            boundary_drives,
             true,
             &mut scratch.b,
         );
@@ -8009,13 +8003,13 @@ impl BlockwiseStage {
         &mut self,
         vs_signals: &[crate::Wave],
         serial_input: crate::Wave,
-        port_incident_offsets: &[(usize, crate::Wave)],
+        boundary_drives: &[BoundaryIncidentDrive],
     ) -> crate::Wave {
         self.update_shared_diode_cutoff_bias_from_ports(vs_signals);
 
         if self.solve_mode == BlockwiseSolveMode::CoupledNewton {
             let (_output, _converged) =
-                self.coupled_solve_newton(vs_signals, serial_input, port_incident_offsets);
+                self.coupled_solve_newton(vs_signals, serial_input, boundary_drives);
             let mut scratch = core::mem::take(&mut self.coupled_scratch);
             scratch.load_a_from(&self.work_a, self.n_ports);
             scratch.b.resize(self.n_ports, 0.0);
@@ -8023,7 +8017,7 @@ impl BlockwiseStage {
                 &scratch.a,
                 vs_signals,
                 serial_input,
-                port_incident_offsets,
+                boundary_drives,
                 true,
                 &mut scratch.b,
             );
@@ -8034,7 +8028,7 @@ impl BlockwiseStage {
             return if output.is_finite() { output } else { 0.0 };
         }
 
-        self.process_coupled_one_step_delay(vs_signals, serial_input, port_incident_offsets)
+        self.process_coupled_one_step_delay(vs_signals, serial_input, boundary_drives)
     }
 
     pub fn solve_diagnostics(&self) -> SolveDiagnostics {
