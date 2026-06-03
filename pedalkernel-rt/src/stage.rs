@@ -7000,6 +7000,23 @@ impl BlockwiseStage {
             .collect()
     }
 
+    /// Declarative input bindings exposed by the BKM stage boundary.
+    pub fn ins(&self) -> Vec<PortBinding> {
+        self.coupling_ports
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, _)| self.bindings_for_coupling_port(idx))
+            .collect()
+    }
+
+    /// Declarative output bindings exposed by the BKM stage boundary.
+    ///
+    /// BKM coupling ports are bidirectional at the stage boundary; internal
+    /// block direction is exposed by `block_ins()` and `block_outs()`.
+    pub fn outs(&self) -> Vec<PortBinding> {
+        self.ins()
+    }
+
     fn block_bindings_for_roles(
         &self,
         block_idx: usize,
@@ -8884,6 +8901,23 @@ mod blockwise_stage_tests {
 
         assert_eq!(stage.block_ins(0), expected);
         assert_eq!(stage.block_outs(0), expected);
+    }
+
+    #[test]
+    fn blockwise_stage_boundary_ports_are_bidirectional_bindings() {
+        let stage = blockwise_stage_fixture(
+            vec![test_block(1.0)],
+            vec![mapped_port(WdfPortTerminals::differential(50, 51), 1.0)],
+            vec![vec![BlockPortBinding::primary(0)]],
+        );
+
+        let expected = vec![
+            PortBinding::new(BindingId::new(50), 0),
+            PortBinding::new(BindingId::new(51), 0),
+        ];
+
+        assert_eq!(stage.ins(), expected);
+        assert_eq!(stage.outs(), expected);
     }
 
     #[test]

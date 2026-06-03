@@ -362,10 +362,12 @@ impl StageRoutePlan {
             if target_coupling_port_indices.is_empty() {
                 continue;
             }
-            let mut positive_target_coupling_port_indices =
-                Self::bkm_coupling_ports_for_node(bkm, collector_left);
-            let mut negative_target_coupling_port_indices =
-                Self::bkm_coupling_ports_for_node(bkm, collector_right);
+            let mut positive_target_coupling_port_indices = collector_left
+                .map(|node| Self::stage_port_indices_for_node(bkm_stage, node))
+                .unwrap_or_default();
+            let mut negative_target_coupling_port_indices = collector_right
+                .map(|node| Self::stage_port_indices_for_node(bkm_stage, node))
+                .unwrap_or_default();
             positive_target_coupling_port_indices.sort_unstable();
             positive_target_coupling_port_indices.dedup();
             negative_target_coupling_port_indices.sort_unstable();
@@ -390,24 +392,6 @@ impl StageRoutePlan {
             });
         }
         drives
-    }
-
-    fn bkm_coupling_ports_for_node(
-        bkm: &crate::stage::BlockwiseStage,
-        node: Option<usize>,
-    ) -> Vec<usize> {
-        let Some(node) = node else {
-            return Vec::new();
-        };
-        bkm.coupling_ports
-            .iter()
-            .enumerate()
-            .filter_map(|(port_idx, port)| {
-                let terminals = port.graph.raw();
-                let (node_pos, node_neg) = terminals.as_tuple();
-                (node_pos == Some(node) || node_neg == Some(node)).then_some(port_idx)
-            })
-            .collect()
     }
 
     fn external_ports_reaching_node(

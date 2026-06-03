@@ -76,17 +76,7 @@ impl Stage {
                     .then_some(PortBinding::new(BindingId::new(binding.node_id), idx))
                 })
                 .collect(),
-            Stage::Blockwise(bkm) => bkm
-                .coupling_ports
-                .iter()
-                .enumerate()
-                .flat_map(|(idx, port)| {
-                    let (pos, neg) = port.graph.raw().as_tuple();
-                    pos.into_iter()
-                        .chain(neg)
-                        .map(move |node| PortBinding::new(BindingId::new(node), idx))
-                })
-                .collect(),
+            Stage::Blockwise(bkm) => bkm.ins(),
             _ => Vec::new(),
         }
     }
@@ -103,17 +93,7 @@ impl Stage {
                         .then_some(PortBinding::new(BindingId::new(binding.node_id), idx))
                 })
                 .collect(),
-            Stage::Blockwise(bkm) => bkm
-                .coupling_ports
-                .iter()
-                .enumerate()
-                .flat_map(|(idx, port)| {
-                    let (pos, neg) = port.graph.raw().as_tuple();
-                    pos.into_iter()
-                        .chain(neg)
-                        .map(move |node| PortBinding::new(BindingId::new(node), idx))
-                })
-                .collect(),
+            Stage::Blockwise(bkm) => bkm.outs(),
             _ => Vec::new(),
         }
     }
