@@ -185,6 +185,123 @@ impl<N> RuntimeOnePort<N> {
     pub fn rp(&self, sample_rate: Wave) -> Wave {
         self.spec.kind.rp(sample_rate)
     }
+
+    pub fn physical_value(&self) -> Wave {
+        match self.spec.kind {
+            OnePortKind::Resistor(ohms) => ohms,
+            OnePortKind::Capacitor(farads) => farads,
+            OnePortKind::Inductor(henries) => henries,
+        }
+    }
+
+    pub fn type_tag(&self) -> &'static str {
+        match self.spec.kind {
+            OnePortKind::Resistor(_) => "resistor",
+            OnePortKind::Capacitor(_) => "capacitor",
+            OnePortKind::Inductor(_) => "inductor",
+        }
+    }
+
+    pub fn state_slot(&self) -> Option<StateSlot> {
+        self.state_slot
+    }
+
+    fn required_state_slot(&self) -> StateSlot {
+        self.state_slot
+            .expect("stateful one-port must have a runtime state slot")
+    }
+
+    pub fn wdf_reflected(&self, state: &RuntimeState) -> Wave {
+        match self.spec.kind {
+            OnePortKind::Resistor(_) => 0.0,
+            OnePortKind::Capacitor(_) => state.wave_cache[self.required_state_slot().0].wave_state,
+            OnePortKind::Inductor(_) => -state.wave_cache[self.required_state_slot().0].wave_state,
+        }
+    }
+
+    pub fn wdf_set_incident(&self, incident: Wave, state: &mut RuntimeState) {
+        match self.spec.kind {
+            OnePortKind::Resistor(_) => {}
+            OnePortKind::Capacitor(_) => {
+                let slot = self.required_state_slot().0;
+                let previous_reflected = state.wave_cache[slot].wave_state;
+                state.wave_cache[slot].previous_reflected = previous_reflected;
+                state.wave_cache[slot].wave_state = incident;
+                state.states[slot] =
+                    OnePortState::CapacitorVoltage((incident + previous_reflected) / 2.0);
+            }
+            OnePortKind::Inductor(_) => {
+                let slot = self.required_state_slot().0;
+                state.wave_cache[slot].wave_state = incident;
+                state.states[slot] = OnePortState::InductorScaledCurrent(incident);
+            }
+        }
+    }
+
+    pub fn wdf_leaf_voltage(&self, state: &RuntimeState) -> Wave {
+        match self.spec.kind {
+            OnePortKind::Resistor(_) => 0.0,
+            OnePortKind::Capacitor(_) => match state.states[self.required_state_slot().0] {
+                OnePortState::CapacitorVoltage(voltage) => voltage,
+                OnePortState::InductorScaledCurrent(_) => 0.0,
+            },
+            OnePortKind::Inductor(_) => {
+                state.wave_cache[self.required_state_slot().0].wave_state / 2.0
+            }
+        }
+    }
+
+    pub fn wdf_projected_leaf_voltage(&self, incident: Wave, state: &RuntimeState) -> Wave {
+        match self.spec.kind {
+            OnePortKind::Resistor(_) | OnePortKind::Inductor(_) => incident / 2.0,
+            OnePortKind::Capacitor(_) => {
+                (incident + state.wave_cache[self.required_state_slot().0].wave_state) / 2.0
+            }
+        }
+    }
+
+    pub fn wdf_one_port_state(&self, state: &RuntimeState) -> Option<OnePortState> {
+        self.state_slot.map(|slot| state.states[slot.0])
+    }
+
+    pub fn wdf_set_one_port_state(
+        &self,
+        one_port_state: OnePortState,
+        state: &mut RuntimeState,
+    ) -> bool {
+        match (self.spec.kind, one_port_state) {
+            (OnePortKind::Capacitor(_), OnePortState::CapacitorVoltage(voltage)) => {
+                let slot = self.required_state_slot().0;
+                let previous_reflected = state.wave_cache[slot].previous_reflected;
+                state.states[slot] = OnePortState::CapacitorVoltage(voltage);
+                state.wave_cache[slot].wave_state = 2.0 * voltage - previous_reflected;
+                true
+            }
+            (OnePortKind::Inductor(_), OnePortState::InductorScaledCurrent(scaled_current)) => {
+                let slot = self.required_state_slot().0;
+                state.states[slot] = OnePortState::InductorScaledCurrent(scaled_current);
+                state.wave_cache[slot].wave_state = scaled_current;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn wdf_reset(&self, state: &mut RuntimeState) {
+        match self.spec.kind {
+            OnePortKind::Resistor(_) => {}
+            OnePortKind::Capacitor(_) => {
+                let slot = self.required_state_slot().0;
+                state.states[slot] = OnePortState::CapacitorVoltage(0.0);
+                state.wave_cache[slot] = WdfWaveCache::default();
+            }
+            OnePortKind::Inductor(_) => {
+                let slot = self.required_state_slot().0;
+                state.states[slot] = OnePortState::InductorScaledCurrent(0.0);
+                state.wave_cache[slot] = WdfWaveCache::default();
+            }
+        }
+    }
 }
 
 /// Dense index into one-port runtime state arrays.

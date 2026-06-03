@@ -1508,10 +1508,15 @@ fn tb303_coupling_caps_land_near_stinchcombe_shelf_corners() {
                     return None;
                 }
                 if let pedalkernel_rt::dyn_node::DynNode::Leaf(
-                    pedalkernel_rt::wdf_leaf::LeafKind::Capacitor(cap),
+                    pedalkernel_rt::wdf_leaf::LeafKind::OnePort { runtime, .. },
                 ) = &passive.node
                 {
-                    Some(cap.capacitance())
+                    match runtime.spec.kind {
+                        pedalkernel_rt::boundary_math::OnePortKind::Capacitor(farads) => {
+                            Some(farads)
+                        }
+                        _ => None,
+                    }
                 } else {
                     None
                 }

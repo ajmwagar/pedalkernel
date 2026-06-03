@@ -16,8 +16,8 @@ use crate::elements::{JfetVariableResistor, Photocoupler};
 use crate::pot_taper::PotTaper;
 use crate::tree::RTypeAdaptor;
 use crate::wdf_leaf::{
-    leaf_matches_id, LeafKind, WdfCapacitor, WdfInductor, WdfJfetVr, WdfLeaf, WdfLeakyCapacitor,
-    WdfPhotocoupler, WdfPot, WdfResistor, WdfSwitchedResistor, WdfUnitDelay, WdfVoltageSource,
+    leaf_matches_id, LeafKind, WdfJfetVr, WdfLeaf, WdfLeakyCapacitor, WdfPhotocoupler, WdfPot,
+    WdfResistor, WdfSwitchedResistor, WdfUnitDelay, WdfVoltageSource,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -125,11 +125,10 @@ impl Clone for DynNode {
 
 fn projected_leaf_voltage(leaf: &LeafKind, incident: crate::Wave) -> crate::Wave {
     match leaf {
-        LeafKind::Resistor(_)
-        | LeafKind::Pot(_)
-        | LeafKind::Inductor(_)
-        | LeafKind::SwitchedResistor(_) => incident / 2.0,
-        LeafKind::Capacitor(cap) => cap.projected_leaf_voltage(incident),
+        LeafKind::Resistor(_) | LeafKind::Pot(_) | LeafKind::SwitchedResistor(_) => incident / 2.0,
+        LeafKind::OnePort { .. } => leaf
+            .projected_one_port_leaf_voltage(incident)
+            .unwrap_or(0.0),
         LeafKind::LeakyCapacitor(cap) => incident * cap.leakage_decay,
         LeafKind::VoltageSource(_) | LeafKind::Photocoupler(_) | LeafKind::JfetVr(_) => 0.0,
         LeafKind::UnitDelay(_) => 0.0,
@@ -140,9 +139,8 @@ fn projected_leaf_voltage_incident_gain(leaf: &LeafKind) -> crate::Wave {
     match leaf {
         LeafKind::Resistor(_)
         | LeafKind::Pot(_)
-        | LeafKind::Inductor(_)
         | LeafKind::SwitchedResistor(_)
-        | LeafKind::Capacitor(_) => 0.5,
+        | LeafKind::OnePort { .. } => 0.5,
         LeafKind::LeakyCapacitor(cap) => cap.leakage_decay,
         LeafKind::VoltageSource(_) | LeafKind::Photocoupler(_) | LeafKind::JfetVr(_) => 0.0,
         LeafKind::UnitDelay(_) => 0.0,
@@ -164,11 +162,7 @@ impl DynNode {
     }
 
     pub fn Capacitor(comp_id: Option<String>, capacitance: crate::Wave, rp: crate::Wave) -> Self {
-        Self::Leaf(LeafKind::Capacitor(WdfCapacitor::from_rp(
-            comp_id,
-            capacitance,
-            rp,
-        )))
+        Self::Leaf(LeafKind::capacitor_from_rp(comp_id, capacitance, rp))
     }
 
     pub fn LeakyCapacitor(
@@ -193,9 +187,7 @@ impl DynNode {
     }
 
     pub fn Inductor(comp_id: Option<String>, inductance: crate::Wave, rp: crate::Wave) -> Self {
-        Self::Leaf(LeafKind::Inductor(WdfInductor::from_rp(
-            comp_id, inductance, rp,
-        )))
+        Self::Leaf(LeafKind::inductor_from_rp(comp_id, inductance, rp))
     }
 
     pub fn VoltageSource(voltage: crate::Wave, rp: crate::Wave) -> Self {
@@ -783,11 +775,8 @@ impl DynNode {
     ) -> bool {
         self.for_each_leaf_mut(&mut |leaf| {
             if leaf.comp_id() == Some(target_id) && leaf.type_tag() == "inductor" {
-                // Update inductance value — inductors don't use set_control for value changes
-                // but we need to update rp. We use set_resistance as a proxy for now.
-                // In practice this would need a dedicated method, but for API compat
-                // we use the fact that inductor rp = 2*fs*L.
-                leaf.set_resistance(2.0 * sample_rate * new_henries);
+                leaf.set_control(target_id, new_henries);
+                leaf.update_sample_rate(sample_rate);
                 true
             } else {
                 false

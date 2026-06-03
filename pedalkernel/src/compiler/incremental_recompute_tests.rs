@@ -37,8 +37,8 @@ fn wdf_resistor_is_not_dynamic() {
 
 #[test]
 fn wdf_capacitor_is_not_dynamic() {
-    let c = WdfCapacitor::new(Some("C1".to_string()), 100e-9, 48_000.0);
-    assert!(!c.is_dynamic(), "WdfCapacitor should NOT be dynamic");
+    let c = LeafKind::capacitor(Some("C1".to_string()), 100e-9, 48_000.0);
+    assert!(!c.is_dynamic(), "capacitor one-port should NOT be dynamic");
 }
 
 #[test]
