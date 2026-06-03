@@ -6,13 +6,13 @@ use super::super::component::{EdgeKind, StampContext};
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use crate::tree::MnaSystem;
-use pedalkernel_rt::boundary_math::{CapStamp, WdfPortTerminals};
+use pedalkernel_rt::boundary_math::{MnaCapStamp, MnaNodeId, MnaPortTerminals};
 use std::collections::{HashMap, VecDeque};
 
 /// Result of building an MNA system from a set of edges.
 pub(super) struct BuiltMna {
     pub mna: MnaSystem,
-    pub cap_stamps: Vec<CapStamp<usize>>,
+    pub cap_stamps: Vec<MnaCapStamp>,
     pub node_set: Vec<NodeId>,
     pub vs_idx: usize,
     pub injection_mna: Option<usize>,
@@ -102,7 +102,7 @@ pub(super) fn build_mna(
 
     // ── Step 3: Build MNA and stamp components ──────────────────────
     let mut mna = MnaSystem::new(num_nodes, num_vsources);
-    let mut cap_stamps: Vec<CapStamp<usize>> = Vec::new();
+    let mut cap_stamps: Vec<MnaCapStamp> = Vec::new();
 
     // Track multi-port components to avoid double-stamping.
     // Components with >1 port use stamp_mna_multi() once.
@@ -152,16 +152,22 @@ pub(super) fn build_mna(
             EdgeKind::Reactive => {
                 if let Some(c) = comp.kind.capacitance() {
                     if n1.is_some() || n2.is_some() {
-                        cap_stamps.push(CapStamp {
-                            terminals: WdfPortTerminals::maybe_differential(n1, n2),
+                        cap_stamps.push(MnaCapStamp {
+                            terminals: MnaPortTerminals::maybe_differential(
+                                n1.map(MnaNodeId::new),
+                                n2.map(MnaNodeId::new),
+                            ),
                             capacitance: c,
                         });
                     }
                 }
                 if let Some(l) = comp.kind.inductance() {
                     if n1.is_some() || n2.is_some() {
-                        cap_stamps.push(CapStamp {
-                            terminals: WdfPortTerminals::maybe_differential(n1, n2),
+                        cap_stamps.push(MnaCapStamp {
+                            terminals: MnaPortTerminals::maybe_differential(
+                                n1.map(MnaNodeId::new),
+                                n2.map(MnaNodeId::new),
+                            ),
                             capacitance: -l, // Negative = inductor convention
                         });
                     }

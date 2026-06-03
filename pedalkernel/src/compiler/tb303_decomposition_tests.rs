@@ -2381,14 +2381,14 @@ fn q12_to_two_rung_differential_diode_ladder_routes_into_bkm_boundary() {
     let q12_right = graph.node_names["Q12R.collector"];
     assert!(
         bkm.coupling_ports.iter().any(|port| {
-            let (pos, neg) = port.graph.as_tuple();
+            let (pos, neg) = port.graph.raw().as_tuple();
             pos == Some(q12_left) || neg == Some(q12_left)
         }),
         "Q12 left collector node should be a BKM coupling boundary"
     );
     assert!(
         bkm.coupling_ports.iter().any(|port| {
-            let (pos, neg) = port.graph.as_tuple();
+            let (pos, neg) = port.graph.raw().as_tuple();
             pos == Some(q12_right) || neg == Some(q12_right)
         }),
         "Q12 right collector node should be a BKM coupling boundary"
@@ -2442,7 +2442,7 @@ fn q12_to_two_rung_differential_diode_ladder_handoff_is_lowpass() {
             .iter()
             .enumerate()
             .filter_map(|(port_idx, port)| {
-                let (pos, neg) = port.graph.as_tuple();
+                let (pos, neg) = port.graph.raw().as_tuple();
                 (pos == Some(q12_left) || neg == Some(q12_left)).then_some(port_idx)
             })
             .collect();
@@ -2451,7 +2451,7 @@ fn q12_to_two_rung_differential_diode_ladder_handoff_is_lowpass() {
             .iter()
             .enumerate()
             .filter_map(|(port_idx, port)| {
-                let (pos, neg) = port.graph.as_tuple();
+                let (pos, neg) = port.graph.raw().as_tuple();
                 (pos == Some(q12_right) || neg == Some(q12_right)).then_some(port_idx)
             })
             .collect();
@@ -2586,7 +2586,7 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
             .iter()
             .enumerate()
             .filter_map(|(port_idx, port)| {
-                let (pos, neg) = port.graph.as_tuple();
+                let (pos, neg) = port.graph.raw().as_tuple();
                 (pos == Some(q12_left) || neg == Some(q12_left)).then_some(port_idx)
             })
             .collect();
@@ -2595,7 +2595,7 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
             .iter()
             .enumerate()
             .filter_map(|(port_idx, port)| {
-                let (pos, neg) = port.graph.as_tuple();
+                let (pos, neg) = port.graph.raw().as_tuple();
                 (pos == Some(q12_right) || neg == Some(q12_right)).then_some(port_idx)
             })
             .collect();

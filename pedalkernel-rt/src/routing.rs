@@ -498,7 +498,7 @@ impl StageRoutePlan {
             .iter()
             .enumerate()
             .filter_map(|(port_idx, port)| {
-                let terminals = port.graph;
+                let terminals = port.graph.raw();
                 let (node_pos, node_neg) = terminals.as_tuple();
                 (node_pos == Some(node) || node_neg == Some(node)).then_some(port_idx)
             })

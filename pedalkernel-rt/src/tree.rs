@@ -12,7 +12,7 @@
 //!
 //! Zero allocation on the hot path — all buffers are pre-sized.
 
-use crate::boundary_math::CapStamp;
+use crate::boundary_math::MnaCapStamp;
 use crate::elements::*;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -1375,7 +1375,7 @@ impl MnaSystem {
     /// Returns `None` if the circuit can't be compiled to IIR.
     pub fn build_iir(
         &self,
-        cap_stamps: &[CapStamp<usize>],
+        cap_stamps: &[MnaCapStamp],
         vs_idx: usize,
         output_pos: Option<usize>,
         _output_neg: Option<usize>,
@@ -1391,7 +1391,7 @@ impl MnaSystem {
         // Build C_cap matrix
         let mut c_cap = vec![0.0; n_nodes * n_nodes];
         for stamp in cap_stamps {
-            let (pos, neg) = stamp.terminals.as_tuple();
+            let (pos, neg) = stamp.terminals.raw().as_tuple();
             let cap = stamp.capacitance;
             if let Some(p) = pos {
                 c_cap[p * n_nodes + p] += cap;
@@ -1497,7 +1497,7 @@ impl MnaSystem {
             let r_in = cap_stamps
                 .iter()
                 .filter_map(|stamp| {
-                    stamp.terminals.pos.map(|p| {
+                    stamp.terminals.raw().pos.map(|p| {
                         let g = self.g_matrix[p * n_nodes + p];
                         if g > 1e-15 {
                             1.0 / g
@@ -1550,7 +1550,7 @@ impl MnaSystem {
     /// - `n_states` = num_nodes + num_vsources
     pub fn build_state_space_matrices(
         &self,
-        cap_stamps: &[CapStamp<usize>],
+        cap_stamps: &[MnaCapStamp],
         vs_idx: usize,
         output_pos: Option<usize>,
         output_neg: Option<usize>,
@@ -1570,7 +1570,7 @@ impl MnaSystem {
         // Build C_cap matrix (n_nodes × n_nodes) from capacitance stamps.
         let mut c_cap = vec![0.0; n_nodes * n_nodes];
         for stamp in cap_stamps {
-            let (pos, neg) = stamp.terminals.as_tuple();
+            let (pos, neg) = stamp.terminals.raw().as_tuple();
             let cap = stamp.capacitance;
             if let Some(p) = pos {
                 c_cap[p * n_nodes + p] += cap;
@@ -2791,15 +2791,14 @@ impl WdfSingleDiodeClipper {
 #[cfg(all(test, DISABLED_needs_pedalkernel))]
 mod tests {
     use super::*;
-    use crate::boundary_math::WdfPortTerminals;
+    use crate::boundary_math::{MnaNodeId, MnaPortTerminals};
 
-    fn cap_stamp(
-        pos: Option<usize>,
-        neg: Option<usize>,
-        capacitance: crate::Wave,
-    ) -> CapStamp<usize> {
-        CapStamp {
-            terminals: WdfPortTerminals::maybe_differential(pos, neg),
+    fn cap_stamp(pos: Option<usize>, neg: Option<usize>, capacitance: crate::Wave) -> MnaCapStamp {
+        MnaCapStamp {
+            terminals: MnaPortTerminals::maybe_differential(
+                pos.map(MnaNodeId::new),
+                neg.map(MnaNodeId::new),
+            ),
             capacitance,
         }
     }

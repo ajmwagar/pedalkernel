@@ -20,7 +20,7 @@ use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
-use pedalkernel_rt::boundary_math::{PotStamp as RuntimePotStamp, WdfPortTerminals};
+use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaPotStamp};
 use pedalkernel_rt::tree::{MnaSystem, WdfPort};
 
 fn output_coupling_dc_block(
@@ -2272,9 +2272,12 @@ fn build_passive_rtype_stage(
                 }
                 let r = child.port_resistance();
                 mna.stamp_resistor(n1, n2, r);
-                pot_stamps.push(RuntimePotStamp {
+                pot_stamps.push(MnaPotStamp {
                     child_idx: children.len(),
-                    terminals: WdfPortTerminals::maybe_differential(n1, n2),
+                    terminals: MnaPortTerminals::maybe_differential(
+                        n1.map(MnaNodeId::new),
+                        n2.map(MnaNodeId::new),
+                    ),
                     conductance: 1.0 / r,
                 });
                 children.push(child);

@@ -66,6 +66,12 @@ pub type GraphNodeId = DomainIndex<GraphNodeDomain>;
 pub type MnaNodeId = DomainIndex<MnaNodeDomain>;
 pub type ScatteringPortId = DomainIndex<ScatteringPortDomain>;
 pub type ProcessorPortId = DomainIndex<ProcessorPortDomain>;
+pub type GraphPortTerminals = PortTerminals<GraphNodeId>;
+pub type MnaPortTerminals = PortTerminals<MnaNodeId>;
+pub type ScatteringPortTerminals = PortTerminals<ScatteringPortId>;
+pub type CircuitMappedPort = MappedPort<GraphNodeId, MnaNodeId>;
+pub type MnaCapStamp = CapStamp<MnaNodeId>;
+pub type MnaPotStamp = PotStamp<MnaNodeId>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -165,6 +171,12 @@ impl<N> PortTerminals<N> {
     }
 }
 
+impl<D> PortTerminals<DomainIndex<D>> {
+    pub fn raw(self) -> PortTerminals<usize> {
+        self.map(DomainIndex::get)
+    }
+}
+
 impl PortTerminals<usize> {
     pub const fn to_wdf_port(self, resistance: Wave) -> crate::tree::WdfPort {
         crate::tree::WdfPort {
@@ -197,6 +209,12 @@ impl PortSpec<usize> {
     }
 }
 
+impl PortSpec<MnaNodeId> {
+    pub fn to_wdf_port(self) -> crate::tree::WdfPort {
+        self.terminals.raw().to_wdf_port(self.resistance)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MappedPort<G, M> {
@@ -210,8 +228,8 @@ impl<G, M> MappedPort<G, M> {
     }
 }
 
-impl MappedPort<usize, usize> {
-    pub const fn to_wdf_port(self) -> crate::tree::WdfPort {
+impl CircuitMappedPort {
+    pub fn to_wdf_port(self) -> crate::tree::WdfPort {
         self.mna.to_wdf_port()
     }
 
@@ -505,6 +523,24 @@ mod tests {
         assert_eq!(binding.graph.as_tuple(), (Some("left"), Some("right")));
         assert_eq!(binding.mna.terminals.as_tuple(), (Some(4), Some(5)));
         assert_eq!(binding.mna.resistance, 1000.0);
+    }
+
+    #[test]
+    fn circuit_mapped_port_uses_typed_graph_and_mna_domains() {
+        let binding = CircuitMappedPort::new(
+            GraphPortTerminals::differential(GraphNodeId::new(10), GraphNodeId::new(11)),
+            PortSpec::new(
+                MnaPortTerminals::differential(MnaNodeId::new(2), MnaNodeId::new(3)),
+                220.0,
+            ),
+        );
+
+        assert_eq!(binding.graph.raw().as_tuple(), (Some(10), Some(11)));
+        assert_eq!(binding.mna.terminals.raw().as_tuple(), (Some(2), Some(3)));
+        let port = binding.to_wdf_port();
+        assert_eq!(port.node_pos, Some(2));
+        assert_eq!(port.node_neg, Some(3));
+        assert_eq!(port.resistance, 220.0);
     }
 
     #[test]

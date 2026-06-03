@@ -32,7 +32,7 @@ use super::{is_inverting_topology, StageStats};
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
-use pedalkernel_rt::boundary_math::{PotStamp as RuntimePotStamp, WdfPortTerminals};
+use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaPotStamp, WdfPortTerminals};
 use pedalkernel_rt::wdf_leaf::WdfLeaf;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -907,9 +907,12 @@ fn assemble_multi_nl_stage(
         pot_mna_stamps: pot_stamps
             .iter()
             .enumerate()
-            .map(|(i, ps)| RuntimePotStamp {
+            .map(|(i, ps)| MnaPotStamp {
                 child_idx: i,
-                terminals: WdfPortTerminals::maybe_differential(ps.mna_pos, ps.mna_neg),
+                terminals: MnaPortTerminals::maybe_differential(
+                    ps.mna_pos.map(MnaNodeId::new),
+                    ps.mna_neg.map(MnaNodeId::new),
+                ),
                 conductance: ps.initial_conductance,
             })
             .collect(),

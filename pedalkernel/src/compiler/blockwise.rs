@@ -13,20 +13,22 @@ use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
-use pedalkernel_rt::boundary_math::{MappedPort, PortSpec, WdfPortTerminals};
+use pedalkernel_rt::boundary_math::{
+    CircuitMappedPort, GraphNodeId, MnaNodeId, PortSpec, WdfPortTerminals,
+};
 use pedalkernel_rt::stage::{BlockPortBinding, BlockPortRole};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 fn push_coupling_port(
-    ports: &mut Vec<MappedPort<usize, usize>>,
+    ports: &mut Vec<CircuitMappedPort>,
     graph_terminals: WdfPortTerminals,
     mna_terminals: WdfPortTerminals,
     resistance: f64,
 ) -> usize {
     let port_idx = ports.len();
-    ports.push(MappedPort::new(
-        graph_terminals,
-        PortSpec::new(mna_terminals, resistance),
+    ports.push(CircuitMappedPort::new(
+        graph_terminals.map(GraphNodeId::new),
+        PortSpec::new(mna_terminals.map(MnaNodeId::new), resistance),
     ));
     port_idx
 }
@@ -3088,8 +3090,11 @@ pub(super) fn try_build_blockwise(
                     "    output extraction: graph.out_node={} → mna_node={out_pos:?}",
                     graph.out_node
                 );
-                let wdf_ports: Vec<_> =
-                    ports.iter().copied().map(MappedPort::to_wdf_port).collect();
+                let wdf_ports: Vec<_> = ports
+                    .iter()
+                    .copied()
+                    .map(CircuitMappedPort::to_wdf_port)
+                    .collect();
                 mna.derive_node_extraction_coeffs(&wdf_ports, out_pos, out_neg)
             })
             .unwrap_or_default();
@@ -3099,7 +3104,11 @@ pub(super) fn try_build_blockwise(
         eprintln!("  [blockwise] coupling scattering: {n_ports} ports");
 
         // Derive scattering matrix
-        let wdf_ports: Vec<_> = ports.iter().copied().map(MappedPort::to_wdf_port).collect();
+        let wdf_ports: Vec<_> = ports
+            .iter()
+            .copied()
+            .map(CircuitMappedPort::to_wdf_port)
+            .collect();
         let scattering = mna.derive_scattering_matrix_general(&wdf_ports);
 
         // Validate scattering matrix

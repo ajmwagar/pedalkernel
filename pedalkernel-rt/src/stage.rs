@@ -9,7 +9,8 @@ use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort
 use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
-    sum_incident_offsets, BoundaryIncidentDrive, CapStamp, MappedPort, PotStamp, WdfPortTerminals,
+    sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, MnaCapStamp, MnaNodeId,
+    MnaPortTerminals, MnaPotStamp, WdfPortTerminals,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -918,7 +919,7 @@ pub enum RootKind {
         recompute_ports: Option<Vec<WdfPort>>,
         /// Pot conductance stamps in the MNA G matrix.
         /// Used to unstamp old conductance and re-stamp new conductance on pot change.
-        pot_stamps: Vec<PotStamp<usize>>,
+        pot_stamps: Vec<MnaPotStamp>,
         /// Dirty flag: set when a pot changes, cleared after S re-derivation.
         needs_recompute: bool,
         /// Precomputed interpolation table for single-pot stages.
@@ -2422,7 +2423,7 @@ impl WdfStage {
                 for stamp in pot_stamps.iter_mut() {
                     let new_r = children[stamp.child_idx].port_resistance();
                     let new_g = 1.0 / new_r;
-                    let (n1, n2) = stamp.terminals.as_tuple();
+                    let (n1, n2) = stamp.terminals.raw().as_tuple();
                     // Unstamp old conductance
                     stamp_g(&mut mna.g_matrix, n, n1, n2, -stamp.conductance);
                     // Stamp new conductance
@@ -3829,7 +3830,7 @@ pub struct MultiNlStage {
     pub pot_children: Vec<DynNode>,
     /// MNA stamp tracking for pots.
     /// Used for delta-updating the G matrix when pot values change.
-    pub pot_mna_stamps: Vec<PotStamp<usize>>,
+    pub pot_mna_stamps: Vec<MnaPotStamp>,
     /// Number of nonlinear ports.
     pub n_nl: usize,
     /// Warm-start voltages for NR solver.
@@ -4785,7 +4786,7 @@ pub struct StateSpacePotBinding {
     pub max_r: crate::Wave,
     pub taper: crate::pot_taper::PotTaper,
     pub position: crate::Wave,
-    pub terminals: WdfPortTerminals,
+    pub terminals: MnaPortTerminals,
     pub conductance: crate::Wave,
 }
 
@@ -4846,7 +4847,7 @@ impl StateSpaceStage {
         }
 
         let n_mna = mna.num_nodes;
-        let (node_pos, node_neg) = binding.terminals.as_tuple();
+        let (node_pos, node_neg) = binding.terminals.raw().as_tuple();
         if let Some(p) = node_pos {
             mna.g_matrix[p * n_mna + p] += delta;
             if let Some(n) = node_neg {
@@ -4936,7 +4937,7 @@ pub struct StateSpaceData {
     /// Number of state variables (num_nodes + num_vsources).
     pub n_states: usize,
     /// Capacitance stamps for rebuilding state-space when G changes.
-    pub cap_stamps: Vec<CapStamp<usize>>,
+    pub cap_stamps: Vec<MnaCapStamp>,
     /// VS branch index for input.
     pub vs_idx: usize,
     /// Output extraction nodes.
@@ -4950,7 +4951,7 @@ pub struct StateSpaceData {
     /// Removes parasitic -1 eigenvalue oscillation from unreduced systems.
     pub prev_output: crate::Wave,
     /// Pot stamps for delta-updating G when pots change.
-    pub pot_stamps: Vec<PotStamp<usize>>,
+    pub pot_stamps: Vec<MnaPotStamp>,
 }
 
 /// Data for a linearized OTA whose gm is stamped into the R-type MNA.
@@ -5681,7 +5682,7 @@ impl MultiNlStage {
                 // Delta-update pot conductances in the MNA G matrix.
                 let n_mna = recompute.mna.num_nodes;
                 for ps in &mut ss.pot_stamps {
-                    let (pos, neg) = ps.terminals.as_tuple();
+                    let (pos, neg) = ps.terminals.raw().as_tuple();
                     let new_r = self.pot_children[ps.child_idx].port_resistance();
                     let new_g = 1.0 / new_r;
                     let delta = new_g - ps.conductance;
@@ -5779,7 +5780,7 @@ impl MultiNlStage {
         let n_mna = recompute.mna.num_nodes;
         for ps in &mut self.pot_mna_stamps {
             let child_idx = ps.child_idx;
-            let (pos, neg) = ps.terminals.as_tuple();
+            let (pos, neg) = ps.terminals.raw().as_tuple();
             let new_r = self.pot_children[child_idx].port_resistance();
             let new_g = 1.0 / new_r;
             let delta = new_g - ps.conductance;
@@ -6497,7 +6498,7 @@ pub struct BlockwiseStage {
     pub coupling_n_mna: usize,
     /// Ports used to derive the coupling scattering matrix, mapped from
     /// original circuit graph terminals to MNA-local terminals.
-    pub coupling_ports: Vec<MappedPort<usize, usize>>,
+    pub coupling_ports: Vec<CircuitMappedPort>,
     /// Coupling ports owned by each nonlinear block.
     ///
     /// Legacy BKM stages use one primary port per block.
@@ -6676,14 +6677,16 @@ impl BlockwiseStage {
     }
 
     pub fn coupling_port_graph_terminals(&self, port_idx: usize) -> Option<WdfPortTerminals> {
-        self.coupling_ports.get(port_idx).map(|port| port.graph)
+        self.coupling_ports
+            .get(port_idx)
+            .map(|port| port.graph.raw())
     }
 
     pub fn coupling_wdf_ports(&self) -> Vec<crate::tree::WdfPort> {
         self.coupling_ports
             .iter()
             .copied()
-            .map(MappedPort::to_wdf_port)
+            .map(CircuitMappedPort::to_wdf_port)
             .collect()
     }
 
@@ -6924,7 +6927,7 @@ impl BlockwiseStage {
         let Some(port) = self.coupling_ports.get(port_idx) else {
             return true;
         };
-        let feedback_node = port.mna.terminals.pos;
+        let feedback_node = port.mna.terminals.pos.map(MnaNodeId::get);
 
         let mut saw_gated_feedback = false;
         for element in &self.coupling_elements {
@@ -8120,14 +8123,14 @@ impl BlockwiseStage {
 #[cfg(test)]
 mod blockwise_stage_tests {
     use super::*;
-    use crate::boundary_math::PortSpec;
+    use crate::boundary_math::{GraphNodeId, PortSpec};
     use crate::dyn_node::DynNode;
 
-    fn mapped_port(
-        terminals: WdfPortTerminals,
-        resistance: crate::Wave,
-    ) -> MappedPort<usize, usize> {
-        MappedPort::new(terminals, PortSpec::new(terminals, resistance))
+    fn mapped_port(terminals: WdfPortTerminals, resistance: crate::Wave) -> CircuitMappedPort {
+        CircuitMappedPort::new(
+            terminals.map(GraphNodeId::new),
+            PortSpec::new(terminals.map(MnaNodeId::new), resistance),
+        )
     }
 
     fn control_sensitive_table() -> KTable {
