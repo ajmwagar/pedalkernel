@@ -6884,16 +6884,12 @@ pub struct BlockwiseStage {
     /// node after post-ladder coupling networks.
     #[cfg_attr(feature = "serde", serde(default))]
     pub output_port_index: Option<usize>,
-    /// Read-only MNA extraction coefficients for the circuit output node.
+    /// Read-only MNA extraction probe for the circuit output node.
     ///
     /// Unlike `output_port_index`, these do not add an observation port to the
     /// coupling adaptor, so reading `audio_out` cannot perturb the solve.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub output_extraction_coeffs: Vec<crate::Wave>,
-    /// MNA terminals used to recompute `output_extraction_coeffs` when coupling
-    /// pots change.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub output_extraction_terminals: Option<WdfPortTerminals>,
+    pub output_extraction: ExtractionProbe<MnaNodeId>,
     /// Supply voltage (V) for supply VS ports in the coupling.
     pub supply_voltage: crate::Wave,
     /// VS port mapping: (port_name, scattering_port_index).
@@ -7065,11 +7061,7 @@ impl BlockwiseStage {
                     })
             })
             .collect();
-        network.extraction = Some(ExtractionProbe::new(
-            self.output_extraction_coeffs.clone(),
-            self.output_extraction_terminals
-                .map(|terminals| terminals.map(MnaNodeId::new)),
-        ));
+        network.extraction = Some(self.output_extraction.clone());
         network
     }
 
@@ -7451,9 +7443,7 @@ impl BlockwiseStage {
     }
 
     fn output_probe_voltage(&self, fallback: crate::Wave) -> crate::Wave {
-        if let Some(v) =
-            ExtractionProbe::<usize>::read_coeffs(&self.output_extraction_coeffs, &self.work_b)
-        {
+        if let Some(v) = self.output_extraction.read_reflected(&self.work_b) {
             return v;
         }
 
@@ -8193,9 +8183,9 @@ impl BlockwiseStage {
             && scattering.iter().all(|v| v.is_finite())
         {
             self.coupling_s = scattering;
-            if let Some(terminals) = self.output_extraction_terminals {
-                let (out_pos, out_neg) = terminals.as_tuple();
-                self.output_extraction_coeffs =
+            if let Some(terminals) = self.output_extraction.terminals {
+                let (out_pos, out_neg) = terminals.raw().as_tuple();
+                self.output_extraction.coeffs =
                     mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg);
             }
         }
@@ -8620,7 +8610,8 @@ impl BlockwiseStage {
     /// Debug label for tracing.
     pub fn debug_label(&self) -> String {
         let max_output_coeff = self
-            .output_extraction_coeffs
+            .output_extraction
+            .coeffs
             .iter()
             .map(|c| c.abs())
             .fold(0.0 as crate::Wave, crate::Wave::max);
@@ -8737,8 +8728,7 @@ mod blockwise_stage_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
+            output_extraction: ExtractionProbe::default(),
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -8961,8 +8951,10 @@ mod blockwise_stage_tests {
             taper: crate::pot_taper::PotTaper::B,
             invert_control: false,
         }];
-        stage.output_extraction_coeffs = vec![0.25, -0.5];
-        stage.output_extraction_terminals = Some(WdfPortTerminals::single_ended(1));
+        stage.output_extraction = ExtractionProbe::new(
+            vec![0.25, -0.5],
+            Some(MnaPortTerminals::single_ended(MnaNodeId::new(1))),
+        );
 
         let network = stage.coupling_network_model();
         let mut incident = vec![0.0; 2];
@@ -9028,8 +9020,7 @@ mod blockwise_stage_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![(0, 1)],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
+            output_extraction: ExtractionProbe::default(),
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -9086,8 +9077,7 @@ mod blockwise_stage_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![(0, 0)],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
+            output_extraction: ExtractionProbe::default(),
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -9150,8 +9140,7 @@ mod blockwise_stage_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
+            output_extraction: ExtractionProbe::default(),
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -9232,8 +9221,7 @@ mod blockwise_stage_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
+            output_extraction: ExtractionProbe::default(),
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -9315,8 +9303,7 @@ mod blockwise_stage_tests {
             cutoff_cv_port: None,
             shared_diode_cutoff_pot: None,
             feedback_port_map: vec![(0, 2)],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
+            output_extraction: ExtractionProbe::default(),
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,
@@ -9438,8 +9425,7 @@ mod blockwise_stage_tests {
             cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
             shared_diode_cutoff_pot: Some(alloc::string::String::from("Cutoff")),
             feedback_port_map: vec![],
-            output_extraction_coeffs: vec![],
-            output_extraction_terminals: None,
+            output_extraction: ExtractionProbe::default(),
             compensation: 1.0,
             oversampler: crate::oversampling::Oversampler::new(
                 crate::oversampling::OversamplingFactor::X1,

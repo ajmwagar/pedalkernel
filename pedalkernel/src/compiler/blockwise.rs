@@ -14,8 +14,9 @@ use super::graph::{CircuitGraph, NodeId};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
 use pedalkernel_rt::boundary_math::{
-    CircuitMappedPort, GraphNodeId, MnaNodeId, OnePort, OnePortKind, PortSpec, PortTerminals,
-    RuntimeOnePort, RuntimeState, ScatteringPortId, WdfPortTerminals,
+    CircuitMappedPort, ExtractionProbe, GraphNodeId, MnaNodeId, MnaPortTerminals, OnePort,
+    OnePortKind, PortSpec, PortTerminals, RuntimeOnePort, RuntimeState, ScatteringPortId,
+    WdfPortTerminals,
 };
 use pedalkernel_rt::stage::{BlockPortBinding, BlockPortRole};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -3294,13 +3295,14 @@ pub(super) fn try_build_blockwise(
             );
         }
 
-        let output_extraction_terminals = node_to_mna
+        let output_probe_terminals = node_to_mna
             .get(&graph.out_node)
             .copied()
-            .map(WdfPortTerminals::single_ended);
-        let output_extraction_coeffs = output_extraction_terminals
+            .map(MnaNodeId::new)
+            .map(MnaPortTerminals::single_ended);
+        let output_probe_coeffs = output_probe_terminals
             .map(|terminals| {
-                let (out_pos, out_neg) = terminals.as_tuple();
+                let (out_pos, out_neg) = terminals.raw().as_tuple();
                 #[cfg(test)]
                 eprintln!(
                     "    output extraction: graph.out_node={} → mna_node={out_pos:?}",
@@ -3314,6 +3316,7 @@ pub(super) fn try_build_blockwise(
                 mna.derive_node_extraction_coeffs(&wdf_ports, out_pos, out_neg)
             })
             .unwrap_or_default();
+        let output_extraction = ExtractionProbe::new(output_probe_coeffs, output_probe_terminals);
         let output_port_index = None;
 
         let n_ports = ports.len();
@@ -3527,8 +3530,7 @@ pub(super) fn try_build_blockwise(
             n_ports,
             output_block,
             output_port_index,
-            output_extraction_coeffs,
-            output_extraction_terminals,
+            output_extraction,
             supply_voltage,
             vs_port_map,
             cutoff_cv_port,

@@ -4207,12 +4207,13 @@ fn tb303_bkm_output_is_read_only_extraction() {
         "audio_out must not be added as an active WDF scattering probe"
     );
     assert_eq!(
-        bkm.output_extraction_coeffs.len(),
+        bkm.output_extraction.coeffs.len(),
         bkm.n_ports,
         "audio_out should be read back through MNA extraction coefficients"
     );
     assert!(
-        bkm.output_extraction_coeffs
+        bkm.output_extraction
+            .coeffs
             .iter()
             .any(|coeff| coeff.abs() > 1.0e-12),
         "audio_out extraction must observe a real coupling-network node"
@@ -7668,7 +7669,7 @@ fn tb303_vco_port_path_is_lowpass() {
         let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage else {
             panic!("routed stage should be BKM");
         };
-        bkm.output_extraction_coeffs.fill(0.0);
+        bkm.output_extraction.coeffs.fill(0.0);
         let vs_signals = vec![0.0; bkm.vs_port_map.len()];
 
         let mut process = |input: f64| {

@@ -652,6 +652,15 @@ impl<N> ExtractionProbe<N> {
     }
 }
 
+impl<N> Default for ExtractionProbe<N> {
+    fn default() -> Self {
+        Self {
+            coeffs: Vec::new(),
+            terminals: None,
+        }
+    }
+}
+
 /// Shared descriptor for linear multiport networks derived from MNA.
 ///
 /// Consumers still own their hot-path work buffers and solver details. This
