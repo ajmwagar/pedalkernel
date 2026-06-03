@@ -1653,7 +1653,7 @@ impl WdfStage {
     /// Call once after tree construction (and after any `wrap_leaf_with_vs`).
     /// The cached pointers eliminate per-sample tree walking in `process()`.
     ///
-    /// `port_names`: names of ports assigned to this stage (from PortBinding).
+    /// `port_names`: names of ports assigned to this stage (from NamedPortBinding).
     pub fn cache_vs_pointers(&mut self, port_names: &[&str]) {
         // Resolve main (non-port) VS
         self.main_vs_ptr = self.tree.resolve_main_vs_ptr().map(VsPtr::new);

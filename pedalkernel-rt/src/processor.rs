@@ -61,7 +61,7 @@ impl Stage {
     ///
     /// This reports current boundary metadata only. It does not imply a
     /// processing strategy; containers can build route tables from these ids.
-    pub fn ins(&self) -> Vec<StagePortBinding> {
+    pub fn ins(&self) -> Vec<PortBinding> {
         match self {
             Stage::Wdf(wdf) => wdf
                 .boundary_bindings
@@ -73,7 +73,7 @@ impl Stage {
                         crate::stage::WdfBoundaryDirection::Input
                             | crate::stage::WdfBoundaryDirection::Control
                     )
-                    .then_some(StagePortBinding::new(BindingId::new(binding.node_id), idx))
+                    .then_some(PortBinding::new(BindingId::new(binding.node_id), idx))
                 })
                 .collect(),
             Stage::Blockwise(bkm) => bkm
@@ -84,7 +84,7 @@ impl Stage {
                     let (pos, neg) = port.graph.raw().as_tuple();
                     pos.into_iter()
                         .chain(neg)
-                        .map(move |node| StagePortBinding::new(BindingId::new(node), idx))
+                        .map(move |node| PortBinding::new(BindingId::new(node), idx))
                 })
                 .collect(),
             _ => Vec::new(),
@@ -92,7 +92,7 @@ impl Stage {
     }
 
     /// Declarative output bindings exposed by this stage.
-    pub fn outs(&self) -> Vec<StagePortBinding> {
+    pub fn outs(&self) -> Vec<PortBinding> {
         match self {
             Stage::Wdf(wdf) => wdf
                 .boundary_bindings
@@ -100,7 +100,7 @@ impl Stage {
                 .enumerate()
                 .filter_map(|(idx, binding)| {
                     (binding.direction == crate::stage::WdfBoundaryDirection::Output)
-                        .then_some(StagePortBinding::new(BindingId::new(binding.node_id), idx))
+                        .then_some(PortBinding::new(BindingId::new(binding.node_id), idx))
                 })
                 .collect(),
             Stage::Blockwise(bkm) => bkm
@@ -111,7 +111,7 @@ impl Stage {
                     let (pos, neg) = port.graph.raw().as_tuple();
                     pos.into_iter()
                         .chain(neg)
-                        .map(move |node| StagePortBinding::new(BindingId::new(node), idx))
+                        .map(move |node| PortBinding::new(BindingId::new(node), idx))
                 })
                 .collect(),
             _ => Vec::new(),
@@ -592,7 +592,7 @@ pub struct MirrorPot {
 /// Output ports extract voltage from a circuit node after processing.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct PortBinding {
+pub struct NamedPortBinding {
     /// Port name (e.g., "audio_in", "cv_cutoff", "env_out").
     pub name: alloc::string::String,
     /// Input or Output.
@@ -610,8 +610,8 @@ pub struct PortBinding {
 }
 
 pub use crate::routing::{
-    BindingId, BkmVsRouteBinding, GraphRoutedBkm, Route, StageGraph, StageGraphConnection,
-    StageGraphNode, StageGraphPort, StageGraphPortDirection, StagePortBinding,
+    BindingId, BkmVsRouteBinding, GraphRoutedBkm, PortBinding, Route, StageGraph,
+    StageGraphConnection, StageGraphNode, StageGraphPort, StageGraphPortDirection,
     StageRouteConnection, StageRouteDebug, StageRouteEndpoint, StageRouteEndpointKind,
     StageRoutePlan,
 };
@@ -1211,8 +1211,8 @@ pub struct CompiledPedal {
     /// Named voltage port bindings (audio I/O, CV, gates, envelope outputs).
     /// Ports inject/extract voltage at circuit nodes at audio rate without
     /// impedance recompute. Declared in the .pedal `ports {}` section.
-    pub ports: Vec<PortBinding>,
-    /// Dense port value buffer — indexed by PortBinding::index.
+    pub ports: Vec<NamedPortBinding>,
+    /// Dense port value buffer — indexed by NamedPortBinding::index.
     /// Input ports: written by external code via set_port() before process().
     /// Output ports: written by process(), read via get_port() after.
     pub port_values: Vec<crate::Wave>,

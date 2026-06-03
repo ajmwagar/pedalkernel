@@ -32,12 +32,12 @@ impl BindingId {
 /// `binding_id`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StagePortBinding {
+pub struct PortBinding {
     pub binding_id: BindingId,
     pub local_port: usize,
 }
 
-impl StagePortBinding {
+impl PortBinding {
     pub const fn new(binding_id: BindingId, local_port: usize) -> Self {
         Self {
             binding_id,
@@ -61,7 +61,7 @@ impl Route {
 }
 
 /// Build declarative routes for every output/input binding id match.
-pub fn connect_matching(outs: &[StagePortBinding], ins: &[StagePortBinding]) -> Vec<Route> {
+pub fn connect_matching(outs: &[PortBinding], ins: &[PortBinding]) -> Vec<Route> {
     let mut routes = Vec::new();
     for out in outs {
         for input in ins {
@@ -82,12 +82,12 @@ mod tests {
     #[test]
     fn matching_bindings_create_declarative_routes() {
         let outs = [
-            StagePortBinding::new(BindingId::new(10), 0),
-            StagePortBinding::new(BindingId::new(20), 1),
+            PortBinding::new(BindingId::new(10), 0),
+            PortBinding::new(BindingId::new(20), 1),
         ];
         let ins = [
-            StagePortBinding::new(BindingId::new(20), 0),
-            StagePortBinding::new(BindingId::new(30), 1),
+            PortBinding::new(BindingId::new(20), 0),
+            PortBinding::new(BindingId::new(30), 1),
         ];
 
         let routes = connect_matching(&outs, &ins);

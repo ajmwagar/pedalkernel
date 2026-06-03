@@ -1512,7 +1512,7 @@ pub fn compile_via_spqr_with_options(
                     port_def.name
                 );
             }
-            port_bindings.push(pedalkernel_rt::processor::PortBinding {
+            port_bindings.push(pedalkernel_rt::processor::NamedPortBinding {
                 name: port_def.name.clone(),
                 direction: port_def.direction,
                 index: i,
@@ -1587,7 +1587,7 @@ pub fn compile_via_spqr_with_options(
 fn build_compiled_stage_graph(
     stages: &[Stage],
     stage_comp_ids: &[Vec<String>],
-    external_ports: &[pedalkernel_rt::processor::PortBinding],
+    external_ports: &[pedalkernel_rt::processor::NamedPortBinding],
 ) -> pedalkernel_rt::processor::StageGraph {
     use pedalkernel_rt::processor::{
         StageGraph, StageGraphConnection, StageGraphNode, StageGraphPort, StageGraphPortDirection,

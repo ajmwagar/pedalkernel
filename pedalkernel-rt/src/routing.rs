@@ -9,8 +9,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::boundary_math::{ProcessorPortId, ScatteringPortId};
-use crate::processor::{PortBinding, Stage};
-pub use crate::route::{BindingId, Route, StagePortBinding};
+use crate::processor::{NamedPortBinding, Stage};
+pub use crate::route::{BindingId, PortBinding, Route};
 
 /// Direction/role of one compiled-stage boundary port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,7 +212,7 @@ pub struct StageRouteDebug {
 impl StageRoutePlan {
     pub fn from_compiled_parts(
         graph: &StageGraph,
-        ports: &[PortBinding],
+        ports: &[NamedPortBinding],
         stages: &[Stage],
     ) -> Self {
         let connections = Self::route_connections(graph);
@@ -361,7 +361,7 @@ impl StageRoutePlan {
 
     fn bkm_boundary_drives(
         graph: &StageGraph,
-        ports: &[PortBinding],
+        ports: &[NamedPortBinding],
         stages: &[Stage],
         bkm_graph_idx: usize,
         bkm: &crate::stage::BlockwiseStage,
@@ -507,7 +507,7 @@ impl StageRoutePlan {
     }
 
     fn external_ports_reaching_node(
-        ports: &[PortBinding],
+        ports: &[NamedPortBinding],
         bkm: &crate::stage::BlockwiseStage,
         node: Option<usize>,
     ) -> Vec<usize> {
@@ -552,7 +552,7 @@ impl StageRoutePlan {
             && !name.contains("gate")
     }
 
-    fn port_names_for_indices(ports: &[PortBinding], indices: &[usize]) -> Vec<String> {
+    fn port_names_for_indices(ports: &[NamedPortBinding], indices: &[usize]) -> Vec<String> {
         indices
             .iter()
             .filter_map(|index| {
