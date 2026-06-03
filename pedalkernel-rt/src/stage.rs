@@ -16,6 +16,7 @@ use crate::boundary_math::{
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
+use crate::route::{connect_matching, BindingId, PortBinding, Route};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VsPtr: Send/Sync-safe raw pointer to a VS leaf's voltage field
@@ -6988,6 +6989,77 @@ impl BlockwiseStage {
             .map(|binding| binding.port)
     }
 
+    fn bindings_for_coupling_port(&self, port_idx: usize) -> Vec<PortBinding> {
+        let Some(terminals) = self.coupling_port_graph_terminals(port_idx) else {
+            return Vec::new();
+        };
+        let (pos, neg) = terminals.as_tuple();
+        pos.into_iter()
+            .chain(neg)
+            .map(|node| PortBinding::new(BindingId::new(node), port_idx))
+            .collect()
+    }
+
+    fn block_bindings_for_roles(
+        &self,
+        block_idx: usize,
+        include_role: impl Fn(BlockPortRole) -> bool,
+    ) -> Vec<PortBinding> {
+        self.block_ports
+            .get(block_idx)
+            .into_iter()
+            .flatten()
+            .filter(|binding| include_role(binding.role))
+            .flat_map(|binding| self.bindings_for_coupling_port(binding.port_idx()))
+            .collect()
+    }
+
+    /// Declarative input bindings for one internal BKM block.
+    ///
+    /// Primary ports are bidirectional for legacy one-port blocks. Differential
+    /// rung bottom ports are inputs; the top differential port is the rung
+    /// output.
+    pub fn block_ins(&self, block_idx: usize) -> Vec<PortBinding> {
+        self.block_bindings_for_roles(block_idx, |role| {
+            matches!(
+                role,
+                BlockPortRole::Primary | BlockPortRole::BottomLeft | BlockPortRole::BottomRight
+            )
+        })
+    }
+
+    /// Declarative output bindings for one internal BKM block.
+    pub fn block_outs(&self, block_idx: usize) -> Vec<PortBinding> {
+        self.block_bindings_for_roles(block_idx, |role| {
+            matches!(
+                role,
+                BlockPortRole::Primary | BlockPortRole::TopDifferential
+            )
+        })
+    }
+
+    /// Declarative internal block routes derived from block-owned port roles.
+    ///
+    /// This is topology metadata only. The realtime BKM solver still uses the
+    /// coupled scattering matrix and `block_ports` role data for wave math.
+    pub fn block_routes(&self) -> Vec<Route> {
+        let mut routes = Vec::new();
+        for from_block_idx in 0..self.blocks.len() {
+            let outs = self.block_outs(from_block_idx);
+            if outs.is_empty() {
+                continue;
+            }
+            for to_block_idx in 0..self.blocks.len() {
+                if from_block_idx == to_block_idx {
+                    continue;
+                }
+                let ins = self.block_ins(to_block_idx);
+                routes.extend(connect_matching(&outs, &ins));
+            }
+        }
+        routes
+    }
+
     pub fn differential_rung_ports(&self, block_idx: usize) -> Option<(usize, usize, usize)> {
         Some((
             self.block_port_for_role(block_idx, BlockPortRole::BottomLeft)?,
@@ -8764,6 +8836,83 @@ mod blockwise_stage_tests {
         assert!(
             !debug.contains("KMethod") && !label.contains("KMethod"),
             "K-method is a per-block solver detail, not the topology name: debug={debug}, label={label}"
+        );
+    }
+
+    #[test]
+    fn blockwise_internal_blocks_expose_declarative_bindings() {
+        let stage = blockwise_stage_fixture(
+            vec![test_block(1.0)],
+            vec![
+                mapped_port(WdfPortTerminals::single_ended(10), 1.0),
+                mapped_port(WdfPortTerminals::single_ended(20), 1.0),
+                mapped_port(WdfPortTerminals::differential(30, 31), 1.0),
+            ],
+            vec![vec![
+                BlockPortBinding::new(0, BlockPortRole::BottomLeft),
+                BlockPortBinding::new(1, BlockPortRole::BottomRight),
+                BlockPortBinding::new(2, BlockPortRole::TopDifferential),
+            ]],
+        );
+
+        let ins = stage.block_ins(0);
+        let outs = stage.block_outs(0);
+
+        assert_eq!(
+            ins.iter()
+                .map(|binding| (binding.binding_id.get(), binding.local_port))
+                .collect::<Vec<_>>(),
+            vec![(10, 0), (20, 1)]
+        );
+        assert_eq!(
+            outs.iter()
+                .map(|binding| (binding.binding_id.get(), binding.local_port))
+                .collect::<Vec<_>>(),
+            vec![(30, 2), (31, 2)]
+        );
+    }
+
+    #[test]
+    fn blockwise_primary_ports_are_bidirectional_bindings() {
+        let stage = blockwise_stage_fixture(
+            vec![test_block(1.0)],
+            vec![mapped_port(WdfPortTerminals::single_ended(44), 1.0)],
+            vec![vec![BlockPortBinding::primary(0)]],
+        );
+
+        let expected = vec![PortBinding::new(BindingId::new(44), 0)];
+
+        assert_eq!(stage.block_ins(0), expected);
+        assert_eq!(stage.block_outs(0), expected);
+    }
+
+    #[test]
+    fn blockwise_internal_routes_use_generic_route_bindings() {
+        let stage = blockwise_stage_fixture(
+            vec![test_block(1.0), test_block(1.0)],
+            vec![
+                mapped_port(WdfPortTerminals::single_ended(10), 1.0),
+                mapped_port(WdfPortTerminals::single_ended(20), 1.0),
+                mapped_port(WdfPortTerminals::single_ended(20), 1.0),
+                mapped_port(WdfPortTerminals::single_ended(30), 1.0),
+            ],
+            vec![
+                vec![
+                    BlockPortBinding::new(0, BlockPortRole::BottomLeft),
+                    BlockPortBinding::new(1, BlockPortRole::TopDifferential),
+                ],
+                vec![
+                    BlockPortBinding::new(2, BlockPortRole::BottomLeft),
+                    BlockPortBinding::new(3, BlockPortRole::TopDifferential),
+                ],
+            ],
+        );
+
+        let routes = stage.block_routes();
+
+        assert_eq!(
+            routes,
+            vec![Route::new(BindingId::new(20), BindingId::new(20))]
         );
     }
 
