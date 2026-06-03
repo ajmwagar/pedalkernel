@@ -14,6 +14,124 @@ use crate::PedalProcessor;
 
 const SR: f64 = 48_000.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Tb303TestLayer {
+    Topology,
+    Compilation,
+    Coupling,
+    Runtime,
+    Reference,
+}
+
+struct Tb303LayerEntry {
+    filter: &'static str,
+    layer: Tb303TestLayer,
+    purpose: &'static str,
+}
+
+// First-line diagnostics for the TB-303 VCF work. Keep this ordered from
+// cheapest/localest to broadest so a failing response test can be chased back
+// through topology, compile-time stage selection, coupling, and runtime state.
+const TB303_LAYERED_DIAGNOSTICS: &[Tb303LayerEntry] = &[
+    Tb303LayerEntry {
+        filter: "tb303_filter_uses_coupled_ladder_not_grounded_cascade",
+        layer: Tb303TestLayer::Topology,
+        purpose: "source topology is a coupled differential ladder, not the old grounded cascade",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_filter_uses_q12_input_differential_pair",
+        layer: Tb303TestLayer::Topology,
+        purpose: "audio enters through Q12 instead of direct ladder injection",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_blockwise_classifies_differential_diode_rungs_generically",
+        layer: Tb303TestLayer::Topology,
+        purpose: "blockwise analysis finds four QL/QR differential diode rungs",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_coupled_differential_ladder_compiles_to_bkm_not_monolithic_mna",
+        layer: Tb303TestLayer::Compilation,
+        purpose: "compiler emits BKM rung blocks instead of monolithic MultiNL",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_q12_compiles_as_multi_binding_wdf_boundary_block",
+        layer: Tb303TestLayer::Compilation,
+        purpose: "Q12 remains a boundary WDF block in the compiled stage contract",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_bkm_differential_rungs_have_side_aware_block_ports",
+        layer: Tb303TestLayer::Coupling,
+        purpose: "BKM exposes bottom-left, bottom-right, and top differential ports per rung",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_bkm_coupling_matrix_connects_ladder_block_ports",
+        layer: Tb303TestLayer::Coupling,
+        purpose: "coupling matrix connects adjacent ladder block rows",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_bkm_direct_path_is_lowpass",
+        layer: Tb303TestLayer::Runtime,
+        purpose: "direct BKM path produces finite nonzero lowpass response",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_bkm_full_processor_vco_port_path_is_not_flat",
+        layer: Tb303TestLayer::Runtime,
+        purpose: "external process_ports path reaches BKM without flattening the response",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_compare_bkm_forced_serial_and_htb_shape",
+        layer: Tb303TestLayer::Reference,
+        purpose: "full BKM response shape is checked against serial and Stinchcombe references",
+    },
+    Tb303LayerEntry {
+        filter: "tb303_resonance_k_sweep_tracks_10pole_shape",
+        layer: Tb303TestLayer::Reference,
+        purpose: "late-stage resonance behavior tracks the 10-pole reference trend",
+    },
+];
+
+#[test]
+fn tb303_layered_diagnostics_are_ordered_and_actionable() {
+    assert!(
+        !TB303_LAYERED_DIAGNOSTICS.is_empty(),
+        "TB303 diagnostic layer map must not be empty"
+    );
+
+    let mut previous = Tb303TestLayer::Topology;
+    let mut seen = std::collections::HashSet::new();
+    let mut layer_counts = [0usize; 5];
+    for entry in TB303_LAYERED_DIAGNOSTICS {
+        assert!(
+            entry.layer >= previous,
+            "TB303 diagnostic `{}` is out of layer order",
+            entry.filter
+        );
+        previous = entry.layer;
+        assert!(
+            entry.filter.starts_with("tb303_"),
+            "diagnostic filter `{}` should be directly runnable as a cargo test filter",
+            entry.filter
+        );
+        assert!(
+            seen.insert(entry.filter),
+            "duplicate TB303 diagnostic filter `{}`",
+            entry.filter
+        );
+        assert!(
+            !entry.purpose.trim().is_empty(),
+            "diagnostic `{}` needs a purpose",
+            entry.filter
+        );
+        layer_counts[entry.layer as usize] += 1;
+    }
+
+    assert_eq!(
+        layer_counts,
+        [3, 2, 2, 2, 2],
+        "keep the first-line TB303 diagnostics balanced across layers"
+    );
+}
+
 fn settled_sine_rms<F>(freq: f64, amp: f64, mut process: F) -> f64
 where
     F: FnMut(f64) -> f64,
@@ -391,6 +509,49 @@ pedal "Two Rung Diode Ladder Feedback CV" { supply 9V
   controls {
     Resonance.position -> "Resonance" [0.0, 0.95] = 0.0
   }
+}
+"#;
+
+const TWO_RUNG_DIFFERENTIAL_DIODE_LADDER: &str = r#"
+pedal "Two Rung Differential Diode Ladder" { supply 9V
+  ports {
+    audio_in: input(10k)
+    audio_out: output
+  }
+  components {
+    QL1: npn(2sc945)
+    QR1: npn(2sc945)
+    QL2: npn(2sc945)
+    QR2: npn(2sc945)
+    R_top_l: resistor(10k)
+    R_top_r: resistor(10k)
+    R_in: resistor(10k)
+    R_ref: resistor(10k)
+    C1: cap(33n)
+    C2: cap(33n)
+  }
+  nets {
+    vcc -> R_top_l.a
+    R_top_l.b -> QL2.base, QL2.collector
+    vcc -> R_top_r.a
+    R_top_r.b -> QR2.base, QR2.collector
+
+    QL2.emitter -> QL1.base, QL1.collector
+    QR2.emitter -> QR1.base, QR1.collector
+
+    audio_in -> R_in.a
+    R_in.b -> QL1.emitter
+    gnd -> R_ref.a
+    R_ref.b -> QR1.emitter
+
+    QL1.emitter -> C1.a
+    QR1.emitter -> C1.b
+    QL2.emitter -> C2.a
+    QR2.emitter -> C2.b
+
+    QL2.emitter -> audio_out
+  }
+  controls {}
 }
 "#;
 
@@ -1713,26 +1874,36 @@ fn tb303_blockwise_blocks_are_in_signal_order() {
         .filter(|i| !active_set.contains(i))
         .collect();
 
-    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
-    let feedback_group = groups
-        .iter()
-        .find(|group| group.has_feedback())
-        .expect("TB303 ladder feedback group should exist");
-    let plan = blockwise::analyze_blockwise(&feedback_group.all_edges(), &graph)
-        .expect("should decompose");
-    let block_names: Vec<&str> = plan
+    let plan = blockwise::analyze_blockwise(&all_edges, &graph).expect("should decompose");
+    let rung_names: Vec<(&str, &str)> = plan
         .blocks
         .iter()
-        .map(|block| {
-            let edge = block.nl_edges[0];
-            graph.components[graph.edges[edge].comp_idx].id.as_str()
+        .filter_map(|block| {
+            let blockwise::BlockTopology::DifferentialDiodeRung {
+                left_comp_idx,
+                right_comp_idx,
+                ..
+            } = block.topology
+            else {
+                return None;
+            };
+            Some((
+                graph.components[left_comp_idx].id.as_str(),
+                graph.components[right_comp_idx].id.as_str(),
+            ))
         })
         .collect();
 
     assert_eq!(
-        block_names,
-        vec!["Q1", "Q2", "Q3", "Q4"],
-        "diode-connected BJT ladder blocks must follow base/collector -> emitter cascade order"
+        rung_names,
+        vec![
+            ("QL1", "QR1"),
+            ("QL2", "QR2"),
+            ("QL3", "QR3"),
+            ("QL4", "QR4"),
+        ],
+        "differential diode rung blocks must be ordered bottom-to-top; \
+         Q12/control blocks are boundary or bias blocks, not ladder rungs"
     );
 }
 
@@ -1748,19 +1919,17 @@ fn tb303_blockwise_rungs_keep_their_own_caps() {
         .filter(|i| !active_set.contains(i))
         .collect();
 
-    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
-    let feedback_group = groups
-        .iter()
-        .find(|group| group.has_feedback())
-        .expect("TB303 ladder feedback group should exist");
-    let plan = blockwise::analyze_blockwise(&feedback_group.all_edges(), &graph)
-        .expect("should decompose");
+    let plan = blockwise::analyze_blockwise(&all_edges, &graph).expect("should decompose");
     let actual: Vec<(&str, Vec<&str>)> = plan
         .blocks
         .iter()
-        .map(|block| {
-            let nl_edge = block.nl_edges[0];
-            let nl_name = graph.components[graph.edges[nl_edge].comp_idx].id.as_str();
+        .filter_map(|block| {
+            let blockwise::BlockTopology::DifferentialDiodeRung { left_comp_idx, .. } =
+                block.topology
+            else {
+                return None;
+            };
+            let nl_name = graph.components[left_comp_idx].id.as_str();
             let caps = block
                 .reactive_edges
                 .iter()
@@ -1769,7 +1938,7 @@ fn tb303_blockwise_rungs_keep_their_own_caps() {
                     matches!(id, "C1" | "C2" | "C3" | "C4").then_some(id)
                 })
                 .collect::<Vec<_>>();
-            (nl_name, caps)
+            Some((nl_name, caps))
         })
         .collect();
 
@@ -1802,22 +1971,46 @@ fn tb303_blockwise_coupling_ports_are_diode_inputs() {
     let selected: Vec<_> = plan
         .blocks
         .iter()
-        .map(|block| {
-            blockwise::block_coupling_port_node(&block.nl_edges, &block.port_nodes, &graph)
+        .filter_map(|block| {
+            blockwise::differential_rung_ports(block, &graph).map(|ports| {
+                (
+                    ports.top_left,
+                    ports.top_right,
+                    ports.bottom_left,
+                    ports.bottom_right,
+                )
+            })
         })
         .collect();
 
-    let expected: Vec<_> = ["Q1.base", "Q2.base", "Q3.base", "Q4.base"]
-        .iter()
-        .map(|name| Some(graph.node_names.get(*name).copied().expect("pin node")))
-        .collect();
+    let expected: Vec<_> = [
+        ("QL1.base", "QR1.base", "QL1.emitter", "QR1.emitter"),
+        ("QL2.base", "QR2.base", "QL2.emitter", "QR2.emitter"),
+        ("QL3.base", "QR3.base", "QL3.emitter", "QR3.emitter"),
+        ("QL4.base", "QR4.base", "QL4.emitter", "QR4.emitter"),
+    ]
+    .iter()
+    .map(|(tl, tr, bl, br)| {
+        (
+            graph.node_names.get(*tl).copied().expect("top left pin"),
+            graph.node_names.get(*tr).copied().expect("top right pin"),
+            graph.node_names.get(*bl).copied().expect("bottom left pin"),
+            graph
+                .node_names
+                .get(*br)
+                .copied()
+                .expect("bottom right pin"),
+        )
+    })
+    .collect();
 
-    eprintln!("  selected block ports: {selected:?}");
-    eprintln!("  expected diode inputs: {expected:?}");
+    eprintln!("  selected differential rung ports: {selected:?}");
+    eprintln!("  expected differential rung ports: {expected:?}");
 
     assert_eq!(
         selected, expected,
-        "BKM coupling ports must attach to each diode's driven base/collector node"
+        "BKM coupling ports must expose each rung's top differential diode inputs \
+         and bottom differential emitter/cap boundary"
     );
 }
 
@@ -1829,19 +2022,34 @@ fn tb303_pedal_nodes_match_expected_ladder_wiring() {
 
     let node = |name: &str| graph.node_names.get(name).copied().expect(name);
 
-    assert_eq!(node("Q1.base"), node("Q1.collector"));
-    assert_eq!(node("Q2.base"), node("Q2.collector"));
-    assert_eq!(node("Q3.base"), node("Q3.collector"));
-    assert_eq!(node("Q4.base"), node("Q4.collector"));
+    for side in ["L", "R"] {
+        for rung in 1..=4 {
+            let q = format!("Q{side}{rung}");
+            assert_eq!(node(&format!("{q}.base")), node(&format!("{q}.collector")));
+            assert_ne!(node(&format!("{q}.base")), node(&format!("{q}.emitter")));
+        }
+    }
 
-    assert_eq!(node("Q1.emitter"), node("Q2.base"));
-    assert_eq!(node("Q2.emitter"), node("Q3.base"));
-    assert_eq!(node("Q3.emitter"), node("Q4.base"));
-    assert_eq!(node("Q4.emitter"), node("C_out.a"));
-    assert_eq!(node("Q4.emitter"), node("Resonance.a"));
+    assert_eq!(node("QL4.emitter"), node("QL3.base"));
+    assert_eq!(node("QL3.emitter"), node("QL2.base"));
+    assert_eq!(node("QL2.emitter"), node("QL1.base"));
+    assert_eq!(node("QR4.emitter"), node("QR3.base"));
+    assert_eq!(node("QR3.emitter"), node("QR2.base"));
+    assert_eq!(node("QR2.emitter"), node("QR1.base"));
 
-    assert_ne!(node("Q1.base"), node("Q1.emitter"));
-    assert_ne!(node("Q4.base"), node("Q4.emitter"));
+    assert_eq!(node("QL1.emitter"), node("C1.a"));
+    assert_eq!(node("QR1.emitter"), node("C1.b"));
+    assert_eq!(node("QL2.emitter"), node("C2.a"));
+    assert_eq!(node("QR2.emitter"), node("C2.b"));
+    assert_eq!(node("QL3.emitter"), node("C3.a"));
+    assert_eq!(node("QR3.emitter"), node("C3.b"));
+    assert_eq!(node("QL4.emitter"), node("C4.a"));
+    assert_eq!(node("QR4.emitter"), node("C4.b"));
+
+    assert_eq!(node("QL1.emitter"), node("Q12L.collector"));
+    assert_eq!(node("QR1.emitter"), node("Q12R.collector"));
+    assert_eq!(node("QL4.emitter"), node("C_out.a"));
+    assert_eq!(node("QL4.emitter"), node("Resonance.b"));
 }
 
 #[test]
@@ -1910,6 +2118,143 @@ fn two_rung_diode_ladder_bkm_direct_path_is_lowpass() {
     assert!(
         gain_100 > gain_10k,
         "two-rung diode ladder BKM should be lowpass: 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}"
+    );
+}
+
+#[test]
+fn two_rung_differential_diode_ladder_compiles_to_bkm_fixture() {
+    let def =
+        crate::dsl::parse_pedal_file(TWO_RUNG_DIFFERENTIAL_DIODE_LADDER).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    let plan = blockwise::analyze_blockwise(&all_edges, &graph)
+        .expect("two-rung differential ladder should decompose");
+
+    let rung_names: Vec<(&str, &str)> = plan
+        .blocks
+        .iter()
+        .filter_map(|block| {
+            let blockwise::BlockTopology::DifferentialDiodeRung {
+                left_comp_idx,
+                right_comp_idx,
+                ..
+            } = block.topology
+            else {
+                return None;
+            };
+            Some((
+                graph.components[left_comp_idx].id.as_str(),
+                graph.components[right_comp_idx].id.as_str(),
+            ))
+        })
+        .collect();
+
+    assert_eq!(
+        rung_names,
+        vec![("QL1", "QR1"), ("QL2", "QR2")],
+        "minimal differential fixture should expose exactly two bottom-to-top rung blocks"
+    );
+
+    let built = blockwise::try_build_blockwise(
+        &all_edges,
+        &graph,
+        &[graph.in_node, graph.out_node],
+        SR,
+        &std::collections::BTreeMap::new(),
+        9.0,
+        &def.ports,
+        false,
+        0.0,
+        false,
+        true,
+        &def.init_hints,
+    )
+    .expect("minimal differential fixture should build through BKM directly");
+    let bkm_count = built
+        .iter()
+        .filter(|stage| matches!(stage, super::spqr_build::BuiltStage::Blockwise(_)))
+        .count();
+    assert_eq!(
+        bkm_count, 1,
+        "minimal differential fixture should compile to one BKM stage"
+    );
+}
+
+#[test]
+fn two_rung_differential_diode_ladder_runtime_is_lowpass() {
+    let def =
+        crate::dsl::parse_pedal_file(TWO_RUNG_DIFFERENTIAL_DIODE_LADDER).expect("parse failed");
+    let graph = CircuitGraph::from_pedal(&def);
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+
+    let measure = |freq: f64| -> f64 {
+        let built = blockwise::try_build_blockwise(
+            &all_edges,
+            &graph,
+            &[graph.in_node, graph.out_node],
+            SR,
+            &std::collections::BTreeMap::new(),
+            9.0,
+            &def.ports,
+            false,
+            0.0,
+            false,
+            true,
+            &def.init_hints,
+        )
+        .expect("minimal differential fixture should build through BKM directly");
+        let mut bkm = built
+            .into_iter()
+            .find_map(|stage| {
+                if let super::spqr_build::BuiltStage::Blockwise(bkm) = stage {
+                    Some(bkm)
+                } else {
+                    None
+                }
+            })
+            .expect("BKM stage");
+
+        for _ in 0..1200 {
+            let _ = bkm.process(&[0.0, 0.0]);
+        }
+
+        let mut values = Vec::with_capacity(2400);
+        for i in 0..2400 {
+            let input = 0.05 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            values.push(bkm.process(&[input, 0.0]));
+        }
+        ac_rms(&values)
+    };
+
+    let gain_100 = measure(100.0);
+    let gain_10k = measure(10_000.0);
+    let ratio_db = db_norm(gain_100, gain_10k);
+
+    eprintln!(
+        "  two-rung differential ladder runtime: 100Hz={gain_100:.6}, \
+         10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
+    );
+
+    assert!(
+        gain_100.is_finite() && gain_10k.is_finite(),
+        "minimal differential fixture must stay finite: 100Hz={gain_100}, 10kHz={gain_10k}"
+    );
+    assert!(
+        gain_100 > 1.0e-8,
+        "minimal differential fixture should produce nonzero output at 100Hz"
+    );
+    assert!(
+        gain_100 > gain_10k * 1.25,
+        "minimal differential fixture should isolate a BKM lowpass response: \
+         100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, ratio={ratio_db:+.1} dB"
     );
 }
 
