@@ -1980,10 +1980,8 @@ pub(super) fn build_spqr_stage_with_options(
         SpqrStage::PassiveWdf {
             tree, edge_indices, ..
         } => {
-            if passive_pot_reactive_needs_rtype(&edge_indices, graph) {
-                if let Some(wdf) = build_passive_rtype_stage(&edge_indices, graph, _sample_rate) {
-                    return Ok(BuiltStage::Wdf(wdf));
-                }
+            if let Some(wdf) = build_passive_rtype_stage(&edge_indices, graph, _sample_rate) {
+                return Ok(BuiltStage::Wdf(wdf));
             }
 
             if let Some(wdf) =
@@ -2303,10 +2301,6 @@ fn build_passive_rtype_stage(
                 }
             }
         }
-    }
-
-    if ports.is_empty() || seen_pots.is_empty() {
-        return None;
     }
 
     let output_mna = node_to_mna(output_node, &nodes);

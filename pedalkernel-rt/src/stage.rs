@@ -2168,7 +2168,9 @@ impl WdfStage {
                     // should be extracted at the load resistor, not the root port.
                     RootKind::Passthrough => {
                         // Open-circuit termination: a_root = b_tree (total reflection).
-                        // Port voltage V = (a + b) / 2 = (b_tree + b_tree) / 2 = b_tree.
+                        // The unnamed voltage source leaf emits b = 2V, so when there
+                        // is no explicit output probe the root fallback must report
+                        // the physical source-side voltage, not the wave magnitude.
                         tree.set_incident_with_state(b_tree, runtime_state);
                         // Check output_probe BEFORE fallback
                         if let Some(ref probe_id) = output_probe {
@@ -2176,8 +2178,7 @@ impl WdfStage {
                                 return v;
                             }
                         }
-                        // Open circuit: full voltage appears at the port.
-                        (b_tree + b_tree) / 2.0
+                        b_tree / 2.0
                     }
                     // ShortCircuit: ground termination (a = -b)
                     // Ground has zero impedance, so it reflects with inverted sign.
@@ -2291,6 +2292,8 @@ impl WdfStage {
                                 out += extraction_coeffs[i] * b_children[i];
                             }
                             return out;
+                        } else if n == 0 || *extraction_vs != 0.0 {
+                            return *extraction_vs * vs_voltage;
                         } else {
                             let a_out = a_children[*output_port];
                             let b_out = b_children[*output_port];
@@ -2592,16 +2595,14 @@ impl WdfStage {
                 }
                 // Re-derive scattering matrix and VS injection vector
                 let (new_s, new_k) = mna.derive_scattering_and_vs_injection(ports, 0);
-                if !extraction_coeffs.is_empty() {
-                    let (new_extract, new_extract_vs) = mna.derive_extraction_coeffs(
-                        ports,
-                        0,
-                        *extraction_output_pos,
-                        *extraction_output_neg,
-                    );
-                    *extraction_coeffs = new_extract;
-                    *extraction_vs = new_extract_vs;
-                }
+                let (new_extract, new_extract_vs) = mna.derive_extraction_coeffs(
+                    ports,
+                    0,
+                    *extraction_output_pos,
+                    *extraction_output_neg,
+                );
+                *extraction_coeffs = new_extract;
+                *extraction_vs = new_extract_vs;
                 *scattering = new_s;
                 *vs_injection = new_k;
                 *needs_recompute = false;

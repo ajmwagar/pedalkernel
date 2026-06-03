@@ -393,7 +393,7 @@ fn level_pot_standalone_changes_output() {
 
     let measure = |pos: f64| -> f64 {
         let mut c = compile_via_spqr(&pedal, SR).expect("compile");
-        c.set_control("Level", pos);
+        c.set_control_immediate("Level", pos);
         let amp = 0.01;
         for s in 0..500 {
             c.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
@@ -447,7 +447,7 @@ fn level_pot_after_gain_stage_changes_output() {
 
     let measure = |pos: f64| -> f64 {
         let mut c = compile_via_spqr(&pedal, SR).expect("compile");
-        c.set_control("Level", pos);
+        c.set_control_immediate("Level", pos);
         let amp = 0.01;
         for s in 0..500 {
             c.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
@@ -494,7 +494,7 @@ fn level_pot_complement_correct_polarity() {
 
     let measure = |pos: f64| -> f64 {
         let mut c = compile_via_spqr(&pedal, SR).expect("compile");
-        c.set_control("Level", pos);
+        c.set_control_immediate("Level", pos);
         let amp = 0.01;
         for s in 0..500 {
             c.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
@@ -560,7 +560,7 @@ fn level_pot_in_tone_network_changes_output() {
 
     let measure = |pos: f64| -> f64 {
         let mut c = compile_via_spqr(&pedal, SR).expect("compile");
-        c.set_control("Level", pos);
+        c.set_control_immediate("Level", pos);
         let amp = 0.01;
         for s in 0..500 {
             c.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());

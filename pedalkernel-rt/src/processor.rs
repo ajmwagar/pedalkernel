@@ -2008,6 +2008,11 @@ impl CompiledPedal {
                     for stage in &mut self.stages {
                         stage.set_control_pot(&comp_id, value);
                     }
+                    for wd in &mut self.wiper_dividers {
+                        if wd.pot_comp_id == comp_id {
+                            wd.position = wd.taper.apply(value);
+                        }
+                    }
                     if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
                         self.bbd_wet_mix = value;
                     }
