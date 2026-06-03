@@ -32,6 +32,7 @@ use super::{is_inverting_topology, StageStats};
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
+use pedalkernel_rt::boundary_math::{PotStamp as RuntimePotStamp, WdfPortTerminals};
 use pedalkernel_rt::wdf_leaf::WdfLeaf;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -270,7 +271,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_hints(
     let n_passive = passive_children.len();
     let extract_output_nodes = find_output_extract_node(all_edges, &node_set, graph)
         .and_then(node_to_mna)
-        .map(|out| (Some(out), None));
+        .map(WdfPortTerminals::single_ended);
 
     // Step 5: Derive scattering matrix + Thevenin adaptation
     let (scattering, vcc_injection_vec) =
@@ -548,12 +549,7 @@ fn build_wdf_ports(
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
     n_nl: usize,
     edge_indices: &[usize],
-) -> (
-    Vec<WdfPort>,
-    Vec<(Option<usize>, Option<usize>)>,
-    Vec<DynNode>,
-    Vec<f64>,
-) {
+) -> (Vec<WdfPort>, Vec<WdfPortTerminals>, Vec<DynNode>, Vec<f64>) {
     let r_nl_default = 1000.0;
     let r_adapted = 1000.0;
     let mut ports = Vec::with_capacity(n_nl + reactive_edges.len() + 1);
@@ -569,7 +565,7 @@ fn build_wdf_ports(
             node_neg: neg,
             resistance: nl_port_resistances[i],
         });
-        port_node_pairs.push((pos, neg));
+        port_node_pairs.push(WdfPortTerminals::maybe_differential(pos, neg));
     }
 
     // Reactive ports
@@ -584,7 +580,7 @@ fn build_wdf_ports(
             node_neg: neg,
             resistance: rp,
         });
-        port_node_pairs.push((pos, neg));
+        port_node_pairs.push(WdfPortTerminals::maybe_differential(pos, neg));
         passive_children.push(dyn_node.clone());
     }
 
@@ -608,7 +604,7 @@ fn build_wdf_ports(
         node_neg: None,
         resistance: r_adapted,
     });
-    port_node_pairs.push((injection_mna, None));
+    port_node_pairs.push(WdfPortTerminals::maybe_single_ended(injection_mna));
 
     (
         ports,
@@ -811,7 +807,7 @@ fn assemble_multi_nl_stage(
     mna: MnaSystem,
     scattering: Vec<f64>,
     ports: Vec<WdfPort>,
-    port_node_pairs: Vec<(Option<usize>, Option<usize>)>,
+    port_node_pairs: Vec<WdfPortTerminals>,
     passive_children: Vec<DynNode>,
     nl_devices: Vec<NlDeviceKind>,
     device_groups: Option<MultiNlDeviceGroups>,
@@ -825,7 +821,7 @@ fn assemble_multi_nl_stage(
     oversampling: OversamplingFactor,
     graph: &CircuitGraph,
     pot_stamps: Vec<PotStamp>,
-    extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
+    extract_output_nodes: Option<WdfPortTerminals>,
     nl_comp_labels: &[String],
     init_hints: &[crate::dsl::InitHint],
 ) -> Result<MultiNlStage, String> {
@@ -833,8 +829,10 @@ fn assemble_multi_nl_stage(
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
     let r_adapted = 1000.0;
-    let extract_coeffs = extract_output_nodes
-        .map(|(out_pos, out_neg)| mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg));
+    let extract_coeffs = extract_output_nodes.map(|out| {
+        let (out_pos, out_neg) = out.as_tuple();
+        mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
+    });
 
     // Output port: last CE port for BJTs, first NL port otherwise
     let output_port = if let Some(ref dg) = device_groups {
@@ -909,7 +907,11 @@ fn assemble_multi_nl_stage(
         pot_mna_stamps: pot_stamps
             .iter()
             .enumerate()
-            .map(|(i, ps)| (i, ps.mna_pos, ps.mna_neg, ps.initial_conductance))
+            .map(|(i, ps)| RuntimePotStamp {
+                child_idx: i,
+                terminals: WdfPortTerminals::maybe_differential(ps.mna_pos, ps.mna_neg),
+                conductance: ps.initial_conductance,
+            })
             .collect(),
         n_nl,
         v_prev: initial_v.clone(),

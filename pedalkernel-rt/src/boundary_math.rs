@@ -36,71 +36,122 @@ impl PortOrientation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct WdfPortTerminals {
-    pub node_pos: Option<usize>,
-    pub node_neg: Option<usize>,
+pub struct PortTerminals<N> {
+    pub pos: Option<N>,
+    pub neg: Option<N>,
 }
 
-impl WdfPortTerminals {
+pub type WdfPortTerminals = PortTerminals<usize>;
+
+impl<N> PortTerminals<N> {
     pub const fn grounded() -> Self {
         Self {
-            node_pos: None,
-            node_neg: None,
+            pos: None,
+            neg: None,
         }
     }
 
-    pub const fn single_ended(node_pos: usize) -> Self {
+    pub const fn single_ended(pos: N) -> Self {
         Self {
-            node_pos: Some(node_pos),
-            node_neg: None,
+            pos: Some(pos),
+            neg: None,
         }
     }
 
-    pub const fn maybe_single_ended(node_pos: Option<usize>) -> Self {
+    pub const fn maybe_single_ended(pos: Option<N>) -> Self {
+        Self { pos, neg: None }
+    }
+
+    pub const fn differential(pos: N, neg: N) -> Self {
         Self {
-            node_pos,
-            node_neg: None,
+            pos: Some(pos),
+            neg: Some(neg),
         }
     }
 
-    pub const fn differential(node_pos: usize, node_neg: usize) -> Self {
+    pub const fn maybe_differential(pos: Option<N>, neg: Option<N>) -> Self {
+        Self { pos, neg }
+    }
+
+    pub fn reversed(self) -> Self {
         Self {
-            node_pos: Some(node_pos),
-            node_neg: Some(node_neg),
+            pos: self.neg,
+            neg: self.pos,
         }
     }
 
-    pub const fn maybe_differential(node_pos: Option<usize>, node_neg: Option<usize>) -> Self {
-        Self { node_pos, node_neg }
-    }
-
-    pub const fn reversed(self) -> Self {
-        Self {
-            node_pos: self.node_neg,
-            node_neg: self.node_pos,
-        }
-    }
-
-    pub const fn as_tuple(self) -> (Option<usize>, Option<usize>) {
-        (self.node_pos, self.node_neg)
+    pub fn as_tuple(self) -> (Option<N>, Option<N>) {
+        (self.pos, self.neg)
     }
 
     pub fn voltage_with<F>(self, mut node_voltage: F) -> PortVoltage
     where
-        F: FnMut(usize) -> Wave,
+        F: FnMut(N) -> Wave,
     {
-        let pos = self.node_pos.map(&mut node_voltage).unwrap_or(0.0);
-        let neg = self.node_neg.map(node_voltage).unwrap_or(0.0);
+        let pos = self.pos.map(&mut node_voltage).unwrap_or(0.0);
+        let neg = self.neg.map(node_voltage).unwrap_or(0.0);
         PortVoltage(pos - neg)
     }
+}
 
+impl PortTerminals<usize> {
     pub const fn to_wdf_port(self, resistance: Wave) -> crate::tree::WdfPort {
         crate::tree::WdfPort {
-            node_pos: self.node_pos,
-            node_neg: self.node_neg,
+            node_pos: self.pos,
+            node_neg: self.neg,
             resistance,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PortSpec<N> {
+    pub terminals: PortTerminals<N>,
+    pub resistance: Wave,
+}
+
+impl<N> PortSpec<N> {
+    pub const fn new(terminals: PortTerminals<N>, resistance: Wave) -> Self {
+        Self {
+            terminals,
+            resistance,
+        }
+    }
+}
+
+impl PortSpec<usize> {
+    pub const fn to_wdf_port(self) -> crate::tree::WdfPort {
+        self.terminals.to_wdf_port(self.resistance)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MappedPort<G, M> {
+    pub graph: PortTerminals<G>,
+    pub mna: PortSpec<M>,
+}
+
+impl<G, M> MappedPort<G, M> {
+    pub const fn new(graph: PortTerminals<G>, mna: PortSpec<M>) -> Self {
+        Self { graph, mna }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct CapStamp<N> {
+    pub terminals: PortTerminals<N>,
+    pub capacitance: Wave,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PotStamp<N> {
+    pub child_idx: usize,
+    pub terminals: PortTerminals<N>,
+    pub conductance: Wave,
 }
 
 impl PortVoltage {
@@ -276,5 +327,40 @@ mod tests {
         assert_eq!(port.node_pos, Some(5));
         assert_eq!(port.node_neg, Some(6));
         assert_eq!(port.resistance, 123.0);
+    }
+
+    #[test]
+    fn port_spec_carries_resistance_with_oriented_terminals() {
+        let spec = PortSpec::new(WdfPortTerminals::differential(2, 9), 470.0);
+        let port = spec.to_wdf_port();
+
+        assert_eq!(port.node_pos, Some(2));
+        assert_eq!(port.node_neg, Some(9));
+        assert_eq!(port.resistance, 470.0);
+    }
+
+    #[test]
+    fn mapped_port_keeps_graph_and_mna_terminal_spaces_together() {
+        let binding = MappedPort::new(
+            PortTerminals::differential("left", "right"),
+            PortSpec::new(WdfPortTerminals::differential(4, 5), 1000.0),
+        );
+
+        assert_eq!(binding.graph.as_tuple(), (Some("left"), Some("right")));
+        assert_eq!(binding.mna.terminals.as_tuple(), (Some(4), Some(5)));
+        assert_eq!(binding.mna.resistance, 1000.0);
+    }
+
+    #[test]
+    fn pot_stamp_names_child_terminals_and_current_conductance() {
+        let stamp = PotStamp {
+            child_idx: 3,
+            terminals: WdfPortTerminals::single_ended(7),
+            conductance: 0.001,
+        };
+
+        assert_eq!(stamp.child_idx, 3);
+        assert_eq!(stamp.terminals.as_tuple(), (Some(7), None));
+        assert_eq!(stamp.conductance, 0.001);
     }
 }

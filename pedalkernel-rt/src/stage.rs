@@ -8,7 +8,9 @@ use crate::oversampling::Oversampler;
 use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
 use crate::{PedalProcessor, Wave};
 
-use crate::boundary_math::{sum_incident_offsets, BoundaryIncidentDrive, WdfPortTerminals};
+use crate::boundary_math::{
+    sum_incident_offsets, BoundaryIncidentDrive, PotStamp, WdfPortTerminals,
+};
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
 
@@ -1646,7 +1648,7 @@ impl WdfStage {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpAmpRecomputeData {
     pub mna: crate::tree::MnaSystem,
-    pub port_pairs: Vec<(Option<usize>, Option<usize>)>,
+    pub port_pairs: Vec<WdfPortTerminals>,
     pub port_resistances: Vec<crate::Wave>,
 }
 
@@ -2915,7 +2917,7 @@ impl WdfStage {
             .port_pairs
             .iter()
             .zip(port_resistances.iter())
-            .map(|(&(pos, neg), &r)| WdfPortTerminals::maybe_differential(pos, neg).to_wdf_port(r))
+            .map(|(&terminals, &r)| terminals.to_wdf_port(r))
             .collect();
         let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
         if scattering.iter().all(|s| s.is_finite()) {
@@ -3730,7 +3732,7 @@ pub struct ScatteringRecomputeData {
     /// Port node pairs: (pos_mna_idx, neg_mna_idx) for each port.
     /// Ordering: [NL_0..NL_{n-1}, passive_0..passive_{m-1}] (VS injection mode)
     /// Or: [NL_0..NL_{n-1}, passive_0..passive_{m-1}, adapted] (standard mode).
-    pub port_node_pairs: Vec<(Option<usize>, Option<usize>)>,
+    pub port_node_pairs: Vec<WdfPortTerminals>,
     /// Resistance of the adapted (voltage source) port.
     pub adapted_resistance: crate::Wave,
     /// When Some, the input VS is stamped as an ideal voltage source in MNA B/C
@@ -3742,7 +3744,7 @@ pub struct ScatteringRecomputeData {
     pub vcc_vs_index: Option<usize>,
     /// Output MNA node pair for direct node-voltage extraction.
     /// When Some, recompute also updates the extraction coefficients.
-    pub extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
+    pub extract_output_nodes: Option<WdfPortTerminals>,
 }
 
 /// Scattering matrix sub-blocks for multi-NL solving.
@@ -3824,9 +3826,9 @@ pub struct MultiNlStage {
     pub passive_children: Vec<DynNode>,
     /// Pot DynNodes stored separately — pots are G-matrix conductances, not WDF ports.
     pub pot_children: Vec<DynNode>,
-    /// MNA stamp tracking for pots: (pot_child_idx, node_pos, node_neg, last_conductance).
+    /// MNA stamp tracking for pots.
     /// Used for delta-updating the G matrix when pot values change.
-    pub pot_mna_stamps: Vec<(usize, Option<usize>, Option<usize>, crate::Wave)>,
+    pub pot_mna_stamps: Vec<PotStamp<usize>>,
     /// Number of nonlinear ports.
     pub n_nl: usize,
     /// Warm-start voltages for NR solver.
@@ -5723,7 +5725,7 @@ impl MultiNlStage {
         // Fast path: interpolation table lookup for single-pot stages
         if let Some(ref table) = self.interp_table {
             if self.pot_mna_stamps.len() == 1 {
-                let pot_r = self.pot_children[self.pot_mna_stamps[0].0].port_resistance();
+                let pot_r = self.pot_children[self.pot_mna_stamps[0].child_idx].port_resistance();
                 let (new_scat, new_vs) = table.lookup(pot_r);
 
                 if new_scat.iter().all(|&s| s.is_finite()) {
@@ -5761,7 +5763,8 @@ impl MultiNlStage {
 
                     // Recompute extraction coefficients from table if needed
                     if let Some(ref recompute) = self.recompute_data {
-                        if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
+                        if let Some(out) = recompute.extract_output_nodes {
+                            let (out_pos, out_neg) = out.as_tuple();
                             let _ = (out_pos, out_neg);
                         }
                     }
@@ -5778,12 +5781,11 @@ impl MultiNlStage {
         // Delta-update pot conductances in the MNA G matrix.
         let n_mna = recompute.mna.num_nodes;
         for ps in &mut self.pot_mna_stamps {
-            let child_idx = ps.0;
-            let pos = ps.1;
-            let neg = ps.2;
+            let child_idx = ps.child_idx;
+            let (pos, neg) = ps.terminals.as_tuple();
             let new_r = self.pot_children[child_idx].port_resistance();
             let new_g = 1.0 / new_r;
-            let delta = new_g - ps.3;
+            let delta = new_g - ps.conductance;
             if delta.abs() > 1e-15 {
                 if let Some(p) = pos {
                     recompute.mna.g_matrix[p * n_mna + p] += delta;
@@ -5797,7 +5799,7 @@ impl MultiNlStage {
                         recompute.mna.g_matrix[n * n_mna + p] -= delta;
                     }
                 }
-                ps.3 = new_g;
+                ps.conductance = new_g;
             }
         }
 
@@ -5816,18 +5818,13 @@ impl MultiNlStage {
 
         // NL ports (resistances don't change)
         for i in 0..n_nl {
-            let (pos, neg) = recompute.port_node_pairs[i];
-            ports.push(
-                WdfPortTerminals::maybe_differential(pos, neg)
-                    .to_wdf_port(self.nl_port_resistances[i]),
-            );
+            ports.push(recompute.port_node_pairs[i].to_wdf_port(self.nl_port_resistances[i]));
         }
 
         // Passive ports (caps/inductors — resistances are fixed for a given sample rate)
         for k in 0..n_passive {
-            let (pos, neg) = recompute.port_node_pairs[n_nl + k];
             let rp = self.passive_children[k].port_resistance();
-            ports.push(WdfPortTerminals::maybe_differential(pos, neg).to_wdf_port(rp));
+            ports.push(recompute.port_node_pairs[n_nl + k].to_wdf_port(rp));
         }
 
         if use_vs {
@@ -5847,7 +5844,8 @@ impl MultiNlStage {
             self.vs_injection = Some(vs_inj);
 
             // Recompute extraction coefficients if used.
-            if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
+            if let Some(out) = recompute.extract_output_nodes {
+                let (out_pos, out_neg) = out.as_tuple();
                 let (coeffs, vs_coeff) = recompute
                     .mna
                     .derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
@@ -5857,9 +5855,8 @@ impl MultiNlStage {
         } else {
             // Standard mode: adapted port included (always last).
             let adapted_pair_idx = n_nl + n_passive;
-            let (pos, neg) = recompute.port_node_pairs[adapted_pair_idx];
             ports.push(
-                WdfPortTerminals::maybe_differential(pos, neg)
+                recompute.port_node_pairs[adapted_pair_idx]
                     .to_wdf_port(recompute.adapted_resistance),
             );
 
@@ -5884,7 +5881,8 @@ impl MultiNlStage {
                     ports.iter().map(|p| p.resistance).collect();
                 self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
 
-                if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
+                if let Some(out) = recompute.extract_output_nodes {
+                    let (out_pos, out_neg) = out.as_tuple();
                     self.extract_coeffs = Some(
                         recompute
                             .mna
@@ -5905,7 +5903,8 @@ impl MultiNlStage {
                     ports.iter().map(|p| p.resistance).collect();
                 self.adaptor = RTypeAdaptor::new(scattering, &port_resistances);
 
-                if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
+                if let Some(out) = recompute.extract_output_nodes {
+                    let (out_pos, out_neg) = out.as_tuple();
                     self.extract_coeffs = Some(
                         recompute
                             .mna
