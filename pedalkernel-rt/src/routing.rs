@@ -11,6 +11,59 @@ use alloc::vec::Vec;
 use crate::boundary_math::{ProcessorPortId, ScatteringPortId};
 use crate::processor::{PortBinding, Stage};
 
+/// Declarative identifier used to join a stage output to a stage input.
+///
+/// The compiler decides what this means. Existing adapters use original graph
+/// node ids because they are already the shared currency at stage boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BindingId(pub usize);
+
+impl BindingId {
+    pub const fn new(raw: usize) -> Self {
+        Self(raw)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+/// One local stage port exposed under a route binding id.
+///
+/// `local_port` is intentionally just an index into the stage's own port
+/// storage. The stage owns what that index means; route building only matches
+/// `binding_id`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StagePortBinding {
+    pub binding_id: BindingId,
+    pub local_port: usize,
+}
+
+impl StagePortBinding {
+    pub const fn new(binding_id: BindingId, local_port: usize) -> Self {
+        Self {
+            binding_id,
+            local_port,
+        }
+    }
+}
+
+/// Declarative route between two exposed stage bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Route {
+    pub from: BindingId,
+    pub to: BindingId,
+}
+
+impl Route {
+    pub const fn new(from: BindingId, to: BindingId) -> Self {
+        Self { from, to }
+    }
+}
+
 /// Direction/role of one compiled-stage boundary port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

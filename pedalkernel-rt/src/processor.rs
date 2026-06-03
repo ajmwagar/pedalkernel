@@ -57,6 +57,67 @@ impl core::fmt::Debug for Stage {
 }
 
 impl Stage {
+    /// Declarative input bindings exposed by this stage.
+    ///
+    /// This reports current boundary metadata only. It does not imply a
+    /// processing strategy; containers can build route tables from these ids.
+    pub fn ins(&self) -> Vec<StagePortBinding> {
+        match self {
+            Stage::Wdf(wdf) => wdf
+                .boundary_bindings
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, binding)| {
+                    matches!(
+                        binding.direction,
+                        crate::stage::WdfBoundaryDirection::Input
+                            | crate::stage::WdfBoundaryDirection::Control
+                    )
+                    .then_some(StagePortBinding::new(BindingId::new(binding.node_id), idx))
+                })
+                .collect(),
+            Stage::Blockwise(bkm) => bkm
+                .coupling_ports
+                .iter()
+                .enumerate()
+                .flat_map(|(idx, port)| {
+                    let (pos, neg) = port.graph.raw().as_tuple();
+                    pos.into_iter()
+                        .chain(neg)
+                        .map(move |node| StagePortBinding::new(BindingId::new(node), idx))
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Declarative output bindings exposed by this stage.
+    pub fn outs(&self) -> Vec<StagePortBinding> {
+        match self {
+            Stage::Wdf(wdf) => wdf
+                .boundary_bindings
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, binding)| {
+                    (binding.direction == crate::stage::WdfBoundaryDirection::Output)
+                        .then_some(StagePortBinding::new(BindingId::new(binding.node_id), idx))
+                })
+                .collect(),
+            Stage::Blockwise(bkm) => bkm
+                .coupling_ports
+                .iter()
+                .enumerate()
+                .flat_map(|(idx, port)| {
+                    let (pos, neg) = port.graph.raw().as_tuple();
+                    pos.into_iter()
+                        .chain(neg)
+                        .map(move |node| StagePortBinding::new(BindingId::new(node), idx))
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Return the runtime target for a pot owned by this stage.
     ///
     /// This is the control-binding capability check. Keep stage-specific pot
@@ -257,6 +318,7 @@ pub type StageRef = Stage;
 mod tests {
     use alloc::boxed::Box;
     use alloc::string::ToString;
+    use alloc::vec;
 
     use super::{ControlTarget, Stage};
     use crate::boundary_math::{MnaNodeId, OnePort, OnePortKind, PortTerminals};
@@ -265,8 +327,58 @@ mod tests {
     use crate::pot_taper::PotTaper;
     use crate::stage::{
         BlackFeedbackStage, IirData, IirPotBinding, IirStage, RootKind, StateSpaceData,
-        StateSpaceStage, WdfStage,
+        StateSpaceStage, WdfBoundaryBinding, WdfBoundaryDirection, WdfStage,
     };
+
+    #[test]
+    fn stage_exposes_declarative_wdf_boundary_bindings() {
+        let mut wdf = WdfStage::new(
+            DynNode::VoltageSource(0.0, 1.0),
+            RootKind::ShortCircuit,
+            Oversampler::new(OversamplingFactor::X1),
+        );
+        wdf.boundary_bindings = vec![
+            WdfBoundaryBinding {
+                label: "base_left".to_string(),
+                node_id: 10,
+                direction: WdfBoundaryDirection::Input,
+            },
+            WdfBoundaryBinding {
+                label: "collector_left".to_string(),
+                node_id: 20,
+                direction: WdfBoundaryDirection::Output,
+            },
+            WdfBoundaryBinding {
+                label: "emitter_tail".to_string(),
+                node_id: 30,
+                direction: WdfBoundaryDirection::Control,
+            },
+        ];
+        let stage = Stage::Wdf(wdf);
+
+        let ins = stage.ins();
+        let outs = stage.outs();
+
+        assert_eq!(ins.len(), 2);
+        assert_eq!(ins[0].binding_id.get(), 10);
+        assert_eq!(ins[0].local_port, 0);
+        assert_eq!(ins[1].binding_id.get(), 30);
+        assert_eq!(ins[1].local_port, 2);
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].binding_id.get(), 20);
+        assert_eq!(outs[0].local_port, 1);
+    }
+
+    #[test]
+    fn route_is_only_binding_id_data() {
+        let route = crate::routing::Route::new(
+            crate::routing::BindingId::new(20),
+            crate::routing::BindingId::new(10),
+        );
+
+        assert_eq!(route.from.get(), 20);
+        assert_eq!(route.to.get(), 10);
+    }
 
     #[test]
     fn stage_owned_wdf_pot_discovery_and_mutation() {
@@ -498,9 +610,10 @@ pub struct PortBinding {
 }
 
 pub use crate::routing::{
-    BkmVsRouteBinding, GraphRoutedBkm, StageGraph, StageGraphConnection, StageGraphNode,
-    StageGraphPort, StageGraphPortDirection, StageRouteConnection, StageRouteDebug,
-    StageRouteEndpoint, StageRouteEndpointKind, StageRoutePlan,
+    BindingId, BkmVsRouteBinding, GraphRoutedBkm, Route, StageGraph, StageGraphConnection,
+    StageGraphNode, StageGraphPort, StageGraphPortDirection, StagePortBinding,
+    StageRouteConnection, StageRouteDebug, StageRouteEndpoint, StageRouteEndpointKind,
+    StageRoutePlan,
 };
 
 /// Control binding: maps a knob label to a parameter in the processing chain.
