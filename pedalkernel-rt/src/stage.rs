@@ -10,8 +10,8 @@ use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
     sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, MnaNodeId, MnaOnePort,
-    MnaPortTerminals, MnaVariableResistorBinding, OnePortState, RuntimeOnePort, RuntimeState,
-    ScatteringPortId, WdfPortTerminals,
+    MnaPortTerminals, MnaVariableResistorBinding, OnePortKind, OnePortState, RuntimeOnePort,
+    RuntimeState, ScatteringPortId, WdfPortTerminals, WdfWaveCache,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -6774,6 +6774,74 @@ impl BlockwiseStage {
             .collect();
     }
 
+    fn ensure_coupling_runtime_state(&mut self) {
+        let Some(required_len) = self
+            .coupling_one_ports
+            .iter()
+            .filter_map(|one_port| one_port.state_slot())
+            .map(|slot| slot.0)
+            .max()
+            .map(|slot| slot + 1)
+        else {
+            return;
+        };
+
+        if self.coupling_runtime_state.states.len() == required_len
+            && self.coupling_runtime_state.wave_cache.len() == required_len
+        {
+            return;
+        }
+
+        let mut slot_kinds = vec![None; required_len];
+        for one_port in &self.coupling_one_ports {
+            if let Some(slot) = one_port.state_slot() {
+                if slot.0 < required_len {
+                    slot_kinds[slot.0] = Some(one_port.spec.kind);
+                }
+            }
+        }
+
+        self.coupling_runtime_state
+            .states
+            .resize_with(required_len, || OnePortState::CapacitorVoltage(0.0));
+        for (idx, kind) in slot_kinds.into_iter().enumerate() {
+            match kind {
+                Some(OnePortKind::Capacitor(_)) => {
+                    if !matches!(
+                        self.coupling_runtime_state.states[idx],
+                        OnePortState::CapacitorVoltage(_)
+                    ) {
+                        self.coupling_runtime_state.states[idx] =
+                            OnePortState::CapacitorVoltage(0.0);
+                    }
+                }
+                Some(OnePortKind::Inductor(_)) => {
+                    if !matches!(
+                        self.coupling_runtime_state.states[idx],
+                        OnePortState::InductorScaledCurrent(_)
+                    ) {
+                        self.coupling_runtime_state.states[idx] =
+                            OnePortState::InductorScaledCurrent(0.0);
+                    }
+                }
+                Some(OnePortKind::Resistor(_)) | None => {}
+            }
+        }
+        self.coupling_runtime_state
+            .wave_cache
+            .resize(required_len, WdfWaveCache::default());
+    }
+
+    fn ensure_block_runtime_states(&mut self) {
+        for block in &mut self.blocks {
+            if block.runtime_state.states.len() != block.runtime_state.wave_cache.len()
+                || block.runtime_state.is_empty()
+            {
+                block.runtime_state = block.tree.bind_runtime_state();
+            }
+        }
+    }
+
     fn primary_port_for_block(&self, block_idx: usize) -> Option<usize> {
         self.block_port_for_role(block_idx, BlockPortRole::Primary)
             .or_else(|| (block_idx < self.n_ports).then_some(block_idx))
@@ -7546,7 +7614,16 @@ impl BlockwiseStage {
         &mut self,
         vs_signals: &[crate::Wave],
     ) -> (crate::Wave, alloc::vec::Vec<crate::Wave>) {
-        if self.work_b.len() != self.n_ports {
+        if self.work_b.len() != self.n_ports
+            || self
+                .coupling_one_ports
+                .iter()
+                .filter_map(|one_port| one_port.state_slot())
+                .any(|slot| slot.0 >= self.coupling_runtime_state.len())
+            || self.blocks.iter().any(|block| {
+                block.runtime_state.states.len() != block.runtime_state.wave_cache.len()
+            })
+        {
             self.init_buffers();
         }
 
@@ -7576,7 +7653,11 @@ impl BlockwiseStage {
         b_tree: crate::Wave,
     ) -> crate::Wave {
         if let Some(ref probe_id) = block.cascade_probe_id {
-            if let Some(v) = block.tree.leaf_voltage_for_incident(probe_id, a_root) {
+            if let Some(v) = block.tree.leaf_voltage_for_incident_with_state(
+                probe_id,
+                a_root,
+                &block.runtime_state,
+            ) {
                 return v;
             }
         }
@@ -7892,6 +7973,8 @@ impl BlockwiseStage {
     /// Allocate work buffers after deserialization.
     pub fn init_buffers(&mut self) {
         self.ensure_block_ports();
+        self.ensure_coupling_runtime_state();
+        self.ensure_block_runtime_states();
         let n = self.n_ports;
         self.rebuild_coupling_passive_by_port();
         if self.work_b.len() != n {
@@ -7984,7 +8067,16 @@ impl BlockwiseStage {
         serial_input: crate::Wave,
         boundary_drives: &[BoundaryIncidentDrive],
     ) -> crate::Wave {
-        if self.work_b.len() != self.n_ports {
+        if self.work_b.len() != self.n_ports
+            || self
+                .coupling_one_ports
+                .iter()
+                .filter_map(|one_port| one_port.state_slot())
+                .any(|slot| slot.0 >= self.coupling_runtime_state.len())
+            || self.blocks.iter().any(|block| {
+                block.runtime_state.states.len() != block.runtime_state.wave_cache.len()
+            })
+        {
             self.init_buffers();
         }
 
