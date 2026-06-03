@@ -371,9 +371,9 @@ mod tests {
 
     #[test]
     fn route_is_only_binding_id_data() {
-        let route = crate::routing::Route::new(
-            crate::routing::BindingId::new(20),
-            crate::routing::BindingId::new(10),
+        let route = crate::route::Route::new(
+            crate::route::BindingId::new(20),
+            crate::route::BindingId::new(10),
         );
 
         assert_eq!(route.from.get(), 20);

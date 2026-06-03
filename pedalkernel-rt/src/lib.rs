@@ -52,6 +52,7 @@ pub mod loading;
 pub mod metering;
 
 // ── Stage graph routing (compiled topology → runtime route plan) ─────────
+pub mod route;
 pub mod routing;
 
 // ── Typed WDF boundary-drive math ──────────────────────────────────────
