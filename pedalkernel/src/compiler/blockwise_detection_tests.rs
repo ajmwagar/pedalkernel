@@ -875,6 +875,34 @@ fn wheatstone_bridge_is_not_blockwise() {
 // chained WDF stages instead of one big MultiNL stage.
 // ═══════════════════════════════════════════════════════════════════════════
 
+fn blockwise_block_counts(compiled: &super::compiled::CompiledPedal) -> Vec<usize> {
+    compiled
+        .stages
+        .iter()
+        .filter_map(|stage| {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
+                Some(bkm.blocks.len())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn blockwise_block_rps(compiled: &super::compiled::CompiledPedal) -> Vec<f64> {
+    compiled
+        .stages
+        .iter()
+        .flat_map(|stage| {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
+                bkm.blocks.iter().map(|block| block.rp).collect()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}
+
 #[test]
 fn ladder_4_compile_emits_chained_stages_not_monolithic() {
     let compiled = compile_cached(BJT_LADDER_4, "blockwise_test");
@@ -893,15 +921,11 @@ fn ladder_4_compile_emits_chained_stages_not_monolithic() {
          Each BJT stage should be its own WDF block."
     );
 
-    // Should have at least 4 WDF stages (one per BJT block)
-    let wdf_count = compiled
-        .stages
-        .iter()
-        .filter(|s| matches!(s, super::compiled::Stage::Wdf(_)))
-        .count();
+    // Current architecture keeps the per-BJT WDF trees inside one BKM stage.
+    let block_counts = blockwise_block_counts(&compiled);
     assert!(
-        wdf_count >= 4,
-        "Should have at least 4 WDF stages for the 4 BJT blocks, got {wdf_count}"
+        block_counts.iter().any(|&count| count >= 4),
+        "Should have a Blockwise stage with at least 4 BJT blocks, got {block_counts:?}"
     );
 }
 
@@ -920,14 +944,10 @@ fn cascade_2_compile_emits_2_wdf_stages() {
         "2-stage cascade should have 0 MultiNL (got {multi_nl_count})"
     );
 
-    let wdf_count = compiled
-        .stages
-        .iter()
-        .filter(|s| matches!(s, super::compiled::Stage::Wdf(_)))
-        .count();
+    let block_counts = blockwise_block_counts(&compiled);
     assert!(
-        wdf_count >= 2,
-        "Should have at least 2 WDF stages, got {wdf_count}"
+        block_counts.iter().any(|&count| count >= 2),
+        "Should have a Blockwise stage with at least 2 BJT blocks, got {block_counts:?}"
     );
 }
 
@@ -2171,23 +2191,12 @@ fn identical_blocks_produce_identical_port_resistance() {
     let pedal = crate::dsl::parse_pedal_file(DIODE_CASCADE_WITH_CONTEXT).unwrap();
     let compiled = compile_cached(DIODE_CASCADE_WITH_CONTEXT, "dedup_test");
 
-    let bjt_rps: Vec<f64> = compiled
-        .stages
-        .iter()
-        .filter_map(|s| {
-            if let super::compiled::Stage::Wdf(w) = s {
-                if matches!(w.root, pedalkernel_rt::stage::RootKind::Bjt(_)) {
-                    return Some(w.tree.port_resistance());
-                }
-            }
-            None
-        })
-        .collect();
+    let bjt_rps = blockwise_block_rps(&compiled);
 
-    eprintln!("  BJT stage port resistances: {:?}", bjt_rps);
+    eprintln!("  BJT block port resistances: {:?}", bjt_rps);
     assert!(
         bjt_rps.len() >= 2,
-        "should have ≥2 BJT WDF stages, got {}",
+        "should have ≥2 BJT blocks, got {}",
         bjt_rps.len()
     );
 

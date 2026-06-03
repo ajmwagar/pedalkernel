@@ -101,6 +101,23 @@ fn find_wdf_with_k_table(compiled: &super::compiled::CompiledPedal) -> bool {
     })
 }
 
+fn blockwise_k_table_dims(compiled: &super::compiled::CompiledPedal) -> Vec<usize> {
+    compiled
+        .stages
+        .iter()
+        .flat_map(|stage| {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
+                bkm.blocks
+                    .iter()
+                    .map(|block| block.k_table.dims)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. BjtRoot exists in RootKind and compiles from common-emitter topology
 // ═══════════════════════════════════════════════════════════════════════════
@@ -243,21 +260,11 @@ fn ladder_4_blocks_have_bjt_roots() {
     let pedal = parse_pedal_file(BJT_LADDER_4).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
-    let bjt_wdf_count = compiled
-        .stages
-        .iter()
-        .filter(|s| {
-            if let super::compiled::Stage::Wdf(w) = s {
-                matches!(w.root, pedalkernel_rt::stage::RootKind::Bjt(_))
-            } else {
-                false
-            }
-        })
-        .count();
+    let block_k_table_dims = blockwise_k_table_dims(&compiled);
 
     assert!(
-        bjt_wdf_count >= 4,
-        "Ladder should have ≥4 WDF stages with BjtRoot, got {bjt_wdf_count}"
+        block_k_table_dims.iter().filter(|&&dims| dims == 2).count() >= 4,
+        "Ladder should have ≥4 BKM BJT blocks with 2D K-tables, got {block_k_table_dims:?}"
     );
 }
 
@@ -266,19 +273,9 @@ fn ladder_4_blocks_have_k_tables() {
     let pedal = parse_pedal_file(BJT_LADDER_4).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
-    let k_table_count = compiled
-        .stages
-        .iter()
-        .filter(|s| {
-            if let super::compiled::Stage::Wdf(w) = s {
-                w.k_table.is_some()
-            } else {
-                false
-            }
-        })
-        .count();
+    let k_table_count = blockwise_k_table_dims(&compiled).len();
 
-    eprintln!("  Ladder 4: {k_table_count} stages with K-tables");
+    eprintln!("  Ladder 4: {k_table_count} BKM blocks with K-tables");
     assert!(
         k_table_count >= 4,
         "Ladder should have ≥4 K-tables (one per BJT block), got {k_table_count}"
@@ -337,7 +334,7 @@ fn k_table_runtime_matches_nr() {
         } else {
             false
         }
-    });
+    }) || !blockwise_k_table_dims(&compiled).is_empty();
     assert!(has_k_table, "Should have at least one K-table stage");
 
     // Process audio — this SHOULD use the K-table internally
