@@ -7,7 +7,9 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 
-use crate::boundary_math::{OnePort, OnePortKind, OnePortState, PortTerminals, RuntimeOnePort};
+use crate::boundary_math::{
+    OnePort, OnePortKind, OnePortState, PortTerminals, RuntimeOnePort, RuntimeState, StateSlot,
+};
 use crate::pot_taper::PotTaper;
 // Import the elements::WdfLeaf trait to call port_resistance/set_sample_rate/reset
 // on Photocoupler and JfetVariableResistor. Renamed to avoid conflict with our WdfLeaf.
@@ -206,9 +208,7 @@ pub struct WdfCapacitor {
     pub comp_id: Option<String>,
     pub runtime: RuntimeOnePort<()>,
     pub sample_rate: crate::Wave,
-    pub state: crate::Wave,
-    /// Last reflected wave (captured before state update, for voltage extraction)
-    pub last_b: crate::Wave,
+    pub runtime_state: RuntimeState,
 }
 
 impl WdfCapacitor {
@@ -217,6 +217,8 @@ impl WdfCapacitor {
         capacitance: crate::Wave,
         sample_rate: crate::Wave,
     ) -> Self {
+        let mut runtime_state = RuntimeState::new();
+        let state_slot = runtime_state.allocate_one_port(OnePortKind::Capacitor(capacitance));
         Self {
             comp_id,
             runtime: RuntimeOnePort::new(
@@ -224,11 +226,10 @@ impl WdfCapacitor {
                     PortTerminals::grounded(),
                     OnePortKind::Capacitor(capacitance),
                 ),
-                None,
+                state_slot,
             ),
             sample_rate,
-            state: 0.0,
-            last_b: 0.0,
+            runtime_state,
         }
     }
 
@@ -242,15 +243,33 @@ impl WdfCapacitor {
             _ => 0.0,
         }
     }
+
+    fn state_slot(&self) -> StateSlot {
+        self.runtime
+            .state_slot
+            .expect("capacitor one-port must have a state slot")
+    }
+
+    fn wave_state(&self) -> crate::Wave {
+        self.runtime_state.wave_cache[self.state_slot().0].wave_state
+    }
+
+    pub fn projected_leaf_voltage(&self, incident: crate::Wave) -> crate::Wave {
+        (incident + self.wave_state()) / 2.0
+    }
 }
 
 impl WdfLeaf for WdfCapacitor {
     fn reflected(&mut self) -> crate::Wave {
-        self.state
+        self.wave_state()
     }
     fn set_incident(&mut self, a: crate::Wave) {
-        self.last_b = self.state;
-        self.state = a;
+        let slot = self.state_slot().0;
+        let previous_reflected = self.runtime_state.wave_cache[slot].wave_state;
+        self.runtime_state.wave_cache[slot].previous_reflected = previous_reflected;
+        self.runtime_state.wave_cache[slot].wave_state = a;
+        self.runtime_state.states[slot] =
+            OnePortState::CapacitorVoltage((a + previous_reflected) / 2.0);
     }
     fn port_resistance(&self) -> crate::Wave {
         self.runtime.rp(self.sample_rate)
@@ -262,7 +281,10 @@ impl WdfLeaf for WdfCapacitor {
         "capacitor"
     }
     fn leaf_voltage(&self) -> crate::Wave {
-        (self.state + self.last_b) / 2.0
+        match self.runtime_state.states[self.state_slot().0] {
+            OnePortState::CapacitorVoltage(voltage) => voltage,
+            OnePortState::InductorScaledCurrent(_) => 0.0,
+        }
     }
     fn is_reactive(&self) -> bool {
         true
@@ -273,7 +295,10 @@ impl WdfLeaf for WdfCapacitor {
     fn set_one_port_state(&mut self, state: OnePortState) -> bool {
         match state {
             OnePortState::CapacitorVoltage(voltage) => {
-                self.state = 2.0 * voltage - self.last_b;
+                let slot = self.state_slot().0;
+                let previous_reflected = self.runtime_state.wave_cache[slot].previous_reflected;
+                self.runtime_state.states[slot] = OnePortState::CapacitorVoltage(voltage);
+                self.runtime_state.wave_cache[slot].wave_state = 2.0 * voltage - previous_reflected;
                 true
             }
             OnePortState::InductorScaledCurrent(_) => false,
@@ -283,8 +308,9 @@ impl WdfLeaf for WdfCapacitor {
         self.sample_rate = fs;
     }
     fn reset(&mut self) {
-        self.state = 0.0;
-        self.last_b = 0.0;
+        let slot = self.state_slot().0;
+        self.runtime_state.states[slot] = OnePortState::CapacitorVoltage(0.0);
+        self.runtime_state.wave_cache[slot] = Default::default();
     }
     fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
         if self.comp_id.is_some() {
@@ -299,7 +325,7 @@ impl WdfLeaf for WdfCapacitor {
             "Capacitor(id=\"{id}\", C={:.3e}F, Rp={:.1}Ω, state={:.6})",
             self.capacitance(),
             self.port_resistance(),
-            self.state
+            self.wave_state()
         )
     }
     fn clone_box(&self) -> Box<dyn WdfLeaf> {
@@ -404,19 +430,21 @@ pub struct WdfInductor {
     pub comp_id: Option<String>,
     pub runtime: RuntimeOnePort<()>,
     pub sample_rate: crate::Wave,
-    pub state: crate::Wave,
+    pub runtime_state: RuntimeState,
 }
 
 impl WdfInductor {
     pub fn new(comp_id: Option<String>, inductance: crate::Wave, sample_rate: crate::Wave) -> Self {
+        let mut runtime_state = RuntimeState::new();
+        let state_slot = runtime_state.allocate_one_port(OnePortKind::Inductor(inductance));
         Self {
             comp_id,
             runtime: RuntimeOnePort::new(
                 OnePort::new(PortTerminals::grounded(), OnePortKind::Inductor(inductance)),
-                None,
+                state_slot,
             ),
             sample_rate,
-            state: 0.0,
+            runtime_state,
         }
     }
 
@@ -430,14 +458,26 @@ impl WdfInductor {
             _ => 0.0,
         }
     }
+
+    fn state_slot(&self) -> StateSlot {
+        self.runtime
+            .state_slot
+            .expect("inductor one-port must have a state slot")
+    }
+
+    fn wave_state(&self) -> crate::Wave {
+        self.runtime_state.wave_cache[self.state_slot().0].wave_state
+    }
 }
 
 impl WdfLeaf for WdfInductor {
     fn reflected(&mut self) -> crate::Wave {
-        -self.state
+        -self.wave_state()
     }
     fn set_incident(&mut self, a: crate::Wave) {
-        self.state = a;
+        let slot = self.state_slot().0;
+        self.runtime_state.wave_cache[slot].wave_state = a;
+        self.runtime_state.states[slot] = OnePortState::InductorScaledCurrent(a);
     }
     fn port_resistance(&self) -> crate::Wave {
         self.runtime.rp(self.sample_rate)
@@ -449,18 +489,21 @@ impl WdfLeaf for WdfInductor {
         "inductor"
     }
     fn leaf_voltage(&self) -> crate::Wave {
-        self.state / 2.0
+        self.wave_state() / 2.0
     }
     fn is_reactive(&self) -> bool {
         true
     }
     fn one_port_state(&self) -> Option<OnePortState> {
-        Some(OnePortState::InductorScaledCurrent(self.state))
+        Some(self.runtime_state.states[self.state_slot().0])
     }
     fn set_one_port_state(&mut self, state: OnePortState) -> bool {
         match state {
             OnePortState::InductorScaledCurrent(scaled_current) => {
-                self.state = scaled_current;
+                let slot = self.state_slot().0;
+                self.runtime_state.states[slot] =
+                    OnePortState::InductorScaledCurrent(scaled_current);
+                self.runtime_state.wave_cache[slot].wave_state = scaled_current;
                 true
             }
             OnePortState::CapacitorVoltage(_) => false,
@@ -470,7 +513,9 @@ impl WdfLeaf for WdfInductor {
         self.sample_rate = fs;
     }
     fn reset(&mut self) {
-        self.state = 0.0;
+        let slot = self.state_slot().0;
+        self.runtime_state.states[slot] = OnePortState::InductorScaledCurrent(0.0);
+        self.runtime_state.wave_cache[slot] = Default::default();
     }
     fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
         if self.comp_id.is_some() {
@@ -485,7 +530,7 @@ impl WdfLeaf for WdfInductor {
             "Inductor(id=\"{id}\", L={:.3e}H, Rp={:.1}Ω, state={:.6})",
             self.inductance(),
             self.port_resistance(),
-            self.state
+            self.wave_state()
         )
     }
     fn clone_box(&self) -> Box<dyn WdfLeaf> {
@@ -1066,6 +1111,12 @@ mod tests {
         let mut cap = WdfCapacitor::from_rp(Some(String::from("C1")), 100e-9, 1_000.0);
 
         cap.set_incident(0.6);
+        let slot = cap.runtime.state_slot.unwrap().0;
+        assert_eq!(
+            cap.runtime_state.states[slot],
+            OnePortState::CapacitorVoltage(0.3)
+        );
+        assert_eq!(cap.runtime_state.wave_cache[slot].wave_state, 0.6);
         assert_eq!(
             cap.one_port_state(),
             Some(OnePortState::CapacitorVoltage(0.3))
@@ -1084,6 +1135,12 @@ mod tests {
         let mut inductor = WdfInductor::from_rp(Some(String::from("L1")), 1e-3, 96.0);
 
         inductor.set_incident(0.25);
+        let slot = inductor.runtime.state_slot.unwrap().0;
+        assert_eq!(
+            inductor.runtime_state.states[slot],
+            OnePortState::InductorScaledCurrent(0.25)
+        );
+        assert_eq!(inductor.runtime_state.wave_cache[slot].wave_state, 0.25);
         assert_eq!(
             inductor.one_port_state(),
             Some(OnePortState::InductorScaledCurrent(0.25))

@@ -174,12 +174,12 @@ impl OnePort<MnaNodeId> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RuntimeOnePort<N> {
     pub spec: OnePort<N>,
-    pub state_idx: Option<usize>,
+    pub state_slot: Option<StateSlot>,
 }
 
 impl<N> RuntimeOnePort<N> {
-    pub const fn new(spec: OnePort<N>, state_idx: Option<usize>) -> Self {
-        Self { spec, state_idx }
+    pub const fn new(spec: OnePort<N>, state_slot: Option<StateSlot>) -> Self {
+        Self { spec, state_slot }
     }
 
     pub fn rp(&self, sample_rate: Wave) -> Wave {
@@ -187,12 +187,80 @@ impl<N> RuntimeOnePort<N> {
     }
 }
 
+/// Dense index into one-port runtime state arrays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StateSlot(pub usize);
+
 /// Sample-time state for reactive one-ports.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OnePortState {
     CapacitorVoltage(Wave),
     InductorScaledCurrent(Wave),
+}
+
+/// WDF working cache for a physical one-port state slot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct WdfWaveCache {
+    pub wave_state: Wave,
+    pub previous_reflected: Wave,
+}
+
+impl Default for WdfWaveCache {
+    fn default() -> Self {
+        Self {
+            wave_state: 0.0,
+            previous_reflected: 0.0,
+        }
+    }
+}
+
+/// Runtime state for physical one-ports plus dense formulation sidecars.
+///
+/// `states` is the canonical physical basis. `wave_cache` is a WDF sidecar
+/// indexed by the same `StateSlot`; entries for non-WDF regions are allocated
+/// but unused. This keeps the hot path as direct vector indexing with the
+/// invariant `states.len() == wave_cache.len()`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RuntimeState {
+    pub states: Vec<OnePortState>,
+    pub wave_cache: Vec<WdfWaveCache>,
+}
+
+impl RuntimeState {
+    pub const fn new() -> Self {
+        Self {
+            states: Vec::new(),
+            wave_cache: Vec::new(),
+        }
+    }
+
+    pub fn allocate(&mut self, state: OnePortState) -> StateSlot {
+        debug_assert_eq!(self.states.len(), self.wave_cache.len());
+        let slot = StateSlot(self.states.len());
+        self.states.push(state);
+        self.wave_cache.push(WdfWaveCache::default());
+        slot
+    }
+
+    pub fn allocate_one_port(&mut self, kind: OnePortKind) -> Option<StateSlot> {
+        match kind {
+            OnePortKind::Resistor(_) => None,
+            OnePortKind::Capacitor(_) => Some(self.allocate(OnePortState::CapacitorVoltage(0.0))),
+            OnePortKind::Inductor(_) => {
+                Some(self.allocate(OnePortState::InductorScaledCurrent(0.0)))
+            }
+        }
+    }
+}
+
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<N> PortTerminals<N> {
@@ -654,11 +722,11 @@ mod tests {
                 PortTerminals::<()>::grounded(),
                 OnePortKind::Capacitor(100e-9),
             ),
-            Some(2),
+            Some(StateSlot(2)),
         );
         let inductor = RuntimeOnePort::new(
             OnePort::new(PortTerminals::<()>::grounded(), OnePortKind::Inductor(1e-3)),
-            Some(3),
+            Some(StateSlot(3)),
         );
         let resistor = RuntimeOnePort::new(
             OnePort::new(
@@ -668,10 +736,39 @@ mod tests {
             None,
         );
 
-        assert_eq!(cap.state_idx, Some(2));
+        assert_eq!(cap.state_slot, Some(StateSlot(2)));
         assert!((cap.rp(sample_rate) - 104.166_666_666_666_67).abs() < 1e-9);
         assert_eq!(inductor.rp(sample_rate), 96.0);
         assert_eq!(resistor.rp(sample_rate), 1_000.0);
+    }
+
+    #[test]
+    fn runtime_state_allocates_dense_physical_state_and_wdf_cache_slots() {
+        let mut runtime = RuntimeState::new();
+
+        assert_eq!(
+            runtime.allocate_one_port(OnePortKind::Resistor(1_000.0)),
+            None
+        );
+        let cap_slot = runtime
+            .allocate_one_port(OnePortKind::Capacitor(100e-9))
+            .unwrap();
+        let inductor_slot = runtime
+            .allocate_one_port(OnePortKind::Inductor(1e-3))
+            .unwrap();
+
+        assert_eq!(cap_slot, StateSlot(0));
+        assert_eq!(inductor_slot, StateSlot(1));
+        assert_eq!(runtime.states.len(), runtime.wave_cache.len());
+        assert_eq!(
+            runtime.states[cap_slot.0],
+            OnePortState::CapacitorVoltage(0.0)
+        );
+        assert_eq!(
+            runtime.states[inductor_slot.0],
+            OnePortState::InductorScaledCurrent(0.0)
+        );
+        assert_eq!(runtime.wave_cache[cap_slot.0], WdfWaveCache::default());
     }
 
     #[test]

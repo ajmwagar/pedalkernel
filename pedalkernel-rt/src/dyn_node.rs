@@ -129,7 +129,7 @@ fn projected_leaf_voltage(leaf: &LeafKind, incident: crate::Wave) -> crate::Wave
         | LeafKind::Pot(_)
         | LeafKind::Inductor(_)
         | LeafKind::SwitchedResistor(_) => incident / 2.0,
-        LeafKind::Capacitor(cap) => (incident + cap.state) / 2.0,
+        LeafKind::Capacitor(cap) => cap.projected_leaf_voltage(incident),
         LeafKind::LeakyCapacitor(cap) => incident * cap.leakage_decay,
         LeafKind::VoltageSource(_) | LeafKind::Photocoupler(_) | LeafKind::JfetVr(_) => 0.0,
         LeafKind::UnitDelay(_) => 0.0,
