@@ -13,6 +13,7 @@ use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
+use pedalkernel_rt::boundary_math::WdfPortTerminals;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 /// Compiler-recognized topology for a blockwise nonlinear unit.
@@ -2800,11 +2801,10 @@ pub(super) fn try_build_blockwise(
                 ] {
                     let port_idx = ports.len();
                     block_port_indices[kbi].push(port_idx);
-                    ports.push(pedalkernel_rt::tree::WdfPort {
-                        node_pos: node_to_mna.get(&node).copied(),
-                        node_neg: None,
-                        resistance: rp,
-                    });
+                    ports.push(
+                        WdfPortTerminals::maybe_single_ended(node_to_mna.get(&node).copied())
+                            .to_wdf_port(rp),
+                    );
                     coupling_port_nodes.push((Some(node), None));
                     #[cfg(test)]
                     eprintln!(
@@ -2818,11 +2818,7 @@ pub(super) fn try_build_blockwise(
                 ) {
                     let port_idx = ports.len();
                     block_port_indices[kbi].push(port_idx);
-                    ports.push(pedalkernel_rt::tree::WdfPort {
-                        node_pos: Some(left_idx),
-                        node_neg: Some(right_idx),
-                        resistance: rp,
-                    });
+                    ports.push(WdfPortTerminals::differential(left_idx, right_idx).to_wdf_port(rp));
                     coupling_port_nodes
                         .push((Some(rung_ports.top_left), Some(rung_ports.top_right)));
                     #[cfg(test)]
@@ -2856,11 +2852,7 @@ pub(super) fn try_build_blockwise(
             if let Some(pn) = best_node {
                 let mna_idx = node_to_mna[&pn];
                 let rp = k_blocks[kbi].nominal_vs_rp;
-                ports.push(pedalkernel_rt::tree::WdfPort {
-                    node_pos: Some(mna_idx),
-                    node_neg: None,
-                    resistance: rp,
-                });
+                ports.push(WdfPortTerminals::single_ended(mna_idx).to_wdf_port(rp));
                 coupling_port_nodes.push((Some(pn), None));
                 block_port_indices[kbi].push(ports.len() - 1);
                 used_ports.insert(pn);
@@ -2868,11 +2860,7 @@ pub(super) fn try_build_blockwise(
                 eprintln!("    block {bi}: port_node=Some({pn}) → mna_node=Some({mna_idx})");
             } else {
                 // Block has no unique node in coupling — use dummy
-                ports.push(pedalkernel_rt::tree::WdfPort {
-                    node_pos: None,
-                    node_neg: None,
-                    resistance: 1000.0,
-                });
+                ports.push(WdfPortTerminals::grounded().to_wdf_port(1000.0));
                 coupling_port_nodes.push((None, None));
                 block_port_indices[kbi].push(ports.len() - 1);
                 #[cfg(test)]
@@ -2913,11 +2901,7 @@ pub(super) fn try_build_blockwise(
                 .get(bi)
                 .map(|block| block.rp)
                 .unwrap_or(r_source_cascade);
-            ports.push(pedalkernel_rt::tree::WdfPort {
-                node_pos: Some(mna_idx),
-                node_neg: None,
-                resistance: rp,
-            });
+            ports.push(WdfPortTerminals::single_ended(mna_idx).to_wdf_port(rp));
             coupling_port_nodes.push((Some(output_node), None));
             feedback_port_map.push((bi, scattering_idx));
             used_ports.insert(output_node);
@@ -2979,11 +2963,7 @@ pub(super) fn try_build_blockwise(
             if let Some(Some(mna_idx)) = edge_and_node {
                 let rp = port_def.impedance.unwrap_or(1.0);
                 let scattering_idx = ports.len();
-                ports.push(pedalkernel_rt::tree::WdfPort {
-                    node_pos: Some(mna_idx),
-                    node_neg: None,
-                    resistance: rp,
-                });
+                ports.push(WdfPortTerminals::single_ended(mna_idx).to_wdf_port(rp));
                 coupling_port_nodes.push((Some(port_node), None));
                 vs_port_map.push((port_def.name.clone(), scattering_idx));
                 #[cfg(test)]
@@ -2995,11 +2975,7 @@ pub(super) fn try_build_blockwise(
         // Fallback: if no audio input port was found, add a default VS at graph.in_node
         if vs_port_map.is_empty() {
             let vs_node = node_to_mna.get(&graph.in_node).copied();
-            ports.push(pedalkernel_rt::tree::WdfPort {
-                node_pos: vs_node,
-                node_neg: None,
-                resistance: 1.0,
-            });
+            ports.push(WdfPortTerminals::maybe_single_ended(vs_node).to_wdf_port(1.0));
             coupling_port_nodes.push((Some(graph.in_node), None));
             vs_port_map.push(("audio_in".to_string(), ports.len() - 1));
         }
@@ -3010,11 +2986,7 @@ pub(super) fn try_build_blockwise(
         for (supply_node, voltage) in &supply_nodes_in_coupling {
             if let Some(&mna_idx) = node_to_mna.get(supply_node) {
                 let scattering_idx = ports.len();
-                ports.push(pedalkernel_rt::tree::WdfPort {
-                    node_pos: Some(mna_idx),
-                    node_neg: None,
-                    resistance: 1.0, // ideal supply
-                });
+                ports.push(WdfPortTerminals::single_ended(mna_idx).to_wdf_port(1.0));
                 coupling_port_nodes.push((Some(*supply_node), None));
                 let name = format!("_supply_{}", supply_node);
                 vs_port_map.push((name, scattering_idx));
@@ -3029,11 +3001,7 @@ pub(super) fn try_build_blockwise(
         {
             let rp = 1.0 / (2.0 * sample_rate * capacitance);
             let scattering_idx = ports.len();
-            ports.push(pedalkernel_rt::tree::WdfPort {
-                node_pos: node_a,
-                node_neg: node_b,
-                resistance: rp,
-            });
+            ports.push(WdfPortTerminals::maybe_differential(node_a, node_b).to_wdf_port(rp));
             coupling_port_nodes.push((graph_node_a, graph_node_b));
             coupling_passives.push(pedalkernel_rt::stage::CouplingPassive {
                 comp_id: comp_id.clone(),

@@ -2510,6 +2510,32 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
     enum Probe {
         SerialFirstRung,
         Q12CollectorBoundary,
+        FirstRungBottomDiff,
+        FirstRungTopDiff,
+        SecondRungBottomDiff,
+        SecondRungTopDiff,
+    }
+
+    impl Probe {
+        const ALL: [Self; 6] = [
+            Self::SerialFirstRung,
+            Self::Q12CollectorBoundary,
+            Self::FirstRungBottomDiff,
+            Self::FirstRungTopDiff,
+            Self::SecondRungBottomDiff,
+            Self::SecondRungTopDiff,
+        ];
+
+        const fn label(self) -> &'static str {
+            match self {
+                Self::SerialFirstRung => "serial_first_rung",
+                Self::Q12CollectorBoundary => "q12_collector_boundary",
+                Self::FirstRungBottomDiff => "first_rung_bottom_diff",
+                Self::FirstRungTopDiff => "first_rung_top_diff",
+                Self::SecondRungBottomDiff => "second_rung_bottom_diff",
+                Self::SecondRungTopDiff => "second_rung_top_diff",
+            }
+        }
     }
 
     let def = crate::dsl::parse_pedal_file(Q12_TO_TWO_RUNG_DIFFERENTIAL_DIODE_LADDER)
@@ -2571,6 +2597,15 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
             !left_port_indices.is_empty() && !right_port_indices.is_empty(),
             "Q12 collector nodes should map to left/right BKM coupling ports"
         );
+        assert!(
+            bkm.block_port_indices.len() >= 2
+                && bkm.block_port_indices[0].len() == 3
+                && bkm.block_port_indices[1].len() == 3,
+            "Q12 fixture should expose two three-port differential rung blocks, got {:?}",
+            bkm.block_port_indices
+        );
+        let first_rung_ports = bkm.block_port_indices[0].clone();
+        let second_rung_ports = bkm.block_port_indices[1].clone();
         let vs_signals = vec![0.0; bkm.vs_port_map.len()];
 
         let mut process = |input: f64| match probe {
@@ -2581,6 +2616,46 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
                     &mut drives,
                     &left_port_indices,
                     &right_port_indices,
+                    pedalkernel_rt::boundary_math::PortVoltage::new(input),
+                );
+                bkm.process_with_boundary_drives(&drives, &vs_signals)
+            }
+            Probe::FirstRungBottomDiff => {
+                let mut drives = Vec::new();
+                pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                    &mut drives,
+                    &[first_rung_ports[0]],
+                    &[first_rung_ports[1]],
+                    pedalkernel_rt::boundary_math::PortVoltage::new(input),
+                );
+                bkm.process_with_boundary_drives(&drives, &vs_signals)
+            }
+            Probe::FirstRungTopDiff => {
+                let mut drives = Vec::new();
+                pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                    &mut drives,
+                    &[first_rung_ports[2]],
+                    &[],
+                    pedalkernel_rt::boundary_math::PortVoltage::new(input),
+                );
+                bkm.process_with_boundary_drives(&drives, &vs_signals)
+            }
+            Probe::SecondRungBottomDiff => {
+                let mut drives = Vec::new();
+                pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                    &mut drives,
+                    &[second_rung_ports[0]],
+                    &[second_rung_ports[1]],
+                    pedalkernel_rt::boundary_math::PortVoltage::new(input),
+                );
+                bkm.process_with_boundary_drives(&drives, &vs_signals)
+            }
+            Probe::SecondRungTopDiff => {
+                let mut drives = Vec::new();
+                pedalkernel_rt::boundary_math::push_differential_voltage_drives(
+                    &mut drives,
+                    &[second_rung_ports[2]],
+                    &[],
                     pedalkernel_rt::boundary_math::PortVoltage::new(input),
                 );
                 bkm.process_with_boundary_drives(&drives, &vs_signals)
@@ -2599,38 +2674,46 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
         ac_rms(&values)
     };
 
-    let serial_100 = measure(Probe::SerialFirstRung, 100.0);
-    let serial_10k = measure(Probe::SerialFirstRung, 10_000.0);
-    let q12_100 = measure(Probe::Q12CollectorBoundary, 100.0);
-    let q12_10k = measure(Probe::Q12CollectorBoundary, 10_000.0);
-    let serial_ratio_db = db_norm(serial_100, serial_10k);
-    let q12_ratio_db = db_norm(q12_100, q12_10k);
-
-    eprintln!(
-        "  boundary probes: serial_first_rung 100Hz={serial_100:.6}, \
-         10kHz={serial_10k:.6}, ratio={serial_ratio_db:+.1} dB"
-    );
-    eprintln!(
-        "  boundary probes: q12_collector_boundary 100Hz={q12_100:.6}, \
-         10kHz={q12_10k:.6}, ratio={q12_ratio_db:+.1} dB"
-    );
+    let mut results = Vec::new();
+    for probe in Probe::ALL {
+        let gain_100 = measure(probe, 100.0);
+        let gain_10k = measure(probe, 10_000.0);
+        let ratio_db = db_norm(gain_100, gain_10k);
+        eprintln!(
+            "  boundary probes: {} 100Hz={gain_100:.6}, 10kHz={gain_10k:.6}, \
+             ratio={ratio_db:+.1} dB",
+            probe.label()
+        );
+        results.push((probe, gain_100, gain_10k, ratio_db));
+    }
 
     assert!(
-        serial_100.is_finite()
-            && serial_10k.is_finite()
-            && q12_100.is_finite()
-            && q12_10k.is_finite(),
+        results
+            .iter()
+            .all(|(_, gain_100, gain_10k, _)| gain_100.is_finite() && gain_10k.is_finite()),
         "boundary probes should stay finite"
     );
+    let (_, serial_100, serial_10k, _) = results
+        .iter()
+        .find(|(probe, _, _, _)| matches!(probe, Probe::SerialFirstRung))
+        .copied()
+        .expect("serial first-rung result");
+    let first_top_is_lowpass = results.iter().any(|(probe, gain_100, gain_10k, _)| {
+        matches!(probe, Probe::FirstRungTopDiff) && *gain_100 > *gain_10k * 1.25
+    });
+    let second_top_is_lowpass = results.iter().any(|(probe, gain_100, gain_10k, _)| {
+        matches!(probe, Probe::SecondRungTopDiff) && *gain_100 > *gain_10k * 1.25
+    });
     if serial_100 <= serial_10k * 1.25 {
         eprintln!(
             "  GAP: serial first-rung drive is not lowpass in the Q12 handoff fixture; \
              this points at BKM output extraction/coupled multiport drive before Q12 routing"
         );
-    } else if q12_100 <= q12_10k * 1.25 {
+    }
+    if !first_top_is_lowpass && !second_top_is_lowpass {
         eprintln!(
-            "  GAP: Q12 collector boundary drive is not yet lowpass; \
-             this localizes the remaining issue to per-boundary BKM drive/output extraction"
+            "  GAP: direct top-differential rung probes are not lowpass; \
+             this points at coupled multiport BKM evaluation or output extraction"
         );
     }
 }

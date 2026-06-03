@@ -8,7 +8,7 @@ use crate::oversampling::Oversampler;
 use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort};
 use crate::{PedalProcessor, Wave};
 
-use crate::boundary_math::{sum_incident_offsets, BoundaryIncidentDrive};
+use crate::boundary_math::{sum_incident_offsets, BoundaryIncidentDrive, WdfPortTerminals};
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
 
@@ -2915,11 +2915,7 @@ impl WdfStage {
             .port_pairs
             .iter()
             .zip(port_resistances.iter())
-            .map(|(&(pos, neg), &r)| crate::tree::WdfPort {
-                node_pos: pos,
-                node_neg: neg,
-                resistance: r,
-            })
+            .map(|(&(pos, neg), &r)| WdfPortTerminals::maybe_differential(pos, neg).to_wdf_port(r))
             .collect();
         let scattering = recompute.mna.derive_scattering_matrix_general(&ports);
         if scattering.iter().all(|s| s.is_finite()) {
@@ -5821,22 +5817,17 @@ impl MultiNlStage {
         // NL ports (resistances don't change)
         for i in 0..n_nl {
             let (pos, neg) = recompute.port_node_pairs[i];
-            ports.push(WdfPort {
-                node_pos: pos,
-                node_neg: neg,
-                resistance: self.nl_port_resistances[i],
-            });
+            ports.push(
+                WdfPortTerminals::maybe_differential(pos, neg)
+                    .to_wdf_port(self.nl_port_resistances[i]),
+            );
         }
 
         // Passive ports (caps/inductors — resistances are fixed for a given sample rate)
         for k in 0..n_passive {
             let (pos, neg) = recompute.port_node_pairs[n_nl + k];
             let rp = self.passive_children[k].port_resistance();
-            ports.push(WdfPort {
-                node_pos: pos,
-                node_neg: neg,
-                resistance: rp,
-            });
+            ports.push(WdfPortTerminals::maybe_differential(pos, neg).to_wdf_port(rp));
         }
 
         if use_vs {
@@ -5867,11 +5858,10 @@ impl MultiNlStage {
             // Standard mode: adapted port included (always last).
             let adapted_pair_idx = n_nl + n_passive;
             let (pos, neg) = recompute.port_node_pairs[adapted_pair_idx];
-            ports.push(WdfPort {
-                node_pos: pos,
-                node_neg: neg,
-                resistance: recompute.adapted_resistance,
-            });
+            ports.push(
+                WdfPortTerminals::maybe_differential(pos, neg)
+                    .to_wdf_port(recompute.adapted_resistance),
+            );
 
             if let Some(vcc_idx) = recompute.vcc_vs_index {
                 // VCC as ideal VS: derive scattering + VCC injection vector

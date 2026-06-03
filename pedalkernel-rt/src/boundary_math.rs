@@ -34,6 +34,75 @@ impl PortOrientation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct WdfPortTerminals {
+    pub node_pos: Option<usize>,
+    pub node_neg: Option<usize>,
+}
+
+impl WdfPortTerminals {
+    pub const fn grounded() -> Self {
+        Self {
+            node_pos: None,
+            node_neg: None,
+        }
+    }
+
+    pub const fn single_ended(node_pos: usize) -> Self {
+        Self {
+            node_pos: Some(node_pos),
+            node_neg: None,
+        }
+    }
+
+    pub const fn maybe_single_ended(node_pos: Option<usize>) -> Self {
+        Self {
+            node_pos,
+            node_neg: None,
+        }
+    }
+
+    pub const fn differential(node_pos: usize, node_neg: usize) -> Self {
+        Self {
+            node_pos: Some(node_pos),
+            node_neg: Some(node_neg),
+        }
+    }
+
+    pub const fn maybe_differential(node_pos: Option<usize>, node_neg: Option<usize>) -> Self {
+        Self { node_pos, node_neg }
+    }
+
+    pub const fn reversed(self) -> Self {
+        Self {
+            node_pos: self.node_neg,
+            node_neg: self.node_pos,
+        }
+    }
+
+    pub const fn as_tuple(self) -> (Option<usize>, Option<usize>) {
+        (self.node_pos, self.node_neg)
+    }
+
+    pub fn voltage_with<F>(self, mut node_voltage: F) -> PortVoltage
+    where
+        F: FnMut(usize) -> Wave,
+    {
+        let pos = self.node_pos.map(&mut node_voltage).unwrap_or(0.0);
+        let neg = self.node_neg.map(node_voltage).unwrap_or(0.0);
+        PortVoltage(pos - neg)
+    }
+
+    pub const fn to_wdf_port(self, resistance: Wave) -> crate::tree::WdfPort {
+        crate::tree::WdfPort {
+            node_pos: self.node_pos,
+            node_neg: self.node_neg,
+            resistance,
+        }
+    }
+}
+
 impl PortVoltage {
     pub const fn new(value: Wave) -> Self {
         Self(value)
@@ -159,5 +228,53 @@ mod tests {
             BoundaryIncidentDrive::new(8, IncidentWave::new(1.0)),
         ];
         assert_eq!(sum_incident_offsets(7, &drives), 0.15000000000000002);
+    }
+
+    #[test]
+    fn wdf_port_terminals_make_single_ended_and_differential_orientation_explicit() {
+        assert_eq!(
+            WdfPortTerminals::single_ended(3).as_tuple(),
+            (Some(3), None)
+        );
+        assert_eq!(
+            WdfPortTerminals::differential(3, 4).as_tuple(),
+            (Some(3), Some(4))
+        );
+        assert_eq!(
+            WdfPortTerminals::differential(3, 4).reversed().as_tuple(),
+            (Some(4), Some(3))
+        );
+        assert_eq!(WdfPortTerminals::grounded().as_tuple(), (None, None));
+    }
+
+    #[test]
+    fn wdf_port_terminals_extract_oriented_voltage() {
+        let node_voltage = |node: usize| match node {
+            1 => 2.5,
+            2 => 0.75,
+            _ => 0.0,
+        };
+        assert_eq!(
+            WdfPortTerminals::single_ended(1).voltage_with(node_voltage),
+            PortVoltage(2.5)
+        );
+        assert_eq!(
+            WdfPortTerminals::differential(1, 2).voltage_with(node_voltage),
+            PortVoltage(1.75)
+        );
+        assert_eq!(
+            WdfPortTerminals::differential(1, 2)
+                .reversed()
+                .voltage_with(node_voltage),
+            PortVoltage(-1.75)
+        );
+    }
+
+    #[test]
+    fn wdf_port_terminals_construct_runtime_wdf_port() {
+        let port = WdfPortTerminals::differential(5, 6).to_wdf_port(123.0);
+        assert_eq!(port.node_pos, Some(5));
+        assert_eq!(port.node_neg, Some(6));
+        assert_eq!(port.resistance, 123.0);
     }
 }
