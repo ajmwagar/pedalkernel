@@ -1682,8 +1682,8 @@ fn build_compiled_stage_graph(
                         *label = format!("passive:{}", passive.comp_id);
                     }
                 }
-                for (port_idx, &(node_pos, node_neg)) in bkm.coupling_port_nodes.iter().enumerate()
-                {
+                for (port_idx, terminals) in bkm.coupling_port_nodes.iter().enumerate() {
+                    let (node_pos, node_neg) = terminals.as_tuple();
                     if let Some(node_id) = node_pos {
                         ports.push(StageGraphPort {
                             label: labels

@@ -6447,6 +6447,15 @@ pub struct SolveDiagnostics {
     pub linear_solve_failed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BlockPortRole {
+    Primary,
+    BottomLeft,
+    BottomRight,
+    TopDifferential,
+}
+
 /// Blockwise K-method stage: N coupled NL blocks with linear coupling.
 ///
 /// Each block is a WDF tree + K-table (composite NL device).
@@ -6479,7 +6488,7 @@ pub struct BlockwiseStage {
     /// solving but not enough to connect BKM ports back to preserved WDF
     /// boundary stages. This parallel vector keeps the source graph identity.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub coupling_port_nodes: Vec<(Option<usize>, Option<usize>)>,
+    pub coupling_port_nodes: Vec<WdfPortTerminals>,
     /// Coupling port indices owned by each nonlinear block.
     ///
     /// Legacy BKM stages use one port per block: `[[0], [1], ...]`.
@@ -6623,6 +6632,25 @@ impl BlockwiseStage {
     /// Relaxing the adaptor wave update prevents high-bias diode ladders from
     /// turning the explicit delay into an artificial energy source.
     const DELAYED_COUPLING_RELAXATION: crate::Wave = 0.25;
+
+    pub fn block_port_for_role(&self, block_idx: usize, role: BlockPortRole) -> Option<usize> {
+        let ports = self.block_port_indices.get(block_idx)?;
+        match role {
+            BlockPortRole::Primary => ports.first().copied(),
+            BlockPortRole::BottomLeft if ports.len() == 3 => ports.first().copied(),
+            BlockPortRole::BottomRight if ports.len() == 3 => ports.get(1).copied(),
+            BlockPortRole::TopDifferential if ports.len() == 3 => ports.get(2).copied(),
+            _ => None,
+        }
+    }
+
+    pub fn differential_rung_ports(&self, block_idx: usize) -> Option<(usize, usize, usize)> {
+        Some((
+            self.block_port_for_role(block_idx, BlockPortRole::BottomLeft)?,
+            self.block_port_for_role(block_idx, BlockPortRole::BottomRight)?,
+            self.block_port_for_role(block_idx, BlockPortRole::TopDifferential)?,
+        ))
+    }
 
     fn block_drive_voltage(block: &KMethodBlock, physical_voltage: crate::Wave) -> crate::Wave {
         block.source_polarity

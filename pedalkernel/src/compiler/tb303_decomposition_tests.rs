@@ -2380,15 +2380,17 @@ fn q12_to_two_rung_differential_diode_ladder_routes_into_bkm_boundary() {
     let q12_left = graph.node_names["Q12L.collector"];
     let q12_right = graph.node_names["Q12R.collector"];
     assert!(
-        bkm.coupling_port_nodes
-            .iter()
-            .any(|(pos, neg)| *pos == Some(q12_left) || *neg == Some(q12_left)),
+        bkm.coupling_port_nodes.iter().any(|terminals| {
+            let (pos, neg) = terminals.as_tuple();
+            pos == Some(q12_left) || neg == Some(q12_left)
+        }),
         "Q12 left collector node should be a BKM coupling boundary"
     );
     assert!(
-        bkm.coupling_port_nodes
-            .iter()
-            .any(|(pos, neg)| *pos == Some(q12_right) || *neg == Some(q12_right)),
+        bkm.coupling_port_nodes.iter().any(|terminals| {
+            let (pos, neg) = terminals.as_tuple();
+            pos == Some(q12_right) || neg == Some(q12_right)
+        }),
         "Q12 right collector node should be a BKM coupling boundary"
     );
 }
@@ -2439,16 +2441,18 @@ fn q12_to_two_rung_differential_diode_ladder_handoff_is_lowpass() {
             .coupling_port_nodes
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, (pos, neg))| {
-                (*pos == Some(q12_left) || *neg == Some(q12_left)).then_some(port_idx)
+            .filter_map(|(port_idx, terminals)| {
+                let (pos, neg) = terminals.as_tuple();
+                (pos == Some(q12_left) || neg == Some(q12_left)).then_some(port_idx)
             })
             .collect();
         let right_port_indices: Vec<usize> = bkm
             .coupling_port_nodes
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, (pos, neg))| {
-                (*pos == Some(q12_right) || *neg == Some(q12_right)).then_some(port_idx)
+            .filter_map(|(port_idx, terminals)| {
+                let (pos, neg) = terminals.as_tuple();
+                (pos == Some(q12_right) || neg == Some(q12_right)).then_some(port_idx)
             })
             .collect();
         assert!(
@@ -2581,16 +2585,18 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
             .coupling_port_nodes
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, (pos, neg))| {
-                (*pos == Some(q12_left) || *neg == Some(q12_left)).then_some(port_idx)
+            .filter_map(|(port_idx, terminals)| {
+                let (pos, neg) = terminals.as_tuple();
+                (pos == Some(q12_left) || neg == Some(q12_left)).then_some(port_idx)
             })
             .collect();
         let right_port_indices: Vec<usize> = bkm
             .coupling_port_nodes
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, (pos, neg))| {
-                (*pos == Some(q12_right) || *neg == Some(q12_right)).then_some(port_idx)
+            .filter_map(|(port_idx, terminals)| {
+                let (pos, neg) = terminals.as_tuple();
+                (pos == Some(q12_right) || neg == Some(q12_right)).then_some(port_idx)
             })
             .collect();
         assert!(
@@ -2598,14 +2604,16 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
             "Q12 collector nodes should map to left/right BKM coupling ports"
         );
         assert!(
-            bkm.block_port_indices.len() >= 2
-                && bkm.block_port_indices[0].len() == 3
-                && bkm.block_port_indices[1].len() == 3,
+            bkm.differential_rung_ports(0).is_some() && bkm.differential_rung_ports(1).is_some(),
             "Q12 fixture should expose two three-port differential rung blocks, got {:?}",
             bkm.block_port_indices
         );
-        let first_rung_ports = bkm.block_port_indices[0].clone();
-        let second_rung_ports = bkm.block_port_indices[1].clone();
+        let first_rung_ports = bkm
+            .differential_rung_ports(0)
+            .expect("first rung should expose bottom-left, bottom-right, top-differential ports");
+        let second_rung_ports = bkm
+            .differential_rung_ports(1)
+            .expect("second rung should expose bottom-left, bottom-right, top-differential ports");
         let vs_signals = vec![0.0; bkm.vs_port_map.len()];
 
         let mut process = |input: f64| match probe {
@@ -2624,8 +2632,8 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
                 let mut drives = Vec::new();
                 pedalkernel_rt::boundary_math::push_differential_voltage_drives(
                     &mut drives,
-                    &[first_rung_ports[0]],
-                    &[first_rung_ports[1]],
+                    &[first_rung_ports.0],
+                    &[first_rung_ports.1],
                     pedalkernel_rt::boundary_math::PortVoltage::new(input),
                 );
                 bkm.process_with_boundary_drives(&drives, &vs_signals)
@@ -2634,7 +2642,7 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
                 let mut drives = Vec::new();
                 pedalkernel_rt::boundary_math::push_differential_voltage_drives(
                     &mut drives,
-                    &[first_rung_ports[2]],
+                    &[first_rung_ports.2],
                     &[],
                     pedalkernel_rt::boundary_math::PortVoltage::new(input),
                 );
@@ -2644,8 +2652,8 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
                 let mut drives = Vec::new();
                 pedalkernel_rt::boundary_math::push_differential_voltage_drives(
                     &mut drives,
-                    &[second_rung_ports[0]],
-                    &[second_rung_ports[1]],
+                    &[second_rung_ports.0],
+                    &[second_rung_ports.1],
                     pedalkernel_rt::boundary_math::PortVoltage::new(input),
                 );
                 bkm.process_with_boundary_drives(&drives, &vs_signals)
@@ -2654,7 +2662,7 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
                 let mut drives = Vec::new();
                 pedalkernel_rt::boundary_math::push_differential_voltage_drives(
                     &mut drives,
-                    &[second_rung_ports[2]],
+                    &[second_rung_ports.2],
                     &[],
                     pedalkernel_rt::boundary_math::PortVoltage::new(input),
                 );
