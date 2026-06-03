@@ -1095,6 +1095,8 @@ pub(in crate::compiler) fn find_flow_groups(
                     }
                 }
             }
+            feedback_block.remove(&elem.output_node);
+            feedback_block.remove(&elem.input_node);
             let mut path = Vec::new();
             let mut visited = HashSet::new();
             visited.insert(elem.output_node);
@@ -1518,6 +1520,45 @@ mod tests {
         assert_ne!(
             u1_group, u2_group,
             "Cascaded op-amps without inter-stage feedback should be in SEPARATE groups"
+        );
+    }
+
+    #[test]
+    fn flow_simple_inverting_opamp_feedback_reaches_global_output() {
+        let (graph, edges) = make_graph_all_edges(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    R1: resistor(10k)
+                    U1: opamp(tl072)
+                    Rf: resistor(100k)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> U1.neg
+                    U1.neg -> Rf.a
+                    Rf.b -> U1.out
+                    U1.pos -> gnd
+                    U1.out -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        let groups = find_flow_groups(&edges, &graph);
+        let u1_group = find_group_containing(&groups, &graph, "U1").expect("U1 group");
+        let group = &groups[u1_group];
+
+        assert!(
+            group.has_feedback(),
+            "op-amp feedback ending at global out must remain a feedback group"
+        );
+        assert!(
+            group
+                .feedback_edges
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Rf"),
+            "Rf should be classified as feedback"
         );
     }
 
