@@ -680,14 +680,15 @@ fn single_diode_cap_rung_is_lowpass() {
         let vs = DynNode::VoltageSource(0.0, vs_rp);
         let cap = DynNode::Capacitor(Some("C1".to_string()), cap_c, cap_rp);
         let mut tree = DynNode::Series(Box::new(vs), Box::new(cap));
+        let mut runtime_state = tree.bind_runtime_state();
         let mut root = DiodeRoot::new(diode);
 
         // Bias: run with DC=0.6V for 2400 samples
         for _ in 0..2400 {
             tree.set_voltage(0.6);
-            let b = tree.reflected();
+            let b = tree.reflected_with_state(&mut runtime_state);
             let a = root.process(b, tree.port_resistance());
-            tree.set_incident(a);
+            tree.set_incident_with_state(a, &mut runtime_state);
         }
 
         // Measure: sine at freq, amplitude 0.05V around bias
@@ -695,9 +696,9 @@ fn single_diode_cap_rung_is_lowpass() {
         for i in 0..4800 {
             let v = 0.6 + 0.05 * (2.0 * std::f64::consts::PI * freq * i as f64 / sr).sin();
             tree.set_voltage(v);
-            let b = tree.reflected();
+            let b = tree.reflected_with_state(&mut runtime_state);
             let a = root.process(b, tree.port_resistance());
-            tree.set_incident(a);
+            tree.set_incident_with_state(a, &mut runtime_state);
             let v_root = (a + b) / 2.0;
             peak = peak.max(v_root.abs());
         }
@@ -708,23 +709,26 @@ fn single_diode_cap_rung_is_lowpass() {
         let vs = DynNode::VoltageSource(0.0, vs_rp);
         let cap = DynNode::Capacitor(Some("C1".to_string()), cap_c, cap_rp);
         let mut tree = DynNode::Series(Box::new(vs), Box::new(cap));
+        let mut runtime_state = tree.bind_runtime_state();
         let mut root = DiodeRoot::new(diode);
 
         for _ in 0..2400 {
             tree.set_voltage(0.6);
-            let b = tree.reflected();
+            let b = tree.reflected_with_state(&mut runtime_state);
             let a = root.process(b, tree.port_resistance());
-            tree.set_incident(a);
+            tree.set_incident_with_state(a, &mut runtime_state);
         }
 
         let mut peak = 0.0f64;
         for i in 0..4800 {
             let v = 0.6 + 0.05 * (2.0 * std::f64::consts::PI * freq * i as f64 / sr).sin();
             tree.set_voltage(v);
-            let b = tree.reflected();
+            let b = tree.reflected_with_state(&mut runtime_state);
             let a = root.process(b, tree.port_resistance());
-            tree.set_incident(a);
-            let v_cap = tree.leaf_voltage("C1").unwrap_or(0.0);
+            tree.set_incident_with_state(a, &mut runtime_state);
+            let v_cap = tree
+                .leaf_voltage_with_state("C1", &runtime_state)
+                .unwrap_or(0.0);
             peak = peak.max(v_cap.abs());
         }
         peak
@@ -805,21 +809,26 @@ fn single_rung_ktable_vs_nr_comparison() {
         let vs = DynNode::VoltageSource(0.0, vs_rp);
         let cap = DynNode::Capacitor(Some("C1".to_string()), cap_c, cap_rp);
         let mut tree = DynNode::Series(Box::new(vs), Box::new(cap));
+        let mut runtime_state = tree.bind_runtime_state();
         let mut root = DiodeRoot::new(diode);
         for _ in 0..2400 {
             tree.set_voltage(0.6);
-            let b = tree.reflected();
+            let b = tree.reflected_with_state(&mut runtime_state);
             let a = root.process(b, tree.port_resistance());
-            tree.set_incident(a);
+            tree.set_incident_with_state(a, &mut runtime_state);
         }
         let mut peak = 0.0f64;
         for i in 0..4800 {
             let v = 0.6 + 0.05 * (2.0 * std::f64::consts::PI * freq * i as f64 / sr).sin();
             tree.set_voltage(v);
-            let b = tree.reflected();
+            let b = tree.reflected_with_state(&mut runtime_state);
             let a = root.process(b, tree.port_resistance());
-            tree.set_incident(a);
-            peak = peak.max(tree.leaf_voltage("C1").unwrap_or(0.0).abs());
+            tree.set_incident_with_state(a, &mut runtime_state);
+            peak = peak.max(
+                tree.leaf_voltage_with_state("C1", &runtime_state)
+                    .unwrap_or(0.0)
+                    .abs(),
+            );
         }
         peak
     };
@@ -829,20 +838,25 @@ fn single_rung_ktable_vs_nr_comparison() {
         let vs = DynNode::VoltageSource(0.0, vs_rp);
         let cap = DynNode::Capacitor(Some("C1".to_string()), cap_c, cap_rp);
         let mut tree = DynNode::Series(Box::new(vs), Box::new(cap));
+        let mut runtime_state = tree.bind_runtime_state();
         for _ in 0..2400 {
             tree.set_voltage(0.6);
-            let b = tree.reflected();
+            let b = tree.reflected_with_state(&mut runtime_state);
             let a = kt.lookup_1d(b);
-            tree.set_incident(a);
+            tree.set_incident_with_state(a, &mut runtime_state);
         }
         let mut peak = 0.0f64;
         for i in 0..4800 {
             let v = 0.6 + 0.05 * (2.0 * std::f64::consts::PI * freq * i as f64 / sr).sin();
             tree.set_voltage(v);
-            let b = tree.reflected();
+            let b = tree.reflected_with_state(&mut runtime_state);
             let a = kt.lookup_1d(b);
-            tree.set_incident(a);
-            peak = peak.max(tree.leaf_voltage("C1").unwrap_or(0.0).abs());
+            tree.set_incident_with_state(a, &mut runtime_state);
+            peak = peak.max(
+                tree.leaf_voltage_with_state("C1", &runtime_state)
+                    .unwrap_or(0.0)
+                    .abs(),
+            );
         }
         peak
     };

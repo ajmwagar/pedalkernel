@@ -12,7 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use crate::boundary_math::{OnePortKind, RuntimeOnePort, RuntimeState, StateSlot};
+use crate::boundary_math::{OnePortKind, RuntimeOnePort, RuntimeState};
 use crate::elements::{JfetVariableResistor, Photocoupler};
 use crate::pot_taper::PotTaper;
 use crate::tree::RTypeAdaptor;
@@ -39,12 +39,6 @@ pub enum BinaryKind {
 /// series/parallel/transformer/R-type adaptors.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DynNode {
-    /// Runtime state owner for a WDF subtree.
-    Runtime {
-        node: Box<DynNode>,
-        runtime_state: RuntimeState,
-    },
-
     /// Terminal one-port element. Concrete enum for serialization support.
     Leaf(LeafKind),
 
@@ -85,13 +79,6 @@ pub enum DynNode {
 impl Clone for DynNode {
     fn clone(&self) -> Self {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => Self::Runtime {
-                node: node.clone(),
-                runtime_state: runtime_state.clone(),
-            },
             Self::Leaf(leaf) => Self::Leaf(leaf.clone()), // LeafKind derives Clone
             Self::Binary {
                 kind,
@@ -138,76 +125,66 @@ impl Clone for DynNode {
 }
 
 impl DynNode {
-    /// Return the structural WDF node, transparently skipping runtime-state owner wrappers.
-    ///
-    /// Runtime wrappers are an ownership detail for dense one-port state slots.
-    /// Callers that inspect topology should use this instead of matching
-    /// `DynNode::Runtime` directly.
+    /// Return the structural WDF node.
     pub fn structural(&self) -> &Self {
-        match self {
-            Self::Runtime { node, .. } => node.structural(),
-            node => node,
-        }
+        self
     }
 
     /// Mutable counterpart to [`DynNode::structural`].
     pub fn structural_mut(&mut self) -> &mut Self {
+        self
+    }
+
+    pub fn one_port_runtime_binding(&self, target_id: &str) -> Option<&RuntimeOnePort<()>> {
         match self {
-            Self::Runtime { node, .. } => node.structural_mut(),
-            node => node,
+            Self::Leaf(LeafKind::OnePort {
+                comp_id, runtime, ..
+            }) if comp_id.as_deref() == Some(target_id) => Some(runtime),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => left
+                .one_port_runtime_binding(target_id)
+                .or_else(|| right.one_port_runtime_binding(target_id)),
+            Self::Transformer { secondary, .. } => secondary.one_port_runtime_binding(target_id),
+            Self::RType { children, .. } => children
+                .iter()
+                .find_map(|child| child.one_port_runtime_binding(target_id)),
         }
     }
 
-    pub fn runtime_state(&self) -> Option<&RuntimeState> {
-        match self {
-            Self::Runtime { runtime_state, .. } => Some(runtime_state),
-            _ => None,
-        }
-    }
-
-    pub fn runtime_state_mut(&mut self) -> Option<&mut RuntimeState> {
-        match self {
-            Self::Runtime { runtime_state, .. } => Some(runtime_state),
-            _ => None,
-        }
-    }
-
-    pub fn one_port_runtime_state(
-        &self,
-        target_id: &str,
-    ) -> Option<(&RuntimeOnePort<()>, &RuntimeState)> {
-        match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.one_port_runtime_state_with_store(target_id, runtime_state),
-            _ => None,
-        }
-    }
-
-    pub fn one_port_runtime_state_mut(
+    pub fn one_port_runtime_binding_mut(
         &mut self,
         target_id: &str,
-    ) -> Option<(&RuntimeOnePort<()>, &mut RuntimeState)> {
+    ) -> Option<&mut RuntimeOnePort<()>> {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.one_port_runtime_state_mut_with_store(target_id, runtime_state),
-            _ => None,
+            Self::Leaf(LeafKind::OnePort {
+                comp_id, runtime, ..
+            }) if comp_id.as_deref() == Some(target_id) => Some(runtime),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => {
+                if left.one_port_runtime_binding(target_id).is_some() {
+                    left.one_port_runtime_binding_mut(target_id)
+                } else {
+                    right.one_port_runtime_binding_mut(target_id)
+                }
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.one_port_runtime_binding_mut(target_id)
+            }
+            Self::RType { children, .. } => {
+                let child = children
+                    .iter_mut()
+                    .find(|child| child.one_port_runtime_binding(target_id).is_some())?;
+                child.one_port_runtime_binding_mut(target_id)
+            }
         }
     }
 
-    fn one_port_runtime_state_with_store<'a>(
+    pub fn one_port_runtime_state_with_store<'a>(
         &'a self,
         target_id: &str,
         runtime_state: &'a RuntimeState,
     ) -> Option<(&'a RuntimeOnePort<()>, &'a RuntimeState)> {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.one_port_runtime_state_with_store(target_id, runtime_state),
             Self::Leaf(LeafKind::OnePort {
                 comp_id, runtime, ..
             }) if comp_id.as_deref() == Some(target_id) => Some((runtime, runtime_state)),
@@ -224,13 +201,12 @@ impl DynNode {
         }
     }
 
-    fn one_port_runtime_state_mut_with_store<'a>(
+    pub fn one_port_runtime_state_mut_with_store<'a>(
         &'a self,
         target_id: &str,
         runtime_state: &'a mut RuntimeState,
     ) -> Option<(&'a RuntimeOnePort<()>, &'a mut RuntimeState)> {
         match self {
-            Self::Runtime { .. } => None,
             Self::Leaf(LeafKind::OnePort {
                 comp_id, runtime, ..
             }) if comp_id.as_deref() == Some(target_id) => Some((runtime, runtime_state)),
@@ -259,62 +235,36 @@ impl DynNode {
         }
     }
 
-    fn runtime_wrap(node: DynNode, runtime_state: RuntimeState) -> Self {
-        if runtime_state.is_empty() {
-            node
-        } else {
-            Self::Runtime {
-                node: Box::new(node),
-                runtime_state,
-            }
-        }
+    /// Bind every stateful one-port leaf to a dense slot and return the owning state store.
+    ///
+    /// DynNode is topology only. Capacitor/inductor leaves carry an unbound
+    /// `RuntimeOnePort`; this method assigns slots in traversal order so
+    /// stages can own the physical state and WDF wave sidecar explicitly.
+    pub fn bind_runtime_state(&mut self) -> RuntimeState {
+        let mut runtime_state = RuntimeState::new();
+        self.bind_runtime_state_slots(&mut runtime_state);
+        runtime_state
     }
 
-    pub(crate) fn into_node_and_runtime_state(self) -> (DynNode, RuntimeState) {
+    fn bind_runtime_state_slots(&mut self, runtime_state: &mut RuntimeState) {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => (*node, runtime_state),
-            node => (node, RuntimeState::new()),
-        }
-    }
-
-    fn shift_state_slots(&mut self, offset: usize) {
-        if offset == 0 {
-            return;
-        }
-        match self {
-            Self::Runtime { node, .. } => node.shift_state_slots(offset),
             Self::Leaf(LeafKind::OnePort { runtime, .. }) => {
-                if let Some(StateSlot(slot)) = runtime.state_slot {
-                    runtime.state_slot = Some(StateSlot(slot + offset));
-                }
+                runtime.state_slot = runtime_state.allocate_one_port(runtime.spec.kind);
             }
             Self::Leaf(_) => {}
             Self::Binary { left, right, .. } => {
-                left.shift_state_slots(offset);
-                right.shift_state_slots(offset);
+                left.bind_runtime_state_slots(runtime_state);
+                right.bind_runtime_state_slots(runtime_state);
             }
-            Self::Transformer { secondary, .. } => secondary.shift_state_slots(offset),
+            Self::Transformer { secondary, .. } => {
+                secondary.bind_runtime_state_slots(runtime_state)
+            }
             Self::RType { children, .. } => {
                 for child in children {
-                    child.shift_state_slots(offset);
+                    child.bind_runtime_state_slots(runtime_state);
                 }
             }
         }
-    }
-
-    fn merge_runtime_children(
-        left: Box<DynNode>,
-        right: Box<DynNode>,
-    ) -> (Box<DynNode>, Box<DynNode>, RuntimeState) {
-        let (left_node, mut runtime_state) = (*left).into_node_and_runtime_state();
-        let (mut right_node, right_state) = (*right).into_node_and_runtime_state();
-        let offset = runtime_state.len();
-        right_node.shift_state_slots(offset);
-        runtime_state.append(right_state);
-        (Box::new(left_node), Box::new(right_node), runtime_state)
     }
 }
 
@@ -399,10 +349,7 @@ impl DynNode {
     }
 
     pub fn OnePort(comp_id: Option<String>, kind: OnePortKind, sample_rate: crate::Wave) -> Self {
-        let mut runtime_state = RuntimeState::new();
-        let state_slot = runtime_state.allocate_one_port(kind);
-        let leaf = LeafKind::one_port_with_slot(comp_id, kind, sample_rate, state_slot);
-        Self::runtime_wrap(Self::Leaf(leaf), runtime_state)
+        Self::Leaf(LeafKind::one_port(comp_id, kind, sample_rate))
     }
 
     pub fn VoltageSource(voltage: crate::Wave, rp: crate::Wave) -> Self {
@@ -492,66 +439,53 @@ impl DynNode {
     }
 
     pub fn Series(left: Box<DynNode>, right: Box<DynNode>) -> Self {
-        let (left, right, runtime_state) = Self::merge_runtime_children(left, right);
         let r1 = left.port_resistance();
         let r2 = right.port_resistance();
         let rp = r1 + r2;
         let gamma = if rp > 0.0 { r1 / rp } else { 0.5 };
-        Self::runtime_wrap(
-            Self::Binary {
-                kind: BinaryKind::Series,
-                left,
-                right,
-                rp,
-                gamma,
-                b1: 0.0,
-                b2: 0.0,
-                dirty: true,
-                has_dynamic: true,
-            },
-            runtime_state,
-        )
+        Self::Binary {
+            kind: BinaryKind::Series,
+            left,
+            right,
+            rp,
+            gamma,
+            b1: 0.0,
+            b2: 0.0,
+            dirty: true,
+            has_dynamic: true,
+        }
     }
 
     pub fn Parallel(left: Box<DynNode>, right: Box<DynNode>) -> Self {
-        let (left, right, runtime_state) = Self::merge_runtime_children(left, right);
         let r1 = left.port_resistance();
         let r2 = right.port_resistance();
         let sum = r1 + r2;
         let rp = if sum > 0.0 { r1 * r2 / sum } else { 0.0 };
         let gamma = if sum > 0.0 { r2 / sum } else { 0.5 };
-        Self::runtime_wrap(
-            Self::Binary {
-                kind: BinaryKind::Parallel,
-                left,
-                right,
-                rp,
-                gamma,
-                b1: 0.0,
-                b2: 0.0,
-                dirty: true,
-                has_dynamic: true,
-            },
-            runtime_state,
-        )
+        Self::Binary {
+            kind: BinaryKind::Parallel,
+            left,
+            right,
+            rp,
+            gamma,
+            b1: 0.0,
+            b2: 0.0,
+            dirty: true,
+            has_dynamic: true,
+        }
     }
 
     pub fn TransformerNode(secondary: Box<DynNode>, turns_ratio: crate::Wave) -> Self {
-        let (secondary_node, runtime_state) = (*secondary).into_node_and_runtime_state();
-        let secondary = Box::new(secondary_node);
         let r_sec = secondary.port_resistance();
         let rp = turns_ratio * turns_ratio * r_sec;
-        Self::runtime_wrap(
-            Self::Transformer {
-                secondary,
-                turns_ratio,
-                rp,
-                b_sec: 0.0,
-                dirty: true,
-                has_dynamic: true,
-            },
-            runtime_state,
-        )
+        Self::Transformer {
+            secondary,
+            turns_ratio,
+            rp,
+            b_sec: 0.0,
+            dirty: true,
+            has_dynamic: true,
+        }
     }
 }
 
@@ -563,7 +497,6 @@ impl DynNode {
     /// Find a leaf by predicate (first match, depth-first). Returns None if not found.
     pub fn find_leaf<T>(&self, f: &impl Fn(&dyn WdfLeaf) -> Option<T>) -> Option<T> {
         match self {
-            Self::Runtime { node, .. } => node.find_leaf(f),
             Self::Leaf(leaf) => f(leaf),
             Self::Binary { left, right, .. } => left.find_leaf(f).or_else(|| right.find_leaf(f)),
             Self::Transformer { secondary, .. } => secondary.find_leaf(f),
@@ -575,7 +508,6 @@ impl DynNode {
     /// to handle split pots where both halves must update.
     pub fn for_each_leaf_mut(&mut self, f: &mut impl FnMut(&mut dyn WdfLeaf) -> bool) -> bool {
         match self {
-            Self::Runtime { node, .. } => node.for_each_leaf_mut(f),
             Self::Leaf(leaf) => f(leaf),
             Self::Binary { left, right, .. } => {
                 let a = left.for_each_leaf_mut(f);
@@ -596,7 +528,6 @@ impl DynNode {
     /// Iterate all leaves immutably.
     pub fn for_each_leaf(&self, f: &mut impl FnMut(&dyn WdfLeaf)) {
         match self {
-            Self::Runtime { node, .. } => node.for_each_leaf(f),
             Self::Leaf(leaf) => f(leaf),
             Self::Binary { left, right, .. } => {
                 left.for_each_leaf(f);
@@ -619,7 +550,6 @@ impl DynNode {
 impl DynNode {
     pub fn port_resistance(&self) -> crate::Wave {
         match self {
-            Self::Runtime { node, .. } => node.port_resistance(),
             Self::Leaf(leaf) => leaf.port_resistance(),
             Self::Binary { rp, .. } | Self::Transformer { rp, .. } => *rp,
             Self::RType { adaptor, .. } => adaptor.port_resistance,
@@ -659,13 +589,6 @@ impl DynNode {
     /// Scatter-up: compute reflected wave (bottom → root), caching child waves.
     #[inline]
     pub fn reflected(&mut self) -> crate::Wave {
-        if let Self::Runtime {
-            node,
-            runtime_state,
-        } = self
-        {
-            return node.reflected_with_state(runtime_state);
-        }
         self.reflected_with_state(&mut RuntimeState::new())
     }
 
@@ -676,10 +599,6 @@ impl DynNode {
     /// compiler helpers that operate on a cloned tree plus cloned state.
     pub fn reflected_with_state(&mut self, runtime_state: &mut RuntimeState) -> crate::Wave {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.reflected_with_state(runtime_state),
             Self::Leaf(LeafKind::OnePort { runtime, .. }) => runtime.wdf_reflected(runtime_state),
             Self::Leaf(leaf) => leaf.reflected(),
             Self::Binary {
@@ -752,21 +671,12 @@ impl DynNode {
                     .collect();
                 adaptor.scatter_up_gain(&gains)
             }
-            Self::Runtime { .. } => unreachable!("structural() skips runtime wrappers"),
         }
     }
 
     /// Scatter-down + state update: propagate incident wave (root → leaves).
     #[inline]
     pub fn set_incident(&mut self, a: crate::Wave) {
-        if let Self::Runtime {
-            node,
-            runtime_state,
-        } = self
-        {
-            node.set_incident_with_state(a, runtime_state);
-            return;
-        }
         self.set_incident_with_state(a, &mut RuntimeState::new());
     }
 
@@ -777,10 +687,6 @@ impl DynNode {
     /// bindings but no embedded `Runtime` wrapper.
     pub fn set_incident_with_state(&mut self, a: crate::Wave, runtime_state: &mut RuntimeState) {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.set_incident_with_state(a, runtime_state),
             Self::Leaf(LeafKind::OnePort { runtime, .. }) => {
                 runtime.wdf_set_incident(a, runtime_state)
             }
@@ -934,7 +840,6 @@ impl DynNode {
                 }
                 None
             }
-            DynNode::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -975,7 +880,6 @@ impl DynNode {
                 }
                 None
             }
-            DynNode::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -1103,13 +1007,6 @@ impl DynNode {
 
     /// Extract voltage at a named leaf after the down-sweep.
     pub fn leaf_voltage(&self, target_id: &str) -> Option<crate::Wave> {
-        if let Self::Runtime {
-            node,
-            runtime_state,
-        } = self
-        {
-            return node.leaf_voltage_with_state(target_id, runtime_state);
-        }
         self.leaf_voltage_with_state(target_id, &RuntimeState::new())
     }
 
@@ -1134,10 +1031,6 @@ impl DynNode {
         best: &Cell<Option<(crate::Wave, bool)>>,
     ) {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.visit_leaf_voltage(target_id, runtime_state, best),
             Self::Leaf(leaf) => {
                 if leaf_matches_id(leaf, target_id) {
                     let v = match leaf {
@@ -1177,17 +1070,10 @@ impl DynNode {
         target_id: &str,
         a_root: crate::Wave,
     ) -> Option<crate::Wave> {
-        if let Self::Runtime {
-            node,
-            runtime_state,
-        } = self
-        {
-            return node.leaf_voltage_for_incident_with_state(target_id, a_root, runtime_state);
-        }
         self.leaf_voltage_for_incident_with_state(target_id, a_root, &RuntimeState::new())
     }
 
-    fn leaf_voltage_for_incident_with_state(
+    pub fn leaf_voltage_for_incident_with_state(
         &self,
         target_id: &str,
         a_root: crate::Wave,
@@ -1214,10 +1100,6 @@ impl DynNode {
         best: &Cell<Option<(crate::Wave, bool)>>,
     ) {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.visit_leaf_voltage_for_incident(target_id, a, runtime_state, best),
             Self::Leaf(leaf) => {
                 if leaf_matches_id(leaf, target_id) {
                     let v = projected_leaf_voltage_with_state(leaf, a, runtime_state);
@@ -1329,7 +1211,6 @@ impl DynNode {
                     child.visit_leaf_voltage_for_incident_gain(target_id, a_gain * *gain, best);
                 }
             }
-            Self::Runtime { .. } => unreachable!("structural() skips runtime wrappers"),
         }
     }
 
@@ -1421,7 +1302,6 @@ impl DynNode {
                 }
             }
             Self::Leaf(_) => {}
-            Self::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -1461,7 +1341,6 @@ impl DynNode {
                 }
                 any_dyn
             }
-            Self::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -1500,7 +1379,6 @@ impl DynNode {
                 }
                 found
             }
-            Self::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -1569,7 +1447,6 @@ impl DynNode {
                     child.recompute_incremental();
                 }
             }
-            Self::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -1593,23 +1470,11 @@ impl DynNode {
 
     /// Reset all state.
     pub fn reset(&mut self) {
-        if let Self::Runtime {
-            node,
-            runtime_state,
-        } = self
-        {
-            node.reset_with_state(runtime_state);
-            return;
-        }
         self.reset_with_state(&mut RuntimeState::new());
     }
 
     pub(crate) fn reset_with_state(&mut self, runtime_state: &mut RuntimeState) {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.reset_with_state(runtime_state),
             Self::Leaf(LeafKind::OnePort { runtime, .. }) => runtime.wdf_reset(runtime_state),
             Self::Leaf(leaf) => leaf.reset(),
             Self::Binary {
@@ -1642,22 +1507,11 @@ impl DynNode {
     /// Extract voltage from the first reactive element in the tree.
     #[allow(dead_code)]
     pub fn reactive_voltage(&self) -> Option<crate::Wave> {
-        if let Self::Runtime {
-            node,
-            runtime_state,
-        } = self
-        {
-            return node.reactive_voltage_with_state(runtime_state);
-        }
         self.reactive_voltage_with_state(&RuntimeState::new())
     }
 
     fn reactive_voltage_with_state(&self, runtime_state: &RuntimeState) -> Option<crate::Wave> {
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => node.reactive_voltage_with_state(runtime_state),
             Self::Leaf(LeafKind::OnePort { runtime, .. }) => {
                 Some(runtime.wdf_leaf_voltage(runtime_state))
             }
@@ -1929,14 +1783,6 @@ impl DynNode {
     pub fn debug_dump(&self, indent: usize) -> String {
         let pad = "  ".repeat(indent);
         match self {
-            Self::Runtime {
-                node,
-                runtime_state,
-            } => {
-                let mut s = format!("{pad}RuntimeState(slots={})\n", runtime_state.len());
-                s.push_str(&node.debug_dump(indent + 1));
-                s
-            }
             Self::Leaf(leaf) => format!("{pad}{}", leaf.debug_info()),
             Self::Binary {
                 kind,
@@ -2011,7 +1857,6 @@ impl DynNode {
             Self::RType { children, .. } => {
                 1 + children.iter().map(|c| c.node_count()).sum::<usize>()
             }
-            Self::Runtime { .. } => unreachable!("structural() skips runtime wrappers"),
         }
     }
 }
@@ -2056,6 +1901,7 @@ mod tests {
     #[test]
     fn resolve_main_vs_ptr_simple() {
         let mut tree = make_simple_tree();
+        let mut runtime_state = tree.bind_runtime_state();
         let ptr = tree.resolve_main_vs_ptr();
         assert!(ptr.is_some(), "should find main VS");
 
@@ -2066,7 +1912,7 @@ mod tests {
         }
 
         // Verify the VS reflects the new voltage
-        let b = tree.reflected();
+        let b = tree.reflected_with_state(&mut runtime_state);
         // reflected() on a VS returns 2*voltage, so with 3.14 the tree
         // should propagate a non-zero reflected wave
         assert!(
@@ -2153,22 +1999,28 @@ mod tests {
     #[test]
     fn leaf_voltage_for_incident_matches_downsweep_without_mutating() {
         let mut tree = make_simple_tree();
+        let mut runtime_state = tree.bind_runtime_state();
         tree.set_voltage(1.0);
-        let _ = tree.reflected();
+        let _ = tree.reflected_with_state(&mut runtime_state);
 
-        let before = tree.leaf_voltage("C1").unwrap();
-        let projected = tree.leaf_voltage_for_incident("C1", 0.25).unwrap();
+        let before = tree.leaf_voltage_with_state("C1", &runtime_state).unwrap();
+        let projected = tree
+            .leaf_voltage_for_incident_with_state("C1", 0.25, &runtime_state)
+            .unwrap();
 
         let mut clone = tree.clone();
-        clone.set_incident(0.25);
-        let expected = clone.leaf_voltage("C1").unwrap();
+        let mut clone_runtime_state = runtime_state.clone();
+        clone.set_incident_with_state(0.25, &mut clone_runtime_state);
+        let expected = clone
+            .leaf_voltage_with_state("C1", &clone_runtime_state)
+            .unwrap();
 
         assert!(
             (projected - expected).abs() < 1e-12,
             "projected voltage should match a real down-sweep: projected={projected}, expected={expected}"
         );
         assert_eq!(
-            tree.leaf_voltage("C1").unwrap(),
+            tree.leaf_voltage_with_state("C1", &runtime_state).unwrap(),
             before,
             "projection must not update original leaf state"
         );

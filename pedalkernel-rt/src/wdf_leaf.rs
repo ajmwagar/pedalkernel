@@ -1038,74 +1038,67 @@ mod tests {
     use super::*;
     use crate::dyn_node::DynNode;
 
-    fn runtime_one_port_fixture<'a>(
-        node: &'a DynNode,
-        target_id: &str,
-    ) -> (
-        &'a RuntimeOnePort<()>,
-        &'a crate::boundary_math::RuntimeState,
-    ) {
-        node.one_port_runtime_state(target_id)
-            .expect("reactive one-port must be backed by runtime state")
-    }
-
-    fn runtime_one_port_fixture_mut<'a>(
-        node: &'a mut DynNode,
-        target_id: &str,
-    ) -> (
-        &'a RuntimeOnePort<()>,
-        &'a mut crate::boundary_math::RuntimeState,
-    ) {
-        node.one_port_runtime_state_mut(target_id)
-            .expect("reactive one-port must be backed by runtime state")
+    fn runtime_one_port_fixture<'a>(node: &'a DynNode, target_id: &str) -> &'a RuntimeOnePort<()> {
+        node.one_port_runtime_binding(target_id)
+            .expect("reactive one-port must be bound to runtime state")
     }
 
     #[test]
     fn capacitor_exports_and_imports_one_port_voltage_state() {
         let mut cap = DynNode::Capacitor(Some(String::from("C1")), 100e-9, 1_000.0);
+        let mut runtime_state = cap.bind_runtime_state();
 
-        cap.set_incident(0.6);
-        let (runtime, runtime_state) = runtime_one_port_fixture(&cap, "C1");
+        cap.set_incident_with_state(0.6, &mut runtime_state);
+        let runtime = runtime_one_port_fixture(&cap, "C1");
         let slot = runtime.state_slot().unwrap().0;
         assert_eq!(
             runtime_state.states[slot],
             Some(OnePortState::CapacitorVoltage(0.3)).unwrap()
         );
         assert_eq!(runtime_state.wave_cache[slot].wave_state, 0.6);
-        assert_eq!(cap.leaf_voltage("C1"), Some(0.3));
+        assert_eq!(cap.leaf_voltage_with_state("C1", &runtime_state), Some(0.3));
 
-        let (runtime, runtime_state) = runtime_one_port_fixture_mut(&mut cap, "C1");
-        assert!(runtime.wdf_set_one_port_state(OnePortState::CapacitorVoltage(0.5), runtime_state));
+        let runtime = runtime_one_port_fixture(&cap, "C1");
+        assert!(
+            runtime.wdf_set_one_port_state(OnePortState::CapacitorVoltage(0.5), &mut runtime_state)
+        );
         assert_eq!(
-            runtime.wdf_one_port_state(runtime_state),
+            runtime.wdf_one_port_state(&runtime_state),
             Some(OnePortState::CapacitorVoltage(0.5))
         );
         assert!(!runtime
-            .wdf_set_one_port_state(OnePortState::InductorScaledCurrent(0.1), runtime_state));
+            .wdf_set_one_port_state(OnePortState::InductorScaledCurrent(0.1), &mut runtime_state));
     }
 
     #[test]
     fn inductor_exports_and_imports_scaled_current_state() {
         let mut inductor = DynNode::Inductor(Some(String::from("L1")), 1e-3, 96.0);
+        let mut runtime_state = inductor.bind_runtime_state();
 
-        inductor.set_incident(0.25);
-        let (runtime, runtime_state) = runtime_one_port_fixture(&inductor, "L1");
+        inductor.set_incident_with_state(0.25, &mut runtime_state);
+        let runtime = runtime_one_port_fixture(&inductor, "L1");
         let slot = runtime.state_slot().unwrap().0;
         assert_eq!(
             runtime_state.states[slot],
             OnePortState::InductorScaledCurrent(0.25)
         );
         assert_eq!(runtime_state.wave_cache[slot].wave_state, 0.25);
-        assert_eq!(inductor.leaf_voltage("L1"), Some(0.125));
-
-        let (runtime, runtime_state) = runtime_one_port_fixture_mut(&mut inductor, "L1");
-        assert!(runtime
-            .wdf_set_one_port_state(OnePortState::InductorScaledCurrent(-0.4), runtime_state));
         assert_eq!(
-            runtime.wdf_one_port_state(runtime_state),
+            inductor.leaf_voltage_with_state("L1", &runtime_state),
+            Some(0.125)
+        );
+
+        let runtime = runtime_one_port_fixture(&inductor, "L1");
+        assert!(runtime.wdf_set_one_port_state(
+            OnePortState::InductorScaledCurrent(-0.4),
+            &mut runtime_state
+        ));
+        assert_eq!(
+            runtime.wdf_one_port_state(&runtime_state),
             Some(OnePortState::InductorScaledCurrent(-0.4))
         );
-        assert!(!runtime.wdf_set_one_port_state(OnePortState::CapacitorVoltage(0.2), runtime_state));
+        assert!(!runtime
+            .wdf_set_one_port_state(OnePortState::CapacitorVoltage(0.2), &mut runtime_state));
     }
 
     #[test]

@@ -1544,7 +1544,8 @@ impl WdfStage {
         root: RootKind,
         oversampler: crate::oversampling::Oversampler,
     ) -> Self {
-        let (mut tree, runtime_state) = tree.into_node_and_runtime_state();
+        let mut tree = tree;
+        let runtime_state = tree.bind_runtime_state();
         tree.compute_dynamic_flags();
         Self {
             tree,
