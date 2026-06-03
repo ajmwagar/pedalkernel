@@ -967,75 +967,71 @@ fn tb303_q12_compiles_as_multi_binding_wdf_boundary_block() {
 }
 
 #[test]
-fn tb303_stage_graph_connects_q12_collectors_to_bkm_ladder_ports() {
+fn tb303_stage_bindings_connect_q12_collectors_to_bkm_ladder_ports() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
 
-    let compiled =
+    let mut compiled =
         super::compile_pedal_with_options(&def, SR, super::compile::CompileOptions::default())
             .expect("compile failed");
+    compiled.cache_all_vs_pointers();
 
-    let graph = &compiled.stage_graph;
-    assert!(
-        !graph.stages.is_empty(),
-        "compiled pedal should expose an emitted stage graph"
-    );
-
-    let q12_stage_idx = graph
+    let q12_stage_idx = compiled
         .stages
         .iter()
         .position(|stage| {
-            stage.kind == "Wdf"
-                && stage
-                    .ports
+            if let pedalkernel_rt::processor::Stage::Wdf(wdf) = stage {
+                wdf.boundary_bindings
                     .iter()
-                    .any(|port| port.label == "collector_left")
-                && stage
-                    .ports
-                    .iter()
-                    .any(|port| port.label == "collector_right")
+                    .any(|binding| binding.label == "collector_left")
+                    && wdf
+                        .boundary_bindings
+                        .iter()
+                        .any(|binding| binding.label == "collector_right")
+            } else {
+                false
+            }
         })
-        .expect("Q12 should appear as a WDF stage graph node with collector boundary ports");
+        .expect("Q12 should appear as a WDF stage with collector boundary bindings");
 
-    let bkm_stage_idx = graph
+    let bkm_stage_idx = compiled
         .stages
         .iter()
-        .position(|stage| stage.kind == "Blockwise")
-        .expect("TB303 ladder should appear as a BKM stage graph node");
-    assert!(
-        !graph
-            .stages
-            .iter()
-            .any(|stage| stage.kind == "BlockwiseKMethod"),
-        "stage graph should name the topology Blockwise; K-method is a solver/table detail"
-    );
+        .position(|stage| matches!(stage, pedalkernel_rt::processor::Stage::Blockwise(_)))
+        .expect("TB303 ladder should appear as a BKM stage");
+
+    let pedalkernel_rt::processor::Stage::Wdf(q12) = &compiled.stages[q12_stage_idx] else {
+        unreachable!("q12_stage_idx was selected as WDF")
+    };
 
     for collector_label in ["collector_left", "collector_right"] {
-        let q12_port_idx = graph.stages[q12_stage_idx]
-            .ports
+        let q12_port_idx = q12
+            .boundary_bindings
             .iter()
-            .position(|port| port.label == collector_label)
+            .position(|binding| binding.label == collector_label)
             .expect("Q12 collector port should be present");
-        let q12_node = graph.stages[q12_stage_idx].ports[q12_port_idx].node_id;
+        let q12_node = q12.boundary_bindings[q12_port_idx].node_id;
 
         assert!(
-            graph.stages[bkm_stage_idx]
-                .ports
+            compiled.stages[bkm_stage_idx]
+                .ins()
                 .iter()
-                .any(|port| port.node_id == q12_node),
-            "BKM stage graph ports should include Q12 {collector_label} node {q12_node}"
+                .chain(compiled.stages[bkm_stage_idx].outs().iter())
+                .any(|binding| binding.binding_id.get() == q12_node),
+            "BKM stage bindings should include Q12 {collector_label} node {q12_node}"
         );
         assert!(
-            graph.connections.iter().any(|connection| {
-                connection.node_id == q12_node
-                    && ((connection.from_stage == q12_stage_idx
-                        && connection.from_port == q12_port_idx
-                        && connection.to_stage == bkm_stage_idx)
-                        || (connection.to_stage == q12_stage_idx
-                            && connection.to_port == q12_port_idx
-                            && connection.from_stage == bkm_stage_idx))
-            }),
-            "stage graph should connect Q12 {collector_label} node {q12_node} to the BKM ladder"
+            compiled
+                .stage_route_plan
+                .connections
+                .iter()
+                .any(|connection| {
+                    connection.node_id == q12_node
+                        && connection.from.stage_idx == q12_stage_idx
+                        && connection.from.port_idx == q12_port_idx
+                        && connection.to.stage_idx == bkm_stage_idx
+                }),
+            "route plan should connect Q12 {collector_label} node {q12_node} to the BKM ladder"
         );
     }
 }
@@ -1103,7 +1099,7 @@ fn tb303_stage_route_plan_maps_external_ports_to_bkm_vs_boundaries() {
     );
     assert!(
         debug.connection_count > 0,
-        "route plan should retain stage graph connectivity for diagnostics"
+        "route plan should retain stage binding connectivity for diagnostics"
     );
 }
 

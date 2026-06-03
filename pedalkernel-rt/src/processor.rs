@@ -325,10 +325,7 @@ mod tests {
     use crate::dyn_node::DynNode;
     use crate::oversampling::{Oversampler, OversamplingFactor};
     use crate::pot_taper::PotTaper;
-    use crate::routing::{
-        StageGraph, StageGraphConnection, StageGraphNode, StageGraphPort, StageGraphPortDirection,
-        StageRouteEndpointKind, StageRoutePlan,
-    };
+    use crate::routing::{StageRouteEndpointKind, StageRoutePlan};
     use crate::stage::{
         BlackFeedbackStage, IirData, IirPotBinding, IirStage, RootKind, StateSpaceData,
         StateSpaceStage, WdfBoundaryBinding, WdfBoundaryDirection, WdfStage,
@@ -416,41 +413,7 @@ mod tests {
         ];
 
         let stages = vec![Stage::Wdf(target_wdf), Stage::Wdf(source_wdf)];
-        let graph = StageGraph {
-            stages: vec![
-                StageGraphNode {
-                    stage_idx: 0,
-                    kind: "Wdf".to_string(),
-                    label: "target".to_string(),
-                    component_ids: vec![],
-                    ports: vec![StageGraphPort {
-                        label: "input".to_string(),
-                        node_id: 42,
-                        direction: StageGraphPortDirection::Input,
-                    }],
-                },
-                StageGraphNode {
-                    stage_idx: 1,
-                    kind: "Wdf".to_string(),
-                    label: "source".to_string(),
-                    component_ids: vec![],
-                    ports: vec![StageGraphPort {
-                        label: "output".to_string(),
-                        node_id: 42,
-                        direction: StageGraphPortDirection::Output,
-                    }],
-                },
-            ],
-            connections: vec![StageGraphConnection {
-                node_id: 42,
-                from_stage: 0,
-                from_port: 0,
-                to_stage: 1,
-                to_port: 0,
-            }],
-        };
-
-        let plan = StageRoutePlan::from_compiled_parts(&graph, &[], &stages);
+        let plan = StageRoutePlan::from_compiled_parts(&[], &stages);
 
         assert_eq!(plan.connections.len(), 1);
         let connection = &plan.connections[0];
@@ -693,10 +656,8 @@ pub struct NamedPortBinding {
 }
 
 pub use crate::routing::{
-    BindingId, BkmVsRouteBinding, GraphRoutedBkm, PortBinding, Route, StageGraph,
-    StageGraphConnection, StageGraphNode, StageGraphPort, StageGraphPortDirection,
-    StageRouteConnection, StageRouteDebug, StageRouteEndpoint, StageRouteEndpointKind,
-    StageRoutePlan,
+    BindingId, BkmVsRouteBinding, GraphRoutedBkm, PortBinding, Route, StageRouteConnection,
+    StageRouteDebug, StageRouteEndpoint, StageRouteEndpointKind, StageRoutePlan,
 };
 
 /// Control binding: maps a knob label to a parameter in the processing chain.
@@ -1164,12 +1125,7 @@ impl RailSaturation {
 pub struct CompiledPedal {
     /// All processing stages in signal-flow order. One vec, no index indirection.
     pub stages: Vec<Stage>,
-    /// Metadata graph of emitted stages, their boundary ports, and shared-node
-    /// adjacencies. This makes serial routing, BKM coupling, and preserved WDF
-    /// boundary stages inspectable from one place.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub stage_graph: StageGraph,
-    /// Runtime execution plan derived from `stage_graph`.
+    /// Runtime execution plan derived from stage-owned boundary bindings.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub stage_route_plan: StageRoutePlan,
     /// Push-pull differential stages (e.g., Fairchild 670 gain cell).
@@ -1521,8 +1477,7 @@ impl CompiledPedal {
     /// - Precomputes K-table inverse scales (eliminates per-sample division)
     /// - Precomputes StateSpace v_rail (eliminates per-sample division)
     pub fn cache_all_vs_pointers(&mut self) {
-        self.stage_route_plan =
-            StageRoutePlan::from_compiled_parts(&self.stage_graph, &self.ports, &self.stages);
+        self.stage_route_plan = StageRoutePlan::from_compiled_parts(&self.ports, &self.stages);
         for stage_idx in 0..self.stages.len() {
             match &mut self.stages[stage_idx] {
                 Stage::Wdf(ref mut wdf) => {
