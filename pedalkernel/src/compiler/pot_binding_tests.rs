@@ -989,26 +989,17 @@ fn screamer_pot_stage_diagnostic() {
             pedalkernel_rt::processor::Stage::StateSpace(_) => ("SS", false, false, false),
             pedalkernel_rt::processor::Stage::MultiNl(m) => {
                 let t = m
-                    .passive_children
+                    .pot_children
                     .iter()
-                    .any(|c| c.get_pot_position("Tone").is_some())
-                    || m.pot_children
-                        .iter()
-                        .any(|c| c.get_pot_position("Tone").is_some());
+                    .any(|c| c.get_pot_position("Tone").is_some());
                 let l = m
-                    .passive_children
+                    .pot_children
                     .iter()
-                    .any(|c| c.get_pot_position("Level").is_some())
-                    || m.pot_children
-                        .iter()
-                        .any(|c| c.get_pot_position("Level").is_some());
+                    .any(|c| c.get_pot_position("Level").is_some());
                 let d = m
-                    .passive_children
+                    .pot_children
                     .iter()
-                    .any(|c| c.get_pot_position("Drive").is_some())
-                    || m.pot_children
-                        .iter()
-                        .any(|c| c.get_pot_position("Drive").is_some());
+                    .any(|c| c.get_pot_position("Drive").is_some());
                 ("MNL", t, l, d)
             }
             pedalkernel_rt::processor::Stage::BlackFeedback(bf) => {

@@ -33,7 +33,8 @@ use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
 use pedalkernel_rt::boundary_math::{
-    MnaNodeId, MnaPortTerminals, MnaVariableResistorBinding, WdfPortTerminals,
+    MnaNodeId, MnaOnePort, MnaPortTerminals, MnaVariableResistorBinding, OnePortKind,
+    RuntimeOnePort, RuntimeState, WdfPortTerminals,
 };
 use pedalkernel_rt::wdf_leaf::WdfLeaf;
 
@@ -275,6 +276,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_hints(
         &node_to_mna,
         n_nl,
         all_edges,
+        effective_rate,
     );
     let n_passive = passive_children.len();
     let extract_output_nodes = find_output_extract_node(all_edges, &node_set, graph)
@@ -315,6 +317,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_hints(
         n_passive,
         supply_voltage,
         oversampling,
+        effective_rate,
         graph,
         variable_resistor_candidates,
         extract_output_nodes,
@@ -537,11 +540,11 @@ fn stamp_passive_edges(
     vcc_vs_idx: Option<usize>,
 ) -> (
     MnaSystem,
-    Vec<(usize, DynNode)>,
+    Vec<(usize, OnePortKind)>,
     Vec<VariableResistorCandidate>,
 ) {
     let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
-    let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new();
+    let mut reactive_edges: Vec<(usize, OnePortKind)> = Vec::new();
     let mut variable_resistor_candidates: Vec<VariableResistorCandidate> = Vec::new();
 
     for &eidx in all_edges {
@@ -575,11 +578,9 @@ fn stamp_passive_edges(
         } else if let Some(r) = comp.kind.resistance() {
             mna.stamp_resistor(n1, n2, r);
         } else if let Some(c) = comp.kind.capacitance() {
-            let rp = 1.0 / (2.0 * effective_rate * c);
-            reactive_edges.push((eidx, DynNode::Capacitor(None, c, rp)));
+            reactive_edges.push((eidx, OnePortKind::Capacitor(c)));
         } else if let Some(l) = comp.kind.inductance() {
-            let rp = 2.0 * effective_rate * l;
-            reactive_edges.push((eidx, DynNode::Inductor(None, l, rp)));
+            reactive_edges.push((eidx, OnePortKind::Inductor(l)));
         }
     }
 
@@ -614,12 +615,18 @@ fn pot_edge_is_wb_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId
 /// Step 4: Build WDF ports (NL + reactive + adapted input).
 fn build_wdf_ports(
     nl_terminals: &[(NodeId, NodeId)],
-    reactive_edges: &[(usize, DynNode)],
+    reactive_edges: &[(usize, OnePortKind)],
     graph: &CircuitGraph,
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
     n_nl: usize,
     edge_indices: &[usize],
-) -> (Vec<WdfPort>, Vec<WdfPortTerminals>, Vec<DynNode>, Vec<f64>) {
+    effective_rate: f64,
+) -> (
+    Vec<WdfPort>,
+    Vec<WdfPortTerminals>,
+    Vec<MnaOnePort>,
+    Vec<f64>,
+) {
     let r_nl_default = 1000.0;
     let r_adapted = 1000.0;
     let mut ports = Vec::with_capacity(n_nl + reactive_edges.len() + 1);
@@ -639,19 +646,22 @@ fn build_wdf_ports(
     }
 
     // Reactive ports
-    let mut passive_children = Vec::with_capacity(reactive_edges.len());
-    for (eidx, dyn_node) in reactive_edges {
+    let mut passive_one_ports = Vec::with_capacity(reactive_edges.len());
+    for (eidx, kind) in reactive_edges {
         let e = &graph.edges[*eidx];
         let pos = node_to_mna(e.node_a);
         let neg = node_to_mna(e.node_b);
-        let rp = dyn_node.port_resistance();
+        let rp = kind.rp(effective_rate);
         ports.push(WdfPort {
             node_pos: pos,
             node_neg: neg,
             resistance: rp,
         });
         port_node_pairs.push(WdfPortTerminals::maybe_differential(pos, neg));
-        passive_children.push(dyn_node.clone());
+        passive_one_ports.push(MnaOnePort::new(
+            MnaPortTerminals::maybe_differential(pos.map(MnaNodeId::new), neg.map(MnaNodeId::new)),
+            *kind,
+        ));
     }
 
     // Adapted (input voltage source) port.
@@ -679,7 +689,7 @@ fn build_wdf_ports(
     (
         ports,
         port_node_pairs,
-        passive_children,
+        passive_one_ports,
         nl_port_resistances,
     )
 }
@@ -891,7 +901,7 @@ fn assemble_multi_nl_stage(
     scattering: Vec<f64>,
     ports: Vec<WdfPort>,
     port_node_pairs: Vec<WdfPortTerminals>,
-    passive_children: Vec<DynNode>,
+    passive_one_port_specs: Vec<MnaOnePort>,
     nl_devices: Vec<NlDeviceKind>,
     device_groups: Option<MultiNlDeviceGroups>,
     nl_port_resistances: Vec<f64>,
@@ -902,6 +912,7 @@ fn assemble_multi_nl_stage(
     n_passive: usize,
     supply_voltage: f64,
     oversampling: OversamplingFactor,
+    effective_rate: f64,
     graph: &CircuitGraph,
     variable_resistor_candidates: Vec<VariableResistorCandidate>,
     extract_output_nodes: Option<WdfPortTerminals>,
@@ -981,18 +992,22 @@ fn assemble_multi_nl_stage(
         crate::elements::nonlinear::solver::NrWorkspace::new(n_nl)
     };
 
-    let mut passive_children = passive_children;
-    let passive_child_runtime_states = passive_children
-        .iter_mut()
-        .map(|child| child.bind_runtime_state())
+    let mut passive_runtime_state = RuntimeState::new();
+    let passive_one_ports = passive_one_port_specs
+        .into_iter()
+        .map(|spec| {
+            let state_slot = passive_runtime_state.allocate_one_port(spec.kind);
+            RuntimeOnePort::new(spec, state_slot)
+        })
         .collect();
 
     Ok(MultiNlStage {
         adaptor,
         nl_devices,
         nl_port_resistances,
-        passive_children,
-        passive_child_runtime_states,
+        passive_one_ports,
+        passive_runtime_state,
+        passive_sample_rate: effective_rate,
         pot_children: variable_resistor_candidates
             .iter()
             .map(|ps| ps.leaf.clone())

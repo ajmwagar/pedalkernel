@@ -79,17 +79,6 @@ impl Stage {
                 }
             }
             Stage::MultiNl(mnl) => {
-                for (passive_child_idx, child) in mnl.passive_children.iter().enumerate() {
-                    if child.get_pot_position(comp_id).is_some()
-                        || child.get_pot_position(&aw_id).is_some()
-                        || child.get_pot_position(&wb_id).is_some()
-                    {
-                        return Some(ControlTarget::PotInMultiNlStage(
-                            stage_idx,
-                            passive_child_idx,
-                        ));
-                    }
-                }
                 for child in &mnl.pot_children {
                     if child.get_pot_position(comp_id).is_some()
                         || child.get_pot_position(&aw_id).is_some()
@@ -1718,9 +1707,12 @@ impl CompiledPedal {
                     result.extend(wdf.tree.list_editable_leaves());
                 }
                 Stage::MultiNl(mnl) => {
-                    for child in &mnl.passive_children {
-                        result.extend(child.list_editable_leaves());
-                    }
+                    result.extend(mnl.pot_children.iter().flat_map(|child| {
+                        child
+                            .list_editable_leaves()
+                            .into_iter()
+                            .filter(|(_, kind, _)| *kind == "pot")
+                    }));
                 }
                 _ => {}
             }
@@ -1759,18 +1751,8 @@ impl CompiledPedal {
                     }
                 }
                 Stage::MultiNl(mnl) => {
-                    for child in &mut mnl.passive_children {
-                        let hit = match kind {
-                            "resistor" => child.set_resistor(comp_id, value),
-                            "capacitor" => child.set_capacitor(comp_id, value, sample_rate),
-                            "inductor" => child.set_inductor(comp_id, value, sample_rate),
-                            _ => false,
-                        };
-                        if hit {
-                            child.recompute();
-                            mnl.recompute_pending = true;
-                            found = true;
-                        }
+                    if kind == "pot" && mnl.set_pot(comp_id, value) {
+                        found = true;
                     }
                 }
                 _ => {}
@@ -3649,19 +3631,6 @@ impl PedalProcessor for CompiledPedal {
                     });
                 }
                 Stage::MultiNl(mnl) => {
-                    for child in &mnl.passive_children {
-                        child.for_each_leaf(&mut |leaf| {
-                            if leaf.type_tag() == "pot" {
-                                if let Some(id) = leaf.comp_id() {
-                                    if seen.insert(format!("m{}:{}", si, id)) {
-                                        let pos = leaf.pot_position().unwrap_or(0.0);
-                                        let r = leaf.port_resistance();
-                                        out.push((format!("[m{}] {}", si, id), pos, r));
-                                    }
-                                }
-                            }
-                        });
-                    }
                     for child in &mnl.pot_children {
                         child.for_each_leaf(&mut |leaf| {
                             if leaf.type_tag() == "pot" {

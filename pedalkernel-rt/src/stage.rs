@@ -4030,11 +4030,13 @@ pub struct MultiNlStage {
     pub nl_devices: Vec<NlDeviceKind>,
     /// Port resistances for the NL ports.
     pub nl_port_resistances: Vec<crate::Wave>,
-    /// Passive child nodes (capacitors, inductors) needing WDF state updates.
-    pub passive_children: Vec<DynNode>,
-    /// Runtime state for `passive_children`, indexed in the same order.
+    /// Reactive passive one-ports needing WDF state updates.
+    pub passive_one_ports: Vec<RuntimeOnePort<MnaNodeId>>,
+    /// Shared runtime state for `passive_one_ports`.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub passive_child_runtime_states: Vec<RuntimeState>,
+    pub passive_runtime_state: RuntimeState,
+    /// Effective sample rate used to derive reactive port resistances.
+    pub passive_sample_rate: crate::Wave,
     /// Pot DynNodes stored separately — pots are G-matrix conductances, not WDF ports.
     pub pot_children: Vec<DynNode>,
     /// Runtime variable-resistor bindings for MNA G-matrix updates.
@@ -5285,25 +5287,6 @@ pub struct LinearizedOtaData {
 }
 
 impl MultiNlStage {
-    fn ensure_passive_child_runtime_states(&mut self) {
-        if self.passive_child_runtime_states.len() == self.passive_children.len()
-            && self
-                .passive_child_runtime_states
-                .iter()
-                .all(|state| state.states.len() == state.wave_cache.len())
-        {
-            return;
-        }
-
-        self.passive_child_runtime_states.clear();
-        self.passive_child_runtime_states
-            .reserve(self.passive_children.len());
-        for child in &mut self.passive_children {
-            self.passive_child_runtime_states
-                .push(child.bind_runtime_state());
-        }
-    }
-
     /// Process one sample through the multi-NL stage.
     ///
     /// 1. Set control voltages (Vbe/Vgk) on each NL device
@@ -5317,7 +5300,6 @@ impl MultiNlStage {
     pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
-        self.ensure_passive_child_runtime_states();
 
         // ── IIR path: compiled from linear R-node MNA ────────────────────
         // Takes priority over state-space. Correct Q for oscillators,
@@ -5380,7 +5362,7 @@ impl MultiNlStage {
 
         let compensation = self.compensation;
         let n_nl = self.n_nl;
-        let n_passive = self.passive_children.len();
+        let n_passive = self.passive_one_ports.len();
         let output_port = self.output_port;
 
         // Set control voltages on each NL device.
@@ -5446,13 +5428,8 @@ impl MultiNlStage {
 
             // 1. Scatter-up passive children (always — caps need state updates)
             let b_passive = &mut self.work_b_passive[..n_passive];
-            for (k, (child, state)) in self
-                .passive_children
-                .iter_mut()
-                .zip(self.passive_child_runtime_states.iter_mut())
-                .enumerate()
-            {
-                b_passive[k] = child.reflected_with_state(state);
+            for (k, one_port) in self.passive_one_ports.iter().enumerate() {
+                b_passive[k] = one_port.wdf_reflected(&self.passive_runtime_state);
             }
 
             // Adaptive X2: on odd sub-samples, skip known_a + NR solve.
@@ -5589,13 +5566,8 @@ impl MultiNlStage {
             }
 
             // 5. Set incident waves on passive children
-            for (k, (child, state)) in self
-                .passive_children
-                .iter_mut()
-                .zip(self.passive_child_runtime_states.iter_mut())
-                .enumerate()
-            {
-                child.set_incident_with_state(a_all[n_nl + k], state);
+            for (k, one_port) in self.passive_one_ports.iter().enumerate() {
+                one_port.wdf_set_incident(a_all[n_nl + k], &mut self.passive_runtime_state);
             }
 
             // 6. Output extraction
@@ -5749,13 +5721,8 @@ impl MultiNlStage {
 
     /// Reset all internal state.
     pub fn reset(&mut self) {
-        self.ensure_passive_child_runtime_states();
-        for (child, state) in self
-            .passive_children
-            .iter_mut()
-            .zip(self.passive_child_runtime_states.iter_mut())
-        {
-            child.reset_with_state(state);
+        for one_port in &self.passive_one_ports {
+            one_port.wdf_reset(&mut self.passive_runtime_state);
         }
         // Restore physics-based initial guesses instead of zeroing.
         // Zeroing v_prev causes the NR solver to start far from the operating
@@ -5785,7 +5752,7 @@ impl MultiNlStage {
 
     /// Debug dump: print multi-NL stage structure.
     pub fn debug_dump(&self) -> String {
-        let n_passive = self.passive_children.len();
+        let n_passive = self.passive_one_ports.len();
         let n_total = self.n_nl + n_passive + 1; // +1 for adapted port
         let solver_type = if self.device_groups.is_some() {
             "grouped"
@@ -5816,12 +5783,13 @@ impl MultiNlStage {
                 ));
             }
         }
-        for (k, child) in self.passive_children.iter().enumerate() {
+        for (k, one_port) in self.passive_one_ports.iter().enumerate() {
             s.push_str(&format!(
-                "  Passive[{}]: Rp={:.1}Ω, nodes={}\n",
+                "  Passive[{}]: {}, Rp={:.1}Ω, terminals={:?}\n",
                 k,
-                child.port_resistance(),
-                child.node_count()
+                one_port.type_tag(),
+                one_port.rp(self.passive_sample_rate),
+                one_port.spec.terminals
             ));
         }
         for (k, child) in self.pot_children.iter().enumerate() {
@@ -5836,7 +5804,7 @@ impl MultiNlStage {
         }
         // Scattering sub-blocks (compact).
         let n_nl = self.n_nl;
-        let n_passive = self.passive_children.len();
+        let n_passive = self.passive_one_ports.len();
         s.push_str(&format!("  S_nl[{}x{}]: [", n_nl, n_nl));
         for (i, v) in self.scattering.s_nl.iter().enumerate() {
             if i > 0 {
@@ -5992,7 +5960,7 @@ impl MultiNlStage {
     /// Recompute the scattering matrix from stored MNA data after a pot change.
     ///
     /// Rebuilds WdfPort vec with current port resistances from nl_port_resistances
-    /// and passive_children, re-derives the scattering matrix, and updates all
+    /// and passive_one_ports, re-derives the scattering matrix, and updates all
     /// sub-blocks (s_nl, s_nl_passive, s_nl_adapted) and the RTypeAdaptor.
     fn recompute_scattering(&mut self) {
         // ── IIR recompute ────────────────────────────────────────────────
@@ -6075,7 +6043,7 @@ impl MultiNlStage {
 
                 if new_scat.iter().all(|&s| s.is_finite()) {
                     let n_nl = self.n_nl;
-                    let n_passive = self.passive_children.len();
+                    let n_passive = self.passive_one_ports.len();
                     self.scattering =
                         MultiNlScattering::from_full_matrix(&new_scat, n_nl, n_passive);
 
@@ -6091,8 +6059,8 @@ impl MultiNlStage {
 
                     // Rebuild port_resistances for RTypeAdaptor
                     let mut port_resistances = self.nl_port_resistances.clone();
-                    for child in &self.passive_children {
-                        port_resistances.push(child.port_resistance());
+                    for one_port in &self.passive_one_ports {
+                        port_resistances.push(one_port.rp(self.passive_sample_rate));
                     }
                     // Add adapted port resistance if not VS mode
                     if self.vs_injection.is_none() {
@@ -6149,7 +6117,7 @@ impl MultiNlStage {
         }
 
         let n_nl = self.n_nl;
-        let n_passive = self.passive_children.len();
+        let n_passive = self.passive_one_ports.len();
         let use_vs = recompute.vs_source_index.is_some();
         let _has_vcc_vs = recompute.vcc_vs_index.is_some();
         let n_total = if use_vs {
@@ -6168,7 +6136,7 @@ impl MultiNlStage {
 
         // Passive ports (caps/inductors — resistances are fixed for a given sample rate)
         for k in 0..n_passive {
-            let rp = self.passive_children[k].port_resistance();
+            let rp = self.passive_one_ports[k].rp(self.passive_sample_rate);
             ports.push(recompute.port_node_pairs[n_nl + k].to_wdf_port(rp));
         }
 
