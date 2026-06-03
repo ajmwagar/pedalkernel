@@ -2322,6 +2322,11 @@ fn build_passive_rtype_stage(
         return None;
     }
 
+    let mut child_runtime_states = Vec::with_capacity(children.len());
+    for child in &mut children {
+        child_runtime_states.push(child.bind_runtime_state());
+    }
+
     let mut wdf = WdfStage::new(
         DynNode::Resistor(Some("__passive_rtype_dummy".to_string()), 1.0),
         RootKind::PassiveRType {
@@ -2329,6 +2334,7 @@ fn build_passive_rtype_stage(
             vs_injection,
             n_ports: ports.len(),
             children,
+            child_runtime_states,
             output_port: 0,
             extraction_coeffs,
             extraction_vs,

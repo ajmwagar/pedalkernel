@@ -902,6 +902,12 @@ pub enum RootKind {
         /// Pots are stored here for control binding but are NOT WDF ports —
         /// they live in the MNA G matrix as conductance entries.
         children: Vec<DynNode>,
+        /// Runtime state for each child DynNode.
+        ///
+        /// Reactive WDF port children own capacitor/inductor state here. Pot
+        /// children are MNA conductance controls and normally have empty state.
+        #[cfg_attr(feature = "serde", serde(default))]
+        child_runtime_states: Vec<RuntimeState>,
         /// Index into `children` for the output probe port.
         output_port: usize,
         /// Direct node-voltage extraction coefficients for output.
@@ -1677,6 +1683,31 @@ pub struct InputPhotocoupler {
 }
 
 impl WdfStage {
+    fn ensure_passive_rtype_child_runtime_states(&mut self) {
+        let RootKind::PassiveRType {
+            children,
+            child_runtime_states,
+            ..
+        } = &mut self.root
+        else {
+            return;
+        };
+
+        if child_runtime_states.len() == children.len()
+            && child_runtime_states
+                .iter()
+                .all(|state| state.states.len() == state.wave_cache.len())
+        {
+            return;
+        }
+
+        child_runtime_states.clear();
+        child_runtime_states.reserve(children.len());
+        for child in children {
+            child_runtime_states.push(child.bind_runtime_state());
+        }
+    }
+
     /// Check if any DynNode tree in this stage contains a pot with the given ID.
     pub fn has_pot(&self, pot_id: &str) -> bool {
         use crate::helpers::has_pot;
@@ -1728,6 +1759,7 @@ impl WdfStage {
     pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Apply inter-stage transformer voltage gain (1.0 when no transformer).
         let input = input * self.transformer_gain;
+        self.ensure_passive_rtype_child_runtime_states();
 
         // ── OpAmp WDF adaptor path (V_neg = V+ constraint scattering) ──
         // Uses closed-form scattering from the op-amp constraint. Gain emerges
@@ -2132,6 +2164,7 @@ impl WdfStage {
                         vs_injection,
                         n_ports,
                         children,
+                        child_runtime_states,
                         output_port,
                         extraction_coeffs,
                         extraction_vs,
@@ -2140,8 +2173,11 @@ impl WdfStage {
                         let vs_voltage = sample * compensation;
                         let n = *n_ports;
                         // 1. Collect reflected waves from children
-                        let b_children: Vec<crate::Wave> =
-                            children.iter_mut().map(|c| c.reflected()).collect();
+                        let b_children: Vec<crate::Wave> = children
+                            .iter_mut()
+                            .zip(child_runtime_states.iter_mut())
+                            .map(|(child, state)| child.reflected_with_state(state))
+                            .collect();
                         // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
                         let mut a_children = vec![0.0; n];
                         for i in 0..n {
@@ -2152,8 +2188,12 @@ impl WdfStage {
                             a_children[i] = a_i;
                         }
                         // 3. Set incident waves on children
-                        for (child, &a_i) in children.iter_mut().zip(a_children.iter()) {
-                            child.set_incident(a_i);
+                        for ((child, state), &a_i) in children
+                            .iter_mut()
+                            .zip(child_runtime_states.iter_mut())
+                            .zip(a_children.iter())
+                        {
+                            child.set_incident_with_state(a_i, state);
                         }
                         // 4. Output voltage at probe port
                         if !extraction_coeffs.is_empty() {
@@ -2343,6 +2383,7 @@ impl WdfStage {
     pub fn reset(&mut self) {
         self.tree.reset_with_state(&mut self.runtime_state);
         self.oversampler.reset();
+        self.ensure_passive_rtype_child_runtime_states();
         if let Some(ref mut opamp) = self.paired_opamp {
             opamp.reset();
         }
@@ -2361,9 +2402,14 @@ impl WdfStage {
         if let RootKind::Bjt(ref mut bjt) = self.root {
             bjt.reset();
         }
-        if let RootKind::PassiveRType { children, .. } = &mut self.root {
-            for child in children.iter_mut() {
-                child.reset();
+        if let RootKind::PassiveRType {
+            children,
+            child_runtime_states,
+            ..
+        } = &mut self.root
+        {
+            for (child, state) in children.iter_mut().zip(child_runtime_states.iter_mut()) {
+                child.reset_with_state(state);
             }
         }
     }
