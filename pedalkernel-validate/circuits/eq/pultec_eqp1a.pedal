@@ -1,0 +1,147 @@
+# PK:
+# Pultec EQP-1A — Program Equalizer (circuit-accurate reference)
+# Type: equalizer
+#
+# This is the "build-to" reference: a faithful transcription of the classic
+# Pulse Techniques EQP-1A passive program equalizer, including the input/output
+# transformers, the rotary frequency selectors, the shunt inductors, and the
+# 12AX7 / 12AU7 tube makeup-gain amplifier that recovers the ~16 dB insertion
+# loss of the passive network.
+#
+# It targets the full feature set of the .pedal DSL. The current WDF engine does
+# not yet render multi-reactive passive networks (transformers + inductors +
+# tube amp) accurately, so this file is the design target the simplified
+# pultec_eqp1a_rlc.pedal "tests to". The accompanying test only asserts that it
+# PARSES; the compile/response checks are #[ignore]d until the engine catches up.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Architecture (signal flow):
+#
+#   IN ─▶ input xfmr ─▶ [ LF shelf ] ─▶ [ HF boost peak ] ─▶ [ HF atten shelf ]
+#        ─▶ 12AX7 gain ─▶ 12AU7 cathode follower ─▶ output xfmr ─▶ OUT
+#
+# Controls (front panel of the real unit):
+#   • LOW FREQUENCY:  Boost (0–10), Atten (0–10), CPS selector 20/30/60/100 Hz
+#   • HIGH FREQUENCY: Boost (0–10), Bandwidth (sharp↔broad),
+#                     KCS boost selector 3/4/5/8/10/12/16 kHz
+#   • HF ATTEN:       Atten (0–10), selector 5/10/20 kHz
+#
+# The famous "low-end trick": set LF Boost and LF Atten up together at the same
+# CPS frequency — the boost peaks at the corner while the atten cut sits just
+# above it, yielding a resonant deep-low shelf with a slight low-mid scoop.
+#
+# NOTE ON VALUES: capacitor/inductor values below are representative of the
+# EQP-1A's published curves (boost ≈ +13.5 dB LF / +18 dB HF, atten ≈ −17 dB LF /
+# −16 dB HF). Frequency-select caps are derived from the target corner/resonant
+# frequencies; verify against an original schematic before manufacture.
+# ─────────────────────────────────────────────────────────────────────────────
+
+pedal "Pultec EQP-1A" subtitle "Pulse Techniques EQP-1A — passive tube program equalizer" {
+
+  # B+ plate supply for the makeup amplifier (tube rectified in the real unit).
+  supply 285V {
+    impedance: 1k
+    filter_cap: 40u
+    rectifier: tube
+  }
+
+  components {
+    # ── Input transformer (bridging line input, ~1:1) ──────────────────────
+    T_in: transformer(1:1, 500m, dcr=50)
+
+    # ── LOW FREQUENCY section (shelf) ───────────────────────────────────────
+    # Shared CPS rotary selects the shelving capacitor (20/30/60/100 Hz);
+    # the large shunt coil sets the shelf with the boost/atten dividers.
+    CPS:      cap_switched(0.1u, 0.068u, 0.033u, 0.022u)  # 20 / 30 / 60 / 100 Hz
+    L_lf:     inductor(2H)        # large LF shelving coil
+    LF_Boost: pot(10k, a)         # LOW FREQUENCY BOOST
+    LF_Atten: pot(10k, a)         # LOW FREQUENCY ATTEN
+    R_lf:     resistor(56k)       # LF boost/atten network resistor
+
+    # ── HIGH FREQUENCY BOOST section (peaking) ──────────────────────────────
+    # Parallel L||C tank; KCS selects the resonant cap, Bandwidth damps the Q.
+    KCS:      cap_switched(5.6n, 3.9n, 2.7n, 1.5n, 1.0n, 820p, 560p) # 3..16 kHz
+    L_hf:     inductor(47m)       # stock HF peaking coil
+    HF_Boost: pot(10k, a)         # HIGH FREQUENCY BOOST
+    HF_BW:    pot(10k)            # BANDWIDTH (sharp ↔ broad)
+
+    # ── HIGH FREQUENCY ATTEN section (shelf) ────────────────────────────────
+    HFA_sel:  cap_switched(3.3n, 1.5n, 820p)   # 5 / 10 / 20 kHz
+    HF_Atten: pot(10k, a)         # HF ATTEN
+    R_hfa:    resistor(100k)
+
+    # ── Makeup gain: 12AX7 voltage amp + 12AU7 cathode follower ─────────────
+    V1: triode(12ax7)             # gain stage (recovers insertion loss)
+    Rk1: resistor(1.5k)           # cathode bias
+    Ck1: cap(25u, electrolytic)   # cathode bypass
+    Rp1: resistor(100k)           # plate load
+    Rg2: resistor(1M)             # grid leak to follower
+    Cc:  cap(0.047u)              # interstage coupling
+
+    V2: triode(12au7)             # cathode follower (low-Z output drive)
+    Rk2: resistor(10k)            # follower cathode resistor
+
+    # ── Output transformer (to 600 Ω line) ─────────────────────────────────
+    T_out: transformer(4:1, 250m, dcr=40)
+  }
+
+  nets {
+    # Input transformer: primary across in/gnd, secondary feeds the EQ.
+    in -> T_in.a
+    gnd -> T_in.b
+    T_in.c -> n_lf
+    T_in.d -> gnd
+
+    # LOW FREQUENCY shelf: shunt coil + selected cap, scaled by boost/atten pots.
+    n_lf -> L_lf.a, CPS.a, R_lf.a
+    L_lf.b -> LF_Boost.a
+    LF_Boost.b -> gnd
+    CPS.b -> LF_Atten.a
+    LF_Atten.b -> gnd
+    R_lf.b -> n_hf
+
+    # HIGH FREQUENCY BOOST: L||C tank to ground via boost pot; bandwidth damps it.
+    n_hf -> L_hf.a, KCS.a
+    L_hf.b -> HF_Boost.a
+    KCS.b -> HF_Boost.a
+    HF_Boost.b -> gnd
+    n_hf -> HF_BW.a
+    HF_BW.b -> gnd
+    n_hf -> n_hfa
+
+    # HIGH FREQUENCY ATTEN: shunt cap shelf via atten pot.
+    n_hfa -> HFA_sel.a, R_hfa.a
+    HFA_sel.b -> HF_Atten.a
+    HF_Atten.b -> gnd
+    R_hfa.b -> n_amp
+
+    # 12AX7 common-cathode gain stage.
+    n_amp -> V1.grid
+    V1.cathode -> Rk1.a, Ck1.a
+    Rk1.b -> gnd
+    Ck1.b -> gnd
+    V1.plate -> Rp1.a, Cc.a
+    Rp1.b -> vcc
+    Cc.b -> Rg2.a, V2.grid
+    Rg2.b -> gnd
+
+    # 12AU7 cathode follower → output transformer.
+    V2.plate -> vcc
+    V2.cathode -> Rk2.a, T_out.a
+    Rk2.b -> gnd
+    T_out.b -> gnd
+    T_out.c -> out
+    T_out.d -> gnd
+  }
+
+  controls {
+    LF_Boost.position -> "LF Boost"     [0.0, 1.0] = 0.0
+    LF_Atten.position -> "LF Atten"     [0.0, 1.0] = 0.0
+    CPS.position      -> "LF Freq"      [0.0, 3.0] = 3.0   # 20/30/60/100 Hz
+    HF_Boost.position -> "HF Boost"     [0.0, 1.0] = 0.0
+    HF_BW.position    -> "HF Bandwidth" [0.0, 1.0] = 0.5
+    KCS.position      -> "HF Boost Freq" [0.0, 6.0] = 4.0  # 3..16 kHz
+    HF_Atten.position -> "HF Atten"     [0.0, 1.0] = 0.0
+    HFA_sel.position  -> "HF Atten Freq" [0.0, 2.0] = 1.0  # 5/10/20 kHz
+  }
+}

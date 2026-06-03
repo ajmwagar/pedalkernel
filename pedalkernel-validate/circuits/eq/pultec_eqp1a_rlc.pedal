@@ -1,0 +1,108 @@
+# PK:
+# Pultec EQP-1A — Program Equalizer (simplified passive RLC model)
+# Type: equalizer
+#
+# This is the "test-now" RLC reduction of the classic Pultec EQP-1A passive
+# program EQ. It keeps the three iconic sections — low-frequency shelving
+# boost/atten, high-frequency peaking boost with a bandwidth (Q) control, and
+# high-frequency shelving atten — driven from continuous pots, followed by an
+# op-amp makeup-gain stage that recovers the passive network's insertion loss.
+#
+# It deliberately drops the tube makeup amplifier, input/output transformers and
+# the rotary frequency selectors of the real unit (those live in the
+# circuit-accurate reference, pultec_eqp1a.pedal). The goal here is a netlist
+# that COMPILES and stays numerically well-behaved on the current WDF engine so
+# it can carry a real test suite.
+#
+# Famous "low-end trick": raising LF Boost and LF Atten together produces a deep
+# low shelf with a slight low-mid scoop, because the boost peaks at the corner
+# while the atten cut sits just above it.
+#
+# NOTE: the WDF engine does not yet render passive RLC magnitude responses
+# accurately (see pedalkernel/tests/validation.rs — the linear filter suite
+# currently fails), so the companion tests assert structural/stability
+# properties today and keep the frequency-response assertions #[ignore]d until
+# the passive-filter path is fixed.
+
+pedal "Pultec EQP-1A (RLC)" subtitle "Simplified passive RLC model of the EQP-1A program EQ" {
+  supply 15V
+
+  components {
+    # Input series resistor — sets the passive section's source impedance (~3.3k,
+    # standing in for the real unit's bridging input transformer).
+    R_in: resistor(3.3k)
+
+    # ---- Low-frequency program EQ (shelf, ~100 Hz) ----
+    # Boost lifts the lows via a shunt inductor branch; Atten cuts them via a
+    # shunt cap branch. Both are scaled by their pots (used as variable Rs).
+    L_lf:     inductor(500m)   # large LF shelving coil
+    LF_Boost: pot(100k, a)     # audio-taper boost amount
+    C_lf:     cap(220n)        # LF atten shelving cap
+    LF_Atten: pot(100k, a)     # audio-taper atten amount
+
+    # ---- High-frequency boost (peaking, ~10 kHz) + bandwidth ----
+    # Parallel L||C tank to ground forms the peak; HF_BW damps it (Q control).
+    L_hf:     inductor(47m)    # stock-style Pultec HF coil
+    C_hf:     cap(5.6n)        # resonance near ~10 kHz with L_hf
+    HF_Boost: pot(100k, a)     # boost amount
+    HF_BW:    pot(100k)        # bandwidth (sharp <-> broad)
+
+    # ---- High-frequency atten (shelf, ~10 kHz) ----
+    C_hfa:    cap(2.2n)
+    HF_Atten: pot(100k, a)
+
+    # ---- Makeup gain (recovers passive insertion loss, non-inverting ~+21 dB) ----
+    U1: opamp(tl072)
+    Rf: resistor(100k)
+    Rg: resistor(10k)
+
+    # Output load
+    R_out: resistor(100k)
+  }
+
+  nets {
+    in -> R_in.a
+    R_in.b -> n_lf
+
+    # LF boost: shunt inductor to ground through the boost pot
+    n_lf -> L_lf.a
+    L_lf.b -> LF_Boost.a
+    LF_Boost.b -> gnd
+    # LF atten: shunt cap to ground through the atten pot
+    n_lf -> C_lf.a
+    C_lf.b -> LF_Atten.a
+    LF_Atten.b -> gnd
+
+    # pass LF node into the HF boost node
+    n_lf -> n_hf
+
+    # HF boost tank: L || C to ground via boost pot, damped by bandwidth pot
+    n_hf -> L_hf.a, C_hf.a
+    L_hf.b -> HF_Boost.a
+    C_hf.b -> HF_Boost.a
+    HF_Boost.b -> gnd
+    n_hf -> HF_BW.a
+    HF_BW.b -> gnd
+
+    # HF atten shelf: shunt cap to ground via atten pot
+    n_hf -> C_hfa.a, n_out
+    C_hfa.b -> HF_Atten.a
+    HF_Atten.b -> gnd
+
+    # makeup gain (non-inverting): EQ node drives the + input
+    n_out -> U1.pos, R_out.a
+    R_out.b -> gnd
+    U1.neg -> Rg.a, Rf.a
+    Rg.b -> gnd
+    Rf.b -> U1.out
+    U1.out -> out
+  }
+
+  controls {
+    LF_Boost.position -> "LF Boost"     [0.0, 1.0] = 0.0
+    LF_Atten.position -> "LF Atten"     [0.0, 1.0] = 0.0
+    HF_Boost.position -> "HF Boost"     [0.0, 1.0] = 0.0
+    HF_BW.position    -> "HF Bandwidth" [0.0, 1.0] = 0.5
+    HF_Atten.position -> "HF Atten"     [0.0, 1.0] = 0.0
+  }
+}
