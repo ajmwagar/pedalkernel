@@ -14,7 +14,8 @@ use super::graph::{CircuitGraph, NodeId};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
 use pedalkernel_rt::boundary_math::{
-    CircuitMappedPort, GraphNodeId, MnaNodeId, PortSpec, WdfPortTerminals,
+    CircuitMappedPort, GraphNodeId, MnaNodeId, OnePort, OnePortKind, PortSpec, PortTerminals,
+    RuntimeOnePort, RuntimeState, ScatteringPortId, WdfPortTerminals,
 };
 use pedalkernel_rt::stage::{BlockPortBinding, BlockPortRole};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -3053,6 +3054,8 @@ pub(super) fn try_build_blockwise(
         }
 
         let mut coupling_passives = Vec::new();
+        let mut coupling_one_ports = Vec::new();
+        let mut coupling_runtime_state = RuntimeState::new();
         for (comp_id, node_a, node_b, graph_node_a, graph_node_b, capacitance) in
             coupling_passive_specs
         {
@@ -3063,12 +3066,21 @@ pub(super) fn try_build_blockwise(
                 WdfPortTerminals::maybe_differential(node_a, node_b),
                 rp,
             );
-            coupling_passives.push(pedalkernel_rt::stage::CouplingPassive::capacitor(
-                comp_id.clone(),
-                scattering_idx,
-                capacitance,
-                rp,
+            let kind = OnePortKind::Capacitor(capacitance);
+            let state_slot = coupling_runtime_state.allocate_one_port(kind);
+            let one_port_idx = coupling_one_ports.len();
+            coupling_one_ports.push(RuntimeOnePort::new(
+                OnePort::new(
+                    PortTerminals::single_ended(ScatteringPortId::new(scattering_idx)),
+                    kind,
+                ),
+                state_slot,
             ));
+            coupling_passives.push(pedalkernel_rt::stage::CouplingPassive {
+                comp_id: comp_id.clone(),
+                port_idx: scattering_idx,
+                one_port_idx,
+            });
             #[cfg(test)]
             eprintln!(
                 "    passive coupling cap {comp_id}: node={node_a:?}->{node_b:?}, C={capacitance:.3e}, Rp={rp:.1}Ω, scattering_port={scattering_idx}"
@@ -3287,6 +3299,12 @@ pub(super) fn try_build_blockwise(
         // core shortcut bypasses resonance/feedback coupling and is only a
         // future explicit optimization target.
         let diode_ladder_core = None;
+        let mut coupling_passive_by_port = vec![None; n_ports];
+        for (passive_idx, passive) in coupling_passives.iter().enumerate() {
+            if passive.port_idx < n_ports {
+                coupling_passive_by_port[passive.port_idx] = Some(passive_idx);
+            }
+        }
         let bkm = pedalkernel_rt::stage::BlockwiseStage {
             blocks: k_blocks,
             coupling_s: scattering,
@@ -3295,6 +3313,9 @@ pub(super) fn try_build_blockwise(
             block_ports,
             coupling_elements,
             coupling_passives,
+            coupling_one_ports,
+            coupling_runtime_state,
+            coupling_passive_by_port,
             coupling_vcvss,
             n_ports,
             output_block,

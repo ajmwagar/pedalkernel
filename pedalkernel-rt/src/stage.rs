@@ -10,7 +10,8 @@ use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
     sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, MnaNodeId, MnaOnePort,
-    MnaPortTerminals, MnaVariableResistorBinding, OnePortState, WdfPortTerminals,
+    MnaPortTerminals, MnaVariableResistorBinding, OnePortState, RuntimeOnePort, RuntimeState,
+    ScatteringPortId, WdfPortTerminals,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -6376,59 +6377,15 @@ pub struct CouplingElement {
 
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// Metadata binding for a reactive one-port attached to the BKM coupling adaptor.
+///
+/// Runtime equations and state live in `coupling_one_ports` and
+/// `coupling_runtime_state`; this only preserves component identity and the
+/// scattering-port attachment.
 pub struct CouplingPassive {
     pub comp_id: String,
     pub port_idx: usize,
-    pub node: DynNode,
-}
-
-impl CouplingPassive {
-    pub fn capacitor(
-        comp_id: String,
-        port_idx: usize,
-        capacitance: crate::Wave,
-        rp: crate::Wave,
-    ) -> Self {
-        Self {
-            node: DynNode::Capacitor(Some(comp_id.clone()), capacitance, rp),
-            comp_id,
-            port_idx,
-        }
-    }
-
-    #[inline]
-    pub fn reflected(&mut self) -> crate::Wave {
-        self.node.reflected()
-    }
-
-    #[inline]
-    pub fn set_incident(&mut self, incident: crate::Wave) {
-        self.node.set_incident(incident);
-    }
-
-    pub fn reset_incident(&mut self) {
-        self.set_incident(0.0);
-    }
-
-    pub fn runtime_state_len(&self) -> usize {
-        self.node
-            .runtime_state()
-            .map(|runtime_state| runtime_state.len())
-            .unwrap_or(0)
-    }
-
-    pub fn one_port_state(&self) -> Option<OnePortState> {
-        let (runtime, runtime_state) = self.node.one_port_runtime_state(&self.comp_id)?;
-        runtime.wdf_one_port_state(runtime_state)
-    }
-
-    pub fn set_one_port_state(&mut self, state: OnePortState) -> bool {
-        let Some((runtime, runtime_state)) = self.node.one_port_runtime_state_mut(&self.comp_id)
-        else {
-            return false;
-        };
-        runtime.wdf_set_one_port_state(state, runtime_state)
-    }
+    pub one_port_idx: usize,
 }
 
 #[derive(Clone)]
@@ -6575,6 +6532,18 @@ pub struct BlockwiseStage {
     /// adaptor. These carry coupling-cap state such as TB303 C_out.
     #[cfg_attr(feature = "serde", serde(default))]
     pub coupling_passives: Vec<CouplingPassive>,
+    /// Physical one-port runtime bindings for coupling passives.
+    ///
+    /// BKM-specific metadata lives in `coupling_passives`; the capacitor/
+    /// inductor state equations stay in the shared `RuntimeOnePort` methods.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub coupling_one_ports: Vec<RuntimeOnePort<ScatteringPortId>>,
+    /// Shared physical state and WDF wave sidecars for `coupling_one_ports`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub coupling_runtime_state: RuntimeState,
+    /// Dense scattering-port lookup into `coupling_passives`.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub coupling_passive_by_port: Vec<Option<usize>>,
     /// Active linear controlled sources stamped into the coupling MNA.
     ///
     /// These are static for a compiled circuit, but must be retained so pot
@@ -7012,9 +6981,50 @@ impl BlockwiseStage {
     }
 
     fn coupling_passive_index(&self, port_idx: usize) -> Option<usize> {
-        self.coupling_passives
-            .iter()
-            .position(|passive| passive.port_idx == port_idx)
+        self.coupling_passive_by_port
+            .get(port_idx)
+            .and_then(|idx| *idx)
+    }
+
+    fn rebuild_coupling_passive_by_port(&mut self) {
+        self.coupling_passive_by_port.clear();
+        self.coupling_passive_by_port.resize(self.n_ports, None);
+        for (passive_idx, passive) in self.coupling_passives.iter().enumerate() {
+            if passive.port_idx < self.n_ports {
+                self.coupling_passive_by_port[passive.port_idx] = Some(passive_idx);
+            }
+        }
+    }
+
+    pub fn coupling_passive_one_port(
+        &self,
+        passive_idx: usize,
+    ) -> Option<&RuntimeOnePort<ScatteringPortId>> {
+        let one_port_idx = self.coupling_passives.get(passive_idx)?.one_port_idx;
+        self.coupling_one_ports.get(one_port_idx)
+    }
+
+    pub fn coupling_passive_one_port_state(&self, passive_idx: usize) -> Option<OnePortState> {
+        self.coupling_passive_one_port(passive_idx)?
+            .wdf_one_port_state(&self.coupling_runtime_state)
+    }
+
+    pub fn set_coupling_passive_one_port_state(
+        &mut self,
+        passive_idx: usize,
+        state: OnePortState,
+    ) -> bool {
+        let Some(one_port_idx) = self
+            .coupling_passives
+            .get(passive_idx)
+            .map(|passive| passive.one_port_idx)
+        else {
+            return false;
+        };
+        let Some(one_port) = self.coupling_one_ports.get(one_port_idx).copied() else {
+            return false;
+        };
+        one_port.wdf_set_one_port_state(state, &mut self.coupling_runtime_state)
     }
 
     fn output_probe_voltage(&self, fallback: crate::Wave) -> crate::Wave {
@@ -7173,10 +7183,14 @@ impl BlockwiseStage {
             if self.port_is_block_owned(i) {
                 continue;
             } else if let Some(passive_idx) = self.coupling_passive_index(i) {
-                b_out[i] = self.coupling_passives[passive_idx].reflected();
+                let one_port_idx = self.coupling_passives[passive_idx].one_port_idx;
+                let one_port = self.coupling_one_ports[one_port_idx];
+                b_out[i] = one_port.wdf_reflected(&self.coupling_runtime_state);
                 if update_state {
-                    self.coupling_passives[passive_idx]
-                        .set_incident(a.get(i).copied().unwrap_or(0.0));
+                    one_port.wdf_set_incident(
+                        a.get(i).copied().unwrap_or(0.0),
+                        &mut self.coupling_runtime_state,
+                    );
                 }
             } else if self.output_port_index == Some(i) {
                 b_out[i] = a.get(i).copied().unwrap_or(0.0);
@@ -7779,8 +7793,10 @@ impl BlockwiseStage {
             for block in &mut self.blocks {
                 block.dc_offset = 0.0;
             }
-            for passive in &mut self.coupling_passives {
-                passive.reset_incident();
+            for passive in &self.coupling_passives {
+                if let Some(one_port) = self.coupling_one_ports.get(passive.one_port_idx) {
+                    one_port.wdf_reset(&mut self.coupling_runtime_state);
+                }
             }
             for v in &mut self.work_a {
                 *v = 0.0;
@@ -7848,6 +7864,7 @@ impl BlockwiseStage {
     pub fn init_buffers(&mut self) {
         self.ensure_block_ports();
         let n = self.n_ports;
+        self.rebuild_coupling_passive_by_port();
         if self.work_b.len() != n {
             self.work_b = vec![0.0; n];
             self.work_a = vec![0.0; n];
@@ -8267,6 +8284,9 @@ mod blockwise_stage_tests {
             block_ports: vec![vec![BlockPortBinding::primary(0)]],
             coupling_elements: vec![],
             coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
@@ -8437,6 +8457,9 @@ mod blockwise_stage_tests {
             block_ports: vec![vec![BlockPortBinding::primary(0)]],
             coupling_elements: vec![],
             coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
@@ -8483,6 +8506,9 @@ mod blockwise_stage_tests {
             block_ports: vec![vec![BlockPortBinding::primary(0)]],
             coupling_elements: vec![],
             coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
@@ -8540,6 +8566,9 @@ mod blockwise_stage_tests {
                 invert_control: true,
             }],
             coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
             n_ports: 2,
             output_block: 0,
@@ -8595,6 +8624,9 @@ mod blockwise_stage_tests {
                 invert_control: true,
             }],
             coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
@@ -8631,6 +8663,16 @@ mod blockwise_stage_tests {
 
     #[test]
     fn bkm_coupling_cap_uses_wdf_passive_port_state() {
+        let mut coupling_runtime_state = RuntimeState::new();
+        let cap_kind = crate::boundary_math::OnePortKind::Capacitor(100e-9);
+        let cap_slot = coupling_runtime_state.allocate_one_port(cap_kind);
+        let coupling_one_ports = vec![RuntimeOnePort::new(
+            crate::boundary_math::OnePort::new(
+                crate::boundary_math::PortTerminals::single_ended(ScatteringPortId::new(0)),
+                cap_kind,
+            ),
+            cap_slot,
+        )];
         let mut stage = BlockwiseStage {
             blocks: vec![],
             coupling_s: vec![1.0],
@@ -8641,12 +8683,14 @@ mod blockwise_stage_tests {
             )],
             block_ports: vec![],
             coupling_elements: vec![],
-            coupling_passives: vec![CouplingPassive::capacitor(
-                alloc::string::String::from("C_out"),
-                0,
-                100e-9,
-                104.1666666667,
-            )],
+            coupling_passives: vec![CouplingPassive {
+                comp_id: alloc::string::String::from("C_out"),
+                port_idx: 0,
+                one_port_idx: 0,
+            }],
+            coupling_one_ports,
+            coupling_runtime_state,
+            coupling_passive_by_port: vec![Some(0)],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 0,
@@ -8680,9 +8724,9 @@ mod blockwise_stage_tests {
             b[0].abs() < 1.0e-12,
             "a WDF capacitor reflects its previous state before accepting the new incident wave"
         );
-        assert_eq!(stage.coupling_passives[0].runtime_state_len(), 1);
+        assert_eq!(stage.coupling_runtime_state.len(), 1);
         assert_eq!(
-            stage.coupling_passives[0].one_port_state(),
+            stage.coupling_passive_one_port_state(0),
             Some(OnePortState::CapacitorVoltage(0.625)),
             "BKM coupling cap state should be inspectable as shared OnePortState"
         );
@@ -8693,7 +8737,7 @@ mod blockwise_stage_tests {
             "BKM coupling caps must behave as passive WDF ports: b_C[n+1] = a_C[n]"
         );
         assert!(
-            stage.coupling_passives[0].set_one_port_state(OnePortState::CapacitorVoltage(-0.25)),
+            stage.set_coupling_passive_one_port_state(0, OnePortState::CapacitorVoltage(-0.25)),
             "BKM coupling cap should update through shared OnePortState"
         );
         stage.coupled_eval_b_for_a(&[0.5], &[], 0.0, &[], false, &mut b);
@@ -8726,6 +8770,9 @@ mod blockwise_stage_tests {
                 invert_control: false,
             }],
             coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
             n_ports: 2,
             output_block: 0,
@@ -8806,6 +8853,9 @@ mod blockwise_stage_tests {
                 invert_control: true,
             }],
             coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
             n_ports: 3,
             output_block: 0,
@@ -8926,6 +8976,9 @@ mod blockwise_stage_tests {
                 invert_control: false,
             }],
             coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
             coupling_vcvss: vec![],
             n_ports: 1,
             output_block: 1,

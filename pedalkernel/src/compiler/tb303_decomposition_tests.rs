@@ -1500,18 +1500,6 @@ fn tb303_coupling_caps_land_near_stinchcombe_shelf_corners() {
         })
         .expect("TB303 should compile to BKM");
 
-    fn dyn_node_cap_value(node: &pedalkernel_rt::dyn_node::DynNode) -> Option<f64> {
-        match node.structural() {
-            pedalkernel_rt::dyn_node::DynNode::Leaf(
-                pedalkernel_rt::wdf_leaf::LeafKind::OnePort { runtime, .. },
-            ) => match runtime.spec.kind {
-                pedalkernel_rt::boundary_math::OnePortKind::Capacitor(farads) => Some(farads),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
     let cap_value = |id: &str| -> f64 {
         bkm.coupling_passives
             .iter()
@@ -1519,7 +1507,11 @@ fn tb303_coupling_caps_land_near_stinchcombe_shelf_corners() {
                 if passive.comp_id != id {
                     return None;
                 }
-                dyn_node_cap_value(&passive.node)
+                let one_port = bkm.coupling_one_ports.get(passive.one_port_idx)?;
+                match one_port.spec.kind {
+                    pedalkernel_rt::boundary_math::OnePortKind::Capacitor(farads) => Some(farads),
+                    _ => None,
+                }
             })
             .unwrap_or_else(|| panic!("missing coupling cap {id} in BKM passives"))
     };
