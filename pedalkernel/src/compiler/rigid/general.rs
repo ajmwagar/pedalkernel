@@ -213,9 +213,15 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_hints(
     // Step 1: Collect unique MNA nodes
     let mut node_set = collect_mna_nodes(all_edges, graph);
 
+    let diode_ladder_filter = differential_diode_ladder_component_filter(all_edges, graph);
+
     // Step 2: Classify NL devices (also returns component labels for hint matching)
-    let (nl_kinds, nl_comp_labels, nl_terminals) =
-        classify_nl_devices(all_edges, graph, &mut node_set)?;
+    let (nl_kinds, nl_comp_labels, nl_terminals) = classify_nl_devices(
+        all_edges,
+        graph,
+        &mut node_set,
+        diode_ladder_filter.as_ref(),
+    )?;
     let n_nl = nl_terminals.len();
 
     // Step 3: Check VCC, build MNA, stamp passives
@@ -363,6 +369,56 @@ fn find_output_extract_node(
     })
 }
 
+fn differential_diode_ladder_component_filter(
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+) -> Option<HashSet<usize>> {
+    let mut seen = HashSet::new();
+    let diode_connected_bjt_count = all_edges
+        .iter()
+        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
+        .filter(|&&eidx| {
+            let edge = &graph.edges[eidx];
+            if !seen.insert(edge.comp_idx) {
+                return false;
+            }
+            let comp = &graph.components[edge.comp_idx];
+            comp.kind
+                .classify_nonlinear(
+                    &comp.id,
+                    edge.node_a,
+                    edge.node_b,
+                    graph.gnd_node,
+                    &graph.node_names,
+                )
+                .is_some_and(|(kind, _)| is_diode_connected_bjt(&kind))
+        })
+        .count();
+    if diode_connected_bjt_count < 8 {
+        return None;
+    }
+
+    let plan = super::super::blockwise::analyze_blockwise(all_edges, graph)?;
+    let mut rung_components = HashSet::new();
+    let mut rung_count = 0usize;
+
+    for block in &plan.blocks {
+        let super::super::blockwise::BlockTopology::DifferentialDiodeRung {
+            left_comp_idx,
+            right_comp_idx,
+            ..
+        } = block.topology
+        else {
+            continue;
+        };
+        rung_count += 1;
+        rung_components.insert(left_comp_idx);
+        rung_components.insert(right_comp_idx);
+    }
+
+    (rung_count >= 4).then_some(rung_components)
+}
+
 /// Step 2: Classify NL edges into NonlinearKind + terminal pairs.
 /// Deduplicates by comp_idx for multi-port devices (BJTs have 2 edges).
 /// Also returns a parallel Vec of component labels (e.g. "Q1") for hint matching.
@@ -370,6 +426,7 @@ fn classify_nl_devices(
     all_edges: &[usize],
     graph: &CircuitGraph,
     node_set: &mut Vec<NodeId>,
+    comp_filter: Option<&HashSet<usize>>,
 ) -> Result<(Vec<NonlinearKind>, Vec<String>, Vec<(NodeId, NodeId)>), String> {
     let mut nl_kinds = Vec::new();
     let mut nl_comp_labels = Vec::new();
@@ -381,6 +438,9 @@ fn classify_nl_devices(
             continue;
         }
         let e = &graph.edges[eidx];
+        if comp_filter.is_some_and(|filter| !filter.contains(&e.comp_idx)) {
+            continue;
+        }
         if !seen.insert(e.comp_idx) {
             continue;
         }
