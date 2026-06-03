@@ -1411,7 +1411,7 @@ fn tb303_bkm_does_not_stamp_reactive_coupling_as_resistor() {
             .iter()
             .any(|passive| passive.comp_id == "C_out"
                 && passive.port_idx < bkm.n_ports
-                && bkm.coupling_ports[passive.port_idx].node_pos.is_some()),
+                && bkm.coupling_ports[passive.port_idx].mna.terminals.pos.is_some()),
         "reactive BKM boundary edge C_out must be represented as a passive WDF coupling port; passives={:?}",
         bkm.coupling_passives
             .iter()
@@ -1582,29 +1582,32 @@ fn tb303_bkm_differential_rungs_have_side_aware_block_ports() {
         "BKM should expose one coupling port per rung"
     );
     assert_eq!(
-        bkm.block_port_indices.len(),
+        bkm.block_ports.len(),
         bkm.blocks.len(),
         "BKM must track which coupling ports are owned by each block"
     );
 
-    for (block_idx, ports) in bkm.block_port_indices.iter().enumerate() {
+    for (block_idx, ports) in bkm.block_ports.iter().enumerate() {
         assert!(
             ports.len() >= 3,
             "differential rung block {block_idx} should expose bottom left/right side ports plus a top differential port, got {ports:?}"
         );
-        let bottom_left = &bkm.coupling_ports[ports[0]];
-        let bottom_right = &bkm.coupling_ports[ports[1]];
-        let top_diff = &bkm.coupling_ports[ports[2]];
+        let (bottom_left_idx, bottom_right_idx, top_diff_idx) = bkm
+            .differential_rung_ports(block_idx)
+            .expect("differential rung ports should be role-bound");
+        let bottom_left = &bkm.coupling_ports[bottom_left_idx];
+        let bottom_right = &bkm.coupling_ports[bottom_right_idx];
+        let top_diff = &bkm.coupling_ports[top_diff_idx];
         assert!(
-            bottom_left.node_pos.is_some() && bottom_left.node_neg.is_none(),
+            bottom_left.mna.terminals.pos.is_some() && bottom_left.mna.terminals.neg.is_none(),
             "bottom-left rung port should be single-ended for asymmetric passive feedback, got {bottom_left:?}"
         );
         assert!(
-            bottom_right.node_pos.is_some() && bottom_right.node_neg.is_none(),
+            bottom_right.mna.terminals.pos.is_some() && bottom_right.mna.terminals.neg.is_none(),
             "bottom-right rung port should be single-ended for asymmetric passive feedback, got {bottom_right:?}"
         );
         assert!(
-            top_diff.node_pos.is_some() && top_diff.node_neg.is_some(),
+            top_diff.mna.terminals.pos.is_some() && top_diff.mna.terminals.neg.is_some(),
             "top rung port should stay floating/differential for symmetric inter-rung coupling, got {top_diff:?}"
         );
     }
@@ -1719,14 +1722,11 @@ fn tb303_bkm_differential_rungs_own_multiple_coupling_ports() {
         })
         .expect("TB303 should compile to BKM");
 
-    eprintln!(
-        "  TB303 BKM block_port_indices: {:?}",
-        bkm.block_port_indices
-    );
+    eprintln!("  TB303 BKM block_ports: {:?}", bkm.block_ports);
 
     assert_eq!(bkm.blocks.len(), 4);
     assert!(
-        bkm.block_port_indices.iter().all(|ports| ports.len() >= 3),
+        bkm.block_ports.iter().all(|ports| ports.len() >= 3),
         "each differential rung must own bottom left/right ports and a top differential port"
     );
     assert!(
@@ -2380,15 +2380,15 @@ fn q12_to_two_rung_differential_diode_ladder_routes_into_bkm_boundary() {
     let q12_left = graph.node_names["Q12L.collector"];
     let q12_right = graph.node_names["Q12R.collector"];
     assert!(
-        bkm.coupling_port_nodes.iter().any(|terminals| {
-            let (pos, neg) = terminals.as_tuple();
+        bkm.coupling_ports.iter().any(|port| {
+            let (pos, neg) = port.graph.as_tuple();
             pos == Some(q12_left) || neg == Some(q12_left)
         }),
         "Q12 left collector node should be a BKM coupling boundary"
     );
     assert!(
-        bkm.coupling_port_nodes.iter().any(|terminals| {
-            let (pos, neg) = terminals.as_tuple();
+        bkm.coupling_ports.iter().any(|port| {
+            let (pos, neg) = port.graph.as_tuple();
             pos == Some(q12_right) || neg == Some(q12_right)
         }),
         "Q12 right collector node should be a BKM coupling boundary"
@@ -2438,20 +2438,20 @@ fn q12_to_two_rung_differential_diode_ladder_handoff_is_lowpass() {
         }
         let mut bkm = bkm.expect("routed target stage should be BKM");
         let left_port_indices: Vec<usize> = bkm
-            .coupling_port_nodes
+            .coupling_ports
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, terminals)| {
-                let (pos, neg) = terminals.as_tuple();
+            .filter_map(|(port_idx, port)| {
+                let (pos, neg) = port.graph.as_tuple();
                 (pos == Some(q12_left) || neg == Some(q12_left)).then_some(port_idx)
             })
             .collect();
         let right_port_indices: Vec<usize> = bkm
-            .coupling_port_nodes
+            .coupling_ports
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, terminals)| {
-                let (pos, neg) = terminals.as_tuple();
+            .filter_map(|(port_idx, port)| {
+                let (pos, neg) = port.graph.as_tuple();
                 (pos == Some(q12_right) || neg == Some(q12_right)).then_some(port_idx)
             })
             .collect();
@@ -2582,20 +2582,20 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
             })
             .expect("BKM stage");
         let left_port_indices: Vec<usize> = bkm
-            .coupling_port_nodes
+            .coupling_ports
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, terminals)| {
-                let (pos, neg) = terminals.as_tuple();
+            .filter_map(|(port_idx, port)| {
+                let (pos, neg) = port.graph.as_tuple();
                 (pos == Some(q12_left) || neg == Some(q12_left)).then_some(port_idx)
             })
             .collect();
         let right_port_indices: Vec<usize> = bkm
-            .coupling_port_nodes
+            .coupling_ports
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, terminals)| {
-                let (pos, neg) = terminals.as_tuple();
+            .filter_map(|(port_idx, port)| {
+                let (pos, neg) = port.graph.as_tuple();
                 (pos == Some(q12_right) || neg == Some(q12_right)).then_some(port_idx)
             })
             .collect();
@@ -2606,7 +2606,7 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
         assert!(
             bkm.differential_rung_ports(0).is_some() && bkm.differential_rung_ports(1).is_some(),
             "Q12 fixture should expose two three-port differential rung blocks, got {:?}",
-            bkm.block_port_indices
+            bkm.block_ports
         );
         let first_rung_ports = bkm
             .differential_rung_ports(0)
@@ -5294,7 +5294,7 @@ fn tb303_resonance_recomputes_bkm_coupling_matrix() {
         .expect("BKM stage");
 
     let before = bkm.coupling_s.clone();
-    let block_ports = bkm.block_port_indices.clone();
+    let block_ports = bkm.block_ports.clone();
     assert!(
         bkm.set_pot("Resonance", 0.7),
         "BKM should accept coupling-network pot changes"
@@ -5361,15 +5361,11 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
         })
         .expect("BKM stage");
 
-    assert_eq!(
-        bkm.block_port_indices.len(),
-        4,
-        "expected four ladder rung blocks"
-    );
+    assert_eq!(bkm.block_ports.len(), 4, "expected four ladder rung blocks");
     assert!(
-        bkm.block_port_indices.iter().all(|ports| ports.len() >= 2),
+        bkm.block_ports.iter().all(|ports| ports.len() >= 2),
         "differential ladder rungs should expose at least bottom/top coupling ports: {:?}",
-        bkm.block_port_indices
+        bkm.block_ports
     );
 
     assert!(bkm.set_pot("Resonance", 0.0));
@@ -5377,12 +5373,12 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
     assert!(bkm.set_pot("Resonance", 0.95));
     let n = bkm.n_ports;
 
-    let input_ports = bkm.block_port_indices[0].clone();
+    let input_ports: Vec<_> = bkm.block_port_ids(0).collect();
     assert!(
         bkm.feedback_port_map.is_empty(),
         "coupled BKM resonance must be represented by passive coupling elements, not synthetic feedback source ports"
     );
-    let output_ports = bkm.block_port_indices[bkm.output_block].clone();
+    let output_ports: Vec<_> = bkm.block_port_ids(bkm.output_block).collect();
     let mut best_feedback_delta = 0.0f64;
     let mut best_feedback_entry = None;
     for &row in &input_ports {

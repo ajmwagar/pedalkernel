@@ -112,9 +112,8 @@ pub struct StampContext<'a> {
     pub internal_node_base: usize,
     /// Sample rate in Hz.
     pub sample_rate: f64,
-    /// Capacitor stamps for state-space integration. Components can push
-    /// (node_pos, node_neg, capacitance) to add internal compensation caps.
-    pub cap_stamps: Option<&'a mut Vec<(Option<usize>, Option<usize>, f64)>>,
+    /// Capacitor stamps for state-space integration.
+    pub cap_stamps: Option<&'a mut Vec<pedalkernel_rt::boundary_math::CapStamp<usize>>>,
 }
 
 /// Pin configuration for validation and graph construction.

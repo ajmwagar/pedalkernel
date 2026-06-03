@@ -12,6 +12,7 @@
 //!
 //! Zero allocation on the hot path — all buffers are pre-sized.
 
+use crate::boundary_math::CapStamp;
 use crate::elements::*;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -1374,7 +1375,7 @@ impl MnaSystem {
     /// Returns `None` if the circuit can't be compiled to IIR.
     pub fn build_iir(
         &self,
-        cap_stamps: &[(Option<usize>, Option<usize>, crate::Wave)],
+        cap_stamps: &[CapStamp<usize>],
         vs_idx: usize,
         output_pos: Option<usize>,
         _output_neg: Option<usize>,
@@ -1389,7 +1390,9 @@ impl MnaSystem {
 
         // Build C_cap matrix
         let mut c_cap = vec![0.0; n_nodes * n_nodes];
-        for &(pos, neg, cap) in cap_stamps {
+        for stamp in cap_stamps {
+            let (pos, neg) = stamp.terminals.as_tuple();
+            let cap = stamp.capacitance;
             if let Some(p) = pos {
                 c_cap[p * n_nodes + p] += cap;
                 if let Some(n) = neg {
@@ -1493,8 +1496,8 @@ impl MnaSystem {
             // Gain: ratio of feedback R to smallest series R at a cap node
             let r_in = cap_stamps
                 .iter()
-                .filter_map(|&(pos, _, _)| {
-                    pos.map(|p| {
+                .filter_map(|stamp| {
+                    stamp.terminals.pos.map(|p| {
                         let g = self.g_matrix[p * n_nodes + p];
                         if g > 1e-15 {
                             1.0 / g
@@ -1547,7 +1550,7 @@ impl MnaSystem {
     /// - `n_states` = num_nodes + num_vsources
     pub fn build_state_space_matrices(
         &self,
-        cap_stamps: &[(Option<usize>, Option<usize>, crate::Wave)],
+        cap_stamps: &[CapStamp<usize>],
         vs_idx: usize,
         output_pos: Option<usize>,
         output_neg: Option<usize>,
@@ -1566,7 +1569,9 @@ impl MnaSystem {
 
         // Build C_cap matrix (n_nodes × n_nodes) from capacitance stamps.
         let mut c_cap = vec![0.0; n_nodes * n_nodes];
-        for &(pos, neg, cap) in cap_stamps {
+        for stamp in cap_stamps {
+            let (pos, neg) = stamp.terminals.as_tuple();
+            let cap = stamp.capacitance;
             if let Some(p) = pos {
                 c_cap[p * n_nodes + p] += cap;
                 if let Some(n) = neg {
@@ -2786,6 +2791,18 @@ impl WdfSingleDiodeClipper {
 #[cfg(all(test, DISABLED_needs_pedalkernel))]
 mod tests {
     use super::*;
+    use crate::boundary_math::WdfPortTerminals;
+
+    fn cap_stamp(
+        pos: Option<usize>,
+        neg: Option<usize>,
+        capacitance: crate::Wave,
+    ) -> CapStamp<usize> {
+        CapStamp {
+            terminals: WdfPortTerminals::maybe_differential(pos, neg),
+            capacitance,
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Transformer adaptor tests
@@ -3175,7 +3192,7 @@ mod tests {
 
         // Cap at neg node — NOT at VS node. This is the stray/coupling cap
         // at the virtual ground point. Large enough to not affect gain.
-        let cap_stamps = vec![(Some(1), None, 1e-6)];
+        let cap_stamps = vec![cap_stamp(Some(1), None, 1e-6)];
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
@@ -3222,7 +3239,7 @@ mod tests {
         mna.stamp_vcvs(Some(1), Some(2), Some(2), None, 200_000.0, 75.0, 1);
 
         // Cap at output node (makes it a state)
-        let cap_stamps = vec![(Some(2), None, 1e-6)];
+        let cap_stamps = vec![cap_stamp(Some(2), None, 1e-6)];
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
 
@@ -3262,7 +3279,7 @@ mod tests {
         mna.stamp_vcvs(Some(1), Some(2), Some(3), None, 200_000.0, 75.0, 1);
 
         // Cap at pos node (between input and VCVS pos)
-        let cap_stamps = vec![(Some(1), None, 1e-6)];
+        let cap_stamps = vec![cap_stamp(Some(1), None, 1e-6)];
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(3), None, fs);
 
@@ -3305,7 +3322,7 @@ mod tests {
         // Feedback cap between neg(1) and out(2) — this IS the integrating element.
         // No coupling cap needed — R provides the input path, VS node has no cap.
         let cap_stamps = vec![
-            (Some(1), Some(2), c), // feedback cap (integrator)
+            cap_stamp(Some(1), Some(2), c), // feedback cap (integrator)
         ];
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
@@ -3953,7 +3970,7 @@ mod tests {
         mna.stamp_resistor(Some(0), Some(1), r);
         mna.stamp_voltage_source(Some(0), None, 0);
 
-        let cap_stamps = vec![(Some(1), None, c)];
+        let cap_stamps = vec![cap_stamp(Some(1), None, c)];
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);
 
@@ -3993,8 +4010,8 @@ mod tests {
         mna.stamp_voltage_source(Some(0), None, 0);
 
         let cap_stamps = vec![
-            (Some(1), None, c1), // C1: mid to gnd
-            (Some(2), None, c2), // C2: output to gnd
+            cap_stamp(Some(1), None, c1), // C1: mid to gnd
+            cap_stamp(Some(2), None, c2), // C2: output to gnd
         ];
         let (a_d, _b_d, _c_out, n_states, _d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(2), None, fs);
@@ -4061,7 +4078,7 @@ mod tests {
         mna.stamp_voltage_source(Some(4), None, 1);
 
         // Caps: C1 (neg→gnd), C2 (junction→gnd)
-        let cap_stamps = vec![(Some(3), None, c1), (Some(0), None, c2)];
+        let cap_stamps = vec![cap_stamp(Some(3), None, c1), cap_stamp(Some(0), None, c2)];
 
         let (a_d, b_d, c_out, n_states, d_ft) =
             mna.build_state_space_matrices(&cap_stamps, 0, Some(1), None, fs);

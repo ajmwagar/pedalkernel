@@ -207,7 +207,12 @@ impl Component for OpAmp {
         // algebraically and the Q drops to ~0.3.
         if model.output_capacitance > 0.0 {
             if let Some(ref mut caps) = ctx.cap_stamps {
-                caps.push((out_mna, None, model.output_capacitance));
+                caps.push(pedalkernel_rt::boundary_math::CapStamp {
+                    terminals: pedalkernel_rt::boundary_math::WdfPortTerminals::maybe_single_ended(
+                        out_mna,
+                    ),
+                    capacitance: model.output_capacitance,
+                });
             }
         }
 

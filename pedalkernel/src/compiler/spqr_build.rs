@@ -20,6 +20,7 @@ use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
+use pedalkernel_rt::boundary_math::{PotStamp as RuntimePotStamp, WdfPortTerminals};
 use pedalkernel_rt::tree::{MnaSystem, WdfPort};
 
 fn output_coupling_dc_block(
@@ -1665,10 +1666,11 @@ fn build_compiled_stage_graph(
                 let mut labels: Vec<String> = (0..bkm.n_ports)
                     .map(|idx| format!("coupling_{idx}"))
                     .collect();
-                for (block_idx, owned_ports) in bkm.block_port_indices.iter().enumerate() {
-                    for (local_idx, &port_idx) in owned_ports.iter().enumerate() {
+                for (block_idx, owned_ports) in bkm.block_ports.iter().enumerate() {
+                    for (local_idx, binding) in owned_ports.iter().enumerate() {
+                        let port_idx = binding.port_idx;
                         if let Some(label) = labels.get_mut(port_idx) {
-                            *label = format!("block{block_idx}_port{local_idx}");
+                            *label = format!("block{block_idx}_{:?}_{local_idx}", binding.role);
                         }
                     }
                 }
@@ -1682,7 +1684,10 @@ fn build_compiled_stage_graph(
                         *label = format!("passive:{}", passive.comp_id);
                     }
                 }
-                for (port_idx, terminals) in bkm.coupling_port_nodes.iter().enumerate() {
+                for port_idx in 0..bkm.coupling_ports.len() {
+                    let Some(terminals) = bkm.coupling_port_graph_terminals(port_idx) else {
+                        continue;
+                    };
                     let (node_pos, node_neg) = terminals.as_tuple();
                     if let Some(node_id) = node_pos {
                         ports.push(StageGraphPort {
@@ -2267,7 +2272,11 @@ fn build_passive_rtype_stage(
                 }
                 let r = child.port_resistance();
                 mna.stamp_resistor(n1, n2, r);
-                pot_stamps.push((children.len(), n1, n2, 1.0 / r));
+                pot_stamps.push(RuntimePotStamp {
+                    child_idx: children.len(),
+                    terminals: WdfPortTerminals::maybe_differential(n1, n2),
+                    conductance: 1.0 / r,
+                });
                 children.push(child);
                 seen_pots.insert(edge.comp_idx);
             }
@@ -2286,8 +2295,8 @@ fn build_passive_rtype_stage(
             });
             children.insert(ports.len() - 1, child);
             for stamp in &mut pot_stamps {
-                if stamp.0 >= ports.len() - 1 {
-                    stamp.0 += 1;
+                if stamp.child_idx >= ports.len() - 1 {
+                    stamp.child_idx += 1;
                 }
             }
         }

@@ -380,7 +380,10 @@ impl StageRoutePlan {
                 if !connected_to_bkm {
                     continue;
                 }
-                for (port_idx, terminals) in bkm.coupling_port_nodes.iter().enumerate() {
+                for port_idx in 0..bkm.coupling_ports.len() {
+                    let Some(terminals) = bkm.coupling_port_graph_terminals(port_idx) else {
+                        continue;
+                    };
                     let (node_pos, node_neg) = terminals.as_tuple();
                     if node_pos == Some(node) || node_neg == Some(node) {
                         target_coupling_port_indices.push(port_idx);
@@ -429,10 +432,11 @@ impl StageRoutePlan {
         let Some(node) = node else {
             return Vec::new();
         };
-        bkm.coupling_port_nodes
+        bkm.coupling_ports
             .iter()
             .enumerate()
-            .filter_map(|(port_idx, terminals)| {
+            .filter_map(|(port_idx, port)| {
+                let terminals = port.graph;
                 let (node_pos, node_neg) = terminals.as_tuple();
                 (node_pos == Some(node) || node_neg == Some(node)).then_some(port_idx)
             })
@@ -454,7 +458,7 @@ impl StageRoutePlan {
             }
         }
         for passive in &bkm.coupling_passives {
-            if let Some(terminals) = bkm.coupling_port_nodes.get(passive.port_idx) {
+            if let Some(terminals) = bkm.coupling_port_graph_terminals(passive.port_idx) {
                 let (a, b) = terminals.as_tuple();
                 let (Some(a), Some(b)) = (a, b) else {
                     continue;

@@ -13,8 +13,23 @@ use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
 use super::spqr_build::BuiltStage;
-use pedalkernel_rt::boundary_math::WdfPortTerminals;
+use pedalkernel_rt::boundary_math::{MappedPort, PortSpec, WdfPortTerminals};
+use pedalkernel_rt::stage::{BlockPortBinding, BlockPortRole};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
+fn push_coupling_port(
+    ports: &mut Vec<MappedPort<usize, usize>>,
+    graph_terminals: WdfPortTerminals,
+    mna_terminals: WdfPortTerminals,
+    resistance: f64,
+) -> usize {
+    let port_idx = ports.len();
+    ports.push(MappedPort::new(
+        graph_terminals,
+        PortSpec::new(mna_terminals, resistance),
+    ));
+    port_idx
+}
 
 /// Compiler-recognized topology for a blockwise nonlinear unit.
 ///
@@ -2771,8 +2786,7 @@ pub(super) fn try_build_blockwise(
         // ── Define WDF ports ────────────────────────────────────────────
         // One port per block (at the block's coupling node) + one adapted VS port
         let mut ports = Vec::new();
-        let mut coupling_port_nodes: Vec<WdfPortTerminals> = Vec::new();
-        let mut block_port_indices: Vec<Vec<usize>> = vec![Vec::new(); n_blocks];
+        let mut block_ports: Vec<Vec<BlockPortBinding>> = vec![Vec::new(); n_blocks];
 
         // Block ports: find each block's UNIQUE coupling node.
         //
@@ -2799,13 +2813,18 @@ pub(super) fn try_build_blockwise(
                     ("bottom_left", rung_ports.bottom_left),
                     ("bottom_right", rung_ports.bottom_right),
                 ] {
-                    let port_idx = ports.len();
-                    block_port_indices[kbi].push(port_idx);
-                    ports.push(
-                        WdfPortTerminals::maybe_single_ended(node_to_mna.get(&node).copied())
-                            .to_wdf_port(rp),
+                    let port_idx = push_coupling_port(
+                        &mut ports,
+                        WdfPortTerminals::single_ended(node),
+                        WdfPortTerminals::maybe_single_ended(node_to_mna.get(&node).copied()),
+                        rp,
                     );
-                    coupling_port_nodes.push(WdfPortTerminals::single_ended(node));
+                    let role = if label == "bottom_left" {
+                        BlockPortRole::BottomLeft
+                    } else {
+                        BlockPortRole::BottomRight
+                    };
+                    block_ports[kbi].push(BlockPortBinding::new(port_idx, role));
                     #[cfg(test)]
                     eprintln!(
                         "    block {bi}: {label}=Some({node}) → mna_node={:?}, scattering_port={port_idx}",
@@ -2816,12 +2835,15 @@ pub(super) fn try_build_blockwise(
                     node_to_mna.get(&rung_ports.top_left),
                     node_to_mna.get(&rung_ports.top_right),
                 ) {
-                    let port_idx = ports.len();
-                    block_port_indices[kbi].push(port_idx);
-                    ports.push(WdfPortTerminals::differential(left_idx, right_idx).to_wdf_port(rp));
-                    coupling_port_nodes.push(WdfPortTerminals::differential(
-                        rung_ports.top_left,
-                        rung_ports.top_right,
+                    let port_idx = push_coupling_port(
+                        &mut ports,
+                        WdfPortTerminals::differential(rung_ports.top_left, rung_ports.top_right),
+                        WdfPortTerminals::differential(left_idx, right_idx),
+                        rp,
+                    );
+                    block_ports[kbi].push(BlockPortBinding::new(
+                        port_idx,
+                        BlockPortRole::TopDifferential,
                     ));
                     #[cfg(test)]
                     eprintln!(
@@ -2854,24 +2876,42 @@ pub(super) fn try_build_blockwise(
             if let Some(pn) = best_node {
                 let mna_idx = node_to_mna[&pn];
                 let rp = k_blocks[kbi].nominal_vs_rp;
-                ports.push(WdfPortTerminals::single_ended(mna_idx).to_wdf_port(rp));
-                coupling_port_nodes.push(WdfPortTerminals::single_ended(pn));
-                block_port_indices[kbi].push(ports.len() - 1);
+                let port_idx = push_coupling_port(
+                    &mut ports,
+                    WdfPortTerminals::single_ended(pn),
+                    WdfPortTerminals::single_ended(mna_idx),
+                    rp,
+                );
+                block_ports[kbi].push(BlockPortBinding::primary(port_idx));
                 used_ports.insert(pn);
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=Some({pn}) → mna_node=Some({mna_idx})");
             } else {
                 // Block has no unique node in coupling — use dummy
-                ports.push(WdfPortTerminals::grounded().to_wdf_port(1000.0));
-                coupling_port_nodes.push(WdfPortTerminals::grounded());
-                block_port_indices[kbi].push(ports.len() - 1);
+                let port_idx = push_coupling_port(
+                    &mut ports,
+                    WdfPortTerminals::grounded(),
+                    WdfPortTerminals::grounded(),
+                    1000.0,
+                );
+                block_ports[kbi].push(BlockPortBinding::primary(port_idx));
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=None (no unique coupling node)");
             }
         }
 
-        let use_coupled_solve =
-            n_blocks >= 2 && block_port_indices.iter().all(|ports| ports.len() == 3);
+        let use_coupled_solve = n_blocks >= 2
+            && block_ports.iter().all(|ports| {
+                ports
+                    .iter()
+                    .any(|binding| binding.role == BlockPortRole::BottomLeft)
+                    && ports
+                        .iter()
+                        .any(|binding| binding.role == BlockPortRole::BottomRight)
+                    && ports
+                        .iter()
+                        .any(|binding| binding.role == BlockPortRole::TopDifferential)
+            });
         let mut feedback_port_map: Vec<(usize, usize)> = Vec::new();
         let output_block_idx = n_blocks.saturating_sub(1);
         for (bi, block) in plan.blocks.iter().enumerate() {
@@ -2898,13 +2938,16 @@ pub(super) fn try_build_blockwise(
             let Some(&mna_idx) = node_to_mna.get(&output_node) else {
                 continue;
             };
-            let scattering_idx = ports.len();
             let rp = k_blocks
                 .get(bi)
                 .map(|block| block.rp)
                 .unwrap_or(r_source_cascade);
-            ports.push(WdfPortTerminals::single_ended(mna_idx).to_wdf_port(rp));
-            coupling_port_nodes.push(WdfPortTerminals::single_ended(output_node));
+            let scattering_idx = push_coupling_port(
+                &mut ports,
+                WdfPortTerminals::single_ended(output_node),
+                WdfPortTerminals::single_ended(mna_idx),
+                rp,
+            );
             feedback_port_map.push((bi, scattering_idx));
             used_ports.insert(output_node);
             #[cfg(test)]
@@ -2964,9 +3007,12 @@ pub(super) fn try_build_blockwise(
 
             if let Some(Some(mna_idx)) = edge_and_node {
                 let rp = port_def.impedance.unwrap_or(1.0);
-                let scattering_idx = ports.len();
-                ports.push(WdfPortTerminals::single_ended(mna_idx).to_wdf_port(rp));
-                coupling_port_nodes.push(WdfPortTerminals::single_ended(port_node));
+                let scattering_idx = push_coupling_port(
+                    &mut ports,
+                    WdfPortTerminals::single_ended(port_node),
+                    WdfPortTerminals::single_ended(mna_idx),
+                    rp,
+                );
                 vs_port_map.push((port_def.name.clone(), scattering_idx));
                 #[cfg(test)]
                 eprintln!("    VS port '{}': mna_node={mna_idx}, Rp={rp:.0}Ω, scattering_port={scattering_idx}",
@@ -2977,9 +3023,13 @@ pub(super) fn try_build_blockwise(
         // Fallback: if no audio input port was found, add a default VS at graph.in_node
         if vs_port_map.is_empty() {
             let vs_node = node_to_mna.get(&graph.in_node).copied();
-            ports.push(WdfPortTerminals::maybe_single_ended(vs_node).to_wdf_port(1.0));
-            coupling_port_nodes.push(WdfPortTerminals::single_ended(graph.in_node));
-            vs_port_map.push(("audio_in".to_string(), ports.len() - 1));
+            let scattering_idx = push_coupling_port(
+                &mut ports,
+                WdfPortTerminals::single_ended(graph.in_node),
+                WdfPortTerminals::maybe_single_ended(vs_node),
+                1.0,
+            );
+            vs_port_map.push(("audio_in".to_string(), scattering_idx));
         }
 
         // Supply VS ports: VCC and other supply nodes that appear in coupling.
@@ -2987,9 +3037,12 @@ pub(super) fn try_build_blockwise(
         // Without them, R_bias grounds the block ports → diodes off → dead filter.
         for (supply_node, voltage) in &supply_nodes_in_coupling {
             if let Some(&mna_idx) = node_to_mna.get(supply_node) {
-                let scattering_idx = ports.len();
-                ports.push(WdfPortTerminals::single_ended(mna_idx).to_wdf_port(1.0));
-                coupling_port_nodes.push(WdfPortTerminals::single_ended(*supply_node));
+                let scattering_idx = push_coupling_port(
+                    &mut ports,
+                    WdfPortTerminals::single_ended(*supply_node),
+                    WdfPortTerminals::single_ended(mna_idx),
+                    1.0,
+                );
                 let name = format!("_supply_{}", supply_node);
                 vs_port_map.push((name, scattering_idx));
                 #[cfg(test)]
@@ -3002,12 +3055,12 @@ pub(super) fn try_build_blockwise(
             coupling_passive_specs
         {
             let rp = 1.0 / (2.0 * sample_rate * capacitance);
-            let scattering_idx = ports.len();
-            ports.push(WdfPortTerminals::maybe_differential(node_a, node_b).to_wdf_port(rp));
-            coupling_port_nodes.push(WdfPortTerminals::maybe_differential(
-                graph_node_a,
-                graph_node_b,
-            ));
+            let scattering_idx = push_coupling_port(
+                &mut ports,
+                WdfPortTerminals::maybe_differential(graph_node_a, graph_node_b),
+                WdfPortTerminals::maybe_differential(node_a, node_b),
+                rp,
+            );
             coupling_passives.push(pedalkernel_rt::stage::CouplingPassive {
                 comp_id: comp_id.clone(),
                 port_idx: scattering_idx,
@@ -3023,18 +3076,21 @@ pub(super) fn try_build_blockwise(
             );
         }
 
-        let output_extraction_nodes = node_to_mna
+        let output_extraction_terminals = node_to_mna
             .get(&graph.out_node)
             .copied()
-            .map(|mna_idx| (Some(mna_idx), None));
-        let output_extraction_coeffs = output_extraction_nodes
-            .map(|(out_pos, out_neg)| {
+            .map(WdfPortTerminals::single_ended);
+        let output_extraction_coeffs = output_extraction_terminals
+            .map(|terminals| {
+                let (out_pos, out_neg) = terminals.as_tuple();
                 #[cfg(test)]
                 eprintln!(
                     "    output extraction: graph.out_node={} → mna_node={out_pos:?}",
                     graph.out_node
                 );
-                mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
+                let wdf_ports: Vec<_> =
+                    ports.iter().copied().map(MappedPort::to_wdf_port).collect();
+                mna.derive_node_extraction_coeffs(&wdf_ports, out_pos, out_neg)
             })
             .unwrap_or_default();
         let output_port_index = None;
@@ -3043,7 +3099,8 @@ pub(super) fn try_build_blockwise(
         eprintln!("  [blockwise] coupling scattering: {n_ports} ports");
 
         // Derive scattering matrix
-        let scattering = mna.derive_scattering_matrix_general(&ports);
+        let wdf_ports: Vec<_> = ports.iter().copied().map(MappedPort::to_wdf_port).collect();
+        let scattering = mna.derive_scattering_matrix_general(&wdf_ports);
 
         // Validate scattering matrix
         let all_finite = scattering.iter().all(|&v| v.is_finite());
@@ -3061,8 +3118,6 @@ pub(super) fn try_build_blockwise(
                 eprintln!("    row {i}: {row:.4?}");
             }
         }
-
-        let coupling_rp: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
 
         let first_block_port_node = plan
             .blocks
@@ -3229,11 +3284,9 @@ pub(super) fn try_build_blockwise(
         let bkm = pedalkernel_rt::stage::BlockwiseStage {
             blocks: k_blocks,
             coupling_s: scattering,
-            coupling_rp,
             coupling_n_mna: n_mna,
             coupling_ports: ports,
-            coupling_port_nodes,
-            block_port_indices,
+            block_ports,
             coupling_elements,
             coupling_passives,
             coupling_vcvss,
@@ -3241,7 +3294,7 @@ pub(super) fn try_build_blockwise(
             output_block,
             output_port_index,
             output_extraction_coeffs,
-            output_extraction_nodes,
+            output_extraction_terminals,
             supply_voltage,
             vs_port_map,
             cutoff_cv_port,

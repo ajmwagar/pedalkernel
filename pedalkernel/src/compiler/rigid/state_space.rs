@@ -12,6 +12,7 @@ use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use super::super::stage::{StateSpaceData, StateSpacePotBinding, StateSpaceStage};
 use super::mna_builder::build_mna;
+use pedalkernel_rt::boundary_math::WdfPortTerminals;
 
 /// Build a state-space stage from a linear rigid R-node with 3+ reactive elements.
 ///
@@ -84,8 +85,10 @@ pub(in crate::compiler) fn build_state_space_stage(
             max_r: pot.max_r,
             taper: pot.taper,
             position,
-            node_pos: node_to_mna(e.node_a),
-            node_neg: node_to_mna(e.node_b),
+            terminals: WdfPortTerminals::maybe_differential(
+                node_to_mna(e.node_a),
+                node_to_mna(e.node_b),
+            ),
             conductance,
         });
     }

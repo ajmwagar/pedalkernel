@@ -139,6 +139,16 @@ impl<G, M> MappedPort<G, M> {
     }
 }
 
+impl MappedPort<usize, usize> {
+    pub const fn to_wdf_port(self) -> crate::tree::WdfPort {
+        self.mna.to_wdf_port()
+    }
+
+    pub const fn resistance(self) -> Wave {
+        self.mna.resistance
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CapStamp<N> {
