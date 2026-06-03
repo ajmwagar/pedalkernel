@@ -274,7 +274,10 @@ mod tests {
     use crate::dyn_node::DynNode;
     use crate::oversampling::{Oversampler, OversamplingFactor};
     use crate::pot_taper::PotTaper;
-    use crate::stage::{BlackFeedbackStage, IirData, IirPotBinding, IirStage, RootKind, WdfStage};
+    use crate::stage::{
+        BlackFeedbackStage, IirData, IirPotBinding, IirStage, RootKind, StateSpaceData,
+        StateSpaceStage, WdfStage,
+    };
 
     #[test]
     fn stage_owned_wdf_pot_discovery_and_mutation() {
@@ -386,6 +389,47 @@ mod tests {
         assert_eq!(iir_stage.state_map.transformed_state_count, 2);
         assert_eq!(iir_stage.state_map.folded_or_eliminated_count, 0);
         assert!(iir_stage
+            .state_map
+            .physical_one_ports
+            .iter()
+            .all(|one_port| matches!(one_port.spec.kind, OnePortKind::Capacitor(_))));
+    }
+
+    #[test]
+    fn state_space_stage_binds_physical_one_port_state_map() {
+        let reactive_one_ports = alloc::vec![
+            OnePort::new(
+                PortTerminals::single_ended(MnaNodeId::new(0)),
+                OnePortKind::Capacitor(100e-9),
+            ),
+            OnePort::new(
+                PortTerminals::single_ended(MnaNodeId::new(1)),
+                OnePortKind::Capacitor(47e-9),
+            ),
+        ];
+        let ss = StateSpaceData {
+            x: alloc::vec![0.0, 0.0],
+            a_matrix: alloc::vec![0.5, 0.0, 0.0, 0.25],
+            b_vector: alloc::vec![1.0, 0.0],
+            c_vector: alloc::vec![0.0, 1.0],
+            n_states: 2,
+            reactive_one_ports,
+            vs_idx: 0,
+            output_pos: Some(1),
+            output_neg: None,
+            sample_rate: 48_000.0,
+            d_feedthrough: 0.0,
+            prev_output: 0.0,
+            variable_resistors: alloc::vec![],
+        };
+
+        let stage = StateSpaceStage::new(ss, 9.0);
+
+        assert_eq!(stage.one_port_states().len(), 2);
+        assert_eq!(stage.state_map.physical_state_count, 2);
+        assert_eq!(stage.state_map.vector_state_count, 2);
+        assert_eq!(stage.state_map.folded_or_eliminated_count, 0);
+        assert!(stage
             .state_map
             .physical_one_ports
             .iter()

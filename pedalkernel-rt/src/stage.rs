@@ -4925,6 +4925,12 @@ pub struct StateSpaceStage {
     /// Previous input sample for bilinear state-space forms that carry both
     /// u[n+1] and u[n] input vectors.
     prev_input: crate::Wave,
+    /// Canonical physical reactive state slots for this StateSpace source network.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub runtime_state: RuntimeState,
+    /// Explicit mapping from physical one-port state to the MNA state vector.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub state_map: StateSpaceStateMap,
 }
 
 #[derive(Debug, Clone)]
@@ -4938,11 +4944,46 @@ pub struct StateSpacePotBinding {
     pub conductance: crate::Wave,
 }
 
+/// How a StateSpace stage's vector relates to physical reactive one-ports.
+///
+/// The MNA-derived state vector may contain node voltages, voltage-source
+/// currents, or a transformed basis. This map keeps the physical reactive
+/// one-port vocabulary attached without requiring a one-to-one assumption.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StateSpaceStateMap {
+    /// Physical reactive one-ports that contributed to this state-space form.
+    pub physical_one_ports: Vec<RuntimeOnePort<MnaNodeId>>,
+    /// Number of canonical physical one-port slots allocated in `runtime_state`.
+    pub physical_state_count: usize,
+    /// Number of entries in the state-space vector.
+    pub vector_state_count: usize,
+    /// Number of physical states folded, transformed, or eliminated by this form.
+    pub folded_or_eliminated_count: usize,
+}
+
+impl StateSpaceStateMap {
+    pub fn empty(vector_state_count: usize) -> Self {
+        Self {
+            physical_one_ports: Vec::new(),
+            physical_state_count: 0,
+            vector_state_count,
+            folded_or_eliminated_count: 0,
+        }
+    }
+}
+
+impl Default for StateSpaceStateMap {
+    fn default() -> Self {
+        Self::empty(0)
+    }
+}
+
 impl StateSpaceStage {
     pub fn new(ss: StateSpaceData, supply_voltage: crate::Wave) -> Self {
         let n = ss.n_states;
         let v_rail = (supply_voltage * 0.5 - 1.5).max(0.5);
-        Self {
+        let mut stage = Self {
             ss,
             work: vec![0.0; n],
             compensation: 1.0,
@@ -4956,7 +4997,41 @@ impl StateSpaceStage {
             v_rail,
             inv_v_rail: 1.0 / v_rail,
             prev_input: 0.0,
+            runtime_state: RuntimeState::new(),
+            state_map: StateSpaceStateMap::empty(n),
+        };
+        stage.bind_physical_one_ports();
+        stage
+    }
+
+    pub fn bind_physical_one_ports(&mut self) {
+        let mut runtime_state = RuntimeState::new();
+        let mut physical_one_ports = Vec::new();
+
+        for one_port in &self.ss.reactive_one_ports {
+            let state_slot = runtime_state.allocate_one_port(one_port.kind);
+            physical_one_ports.push(RuntimeOnePort::new(*one_port, state_slot));
         }
+
+        let physical_state_count = runtime_state.len();
+        let vector_state_count = self.ss.n_states;
+        let folded_or_eliminated_count = physical_state_count.saturating_sub(vector_state_count);
+
+        self.runtime_state = runtime_state;
+        self.state_map = StateSpaceStateMap {
+            physical_one_ports,
+            physical_state_count,
+            vector_state_count,
+            folded_or_eliminated_count,
+        };
+    }
+
+    pub fn one_port_states(&self) -> &[OnePortState] {
+        &self.runtime_state.states
+    }
+
+    pub fn one_port_states_mut(&mut self) -> &mut [OnePortState] {
+        &mut self.runtime_state.states
     }
 
     /// Recompute cached v_rail after supply voltage change or deserialization.
