@@ -206,13 +206,13 @@ impl Component for OpAmp {
         // energy recirculation. Without this, the output is eliminated
         // algebraically and the Q drops to ~0.3.
         if model.output_capacitance > 0.0 {
-            if let Some(ref mut caps) = ctx.cap_stamps {
-                caps.push(pedalkernel_rt::boundary_math::MnaCapStamp {
-                    terminals: pedalkernel_rt::boundary_math::MnaPortTerminals::maybe_single_ended(
+            if let Some(ref mut reactive_one_ports) = ctx.reactive_one_ports {
+                reactive_one_ports.push(pedalkernel_rt::boundary_math::OnePort::new(
+                    pedalkernel_rt::boundary_math::MnaPortTerminals::maybe_single_ended(
                         out_mna.map(pedalkernel_rt::boundary_math::MnaNodeId::new),
                     ),
-                    capacitance: model.output_capacitance,
-                });
+                    pedalkernel_rt::boundary_math::OnePortKind::Capacitor(model.output_capacitance),
+                ));
             }
         }
 

@@ -9,8 +9,8 @@ use crate::tree::{MnaSystem, RTypeAdaptor, ScatteringInterpolationTable, WdfPort
 use crate::{PedalProcessor, Wave};
 
 use crate::boundary_math::{
-    sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, MnaCapStamp, MnaNodeId,
-    MnaPortTerminals, MnaPotStamp, WdfPortTerminals,
+    sum_incident_offsets, BoundaryIncidentDrive, CircuitMappedPort, MnaNodeId, MnaOnePort,
+    MnaPortTerminals, MnaVariableResistorBinding, WdfPortTerminals,
 };
 use crate::dyn_node::DynNode;
 use crate::helpers::balance_parallel_vs;
@@ -917,9 +917,8 @@ pub enum RootKind {
         recompute_mna: Option<MnaSystem>,
         /// WDF port definitions (reactive ports only, not pots).
         recompute_ports: Option<Vec<WdfPort>>,
-        /// Pot conductance stamps in the MNA G matrix.
-        /// Used to unstamp old conductance and re-stamp new conductance on pot change.
-        pot_stamps: Vec<MnaPotStamp>,
+        /// Runtime variable-resistor bindings for MNA G-matrix updates.
+        variable_resistors: Vec<MnaVariableResistorBinding>,
         /// Dirty flag: set when a pot changes, cleared after S re-derivation.
         needs_recompute: bool,
         /// Precomputed interpolation table for single-pot stages.
@@ -2381,7 +2380,7 @@ impl WdfStage {
 
     /// Re-derive scattering matrix from stored MNA after pot changes.
     ///
-    /// Unstamps old pot conductances from the G matrix, stamps new ones based
+    /// Removes old variable-resistor conductances from the G matrix, adds new ones based
     /// on current DynNode::Pot resistance, then re-derives S and k vectors.
     pub fn flush_passive_rtype_recompute(&mut self) {
         if let RootKind::PassiveRType {
@@ -2390,7 +2389,7 @@ impl WdfStage {
             needs_recompute,
             recompute_mna,
             recompute_ports,
-            pot_stamps,
+            variable_resistors,
             children,
             interp_table,
             extraction_coeffs,
@@ -2406,8 +2405,8 @@ impl WdfStage {
 
             // Fast path: interpolation table lookup for single-pot stages
             if let Some(table) = interp_table.as_ref() {
-                if pot_stamps.len() == 1 {
-                    let pot_r = children[pot_stamps[0].child_idx].port_resistance();
+                if variable_resistors.len() == 1 {
+                    let pot_r = children[variable_resistors[0].child_idx].port_resistance();
                     let (new_s, new_k) = table.lookup(pot_r);
                     *scattering = new_s;
                     *vs_injection = new_k;
@@ -2419,16 +2418,14 @@ impl WdfStage {
             // Slow path: full MNA re-derivation
             if let (Some(mna), Some(ports)) = (recompute_mna.as_mut(), recompute_ports.as_ref()) {
                 let n = mna.num_nodes;
-                // Update G matrix: unstamp old conductance, stamp new
-                for stamp in pot_stamps.iter_mut() {
-                    let new_r = children[stamp.child_idx].port_resistance();
+                // Update G matrix: remove old conductance, add new.
+                for binding in variable_resistors.iter_mut() {
+                    let new_r = children[binding.child_idx].port_resistance();
                     let new_g = 1.0 / new_r;
-                    let (n1, n2) = stamp.terminals.raw().as_tuple();
-                    // Unstamp old conductance
-                    stamp_g(&mut mna.g_matrix, n, n1, n2, -stamp.conductance);
-                    // Stamp new conductance
+                    let (n1, n2) = binding.terminals.raw().as_tuple();
+                    stamp_g(&mut mna.g_matrix, n, n1, n2, -binding.conductance);
                     stamp_g(&mut mna.g_matrix, n, n1, n2, new_g);
-                    stamp.conductance = new_g;
+                    binding.conductance = new_g;
                 }
                 // Re-derive scattering matrix and VS injection vector
                 let (new_s, new_k) = mna.derive_scattering_and_vs_injection(ports, 0);
@@ -3828,9 +3825,8 @@ pub struct MultiNlStage {
     pub passive_children: Vec<DynNode>,
     /// Pot DynNodes stored separately — pots are G-matrix conductances, not WDF ports.
     pub pot_children: Vec<DynNode>,
-    /// MNA stamp tracking for pots.
-    /// Used for delta-updating the G matrix when pot values change.
-    pub pot_mna_stamps: Vec<MnaPotStamp>,
+    /// Runtime variable-resistor bindings for MNA G-matrix updates.
+    pub variable_resistors: Vec<MnaVariableResistorBinding>,
     /// Number of nonlinear ports.
     pub n_nl: usize,
     /// Warm-start voltages for NR solver.
@@ -4863,7 +4859,7 @@ impl StateSpaceStage {
         binding.conductance = new_g;
 
         let (a_d, b_d, c_out, n_states, d_feedthrough) = mna.build_state_space_matrices(
-            &self.ss.cap_stamps,
+            &self.ss.reactive_one_ports,
             self.ss.vs_idx,
             self.ss.output_pos,
             self.ss.output_neg,
@@ -4936,8 +4932,8 @@ pub struct StateSpaceData {
     pub c_vector: Vec<crate::Wave>,
     /// Number of state variables (num_nodes + num_vsources).
     pub n_states: usize,
-    /// Capacitance stamps for rebuilding state-space when G changes.
-    pub cap_stamps: Vec<MnaCapStamp>,
+    /// Reactive one-ports for rebuilding state-space when G changes.
+    pub reactive_one_ports: Vec<MnaOnePort>,
     /// VS branch index for input.
     pub vs_idx: usize,
     /// Output extraction nodes.
@@ -4950,8 +4946,8 @@ pub struct StateSpaceData {
     /// Previous output for 2-sample Nyquist filter.
     /// Removes parasitic -1 eigenvalue oscillation from unreduced systems.
     pub prev_output: crate::Wave,
-    /// Pot stamps for delta-updating G when pots change.
-    pub pot_stamps: Vec<MnaPotStamp>,
+    /// Runtime variable-resistor bindings for delta-updating G when controls change.
+    pub variable_resistors: Vec<MnaVariableResistorBinding>,
 }
 
 /// Data for a linearized OTA whose gm is stamped into the R-type MNA.
@@ -5681,7 +5677,7 @@ impl MultiNlStage {
             if let Some(ref mut recompute) = self.recompute_data {
                 // Delta-update pot conductances in the MNA G matrix.
                 let n_mna = recompute.mna.num_nodes;
-                for ps in &mut ss.pot_stamps {
+                for ps in &mut ss.variable_resistors {
                     let (pos, neg) = ps.terminals.raw().as_tuple();
                     let new_r = self.pot_children[ps.child_idx].port_resistance();
                     let new_g = 1.0 / new_r;
@@ -5704,7 +5700,7 @@ impl MultiNlStage {
                     }
                 }
                 let (a_d, b_d, c_out, _n, d_ft) = recompute.mna.build_state_space_matrices(
-                    &ss.cap_stamps,
+                    &ss.reactive_one_ports,
                     ss.vs_idx,
                     ss.output_pos,
                     ss.output_neg,
@@ -5722,8 +5718,9 @@ impl MultiNlStage {
 
         // Fast path: interpolation table lookup for single-pot stages
         if let Some(ref table) = self.interp_table {
-            if self.pot_mna_stamps.len() == 1 {
-                let pot_r = self.pot_children[self.pot_mna_stamps[0].child_idx].port_resistance();
+            if self.variable_resistors.len() == 1 {
+                let pot_r =
+                    self.pot_children[self.variable_resistors[0].child_idx].port_resistance();
                 let (new_scat, new_vs) = table.lookup(pot_r);
 
                 if new_scat.iter().all(|&s| s.is_finite()) {
@@ -5778,7 +5775,7 @@ impl MultiNlStage {
 
         // Delta-update pot conductances in the MNA G matrix.
         let n_mna = recompute.mna.num_nodes;
-        for ps in &mut self.pot_mna_stamps {
+        for ps in &mut self.variable_resistors {
             let child_idx = ps.child_idx;
             let (pos, neg) = ps.terminals.raw().as_tuple();
             let new_r = self.pot_children[child_idx].port_resistance();

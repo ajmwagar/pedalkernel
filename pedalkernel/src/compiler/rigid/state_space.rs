@@ -28,12 +28,12 @@ pub(in crate::compiler) fn build_state_space_stage(
 ) -> Result<StateSpaceStage, String> {
     let built = build_mna(edge_indices, pendant_trees, graph, sample_rate)?;
 
-    if built.cap_stamps.is_empty() {
+    if built.reactive_one_ports.is_empty() {
         return Err("StateSpace: no reactive elements found".to_string());
     }
 
     let (a_d, b_d, c_out, n_states, d_feedthrough) = built.mna.build_state_space_matrices(
-        &built.cap_stamps,
+        &built.reactive_one_ports,
         built.vs_idx,
         built.output_mna,
         None,
@@ -99,14 +99,14 @@ pub(in crate::compiler) fn build_state_space_stage(
         b_vector: b_d,
         c_vector: c_out,
         n_states,
-        cap_stamps: built.cap_stamps,
+        reactive_one_ports: built.reactive_one_ports,
         vs_idx: built.vs_idx,
         output_pos: built.output_mna,
         output_neg: None,
         sample_rate,
         d_feedthrough,
         prev_output: 0.0,
-        pot_stamps: Vec::new(),
+        variable_resistors: Vec::new(),
     };
 
     let mut stage = StateSpaceStage::new(ss, supply_voltage);

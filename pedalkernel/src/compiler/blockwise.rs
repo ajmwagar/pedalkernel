@@ -2650,7 +2650,7 @@ pub(super) fn try_build_blockwise(
                 vsrc_base: vsource_index,
                 internal_node_base: 0,
                 sample_rate,
-                cap_stamps: None,
+                reactive_one_ports: None,
             };
             comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
 

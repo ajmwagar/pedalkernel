@@ -70,8 +70,11 @@ pub type GraphPortTerminals = PortTerminals<GraphNodeId>;
 pub type MnaPortTerminals = PortTerminals<MnaNodeId>;
 pub type ScatteringPortTerminals = PortTerminals<ScatteringPortId>;
 pub type CircuitMappedPort = MappedPort<GraphNodeId, MnaNodeId>;
-pub type MnaCapStamp = CapStamp<MnaNodeId>;
-pub type MnaPotStamp = PotStamp<MnaNodeId>;
+pub type MnaOnePort = OnePort<MnaNodeId>;
+pub type MnaVariableResistorBinding = VariableResistorBinding<MnaNodeId>;
+pub type Ohms = Wave;
+pub type Farads = Wave;
+pub type Henries = Wave;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -109,6 +112,62 @@ pub struct PortTerminals<N> {
 }
 
 pub type WdfPortTerminals = PortTerminals<usize>;
+
+/// A physical WDF one-port component value.
+///
+/// Runtime state is stored separately: capacitors keep voltage, while inductors
+/// typically keep the wave-scaled current `R_port * I_L`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum OnePortKind {
+    Resistor(Ohms),
+    Capacitor(Farads),
+    Inductor(Henries),
+}
+
+impl OnePortKind {
+    pub const fn is_stateful(self) -> bool {
+        matches!(self, Self::Capacitor(_) | Self::Inductor(_))
+    }
+}
+
+/// A two-terminal one-port in node domain `N`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct OnePort<N> {
+    pub terminals: PortTerminals<N>,
+    pub kind: OnePortKind,
+}
+
+impl<N> OnePort<N> {
+    pub const fn new(terminals: PortTerminals<N>, kind: OnePortKind) -> Self {
+        Self { terminals, kind }
+    }
+
+    pub fn map<M, F>(self, f: F) -> OnePort<M>
+    where
+        F: FnMut(N) -> M,
+    {
+        OnePort {
+            terminals: self.terminals.map(f),
+            kind: self.kind,
+        }
+    }
+}
+
+impl OnePort<MnaNodeId> {
+    pub fn raw_terminals(self) -> WdfPortTerminals {
+        self.terminals.raw()
+    }
+}
+
+/// Sample-time state for reactive one-ports.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum OnePortState {
+    CapacitorVoltage(Wave),
+    InductorScaledCurrent(Wave),
+}
 
 impl<N> PortTerminals<N> {
     pub const fn grounded() -> Self {
@@ -240,14 +299,7 @@ impl CircuitMappedPort {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct CapStamp<N> {
-    pub terminals: PortTerminals<N>,
-    pub capacitance: Wave,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct PotStamp<N> {
+pub struct VariableResistorBinding<N> {
     pub child_idx: usize,
     pub terminals: PortTerminals<N>,
     pub conductance: Wave,
@@ -544,15 +596,40 @@ mod tests {
     }
 
     #[test]
-    fn pot_stamp_names_child_terminals_and_current_conductance() {
-        let stamp = PotStamp {
+    fn one_port_describes_physical_value_separately_from_runtime_state() {
+        let cap = OnePort::new(
+            PortTerminals::differential("out", "ref"),
+            OnePortKind::Capacitor(100e-9),
+        );
+        let mapped = cap.map(|node| match node {
+            "out" => MnaNodeId::new(4),
+            "ref" => MnaNodeId::new(5),
+            _ => MnaNodeId::new(usize::MAX),
+        });
+
+        assert_eq!(mapped.terminals.raw().as_tuple(), (Some(4), Some(5)));
+        assert!(mapped.kind.is_stateful());
+        assert_eq!(OnePortKind::Resistor(1_000.0).is_stateful(), false);
+        assert_eq!(
+            OnePortState::CapacitorVoltage(0.25),
+            OnePortState::CapacitorVoltage(0.25)
+        );
+        assert_eq!(
+            OnePortState::InductorScaledCurrent(0.5),
+            OnePortState::InductorScaledCurrent(0.5)
+        );
+    }
+
+    #[test]
+    fn variable_resistor_binding_names_child_terminals_and_current_conductance() {
+        let binding = VariableResistorBinding {
             child_idx: 3,
             terminals: WdfPortTerminals::single_ended(7),
             conductance: 0.001,
         };
 
-        assert_eq!(stamp.child_idx, 3);
-        assert_eq!(stamp.terminals.as_tuple(), (Some(7), None));
-        assert_eq!(stamp.conductance, 0.001);
+        assert_eq!(binding.child_idx, 3);
+        assert_eq!(binding.terminals.as_tuple(), (Some(7), None));
+        assert_eq!(binding.conductance, 0.001);
     }
 }

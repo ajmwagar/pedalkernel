@@ -6,13 +6,15 @@ use super::super::component::{EdgeKind, StampContext};
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use crate::tree::MnaSystem;
-use pedalkernel_rt::boundary_math::{MnaCapStamp, MnaNodeId, MnaPortTerminals};
+use pedalkernel_rt::boundary_math::{
+    MnaNodeId, MnaOnePort, MnaPortTerminals, OnePort, OnePortKind,
+};
 use std::collections::{HashMap, VecDeque};
 
 /// Result of building an MNA system from a set of edges.
 pub(super) struct BuiltMna {
     pub mna: MnaSystem,
-    pub cap_stamps: Vec<MnaCapStamp>,
+    pub reactive_one_ports: Vec<MnaOnePort>,
     pub node_set: Vec<NodeId>,
     pub vs_idx: usize,
     pub injection_mna: Option<usize>,
@@ -102,7 +104,7 @@ pub(super) fn build_mna(
 
     // ── Step 3: Build MNA and stamp components ──────────────────────
     let mut mna = MnaSystem::new(num_nodes, num_vsources);
-    let mut cap_stamps: Vec<MnaCapStamp> = Vec::new();
+    let mut reactive_one_ports: Vec<MnaOnePort> = Vec::new();
 
     // Track multi-port components to avoid double-stamping.
     // Components with >1 port use stamp_mna_multi() once.
@@ -136,7 +138,7 @@ pub(super) fn build_mna(
                     vsrc_base: 0,
                     internal_node_base: 0,
                     sample_rate,
-                    cap_stamps: None,
+                    reactive_one_ports: None,
                 };
                 comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
             }
@@ -152,24 +154,24 @@ pub(super) fn build_mna(
             EdgeKind::Reactive => {
                 if let Some(c) = comp.kind.capacitance() {
                     if n1.is_some() || n2.is_some() {
-                        cap_stamps.push(MnaCapStamp {
-                            terminals: MnaPortTerminals::maybe_differential(
+                        reactive_one_ports.push(OnePort::new(
+                            MnaPortTerminals::maybe_differential(
                                 n1.map(MnaNodeId::new),
                                 n2.map(MnaNodeId::new),
                             ),
-                            capacitance: c,
-                        });
+                            OnePortKind::Capacitor(c),
+                        ));
                     }
                 }
                 if let Some(l) = comp.kind.inductance() {
                     if n1.is_some() || n2.is_some() {
-                        cap_stamps.push(MnaCapStamp {
-                            terminals: MnaPortTerminals::maybe_differential(
+                        reactive_one_ports.push(OnePort::new(
+                            MnaPortTerminals::maybe_differential(
                                 n1.map(MnaNodeId::new),
                                 n2.map(MnaNodeId::new),
                             ),
-                            capacitance: -l, // Negative = inductor convention
-                        });
+                            OnePortKind::Inductor(l),
+                        ));
                     }
                 }
             }
@@ -190,7 +192,7 @@ pub(super) fn build_mna(
                     vsrc_base,
                     internal_node_base: 0,
                     sample_rate,
-                    cap_stamps: None,
+                    reactive_one_ports: None,
                 };
                 comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
             }
@@ -247,7 +249,7 @@ pub(super) fn build_mna(
 
     Ok(BuiltMna {
         mna,
-        cap_stamps,
+        reactive_one_ports,
         node_set,
         vs_idx,
         injection_mna,

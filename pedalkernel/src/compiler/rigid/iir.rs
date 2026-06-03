@@ -53,14 +53,14 @@ pub(in crate::compiler) fn build_iir_stage(
 ) -> Result<IirData, String> {
     let built = build_mna(edge_indices, pendant_trees, graph, sample_rate)?;
     let mna = built.mna;
-    let cap_stamps = built.cap_stamps;
+    let reactive_one_ports = built.reactive_one_ports;
     let vs_idx = built.vs_idx;
     let out_mna = built.output_mna;
 
     // ── No caps → pure resistive network (DC gain only) ──────────
     // Compute the actual gain from MNA instead of assuming passthrough.
     // This handles pot voltage dividers, attenuator pads, etc.
-    if cap_stamps.is_empty() {
+    if reactive_one_ports.is_empty() {
         let dc_gain = mna.dc_gain(vs_idx, out_mna);
         #[cfg(test)]
         eprintln!("IIR dc_gain={dc_gain:.4} vs_idx={vs_idx} out_mna={out_mna:?}");
@@ -72,9 +72,14 @@ pub(in crate::compiler) fn build_iir_stage(
     }
 
     // ── Build IIR biquad ─────────────────────────────────────────
-    if let Some((b_coeffs, a_coeffs)) =
-        mna.build_iir(&cap_stamps, vs_idx, out_mna, None, sample_rate, None)
-    {
+    if let Some((b_coeffs, a_coeffs)) = mna.build_iir(
+        &reactive_one_ports,
+        vs_idx,
+        out_mna,
+        None,
+        sample_rate,
+        None,
+    ) {
         if iir_coeffs_are_stable_and_finite(&b_coeffs, &a_coeffs) {
             let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate);
             let feedback = extract_feedback_r(edge_indices, graph);
@@ -94,7 +99,7 @@ pub(in crate::compiler) fn build_iir_stage(
 
     // Fallback: state-space reduction → extract biquad if 2nd order
     let (a_d, b_d, c_out, n_states, d_feedthrough) =
-        mna.build_state_space_matrices(&cap_stamps, vs_idx, out_mna, None, sample_rate);
+        mna.build_state_space_matrices(&reactive_one_ports, vs_idx, out_mna, None, sample_rate);
 
     if n_states <= 2 && n_states > 0 {
         // b_d contains two packed vectors: b_plus[0..n] and b_minus[n..2n]
@@ -271,7 +276,7 @@ pub(in crate::compiler) fn build_biquad_table(
             Err(_) => return None,
         };
         let mut mna = built.mna;
-        let cap_stamps = &built.cap_stamps;
+        let reactive_one_ports = &built.reactive_one_ports;
         let vs_idx = built.vs_idx;
         let out_mna = built.output_mna;
 
@@ -319,7 +324,7 @@ pub(in crate::compiler) fn build_biquad_table(
         // Extract biquad from modified MNA. The generic table path must use
         // the actual MNA/state-space transfer function; oscillator-specific
         // synthesis is selected elsewhere, not for every active VCVS filter.
-        let biquad = mna.build_iir(cap_stamps, vs_idx, out_mna, None, sample_rate, None);
+        let biquad = mna.build_iir(reactive_one_ports, vs_idx, out_mna, None, sample_rate, None);
 
         if let Some((b, a)) = biquad.filter(|(b, a)| iir_coeffs_are_stable_and_finite(b, a)) {
             coeffs.push(b.get(0).copied().unwrap_or(0.0));
@@ -329,8 +334,13 @@ pub(in crate::compiler) fn build_biquad_table(
             coeffs.push(a.get(2).copied().unwrap_or(0.0));
         } else {
             // Fallback: try state-space
-            let (a_d, b_d, c_out, n_states, d_ft) =
-                mna.build_state_space_matrices(cap_stamps, vs_idx, out_mna, None, sample_rate);
+            let (a_d, b_d, c_out, n_states, d_ft) = mna.build_state_space_matrices(
+                reactive_one_ports,
+                vs_idx,
+                out_mna,
+                None,
+                sample_rate,
+            );
             if n_states <= 2 && n_states > 0 {
                 let has_two = b_d.len() >= 2 * n_states;
                 let bp = &b_d[..n_states];

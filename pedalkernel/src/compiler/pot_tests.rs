@@ -296,11 +296,11 @@ fn pot_volume_inverted_range() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Layer 1: MNA stamping — does the pot stamp correct resistances?
+// Layer 1: MNA lowering — does the pot produce correct split resistances?
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn mna_pot_stamps_split_resistance() {
+fn mna_pot_split_resistance_matrix_entries() {
     use super::component::{Component, StampContext};
     use super::components::Potentiometer;
     use crate::dsl::PotTaper;
@@ -325,7 +325,7 @@ fn mna_pot_stamps_split_resistance() {
         vsrc_base: 0,
         internal_node_base: 0,
         sample_rate: 48000.0,
-        cap_stamps: None,
+        reactive_one_ports: None,
     };
     pot.stamp_mna_multi("Vol", &mut ctx, &mut mna);
 
@@ -437,7 +437,7 @@ fn iir_builder_pot_dc_gain() {
                     vsrc_base: 0,
                     internal_node_base: 0,
                     sample_rate: 48000.0,
-                    cap_stamps: None,
+                    reactive_one_ports: None,
                 };
                 comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
                 break; // Only stamp once

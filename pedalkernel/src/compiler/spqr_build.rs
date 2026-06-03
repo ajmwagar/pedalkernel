@@ -20,7 +20,7 @@ use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
-use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaPotStamp};
+use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaVariableResistorBinding};
 use pedalkernel_rt::tree::{MnaSystem, WdfPort};
 
 fn output_coupling_dc_block(
@@ -2249,7 +2249,7 @@ fn build_passive_rtype_stage(
 
     let mut children = Vec::new();
     let mut ports = Vec::new();
-    let mut pot_stamps = Vec::new();
+    let mut variable_resistors = Vec::new();
     let mut seen_pots = std::collections::HashSet::new();
 
     for &eidx in edge_indices {
@@ -2272,7 +2272,7 @@ fn build_passive_rtype_stage(
                 }
                 let r = child.port_resistance();
                 mna.stamp_resistor(n1, n2, r);
-                pot_stamps.push(MnaPotStamp {
+                variable_resistors.push(MnaVariableResistorBinding {
                     child_idx: children.len(),
                     terminals: MnaPortTerminals::maybe_differential(
                         n1.map(MnaNodeId::new),
@@ -2297,9 +2297,9 @@ fn build_passive_rtype_stage(
                 resistance: rp,
             });
             children.insert(ports.len() - 1, child);
-            for stamp in &mut pot_stamps {
-                if stamp.child_idx >= ports.len() - 1 {
-                    stamp.child_idx += 1;
+            for binding in &mut variable_resistors {
+                if binding.child_idx >= ports.len() - 1 {
+                    binding.child_idx += 1;
                 }
             }
         }
@@ -2336,7 +2336,7 @@ fn build_passive_rtype_stage(
             extraction_output_neg: None,
             recompute_mna: Some(mna),
             recompute_ports: Some(ports),
-            pot_stamps,
+            variable_resistors,
             needs_recompute: false,
             interp_table: None,
         },

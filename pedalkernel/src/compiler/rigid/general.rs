@@ -32,7 +32,9 @@ use super::{is_inverting_topology, StageStats};
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
-use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaPotStamp, WdfPortTerminals};
+use pedalkernel_rt::boundary_math::{
+    MnaNodeId, MnaPortTerminals, MnaVariableResistorBinding, WdfPortTerminals,
+};
 use pedalkernel_rt::wdf_leaf::WdfLeaf;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -248,7 +250,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_hints(
         .copied()
         .collect();
 
-    let (mut mna, reactive_edges, pot_stamps) = stamp_passive_edges(
+    let (mut mna, reactive_edges, variable_resistor_candidates) = stamp_passive_edges(
         all_edges,
         &nl_edge_set,
         graph,
@@ -308,7 +310,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_hints(
         supply_voltage,
         oversampling,
         graph,
-        pot_stamps,
+        variable_resistor_candidates,
         extract_output_nodes,
         &nl_comp_labels,
         init_hints,
@@ -450,7 +452,7 @@ fn check_vcc_needed(
 /// Returns (mna, reactive_edges).
 /// A pot detected during passive stamping. Stamped into MNA as a fixed resistor
 /// at its initial position, but also tracked for runtime delta-updating.
-struct PotStamp {
+struct VariableResistorCandidate {
     /// WDF pot leaf for runtime position changes.
     leaf: DynNode,
     /// MNA node indices (pos, neg) for G-matrix delta updates.
@@ -469,10 +471,14 @@ fn stamp_passive_edges(
     num_vsources: usize,
     effective_rate: f64,
     vcc_vs_idx: Option<usize>,
-) -> (MnaSystem, Vec<(usize, DynNode)>, Vec<PotStamp>) {
+) -> (
+    MnaSystem,
+    Vec<(usize, DynNode)>,
+    Vec<VariableResistorCandidate>,
+) {
     let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
     let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new();
-    let mut pot_stamps: Vec<PotStamp> = Vec::new();
+    let mut variable_resistor_candidates: Vec<VariableResistorCandidate> = Vec::new();
 
     for &eidx in all_edges {
         if nl_edge_set.contains(&eidx) {
@@ -495,7 +501,7 @@ fn stamp_passive_edges(
                 }
                 let initial_r = leaf.port_resistance();
                 mna.stamp_resistor(n1, n2, initial_r);
-                pot_stamps.push(PotStamp {
+                variable_resistor_candidates.push(VariableResistorCandidate {
                     leaf,
                     mna_pos: n1,
                     mna_neg: n2,
@@ -524,7 +530,7 @@ fn stamp_passive_edges(
         mna.stamp_voltage_source(vcc_mna, None, vcc_idx);
     }
 
-    (mna, reactive_edges, pot_stamps)
+    (mna, reactive_edges, variable_resistor_candidates)
 }
 
 fn pot_edge_is_wb_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId) -> bool {
@@ -820,7 +826,7 @@ fn assemble_multi_nl_stage(
     supply_voltage: f64,
     oversampling: OversamplingFactor,
     graph: &CircuitGraph,
-    pot_stamps: Vec<PotStamp>,
+    variable_resistor_candidates: Vec<VariableResistorCandidate>,
     extract_output_nodes: Option<WdfPortTerminals>,
     nl_comp_labels: &[String],
     init_hints: &[crate::dsl::InitHint],
@@ -903,11 +909,14 @@ fn assemble_multi_nl_stage(
         nl_devices,
         nl_port_resistances,
         passive_children,
-        pot_children: pot_stamps.iter().map(|ps| ps.leaf.clone()).collect(),
-        pot_mna_stamps: pot_stamps
+        pot_children: variable_resistor_candidates
+            .iter()
+            .map(|ps| ps.leaf.clone())
+            .collect(),
+        variable_resistors: variable_resistor_candidates
             .iter()
             .enumerate()
-            .map(|(i, ps)| MnaPotStamp {
+            .map(|(i, ps)| MnaVariableResistorBinding {
                 child_idx: i,
                 terminals: MnaPortTerminals::maybe_differential(
                     ps.mna_pos.map(MnaNodeId::new),
