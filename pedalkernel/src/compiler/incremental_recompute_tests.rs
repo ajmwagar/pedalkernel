@@ -72,13 +72,6 @@ fn pot_100k() -> DynNode {
     DynNode::Pot("Gain".to_string(), 100_000.0, 0.5, PotTaper::B)
 }
 
-fn structural_node(node: &DynNode) -> &DynNode {
-    match node {
-        DynNode::Runtime { node, .. } => structural_node(node),
-        node => node,
-    }
-}
-
 #[test]
 fn static_tree_has_no_dynamic_flags() {
     // Series(Resistor(1k), Capacitor(100n, 48000)) — all static
@@ -87,7 +80,7 @@ fn static_tree_has_no_dynamic_flags() {
     let result = tree.compute_dynamic_flags();
     assert!(!result, "Static tree should return false from compute_dynamic_flags");
 
-    match structural_node(&tree) {
+    match tree.structural() {
         DynNode::Binary { has_dynamic, .. } => {
             assert!(!has_dynamic, "Static tree root should have has_dynamic=false");
         }
@@ -103,7 +96,7 @@ fn tree_with_pot_has_dynamic_flag() {
     let result = tree.compute_dynamic_flags();
     assert!(result, "Tree with pot should return true from compute_dynamic_flags");
 
-    match structural_node(&tree) {
+    match tree.structural() {
         DynNode::Binary { has_dynamic, .. } => {
             assert!(has_dynamic, "Root should have has_dynamic=true");
         }
@@ -120,7 +113,7 @@ fn mixed_tree_dynamic_flag_only_on_pot_side() {
     tree.compute_dynamic_flags();
 
     // Root Series: has_dynamic = true
-    match structural_node(&tree) {
+    match tree.structural() {
         DynNode::Binary {
             has_dynamic,
             left,
@@ -136,7 +129,7 @@ fn mixed_tree_dynamic_flag_only_on_pot_side() {
             );
 
             // Right is inner Series: has_dynamic = true
-            match structural_node(right) {
+            match right.structural() {
                 DynNode::Binary { has_dynamic, .. } => {
                     assert!(has_dynamic, "Inner Series should have has_dynamic=true");
                 }
@@ -158,7 +151,7 @@ fn set_pot_dirty_marks_ancestors() {
     tree.compute_dynamic_flags();
 
     // Dirty should be false after compute_dynamic_flags
-    match structural_node(&tree) {
+    match tree.structural() {
         DynNode::Binary { dirty, .. } => assert!(!dirty, "dirty should be false initially"),
         _ => panic!("Expected Binary"),
     }
@@ -166,7 +159,7 @@ fn set_pot_dirty_marks_ancestors() {
     let found = tree.set_pot_dirty("Gain", 0.7);
     assert!(found, "set_pot_dirty should find the pot");
 
-    match structural_node(&tree) {
+    match tree.structural() {
         DynNode::Binary { dirty, .. } => assert!(dirty, "Root should be dirty after set_pot_dirty"),
         _ => panic!("Expected Binary"),
     }
@@ -180,7 +173,7 @@ fn set_pot_dirty_returns_false_for_missing_pot() {
     let found = tree.set_pot_dirty("nonexistent", 0.5);
     assert!(!found, "set_pot_dirty should return false for missing pot");
 
-    match structural_node(&tree) {
+    match tree.structural() {
         DynNode::Binary { dirty, .. } => {
             assert!(!dirty, "Root should NOT be dirty when pot not found");
         }
@@ -223,11 +216,11 @@ fn incremental_matches_full_recompute() {
     );
 
     // Check gamma too
-    let gamma_full = match structural_node(&tree_full) {
+    let gamma_full = match tree_full.structural() {
         DynNode::Binary { gamma, .. } => *gamma,
         _ => panic!("Expected Binary"),
     };
-    let gamma_incr = match structural_node(&tree_incr) {
+    let gamma_incr = match tree_incr.structural() {
         DynNode::Binary { gamma, .. } => *gamma,
         _ => panic!("Expected Binary"),
     };
@@ -259,7 +252,7 @@ fn incremental_skips_static_subtree() {
     );
 
     // Verify the cap's rp is unchanged (it's static, should not be touched)
-    match structural_node(&tree) {
+    match tree.structural() {
         DynNode::Binary { left, .. } => {
             let cap_rp = left.port_resistance();
             let expected_rp = 1.0 / (2.0 * 48000.0 * 100e-9);
@@ -279,7 +272,7 @@ fn incremental_noop_when_no_pot_changed() {
     tree.compute_dynamic_flags();
 
     let rp_before = tree.port_resistance();
-    let gamma_before = match structural_node(&tree) {
+    let gamma_before = match tree.structural() {
         DynNode::Binary { gamma, .. } => *gamma,
         _ => panic!("Expected Binary"),
     };
@@ -288,7 +281,7 @@ fn incremental_noop_when_no_pot_changed() {
     tree.recompute_incremental();
 
     let rp_after = tree.port_resistance();
-    let gamma_after = match structural_node(&tree) {
+    let gamma_after = match tree.structural() {
         DynNode::Binary { gamma, .. } => *gamma,
         _ => panic!("Expected Binary"),
     };
@@ -320,7 +313,7 @@ fn split_pot_dirty_marks_both_halves() {
     let found = tree.set_pot_dirty("Drive", 0.3);
     assert!(found, "set_pot_dirty should find split pot halves via prefix");
 
-    match structural_node(&tree) {
+    match tree.structural() {
         DynNode::Binary { dirty, .. } => {
             assert!(dirty, "Root should be dirty after split pot update");
         }

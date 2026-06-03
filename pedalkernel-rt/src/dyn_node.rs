@@ -12,7 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use crate::boundary_math::{OnePortKind, RuntimeState, StateSlot};
+use crate::boundary_math::{OnePortKind, RuntimeOnePort, RuntimeState, StateSlot};
 use crate::elements::{JfetVariableResistor, Photocoupler};
 use crate::pot_taper::PotTaper;
 use crate::tree::RTypeAdaptor;
@@ -138,6 +138,127 @@ impl Clone for DynNode {
 }
 
 impl DynNode {
+    /// Return the structural WDF node, transparently skipping runtime-state owner wrappers.
+    ///
+    /// Runtime wrappers are an ownership detail for dense one-port state slots.
+    /// Callers that inspect topology should use this instead of matching
+    /// `DynNode::Runtime` directly.
+    pub fn structural(&self) -> &Self {
+        match self {
+            Self::Runtime { node, .. } => node.structural(),
+            node => node,
+        }
+    }
+
+    /// Mutable counterpart to [`DynNode::structural`].
+    pub fn structural_mut(&mut self) -> &mut Self {
+        match self {
+            Self::Runtime { node, .. } => node.structural_mut(),
+            node => node,
+        }
+    }
+
+    pub fn runtime_state(&self) -> Option<&RuntimeState> {
+        match self {
+            Self::Runtime { runtime_state, .. } => Some(runtime_state),
+            _ => None,
+        }
+    }
+
+    pub fn runtime_state_mut(&mut self) -> Option<&mut RuntimeState> {
+        match self {
+            Self::Runtime { runtime_state, .. } => Some(runtime_state),
+            _ => None,
+        }
+    }
+
+    pub fn one_port_runtime_state(
+        &self,
+        target_id: &str,
+    ) -> Option<(&RuntimeOnePort<()>, &RuntimeState)> {
+        match self {
+            Self::Runtime {
+                node,
+                runtime_state,
+            } => node.one_port_runtime_state_with_store(target_id, runtime_state),
+            _ => None,
+        }
+    }
+
+    pub fn one_port_runtime_state_mut(
+        &mut self,
+        target_id: &str,
+    ) -> Option<(&RuntimeOnePort<()>, &mut RuntimeState)> {
+        match self {
+            Self::Runtime {
+                node,
+                runtime_state,
+            } => node.one_port_runtime_state_mut_with_store(target_id, runtime_state),
+            _ => None,
+        }
+    }
+
+    fn one_port_runtime_state_with_store<'a>(
+        &'a self,
+        target_id: &str,
+        runtime_state: &'a RuntimeState,
+    ) -> Option<(&'a RuntimeOnePort<()>, &'a RuntimeState)> {
+        match self {
+            Self::Runtime {
+                node,
+                runtime_state,
+            } => node.one_port_runtime_state_with_store(target_id, runtime_state),
+            Self::Leaf(LeafKind::OnePort {
+                comp_id, runtime, ..
+            }) if comp_id.as_deref() == Some(target_id) => Some((runtime, runtime_state)),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => left
+                .one_port_runtime_state_with_store(target_id, runtime_state)
+                .or_else(|| right.one_port_runtime_state_with_store(target_id, runtime_state)),
+            Self::Transformer { secondary, .. } => {
+                secondary.one_port_runtime_state_with_store(target_id, runtime_state)
+            }
+            Self::RType { children, .. } => children.iter().find_map(|child| {
+                child.one_port_runtime_state_with_store(target_id, runtime_state)
+            }),
+        }
+    }
+
+    fn one_port_runtime_state_mut_with_store<'a>(
+        &'a self,
+        target_id: &str,
+        runtime_state: &'a mut RuntimeState,
+    ) -> Option<(&'a RuntimeOnePort<()>, &'a mut RuntimeState)> {
+        match self {
+            Self::Runtime { .. } => None,
+            Self::Leaf(LeafKind::OnePort {
+                comp_id, runtime, ..
+            }) if comp_id.as_deref() == Some(target_id) => Some((runtime, runtime_state)),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => {
+                if left
+                    .one_port_runtime_state_with_store(target_id, runtime_state)
+                    .is_some()
+                {
+                    left.one_port_runtime_state_mut_with_store(target_id, runtime_state)
+                } else {
+                    right.one_port_runtime_state_mut_with_store(target_id, runtime_state)
+                }
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.one_port_runtime_state_mut_with_store(target_id, runtime_state)
+            }
+            Self::RType { children, .. } => {
+                let child = children.iter().find(|child| {
+                    child
+                        .one_port_runtime_state_with_store(target_id, runtime_state)
+                        .is_some()
+                })?;
+                child.one_port_runtime_state_mut_with_store(target_id, runtime_state)
+            }
+        }
+    }
+
     fn runtime_wrap(node: DynNode, runtime_state: RuntimeState) -> Self {
         if runtime_state.is_empty() {
             node
@@ -596,8 +717,7 @@ impl DynNode {
     /// `set_voltage()` call on the tree's unnamed voltage source. This lets
     /// coupled BKM build a Jacobian without finite-differencing each block.
     pub fn reflected_voltage_gain(&self) -> crate::Wave {
-        match self {
-            Self::Runtime { node, .. } => node.reflected_voltage_gain(),
+        match self.structural() {
             Self::Leaf(leaf) => match leaf {
                 LeafKind::VoltageSource(vs) if vs.port_name.is_none() && !vs.is_cathode_bias => 2.0,
                 _ => 0.0,
@@ -628,6 +748,7 @@ impl DynNode {
                     .collect();
                 adaptor.scatter_up_gain(&gains)
             }
+            Self::Runtime { .. } => unreachable!("structural() skips runtime wrappers"),
         }
     }
 
@@ -746,8 +867,7 @@ impl DynNode {
     /// NOTE: Prefer `resolve_port_vs_ptr` + direct pointer write for hot paths.
     /// This method walks the tree recursively with string comparison.
     pub fn set_voltage_by_port(&mut self, port_name: &str, v: crate::Wave) -> bool {
-        match self {
-            DynNode::Runtime { node, .. } => node.set_voltage_by_port(port_name, v),
+        match self.structural_mut() {
             DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
                 if vs.port_name.as_deref() == Some(port_name) {
                     vs.voltage = v; // Direct set, bypasses trait guard
@@ -777,8 +897,7 @@ impl DynNode {
     /// The returned pointer is valid as long as the tree is not dropped or
     /// structurally modified (which never happens after construction).
     pub fn resolve_main_vs_ptr(&mut self) -> Option<*mut crate::Wave> {
-        match self {
-            DynNode::Runtime { node, .. } => node.resolve_main_vs_ptr(),
+        match self.structural_mut() {
             DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
                 if vs.port_name.is_none() && !vs.is_cathode_bias {
                     Some(&mut vs.voltage as *mut crate::Wave)
@@ -807,6 +926,7 @@ impl DynNode {
                 }
                 None
             }
+            DynNode::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -818,8 +938,7 @@ impl DynNode {
     /// # Safety
     /// Same as `resolve_main_vs_ptr` — valid as long as tree is not dropped.
     pub fn resolve_port_vs_ptr(&mut self, port_name: &str) -> Option<*mut crate::Wave> {
-        match self {
-            DynNode::Runtime { node, .. } => node.resolve_port_vs_ptr(port_name),
+        match self.structural_mut() {
             DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
                 if vs.port_name.as_deref() == Some(port_name) {
                     Some(&mut vs.voltage as *mut crate::Wave)
@@ -848,6 +967,7 @@ impl DynNode {
                 }
                 None
             }
+            DynNode::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -855,8 +975,7 @@ impl DynNode {
     /// The VS represents a voltage port driving current through the leaf.
     /// Returns true if the leaf was found and wrapped.
     pub fn wrap_leaf_with_vs(&mut self, target_comp_id: &str, port_name: &str) -> bool {
-        match self {
-            DynNode::Runtime { node, .. } => node.wrap_leaf_with_vs(target_comp_id, port_name),
+        match self.structural_mut() {
             DynNode::Leaf(ref leaf) => {
                 if leaf.comp_id() == Some(target_comp_id) {
                     // Found the target leaf — wrap self with Series(VS, self)
@@ -1152,10 +1271,7 @@ impl DynNode {
         a_gain: crate::Wave,
         best: &Cell<Option<(crate::Wave, bool)>>,
     ) {
-        match self {
-            Self::Runtime { node, .. } => {
-                node.visit_leaf_voltage_for_incident_gain(target_id, a_gain, best)
-            }
+        match self.structural() {
             Self::Leaf(leaf) => {
                 if leaf_matches_id(leaf, target_id) {
                     let gain = projected_leaf_voltage_incident_gain(leaf) * a_gain;
@@ -1204,13 +1320,13 @@ impl DynNode {
                     child.visit_leaf_voltage_for_incident_gain(target_id, a_gain * *gain, best);
                 }
             }
+            Self::Runtime { .. } => unreachable!("structural() skips runtime wrappers"),
         }
     }
 
     /// Return this leaf's component ID (only if this node is a leaf).
     pub fn leaf_comp_id(&self) -> Option<String> {
-        match self {
-            Self::Runtime { node, .. } => node.leaf_comp_id(),
+        match self.structural() {
             Self::Leaf(leaf) => leaf.comp_id().map(|s| s.to_string()),
             _ => None,
         }
@@ -1218,8 +1334,7 @@ impl DynNode {
 
     /// Tag the deepest Resistor leaf as a Pot for output probe identification.
     pub fn tag_as_probe(&mut self, tag: &str) -> bool {
-        match self {
-            Self::Runtime { node, .. } => node.tag_as_probe(tag),
+        match self.structural_mut() {
             Self::Leaf(leaf) => {
                 if leaf.type_tag() == "resistor" {
                     let rp = leaf.port_resistance();
@@ -1245,8 +1360,7 @@ impl DynNode {
     /// Recompute all adaptor coefficients bottom-up (call after pot changes).
     /// Also clears dirty flags so incremental recompute starts clean.
     pub fn recompute(&mut self) {
-        match self {
-            Self::Runtime { node, .. } => node.recompute(),
+        match self.structural_mut() {
             Self::Binary {
                 kind,
                 left,
@@ -1298,14 +1412,14 @@ impl DynNode {
                 }
             }
             Self::Leaf(_) => {}
+            Self::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
     /// Post-construction pass: sets `has_dynamic` based on whether any descendant
     /// leaf is dynamic. Call once after tree construction.
     pub fn compute_dynamic_flags(&mut self) -> bool {
-        match self {
-            Self::Runtime { node, .. } => node.compute_dynamic_flags(),
+        match self.structural_mut() {
             Self::Leaf(leaf) => leaf.is_dynamic(),
             Self::Binary {
                 left,
@@ -1338,6 +1452,7 @@ impl DynNode {
                 }
                 any_dyn
             }
+            Self::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -1347,8 +1462,7 @@ impl DynNode {
     /// Uses bitwise OR (not short-circuit) so split pots (__aw/__wb) that
     /// appear in both subtrees are both updated.
     pub fn set_pot_dirty(&mut self, target_id: &str, pos: crate::Wave) -> bool {
-        match self {
-            Self::Runtime { node, .. } => node.set_pot_dirty(target_id, pos),
+        match self.structural_mut() {
             Self::Leaf(leaf) => leaf.set_control(target_id, pos),
             Self::Binary {
                 left, right, dirty, ..
@@ -1377,13 +1491,13 @@ impl DynNode {
                 }
                 found
             }
+            Self::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
     /// Recompute only dirty subtrees. Skips entirely-static subtrees.
     pub fn recompute_incremental(&mut self) {
-        match self {
-            Self::Runtime { node, .. } => node.recompute_incremental(),
+        match self.structural_mut() {
             Self::Leaf(_) => {}
             Self::Binary {
                 has_dynamic: false, ..
@@ -1446,6 +1560,7 @@ impl DynNode {
                     child.recompute_incremental();
                 }
             }
+            Self::Runtime { .. } => unreachable!("structural_mut() skips runtime wrappers"),
         }
     }
 
@@ -1880,14 +1995,14 @@ impl DynNode {
 
     /// Count total nodes in tree (for statistics).
     pub fn node_count(&self) -> usize {
-        match self {
-            Self::Runtime { node, .. } => node.node_count(),
+        match self.structural() {
             Self::Leaf(_) => 1,
             Self::Binary { left, right, .. } => 1 + left.node_count() + right.node_count(),
             Self::Transformer { secondary, .. } => 1 + secondary.node_count(),
             Self::RType { children, .. } => {
                 1 + children.iter().map(|c| c.node_count()).sum::<usize>()
             }
+            Self::Runtime { .. } => unreachable!("structural() skips runtime wrappers"),
         }
     }
 }

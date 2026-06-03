@@ -1038,34 +1038,26 @@ mod tests {
     use super::*;
     use crate::dyn_node::DynNode;
 
-    fn runtime_one_port_fixture(
-        node: &DynNode,
-    ) -> (&RuntimeOnePort<()>, &crate::boundary_math::RuntimeState) {
-        match node {
-            DynNode::Runtime {
-                node: inner,
-                runtime_state,
-            } => match &**inner {
-                DynNode::Leaf(LeafKind::OnePort { runtime, .. }) => (runtime, runtime_state),
-                _ => panic!("runtime wrapper must own a one-port leaf"),
-            },
-            _ => panic!("reactive one-port must be wrapped with runtime state"),
-        }
+    fn runtime_one_port_fixture<'a>(
+        node: &'a DynNode,
+        target_id: &str,
+    ) -> (
+        &'a RuntimeOnePort<()>,
+        &'a crate::boundary_math::RuntimeState,
+    ) {
+        node.one_port_runtime_state(target_id)
+            .expect("reactive one-port must be backed by runtime state")
     }
 
-    fn runtime_one_port_fixture_mut(
-        node: &mut DynNode,
-    ) -> (&RuntimeOnePort<()>, &mut crate::boundary_math::RuntimeState) {
-        match node {
-            DynNode::Runtime {
-                node: inner,
-                runtime_state,
-            } => match &**inner {
-                DynNode::Leaf(LeafKind::OnePort { runtime, .. }) => (runtime, runtime_state),
-                _ => panic!("runtime wrapper must own a one-port leaf"),
-            },
-            _ => panic!("reactive one-port must be wrapped with runtime state"),
-        }
+    fn runtime_one_port_fixture_mut<'a>(
+        node: &'a mut DynNode,
+        target_id: &str,
+    ) -> (
+        &'a RuntimeOnePort<()>,
+        &'a mut crate::boundary_math::RuntimeState,
+    ) {
+        node.one_port_runtime_state_mut(target_id)
+            .expect("reactive one-port must be backed by runtime state")
     }
 
     #[test]
@@ -1073,7 +1065,7 @@ mod tests {
         let mut cap = DynNode::Capacitor(Some(String::from("C1")), 100e-9, 1_000.0);
 
         cap.set_incident(0.6);
-        let (runtime, runtime_state) = runtime_one_port_fixture(&cap);
+        let (runtime, runtime_state) = runtime_one_port_fixture(&cap, "C1");
         let slot = runtime.state_slot().unwrap().0;
         assert_eq!(
             runtime_state.states[slot],
@@ -1082,7 +1074,7 @@ mod tests {
         assert_eq!(runtime_state.wave_cache[slot].wave_state, 0.6);
         assert_eq!(cap.leaf_voltage("C1"), Some(0.3));
 
-        let (runtime, runtime_state) = runtime_one_port_fixture_mut(&mut cap);
+        let (runtime, runtime_state) = runtime_one_port_fixture_mut(&mut cap, "C1");
         assert!(runtime.wdf_set_one_port_state(OnePortState::CapacitorVoltage(0.5), runtime_state));
         assert_eq!(
             runtime.wdf_one_port_state(runtime_state),
@@ -1097,7 +1089,7 @@ mod tests {
         let mut inductor = DynNode::Inductor(Some(String::from("L1")), 1e-3, 96.0);
 
         inductor.set_incident(0.25);
-        let (runtime, runtime_state) = runtime_one_port_fixture(&inductor);
+        let (runtime, runtime_state) = runtime_one_port_fixture(&inductor, "L1");
         let slot = runtime.state_slot().unwrap().0;
         assert_eq!(
             runtime_state.states[slot],
@@ -1106,7 +1098,7 @@ mod tests {
         assert_eq!(runtime_state.wave_cache[slot].wave_state, 0.25);
         assert_eq!(inductor.leaf_voltage("L1"), Some(0.125));
 
-        let (runtime, runtime_state) = runtime_one_port_fixture_mut(&mut inductor);
+        let (runtime, runtime_state) = runtime_one_port_fixture_mut(&mut inductor, "L1");
         assert!(runtime
             .wdf_set_one_port_state(OnePortState::InductorScaledCurrent(-0.4), runtime_state));
         assert_eq!(

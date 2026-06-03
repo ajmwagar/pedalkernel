@@ -1501,8 +1501,7 @@ fn tb303_coupling_caps_land_near_stinchcombe_shelf_corners() {
         .expect("TB303 should compile to BKM");
 
     fn dyn_node_cap_value(node: &pedalkernel_rt::dyn_node::DynNode) -> Option<f64> {
-        match node {
-            pedalkernel_rt::dyn_node::DynNode::Runtime { node, .. } => dyn_node_cap_value(node),
+        match node.structural() {
             pedalkernel_rt::dyn_node::DynNode::Leaf(
                 pedalkernel_rt::wdf_leaf::LeafKind::OnePort { runtime, .. },
             ) => match runtime.spec.kind {
