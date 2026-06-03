@@ -221,6 +221,9 @@ fn bfs_reachable_nodes(
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     visited.insert(start);
+    if blocked_outputs.contains(&start) {
+        return visited;
+    }
     queue.push_back(start);
 
     while let Some(node) = queue.pop_front() {
@@ -242,6 +245,41 @@ fn bfs_reachable_nodes(
     }
 
     visited
+}
+
+fn edge_spans_any_output_and_input(
+    edge_idx: usize,
+    outputs: &[NodeId],
+    input: NodeId,
+    graph: &CircuitGraph,
+) -> bool {
+    let edge = &graph.edges[edge_idx];
+    outputs.iter().any(|&out| {
+        (edge.node_a == out && edge.node_b == input) || (edge.node_b == out && edge.node_a == input)
+    })
+}
+
+fn edge_touches_output_and_returns_to_input(
+    edge_idx: usize,
+    outputs: &[NodeId],
+    input: NodeId,
+    adj: &BTreeMap<NodeId, Vec<(usize, NodeId)>>,
+    blocked_outputs: &HashSet<NodeId>,
+    graph: &CircuitGraph,
+) -> bool {
+    let edge = &graph.edges[edge_idx];
+    outputs.iter().any(|&out| {
+        let other = if edge.node_a == out {
+            edge.node_b
+        } else if edge.node_b == out {
+            edge.node_a
+        } else {
+            return false;
+        };
+        let mut blocked = blocked_outputs.clone();
+        blocked.remove(&input);
+        bfs_reachable_nodes(other, adj, &blocked).contains(&input)
+    })
 }
 
 /// Build the directed flow graph between active elements.
@@ -303,6 +341,9 @@ fn build_flow_graph(
             .collect();
         blocked_outputs.insert(graph.in_node);
         blocked_outputs.insert(graph.out_node);
+        if elem_i.output_nodes.contains(&graph.out_node) {
+            blocked_outputs.remove(&graph.out_node);
+        }
 
         // BFS from ALL of element i's output nodes through passive edges
         let mut reachable = HashSet::new();
@@ -348,8 +389,44 @@ fn build_flow_graph(
                 continue;
             }
             let comp_j = &graph.components[graph.edges[elem_j.edge_idx].comp_idx];
-            let use_restricted =
-                comp_j.kind.feedback_input_is_barrier() && restricted_reachable.is_some();
+            let comp_i = &graph.components[graph.edges[elem_i.edge_idx].comp_idx];
+            let target_is_direct_feedback_device = edge_spans_any_output_and_input(
+                elem_j.edge_idx,
+                &elem_i.output_nodes,
+                elem_i.input_node,
+                graph,
+            );
+            let target_is_series_feedback_device = edge_touches_output_and_returns_to_input(
+                elem_j.edge_idx,
+                &elem_i.output_nodes,
+                elem_i.input_node,
+                adj,
+                &blocked_outputs,
+                graph,
+            );
+            let source_is_direct_feedback_device = edge_spans_any_output_and_input(
+                elem_i.edge_idx,
+                &elem_j.output_nodes,
+                elem_j.input_node,
+                graph,
+            );
+            let source_is_series_feedback_device = edge_touches_output_and_returns_to_input(
+                elem_i.edge_idx,
+                &elem_j.output_nodes,
+                elem_j.input_node,
+                adj,
+                &blocked_outputs,
+                graph,
+            );
+            let use_restricted = restricted_reachable.is_some()
+                && (comp_j.kind.feedback_input_is_barrier()
+                    || (comp_i.kind.feedback_input_is_barrier()
+                        && !target_is_direct_feedback_device
+                        && !target_is_series_feedback_device));
+            if source_is_direct_feedback_device || source_is_series_feedback_device {
+                flow_adj[i].push(j);
+                continue;
+            }
             let reach = if use_restricted {
                 restricted_reachable.as_ref().unwrap()
             } else {
@@ -1512,7 +1589,6 @@ mod tests {
         );
 
         let groups = find_flow_groups(&edges, &graph);
-
         let u1_group = find_group_containing(&groups, &graph, "U1");
         let u2_group = find_group_containing(&groups, &graph, "U2");
         assert!(u1_group.is_some(), "Should have U1 group");

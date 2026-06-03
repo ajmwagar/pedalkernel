@@ -1248,7 +1248,11 @@ fn validate_plan(plan: &BlockwisePlan, graph: &CircuitGraph) -> bool {
     let has_reactive_state = plan
         .blocks
         .iter()
-        .any(|block| !block.reactive_edges.is_empty());
+        .any(|block| !block.reactive_edges.is_empty())
+        || plan
+            .coupling_edges
+            .iter()
+            .any(|&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Reactive);
     if !has_reactive_state {
         return false;
     }

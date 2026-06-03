@@ -409,8 +409,12 @@ fn classify_nl_devices(
                 emitter_node,
                 ..
             } => {
-                nl_terminals.push((*base_node, *emitter_node));
-                nl_terminals.push((*collector_node, *emitter_node));
+                if base_node == collector_node {
+                    nl_terminals.push((*base_node, *emitter_node));
+                } else {
+                    nl_terminals.push((*base_node, *emitter_node));
+                    nl_terminals.push((*collector_node, *emitter_node));
+                }
                 for &n in &[*base_node, *collector_node, *emitter_node] {
                     if !node_set.contains(&n)
                         && n != graph.gnd_node
@@ -743,31 +747,44 @@ fn is_diode_connected_bjt(kind: &NonlinearKind) -> bool {
 fn create_nl_devices(
     nl_kinds: &[NonlinearKind],
 ) -> Result<(Vec<NlDeviceKind>, Option<MultiNlDeviceGroups>), String> {
-    let all_bjt_two_port = nl_kinds.iter().all(|k| {
+    let all_bjt = nl_kinds.iter().all(|k| {
+        matches!(
+            k,
+            NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
+        )
+    });
+    let any_bjt_two_port = nl_kinds.iter().any(|k| {
         matches!(
             k,
             NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
         ) && !is_diode_connected_bjt(k)
     });
 
-    if all_bjt_two_port && !nl_kinds.is_empty() {
+    if all_bjt && any_bjt_two_port {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
         let mut offset = 0usize;
         for kind in nl_kinds {
             offsets.push(offset);
             match kind {
-                NonlinearKind::BjtNpn { model_name, .. } => {
+                NonlinearKind::BjtNpn { model_name, .. } if !is_diode_connected_bjt(kind) => {
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(
                         gummel_poon_model(model_name),
                     )));
                     offset += 2;
                 }
-                NonlinearKind::BjtPnp { model_name, .. } => {
+                NonlinearKind::BjtPnp { model_name, .. } if !is_diode_connected_bjt(kind) => {
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(
                         gummel_poon_model(model_name),
                     )));
                     offset += 2;
+                }
+                NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. } => {
+                    let device = super::super::build::create_nl_device(kind).ok_or_else(|| {
+                        "Unsupported diode-connected BJT device kind in general MNA".to_string()
+                    })?;
+                    groups.push(NlDeviceGroupKind::SinglePort(device));
+                    offset += 1;
                 }
                 _ => unreachable!(),
             }

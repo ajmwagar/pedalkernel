@@ -653,16 +653,14 @@ impl CircuitGraph {
                     let node_neg = uf.find(id_neg);
                     let node_out = uf.find(id_out);
 
-                    // Create a proper graph edge (neg→out) for SPQR decomposition.
-                    // For unity followers, neg==out==pos, so this edge is a self-loop
-                    // (node_a == node_b) and gets filtered later.
-                    if node_neg != node_out {
-                        edges.push(GraphEdge {
-                            comp_idx: idx,
-                            node_a: node_neg,
-                            node_b: node_out,
-                        });
-                    }
+                    // Create a graph edge (neg→out) for stage grouping. Unity
+                    // followers resolve to a self-loop, but keeping the edge
+                    // preserves the active buffer as an explicit FlowGroup.
+                    edges.push(GraphEdge {
+                        comp_idx: idx,
+                        node_a: node_neg,
+                        node_b: node_out,
+                    });
 
                     // Record nullor pins for backward compat with existing pipeline.
                     nullor_pin_records.push(NullorPinRecord {
