@@ -1810,6 +1810,10 @@ impl CompiledPedal {
         if let Some(ref mut acc) = self.metrics_accumulator {
             acc.set_nominal_supply(self.supply_voltage as f32);
         }
+
+        for subcircuit in &mut self.subcircuit_processors {
+            subcircuit.circuit.enable_metering(block_size);
+        }
     }
 
     /// Get a reference to the metrics ring buffer for UI thread reading.
@@ -1823,10 +1827,80 @@ impl CompiledPedal {
     ///
     /// Returns default metrics if metering is not enabled.
     pub fn read_metrics(&self) -> UiMetrics {
-        self.metrics_buffer
+        let mut metrics = self
+            .metrics_buffer
             .as_ref()
             .map(|b| b.read_latest())
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        if metrics.nr_solve_count == 0 {
+            for (stage_idx, stage) in self.stages.iter().enumerate() {
+                let Stage::Blockwise(blockwise) = stage else {
+                    continue;
+                };
+                let diag = blockwise.solve_diagnostics();
+                if diag.iterations == 0 {
+                    continue;
+                }
+                metrics.nr_solve_count = metrics.nr_solve_count.saturating_add(1);
+                metrics.nr_total_iterations =
+                    metrics.nr_total_iterations.saturating_add(diag.iterations);
+                metrics.nr_max_iterations = metrics
+                    .nr_max_iterations
+                    .max(diag.iterations.min(u16::MAX as u32) as u16);
+                if !diag.converged || diag.linear_solve_failed {
+                    metrics.nr_nonconverged_count = metrics.nr_nonconverged_count.saturating_add(1);
+                }
+                if diag.residual.is_finite() {
+                    metrics.nr_max_residual = metrics.nr_max_residual.max(diag.residual as f32);
+                }
+                if stage_idx < crate::metering::MAX_STAGES {
+                    metrics.stage_nr_iterations[stage_idx] = metrics.stage_nr_iterations[stage_idx]
+                        .max(diag.iterations.min(u16::MAX as u32) as u16);
+                    if diag.residual.is_finite() {
+                        metrics.stage_nr_residual[stage_idx] =
+                            metrics.stage_nr_residual[stage_idx].max(diag.residual as f32);
+                    }
+                    if !diag.converged || diag.linear_solve_failed {
+                        metrics.stage_nr_nonconverged[stage_idx] =
+                            metrics.stage_nr_nonconverged[stage_idx].saturating_add(1);
+                    }
+                    metrics.stage_count = metrics
+                        .stage_count
+                        .max((stage_idx + 1).min(crate::metering::MAX_STAGES) as u8);
+                }
+            }
+        }
+
+        for subcircuit in &self.subcircuit_processors {
+            let child = subcircuit.circuit.read_metrics();
+            metrics.nr_solve_count = metrics.nr_solve_count.saturating_add(child.nr_solve_count);
+            metrics.nr_total_iterations = metrics
+                .nr_total_iterations
+                .saturating_add(child.nr_total_iterations);
+            metrics.nr_max_iterations = metrics.nr_max_iterations.max(child.nr_max_iterations);
+            metrics.nr_nonconverged_count = metrics
+                .nr_nonconverged_count
+                .saturating_add(child.nr_nonconverged_count);
+            metrics.nr_max_residual = metrics.nr_max_residual.max(child.nr_max_residual);
+            metrics.nonfinite_count = metrics
+                .nonfinite_count
+                .saturating_add(child.nonfinite_count);
+            metrics.blowup_count = metrics.blowup_count.saturating_add(child.blowup_count);
+            metrics.max_abs_sample = metrics.max_abs_sample.max(child.max_abs_sample);
+            metrics.stage_count = metrics.stage_count.max(child.stage_count);
+            for i in 0..crate::metering::MAX_STAGES {
+                metrics.stage_levels[i] = metrics.stage_levels[i].max(child.stage_levels[i]);
+                metrics.stage_nr_iterations[i] =
+                    metrics.stage_nr_iterations[i].max(child.stage_nr_iterations[i]);
+                metrics.stage_nr_residual[i] =
+                    metrics.stage_nr_residual[i].max(child.stage_nr_residual[i]);
+                metrics.stage_nr_nonconverged[i] =
+                    metrics.stage_nr_nonconverged[i].saturating_add(child.stage_nr_nonconverged[i]);
+            }
+        }
+
+        metrics
     }
 
     /// List all editable passive components across all stages.
@@ -3196,11 +3270,32 @@ impl PedalProcessor for CompiledPedal {
                     .iter()
                     .find(|p| p.direction == crate::PortDirection::Input)
                     .map(|p| p.name.clone());
+                let refreshed_port_index_cache =
+                    if let Stage::Blockwise(stage) = &self.stages[stage_idx] {
+                        (stage.port_index_cache.len() != stage.vs_port_map.len()).then(|| {
+                            stage
+                                .vs_port_map
+                                .iter()
+                                .map(|(name, _)| {
+                                    self.ports
+                                        .iter()
+                                        .find(|p| &p.name == name)
+                                        .map(|p| p.index)
+                                        .unwrap_or(usize::MAX)
+                                })
+                                .collect::<alloc::vec::Vec<_>>()
+                        })
+                    } else {
+                        None
+                    };
                 let bkm_stage = if let Stage::Blockwise(s) = &mut self.stages[stage_idx] {
                     s
                 } else {
                     unreachable!()
                 };
+                if let Some(cache) = refreshed_port_index_cache {
+                    bkm_stage.port_index_cache = cache;
+                }
                 // Build VS signals from port values.
                 let n_vs = bkm_stage.vs_port_map.len();
                 let mut vs_signals = alloc::vec![0.0 as crate::Wave; n_vs];
