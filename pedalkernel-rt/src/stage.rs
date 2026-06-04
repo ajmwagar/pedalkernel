@@ -7980,6 +7980,14 @@ impl BlockwiseStage {
         &mut self,
         vs_signals: &[crate::Wave],
     ) -> (crate::Wave, alloc::vec::Vec<crate::Wave>) {
+        self.debug_process_with_block_outputs_with_serial_input(0.0, vs_signals)
+    }
+
+    pub fn debug_process_with_block_outputs_with_serial_input(
+        &mut self,
+        serial_input: crate::Wave,
+        vs_signals: &[crate::Wave],
+    ) -> (crate::Wave, alloc::vec::Vec<crate::Wave>) {
         if self.work_b.len() != self.n_ports
             || self
                 .coupling_one_ports
@@ -7999,16 +8007,16 @@ impl BlockwiseStage {
             BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
         ) {
             if self.solve_mode == BlockwiseSolveMode::CoupledNewton {
-                let _ = self.coupled_solve_newton(vs_signals, 0.0, &[]);
+                let _ = self.coupled_solve_newton(vs_signals, serial_input, &[]);
             } else {
                 self.write_vs_ports(vs_signals);
                 self.scatter_coupling();
             }
-            self.run_coupled_blocks(true, 0.0, Some(&mut outputs))
+            self.run_coupled_blocks(true, serial_input, Some(&mut outputs))
         } else {
             self.write_vs_ports(vs_signals);
             self.scatter_coupling();
-            self.run_block_cascade(true, true, 0.0, Some(&mut outputs))
+            self.run_block_cascade(true, true, serial_input, Some(&mut outputs))
         };
         (output, outputs)
     }

@@ -663,6 +663,31 @@ fn tb303_bkm_vs_signals_with_vco(
         .collect()
 }
 
+fn tb303_bkm_vs_signals_with_audio(
+    bkm: &pedalkernel_rt::stage::BlockwiseStage,
+    audio_in: f64,
+    vco_in: f64,
+    cutoff_cv: f64,
+    resonance_cv: f64,
+) -> Vec<f64> {
+    bkm.vs_port_map
+        .iter()
+        .map(|(name, _)| {
+            if name == "audio_in" {
+                audio_in
+            } else if name == "vco_in" {
+                vco_in
+            } else if name == "cv_cutoff" {
+                cutoff_cv
+            } else if name == "cv_resonance" {
+                resonance_cv
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
 fn tb303_source_without_resonance_feedback(source: &str) -> String {
     let mut stripped = String::with_capacity(source.len());
     let mut skip_resonance_comment_block = false;
@@ -710,8 +735,10 @@ fn tb303_source_without_resonance_feedback(source: &str) -> String {
 fn bkm_block_row_coupling_summary(
     bkm: &pedalkernel_rt::stage::BlockwiseStage,
 ) -> Vec<(usize, f64, f64)> {
-    let block_rows = bkm.blocks.len().min(bkm.n_ports);
-    (0..block_rows)
+    bkm.block_ports
+        .iter()
+        .flat_map(|bindings| bindings.iter().map(|binding| binding.port))
+        .filter(|&row| row < bkm.n_ports)
         .map(|row| {
             let diag = bkm.coupling_s[row * bkm.n_ports + row];
             let offdiag_max = (0..bkm.n_ports)
@@ -724,10 +751,26 @@ fn bkm_block_row_coupling_summary(
 }
 
 fn bkm_identity_isolated_block_rows(bkm: &pedalkernel_rt::stage::BlockwiseStage) -> Vec<usize> {
-    bkm_block_row_coupling_summary(bkm)
-        .into_iter()
-        .filter_map(|(row, diag, offdiag_max)| {
-            ((diag - 1.0).abs() < 1e-4 && offdiag_max < 1e-5).then_some(row)
+    bkm.block_ports
+        .iter()
+        .enumerate()
+        .filter_map(|(block_idx, bindings)| {
+            if bindings.is_empty() {
+                return Some(block_idx);
+            }
+            let all_identity = bindings.iter().all(|binding| {
+                let row = binding.port;
+                if row >= bkm.n_ports {
+                    return true;
+                }
+                let diag = bkm.coupling_s[row * bkm.n_ports + row];
+                let offdiag_max = (0..bkm.n_ports)
+                    .filter(|&col| col != row)
+                    .map(|col| bkm.coupling_s[row * bkm.n_ports + col].abs())
+                    .fold(0.0_f64, f64::max);
+                (diag - 1.0).abs() < 1e-4 && offdiag_max < 1e-5
+            });
+            all_identity.then_some(block_idx)
         })
         .collect()
 }
@@ -1415,8 +1458,14 @@ fn tb303_bkm_does_not_stamp_reactive_coupling_as_resistor() {
             .collect::<Vec<_>>()
     );
     assert!(
-        bkm.output_port_index.is_some(),
-        "BKM should add a high-Z output probe coupling port so audio_out is read after C_out/R_out, not from the internal ladder tap"
+        bkm.output_port_index.is_none()
+            && bkm.output_extraction.coeffs.len() == bkm.n_ports
+            && bkm
+                .output_extraction
+                .coeffs
+                .iter()
+                .any(|coeff| coeff.abs() > 1.0e-12),
+        "BKM should read audio_out through read-only extraction after C_out/R_out, not perturb the solve with a high-Z probe"
     );
     assert!(
         bkm.coupling_elements
@@ -3370,7 +3419,8 @@ fn tb303_bkm_direct_output_reaches_serial_output() {
         .expect("TB303 should have output coupling WDF stage");
 
     for _ in 0..2400 {
-        let direct = bkm.process(&[0.0, 0.0, 0.0, 0.0]);
+        let vs = tb303_bkm_vs_signals_with_audio(bkm, 0.0, 0.0, 0.0, 0.0);
+        let direct = bkm.process(&vs);
         let _ = wdf.process(direct);
         let _ = proc_serial.process(0.0);
     }
@@ -3380,7 +3430,8 @@ fn tb303_bkm_direct_output_reaches_serial_output() {
     let mut serial_peak = 0.0f64;
     for i in 0..4800 {
         let input = 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin();
-        let bkm_out = bkm.process(&[input, 0.0, 0.0, 0.0]);
+        let vs = tb303_bkm_vs_signals_with_audio(bkm, input, 0.0, 0.0, 0.0);
+        let bkm_out = bkm.process(&vs);
         bkm_peak = bkm_peak.max(bkm_out.abs());
         coupled_peak = coupled_peak.max(wdf.process(bkm_out).abs());
         serial_peak = serial_peak.max(proc_serial.process(input).abs());
@@ -3488,18 +3539,20 @@ fn tb303_bkm_feedback_ports_are_the_lowpass_bypass_source() {
 
         for i in 0..9600 {
             let input = 0.03 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
+            let vs = tb303_bkm_vs_signals(bkm, 0.0, 0.0);
             if with_feedback_ports {
-                let _ = bkm.process(&[input, 0.0, 0.5, 0.0]);
+                let _ = bkm.process_with_serial_input(input, &vs);
             } else {
-                let _ = bkm.debug_process_without_feedback_ports(&[input, 0.0, 0.5, 0.0]);
+                let _ = bkm.debug_process_without_feedback_ports(&vs);
             }
         }
 
         settled_sine_ac_rms(freq, 0.03, |input| {
+            let vs = tb303_bkm_vs_signals(bkm, 0.0, 0.0);
             if with_feedback_ports {
-                bkm.process(&[input, 0.0, 0.5, 0.0])
+                bkm.process_with_serial_input(input, &vs)
             } else {
-                bkm.debug_process_without_feedback_ports(&[input, 0.0, 0.5, 0.0])
+                bkm.debug_process_without_feedback_ports(&vs)
             }
         })
     };
@@ -3551,7 +3604,8 @@ fn tb303_bkm_cutoff_pot_without_cv_is_lowpass() {
             .expect("TB303 should compile to BKM");
 
         settled_sine_ac_rms(freq, 0.03, |input| {
-            bkm.process(&[input, input * vco_drive, 0.0, 0.0])
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, input * vco_drive, 0.0, 0.0);
+            bkm.process_with_serial_input(input, &vs)
         })
     };
 
@@ -3602,7 +3656,8 @@ fn tb303_bkm_core_without_resonance_feedback_is_lowpass() {
             .expect("TB303 core should compile to BKM");
 
         settled_sine_ac_rms(freq, 0.03, |input| {
-            bkm.process(&[input, input * vco_drive, 0.0])
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, input * vco_drive, 0.0, 0.0);
+            bkm.process_with_serial_input(input, &vs)
         })
     };
 
@@ -3812,15 +3867,15 @@ fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
 
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let vs = tb303_bkm_vs_signals_with_vco(bkm, input, 0.0, 0.0);
-            let _ = bkm.debug_process_with_block_outputs(&vs);
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, 0.0, 0.0, 0.0);
+            let _ = bkm.debug_process_with_block_outputs_with_serial_input(input, &vs);
         }
 
         let mut values = vec![Vec::new(); bkm.blocks.len()];
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let vs = tb303_bkm_vs_signals_with_vco(bkm, input, 0.0, 0.0);
-            let (_, blocks) = bkm.debug_process_with_block_outputs(&vs);
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, 0.0, 0.0, 0.0);
+            let (_, blocks) = bkm.debug_process_with_block_outputs_with_serial_input(input, &vs);
             for (block_values, value) in values.iter_mut().zip(blocks.iter()) {
                 block_values.push(*value);
             }
@@ -3915,15 +3970,15 @@ fn tb303_bkm_rung_response_exposes_missing_cascaded_poles() {
 
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let vs = tb303_bkm_vs_signals_with_vco(bkm, input, 0.0, 0.0);
-            let _ = bkm.debug_process_with_block_outputs(&vs);
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, 0.0, 0.0, 0.0);
+            let _ = bkm.debug_process_with_block_outputs_with_serial_input(input, &vs);
         }
 
         let mut values = vec![Vec::new(); bkm.blocks.len()];
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
-            let vs = tb303_bkm_vs_signals_with_vco(bkm, input, 0.0, 0.0);
-            let (_, outputs) = bkm.debug_process_with_block_outputs(&vs);
+            let vs = tb303_bkm_vs_signals_with_vco(bkm, 0.0, 0.0, 0.0);
+            let (_, outputs) = bkm.debug_process_with_block_outputs_with_serial_input(input, &vs);
             for (block_values, value) in values.iter_mut().zip(outputs.iter()) {
                 block_values.push(*value);
             }

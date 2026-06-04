@@ -2167,10 +2167,7 @@ pub(super) fn try_build_blockwise(
         if plan.coupling.contains_edge(eidx) || early_extra_coupling.contains(&eidx) {
             continue;
         }
-        if !matches!(
-            graph.effective_edge_kind(eidx),
-            EdgeKind::Linear | EdgeKind::Reactive
-        ) {
+        if !matches!(graph.effective_edge_kind(eidx), EdgeKind::Linear) {
             continue;
         }
         let Some(other_node) = (if early_output_boundary_nodes.contains(&edge.node_a) {
