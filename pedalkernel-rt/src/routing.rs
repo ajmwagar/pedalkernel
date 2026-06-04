@@ -211,7 +211,7 @@ impl StageRoutePlan {
             }
         }
 
-        if vs_bindings.is_empty() || output_port_indices.is_empty() {
+        if boundary_drives.is_empty() || vs_bindings.is_empty() || output_port_indices.is_empty() {
             return Self {
                 connections,
                 ..Self::default()
@@ -532,5 +532,118 @@ impl StageRoutePlan {
             }
         }
         connections
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::ToString;
+    use alloc::vec;
+
+    use super::*;
+    use crate::boundary_math::{
+        CircuitMappedPort, ExtractionProbe, GraphNodeId, MnaNodeId, PortSpec, RuntimeState,
+        WdfPortTerminals,
+    };
+    use crate::dyn_node::DynNode;
+    use crate::oversampling::{Oversampler, OversamplingFactor};
+    use crate::processor::NamedPortBinding;
+    use crate::stage::{
+        BlockwiseSolveMode, BlockwiseStage, CoupledSolveScratch, RootKind, WdfBoundaryBinding,
+        WdfBoundaryDirection, WdfStage,
+    };
+
+    fn mapped_port(terminals: WdfPortTerminals, resistance: crate::Wave) -> CircuitMappedPort {
+        CircuitMappedPort::new(
+            terminals.map(GraphNodeId::new),
+            PortSpec::new(terminals.map(MnaNodeId::new), resistance),
+        )
+    }
+
+    fn empty_bkm_with_port(node_id: usize) -> BlockwiseStage {
+        BlockwiseStage {
+            blocks: vec![],
+            coupling_s: vec![0.0],
+            coupling_n_mna: 0,
+            coupling_ports: vec![mapped_port(WdfPortTerminals::single_ended(node_id), 1.0)],
+            block_ports: vec![],
+            coupling_elements: vec![],
+            coupling_passives: vec![],
+            coupling_one_ports: vec![],
+            coupling_runtime_state: RuntimeState::new(),
+            coupling_passive_by_port: vec![],
+            coupling_vcvss: vec![],
+            n_ports: 1,
+            output_block: 0,
+            output_port_index: Some(0),
+            supply_voltage: 9.0,
+            vs_port_map: vec![("audio_in".to_string(), 0)],
+            cutoff_cv_port: None,
+            shared_diode_cutoff_pot: None,
+            feedback_port_map: vec![],
+            output_extraction: ExtractionProbe::default(),
+            compensation: 1.0,
+            oversampler: Oversampler::new(OversamplingFactor::X1),
+            signal_flow_distance: 0,
+            bypass_serial: false,
+            solve_mode: BlockwiseSolveMode::Cascade,
+            diode_ladder_core: None,
+            b_warm: vec![0.0],
+            work_b: vec![0.0],
+            work_a: vec![0.0],
+            coupled_scratch: CoupledSolveScratch::default(),
+            port_index_cache: vec![],
+        }
+    }
+
+    #[test]
+    fn bkm_voltage_ports_use_generic_binding_routes_until_boundary_drive_is_needed() {
+        let mut source = WdfStage::new(
+            DynNode::VoltageSource(0.0, 1.0),
+            RootKind::ShortCircuit,
+            Oversampler::new(OversamplingFactor::X1),
+        );
+        source.boundary_bindings = vec![WdfBoundaryBinding {
+            label: "source_out".to_string(),
+            node_id: 42,
+            direction: WdfBoundaryDirection::Output,
+        }];
+
+        let ports = vec![
+            NamedPortBinding {
+                name: "audio_in".to_string(),
+                direction: crate::PortDirection::Input,
+                index: 0,
+                node_id: 42,
+                default_value: 0.0,
+                stage_idx: 1,
+            },
+            NamedPortBinding {
+                name: "audio_out".to_string(),
+                direction: crate::PortDirection::Output,
+                index: 1,
+                node_id: 42,
+                default_value: 0.0,
+                stage_idx: 1,
+            },
+        ];
+        let stages = vec![
+            Stage::Wdf(source),
+            Stage::Blockwise(empty_bkm_with_port(42)),
+        ];
+
+        let plan = StageRoutePlan::from_compiled_parts(&ports, &stages);
+
+        assert_eq!(plan.connections.len(), 1);
+        let connection = &plan.connections[0];
+        assert_eq!(connection.node_id, 42);
+        assert_eq!(connection.from.stage_idx, 0);
+        assert_eq!(connection.from.port_idx, 0);
+        assert_eq!(connection.to.stage_idx, 1);
+        assert_eq!(connection.to.port_idx, 0);
+        assert!(
+            plan.primary_bkm.is_none(),
+            "ordinary BKM voltage mapping should stay in generic route connections"
+        );
     }
 }
