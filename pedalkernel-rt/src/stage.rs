@@ -7266,28 +7266,25 @@ impl BlockwiseStage {
                     -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
                     Self::MAX_BLOCK_INCIDENT_VOLTAGE,
                 );
-                let (output_voltage, _) = Self::solve_block_port(
+                let (raw_voltage, ac_voltage, _) = Self::solve_block_port(
                     &mut self.blocks[block_idx],
                     differential_incident,
                     update_state,
                 );
 
                 if bottom_left < b_out.len() {
-                    b_out[bottom_left] =
-                        differential_incident - a.get(bottom_left).copied().unwrap_or(0.0);
+                    b_out[bottom_left] = a.get(bottom_left).copied().unwrap_or(0.0);
                 }
                 if bottom_right < b_out.len() {
-                    b_out[bottom_right] =
-                        -differential_incident - a.get(bottom_right).copied().unwrap_or(0.0);
+                    b_out[bottom_right] = a.get(bottom_right).copied().unwrap_or(0.0);
                 }
                 if top_diff < b_out.len() {
-                    b_out[top_diff] =
-                        2.0 * output_voltage - a.get(top_diff).copied().unwrap_or(0.0);
+                    b_out[top_diff] = 2.0 * raw_voltage - a.get(top_diff).copied().unwrap_or(0.0);
                 }
-                return output_voltage;
+                return ac_voltage;
             }
 
-            let (output_voltage, primary_reflected) =
+            let (raw_voltage, ac_voltage, primary_reflected) =
                 Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
             let is_multiport_block = port_bindings.len() > 1;
             if primary_port < b_out.len() {
@@ -7304,20 +7301,19 @@ impl BlockwiseStage {
                 .filter(|&port_idx| port_idx != primary_port)
             {
                 if port_idx < b_out.len() {
-                    b_out[port_idx] =
-                        2.0 * output_voltage - a.get(port_idx).copied().unwrap_or(0.0);
+                    b_out[port_idx] = 2.0 * raw_voltage - a.get(port_idx).copied().unwrap_or(0.0);
                 }
             }
-            output_voltage
+            ac_voltage
         } else if primary_port < b_out.len() {
-            let (output_voltage, primary_reflected) =
+            let (_, ac_voltage, primary_reflected) =
                 Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
             b_out[primary_port] = primary_reflected;
-            output_voltage
+            ac_voltage
         } else {
-            let (output_voltage, _) =
+            let (_, ac_voltage, _) =
                 Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
-            output_voltage
+            ac_voltage
         }
     }
 
@@ -7566,23 +7562,23 @@ impl BlockwiseStage {
         block: &mut KMethodBlock,
         incident: crate::Wave,
         update_state: bool,
-    ) -> (crate::Wave, crate::Wave) {
+    ) -> (crate::Wave, crate::Wave, crate::Wave) {
         if !incident.is_finite() {
-            return (0.0, 0.0);
+            return (0.0, 0.0, 0.0);
         }
-        let (_, _, _, port_voltage) = if update_state {
+        let (_, _, raw_voltage, ac_voltage) = if update_state {
             Self::solve_block_and_update_state(block, incident)
         } else {
             Self::solve_block_without_state_update(block, incident)
         };
-        if !port_voltage.is_finite() {
-            return (0.0, -incident);
+        if !raw_voltage.is_finite() || !ac_voltage.is_finite() {
+            return (0.0, 0.0, -incident);
         }
-        let reflected = 2.0 * port_voltage - incident;
+        let reflected = 2.0 * raw_voltage - incident;
         if reflected.is_finite() {
-            (port_voltage, reflected)
+            (raw_voltage, ac_voltage, reflected)
         } else {
-            (0.0, -incident)
+            (0.0, 0.0, -incident)
         }
     }
 
@@ -7768,10 +7764,10 @@ impl BlockwiseStage {
                     output_derivative_by_block[block_idx] = d_out;
 
                     if bottom_left < n {
-                        db_da[bottom_left * n + bottom_right] = -1.0;
+                        db_da[bottom_left * n + bottom_left] = 1.0;
                     }
                     if bottom_right < n {
-                        db_da[bottom_right * n + bottom_left] = -1.0;
+                        db_da[bottom_right * n + bottom_right] = 1.0;
                     }
                     if top_diff < n {
                         db_da[top_diff * n + bottom_left] = 2.0 * d_out;
@@ -8019,6 +8015,19 @@ impl BlockwiseStage {
             self.run_block_cascade(true, true, serial_input, Some(&mut outputs))
         };
         (output, outputs)
+    }
+
+    pub fn debug_current_differential_incidents(&self) -> alloc::vec::Vec<crate::Wave> {
+        (0..self.blocks.len())
+            .map(|block_idx| {
+                self.differential_rung_ports(block_idx)
+                    .map(|(bottom_left, bottom_right, _)| {
+                        self.work_a.get(bottom_left).copied().unwrap_or(0.0)
+                            - self.work_a.get(bottom_right).copied().unwrap_or(0.0)
+                    })
+                    .unwrap_or(0.0)
+            })
+            .collect()
     }
 
     fn block_output_voltage(
@@ -9526,6 +9535,21 @@ mod blockwise_stage_tests {
             (raw - ac - 0.75).abs() < 1e-12,
             "BKM should keep raw cascade voltage available for driving downstream nonlinear blocks \
              while exposing AC output separately"
+        );
+    }
+
+    #[test]
+    fn bkm_block_port_reflects_raw_voltage_but_reports_ac_output() {
+        let mut block = test_block(1.0);
+        block.k_table = one_dimensional_table();
+        block.dc_offset = 0.75;
+
+        let (raw, ac, reflected) = BlockwiseStage::solve_block_port(&mut block, 0.25, false);
+
+        assert!((raw - ac - 0.75).abs() < 1e-12);
+        assert!(
+            (reflected - (2.0 * raw - 0.25)).abs() < 1e-12,
+            "coupled BKM ports must reflect physical voltage; DC subtraction is only for exposed audio/debug output"
         );
     }
 

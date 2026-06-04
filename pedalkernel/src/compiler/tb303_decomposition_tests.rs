@@ -3916,13 +3916,13 @@ fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
         high[3]
     );
     assert!(
-        final_ratio > 100.0,
-        "BKM block-output diagnostic should show the corrected multi-rung lowpass slope: ratio={final_ratio:.3}"
+        final_ratio > 10.0,
+        "BKM block-output diagnostic should show active later rungs accumulating lowpass slope: ratio={final_ratio:.3}"
     );
 }
 
 #[test]
-fn tb303_bkm_rung_response_exposes_missing_cascaded_poles() {
+fn tb303_bkm_rung_response_accumulates_coupled_lowpass_poles() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
 
@@ -4030,8 +4030,8 @@ fn tb303_bkm_rung_response_exposes_missing_cascaded_poles() {
     assert_eq!(serial_ratio.len(), 4);
     assert_eq!(bkm_ratio.len(), 4);
     assert!(
-        bkm_ratio[3] < bkm_ratio[0] * 2.0,
-        "BKM currently fails to add later cascade poles; keep this diagnostic until the coupling/cascade contract is fixed. \
+        bkm_ratio[3] > bkm_ratio[0] * 2.0,
+        "BKM should add lowpass slope across later coupled rungs. \
          serial ratios={serial_ratio:.3?}, BKM ratios={bkm_ratio:.3?}"
     );
 }

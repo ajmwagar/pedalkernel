@@ -1561,13 +1561,30 @@ impl CompiledPedal {
         }
 
         let output = bkm_stage.process_with_boundary_drives(&boundary_drives, &vs_signals);
-        let output = if output.is_finite() { output } else { 0.0 };
+        let output = self.condition_output_signal(output);
         for port_idx in route.output_port_indices {
             if port_idx < self.port_values.len() {
                 self.port_values[port_idx] = output;
             }
         }
         Some(output)
+    }
+
+    fn condition_output_signal(&mut self, mut signal: crate::Wave) -> crate::Wave {
+        if let Some(ref mut loading) = self.output_loading {
+            signal = loading.process(signal);
+        }
+        if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.output_dc_block {
+            let x = signal;
+            let y = b0 * (x - *x_prev) + a1 * *y_prev;
+            *x_prev = x;
+            *y_prev = crate::stage::flush_denormal(y);
+            signal = *y_prev;
+        }
+        if !signal.is_finite() {
+            signal = 0.0;
+        }
+        signal * self.output_gain
     }
 
     /// Get the tolerance seed for this pedal unit (for diagnostics/UI).
