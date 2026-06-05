@@ -618,7 +618,7 @@ impl<R> RolePortBinding<R, usize> {
     }
 }
 
-/// Read-only node extraction from a reflected-wave vector.
+/// Read-only node extraction from a coupling wave vector.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExtractionProbe<N = usize> {
@@ -1125,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn extraction_probe_reads_reflected_wave_vector() {
+    fn extraction_probe_reads_wave_vector() {
         let probe = ExtractionProbe::new(vec![0.25, -0.5, 0.0], Some(WdfPortTerminals::grounded()));
         let reflected = [2.0, -1.0, 9.0];
 

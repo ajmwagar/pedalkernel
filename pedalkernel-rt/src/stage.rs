@@ -6952,7 +6952,7 @@ impl BlockwiseStage {
     /// Coupled delayed mode is a realtime approximation. Treat values outside
     /// normal audio/circuit rails as solver failure so they cannot poison the
     /// next sample's warm start.
-    const MAX_STABLE_OUTPUT: crate::Wave = 32.0;
+    const MAX_STABLE_OUTPUT: crate::Wave = 1.0;
     /// Physical voltages entering one local K-method block must stay inside
     /// plausible circuit rails. The coupled adaptor may transiently propose a
     /// larger wave during Newton/fixed-point iteration; letting that value
@@ -7497,7 +7497,7 @@ impl BlockwiseStage {
     }
 
     fn output_probe_voltage(&self, fallback: crate::Wave) -> crate::Wave {
-        if let Some(v) = self.output_extraction.read_reflected(&self.work_b) {
+        if let Some(v) = self.output_extraction.read_reflected(&self.work_a) {
             return v;
         }
 
@@ -8665,9 +8665,20 @@ impl BlockwiseStage {
             );
             self.work_b.copy_from_slice(&scratch.b);
             self.coupled_scratch = scratch;
-            let output = self.output_probe_voltage(block_output);
+            let raw_output = self.output_probe_voltage(block_output);
+            let output_is_stable =
+                raw_output.is_finite() && raw_output.abs() <= Self::MAX_STABLE_OUTPUT;
+            let output = if output_is_stable { raw_output } else { 0.0 };
             self.b_warm[0] = output;
-            return if output.is_finite() { output } else { 0.0 };
+            if !output_is_stable {
+                for v in &mut self.work_a {
+                    *v = 0.0;
+                }
+                for v in &mut self.work_b {
+                    *v = 0.0;
+                }
+            }
+            return output;
         }
 
         self.process_coupled_one_step_delay(vs_signals, serial_input, boundary_drives)
