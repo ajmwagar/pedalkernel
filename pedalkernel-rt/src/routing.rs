@@ -566,7 +566,7 @@ mod tests {
             coupling_s: vec![0.0],
             coupling_n_mna: 0,
             coupling_ports: vec![mapped_port(WdfPortTerminals::single_ended(node_id), 1.0)],
-            owned_ports: vec![],
+            sub_stages: vec![],
             coupling_elements: vec![],
             coupling_passives: vec![],
             coupling_one_ports: vec![],

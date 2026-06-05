@@ -18,7 +18,7 @@ use pedalkernel_rt::boundary_math::{
     OnePortKind, PortSpec, PortTerminals, RuntimeOnePort, RuntimeState, ScatteringPortId,
     WdfPortTerminals,
 };
-use pedalkernel_rt::stage::{OwnedPortBinding, OwnedPortRole};
+use pedalkernel_rt::stage::{BlockwiseSubStage, OwnedPortBinding, OwnedPortRole};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 fn push_coupling_port(
@@ -2799,7 +2799,7 @@ pub(super) fn try_build_blockwise(
             node_set.iter().enumerate().map(|(i, &n)| (n, i)).collect();
         let n_mna = node_set.len();
 
-        eprintln!("  [blockwise] coupling MNA: {n_mna} nodes, {n_blocks} owned ports");
+        eprintln!("  [blockwise] coupling MNA: {n_mna} nodes, {n_blocks} sub-stage ports");
 
         let mut vcvs_vsource_base: HashMap<usize, usize> = HashMap::new();
         let mut n_vcvs_sources = 0usize;
@@ -2994,9 +2994,9 @@ pub(super) fn try_build_blockwise(
         // ── Define WDF ports ────────────────────────────────────────────
         // One port per block (at the block's coupling node) + one adapted VS port
         let mut ports = Vec::new();
-        let mut owned_ports: Vec<Vec<OwnedPortBinding>> = vec![Vec::new(); n_blocks];
+        let mut sub_stages: Vec<BlockwiseSubStage> = vec![BlockwiseSubStage::default(); n_blocks];
 
-        // Owned ports: find each block's UNIQUE coupling node.
+        // Sub-stage ports: find each block's UNIQUE coupling node.
         //
         // For cascaded diode-connected BJTs (base=collector), adjacent blocks
         // share a node (Q1.emitter = Q2.base). Naively picking the first
@@ -3035,7 +3035,9 @@ pub(super) fn try_build_blockwise(
                         WdfPortTerminals::maybe_single_ended(node_to_mna.get(&node).copied()),
                         rp,
                     );
-                    owned_ports[kbi].push(OwnedPortBinding::new(port_idx, role));
+                    sub_stages[kbi]
+                        .ports
+                        .push(OwnedPortBinding::new(port_idx, role));
                     #[cfg(test)]
                     eprintln!(
                         "    block {bi}: {label}=Some({node}) → mna_node={:?}, scattering_port={port_idx}",
@@ -3052,7 +3054,7 @@ pub(super) fn try_build_blockwise(
                         WdfPortTerminals::differential(left_idx, right_idx),
                         rp,
                     );
-                    owned_ports[kbi].push(OwnedPortBinding::new(
+                    sub_stages[kbi].ports.push(OwnedPortBinding::new(
                         port_idx,
                         OwnedPortRole::DifferentialOutput,
                     ));
@@ -3093,7 +3095,9 @@ pub(super) fn try_build_blockwise(
                     WdfPortTerminals::single_ended(mna_idx),
                     rp,
                 );
-                owned_ports[kbi].push(OwnedPortBinding::primary(port_idx));
+                sub_stages[kbi]
+                    .ports
+                    .push(OwnedPortBinding::primary(port_idx));
                 used_ports.insert(pn);
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=Some({pn}) → mna_node=Some({mna_idx})");
@@ -3105,21 +3109,26 @@ pub(super) fn try_build_blockwise(
                     WdfPortTerminals::grounded(),
                     1000.0,
                 );
-                owned_ports[kbi].push(OwnedPortBinding::primary(port_idx));
+                sub_stages[kbi]
+                    .ports
+                    .push(OwnedPortBinding::primary(port_idx));
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=None (no unique coupling node)");
             }
         }
 
         let use_coupled_solve = n_blocks >= 2
-            && owned_ports.iter().all(|ports| {
-                ports
+            && sub_stages.iter().all(|sub_stage| {
+                sub_stage
+                    .ports
                     .iter()
                     .any(|binding| binding.role == OwnedPortRole::DifferentialPositive)
-                    && ports
+                    && sub_stage
+                        .ports
                         .iter()
                         .any(|binding| binding.role == OwnedPortRole::DifferentialNegative)
-                    && ports
+                    && sub_stage
+                        .ports
                         .iter()
                         .any(|binding| binding.role == OwnedPortRole::DifferentialOutput)
             });
@@ -3245,7 +3254,7 @@ pub(super) fn try_build_blockwise(
 
         // Supply VS ports: VCC and other supply nodes that appear in coupling.
         // These establish DC bias current through R_bias → diodes.
-        // Without them, R_bias grounds the owned ports → diodes off → dead filter.
+        // Without them, R_bias grounds the sub-stage ports → diodes off → dead filter.
         for (supply_node, voltage) in &supply_nodes_in_coupling {
             if let Some(&mna_idx) = node_to_mna.get(supply_node) {
                 let scattering_idx = push_coupling_port(
@@ -3520,7 +3529,7 @@ pub(super) fn try_build_blockwise(
             coupling_s: scattering,
             coupling_n_mna: n_mna,
             coupling_ports: ports,
-            owned_ports,
+            sub_stages,
             coupling_elements,
             coupling_passives,
             coupling_one_ports,

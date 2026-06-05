@@ -59,12 +59,12 @@ const TB303_LAYERED_DIAGNOSTICS: &[Tb303LayerEntry] = &[
         purpose: "Q12 remains a boundary WDF block in the compiled stage contract",
     },
     Tb303LayerEntry {
-        filter: "tb303_bkm_differential_rungs_have_side_aware_owned_ports",
+        filter: "tb303_bkm_differential_rungs_have_side_aware_sub_stage_ports",
         layer: Tb303TestLayer::Coupling,
         purpose: "BKM exposes bottom-left, bottom-right, and top differential ports per rung",
     },
     Tb303LayerEntry {
-        filter: "tb303_bkm_coupling_matrix_connects_ladder_owned_ports",
+        filter: "tb303_bkm_coupling_matrix_connects_ladder_sub_stage_ports",
         layer: Tb303TestLayer::Coupling,
         purpose: "coupling matrix connects adjacent ladder block rows",
     },
@@ -735,9 +735,9 @@ fn tb303_source_without_resonance_feedback(source: &str) -> String {
 fn bkm_block_row_coupling_summary(
     bkm: &pedalkernel_rt::stage::BlockwiseStage,
 ) -> Vec<(usize, f64, f64)> {
-    bkm.owned_ports
+    bkm.sub_stages
         .iter()
-        .flat_map(|bindings| bindings.iter().map(|binding| binding.port))
+        .flat_map(|sub_stage| sub_stage.owned_port_ids())
         .filter(|&row| row < bkm.n_ports)
         .map(|row| {
             let diag = bkm.coupling_s[row * bkm.n_ports + row];
@@ -751,14 +751,14 @@ fn bkm_block_row_coupling_summary(
 }
 
 fn bkm_identity_isolated_block_rows(bkm: &pedalkernel_rt::stage::BlockwiseStage) -> Vec<usize> {
-    bkm.owned_ports
+    bkm.sub_stages
         .iter()
         .enumerate()
-        .filter_map(|(block_idx, bindings)| {
-            if bindings.is_empty() {
+        .filter_map(|(block_idx, sub_stage)| {
+            if sub_stage.is_empty() {
                 return Some(block_idx);
             }
-            let all_identity = bindings.iter().all(|binding| {
+            let all_identity = sub_stage.ports.iter().all(|binding| {
                 let row = binding.port;
                 if row >= bkm.n_ports {
                     return true;
@@ -1601,7 +1601,7 @@ fn tb303_coupling_caps_land_near_stinchcombe_shelf_corners() {
 }
 
 #[test]
-fn tb303_bkm_differential_rungs_have_side_aware_owned_ports() {
+fn tb303_bkm_differential_rungs_have_side_aware_sub_stage_ports() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
     let compiled =
@@ -1638,15 +1638,16 @@ fn tb303_bkm_differential_rungs_have_side_aware_owned_ports() {
         "BKM should expose one coupling port per rung"
     );
     assert_eq!(
-        bkm.owned_ports.len(),
+        bkm.sub_stages.len(),
         bkm.blocks.len(),
-        "BKM must track which coupling ports are owned by each block"
+        "BKM must track which coupling ports are owned by each sub-stage"
     );
 
-    for (block_idx, ports) in bkm.owned_ports.iter().enumerate() {
+    for (block_idx, sub_stage) in bkm.sub_stages.iter().enumerate() {
         assert!(
-            ports.len() >= 3,
-            "differential rung block {block_idx} should expose bottom left/right side ports plus a top differential port, got {ports:?}"
+            sub_stage.ports.len() >= 3,
+            "differential rung block {block_idx} should expose bottom left/right side ports plus a top differential port, got {:?}",
+            sub_stage.ports
         );
         let (bottom_left_idx, bottom_right_idx, top_diff_idx) = bkm
             .differential_owned_ports(block_idx)
@@ -1777,11 +1778,13 @@ fn tb303_bkm_differential_rungs_own_multiple_coupling_ports() {
         })
         .expect("TB303 should compile to BKM");
 
-    eprintln!("  TB303 BKM owned_ports: {:?}", bkm.owned_ports);
+    eprintln!("  TB303 BKM sub_stages: {:?}", bkm.sub_stages);
 
     assert_eq!(bkm.blocks.len(), 4);
     assert!(
-        bkm.owned_ports.iter().all(|ports| ports.len() >= 3),
+        bkm.sub_stages
+            .iter()
+            .all(|sub_stage| sub_stage.ports.len() >= 3),
         "each differential rung must own bottom left/right ports and a top differential port"
     );
     assert!(
@@ -1833,7 +1836,7 @@ fn tb303_blockwise_differential_rungs_expose_top_and_bottom_ports() {
 }
 
 #[test]
-fn tb303_bkm_coupling_matrix_connects_ladder_owned_ports() {
+fn tb303_bkm_coupling_matrix_connects_ladder_sub_stage_ports() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
     let compiled =
@@ -2661,7 +2664,7 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
         assert!(
             bkm.differential_owned_ports(0).is_some() && bkm.differential_owned_ports(1).is_some(),
             "Q12 fixture should expose two three-port differential rung blocks, got {:?}",
-            bkm.owned_ports
+            bkm.sub_stages
         );
         let first_rung_ports = bkm
             .differential_owned_ports(0)
@@ -2946,7 +2949,7 @@ fn two_rung_feedback_diode_ladder_compiles_to_bkm() {
 }
 
 #[test]
-fn two_rung_feedback_bkm_coupling_matrix_connects_owned_ports() {
+fn two_rung_feedback_bkm_coupling_matrix_connects_sub_stage_ports() {
     let def =
         crate::dsl::parse_pedal_file(TWO_RUNG_DIODE_LADDER_WITH_FEEDBACK).expect("parse failed");
     let proc = super::compile_pedal(&def, SR).expect("compile failed");
@@ -2969,7 +2972,7 @@ fn two_rung_feedback_bkm_coupling_matrix_connects_owned_ports() {
     assert!(
         isolated.is_empty(),
         "BKM coupling MNA isolated simple ladder block rows {isolated:?}; \
-         the compiler must derive connected owned ports from the parsed .pedal graph"
+         the compiler must derive connected sub-stage ports from the parsed .pedal graph"
     );
 }
 
@@ -5336,7 +5339,7 @@ fn tb303_resonance_recomputes_bkm_coupling_matrix() {
         .expect("BKM stage");
 
     let before = bkm.coupling_s.clone();
-    let owned_ports = bkm.owned_ports.clone();
+    let sub_stages = bkm.sub_stages.clone();
     assert!(
         bkm.set_pot("Resonance", 0.7),
         "BKM should accept coupling-network pot changes"
@@ -5361,7 +5364,7 @@ fn tb303_resonance_recomputes_bkm_coupling_matrix() {
     changed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
 
     eprintln!("  Resonance coupling matrix max delta: {delta:.6}");
-    eprintln!("  BKM owned ports: {owned_ports:?}");
+    eprintln!("  BKM sub-stages: {sub_stages:?}");
     eprintln!("  Resonance/R_fb coupling elements:");
     for element in bkm.coupling_elements.iter().filter(|e| {
         e.comp_id == "Resonance" || e.comp_id == "R_fb_limit" || e.comp_id == "R_res_cv"
@@ -5403,11 +5406,13 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
         })
         .expect("BKM stage");
 
-    assert_eq!(bkm.owned_ports.len(), 4, "expected four ladder rung blocks");
+    assert_eq!(bkm.sub_stages.len(), 4, "expected four ladder rung blocks");
     assert!(
-        bkm.owned_ports.iter().all(|ports| ports.len() >= 2),
+        bkm.sub_stages
+            .iter()
+            .all(|sub_stage| sub_stage.ports.len() >= 2),
         "differential ladder rungs should expose at least bottom/top coupling ports: {:?}",
-        bkm.owned_ports
+        bkm.sub_stages
     );
 
     assert!(bkm.set_pot("Resonance", 0.0));
