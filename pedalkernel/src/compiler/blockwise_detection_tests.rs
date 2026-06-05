@@ -2754,7 +2754,7 @@ fn coupling_scattering_includes_vcc_supply() {
     let plan = blockwise::analyze_blockwise(&group_edges, &graph).expect("should decompose");
 
     // Check: does the coupling scattering have a VCC VS port?
-    // The coupling edges include R_bias1..4 which connect VCC to block ports.
+    // The coupling edges include R_bias1..4 which connect VCC to owned ports.
     let has_bias_edge = plan.coupling_edges.iter().any(|&eidx| {
         let comp = &graph.components[graph.edges[eidx].comp_idx];
         comp.id.contains("R_bias")
