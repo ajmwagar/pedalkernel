@@ -7272,8 +7272,14 @@ impl BlockwiseStage {
                     update_state,
                 );
 
+                // The left emitter node is both the rung's local solved output
+                // and a coupling-network terminal (C_out / resonance send on
+                // the TB-303 ladder). Reflect the solved voltage here so
+                // passive feedback observes the live rung state, not only the
+                // imposed incident wave.
                 if bottom_left < b_out.len() {
-                    b_out[bottom_left] = a.get(bottom_left).copied().unwrap_or(0.0);
+                    b_out[bottom_left] =
+                        2.0 * raw_voltage - a.get(bottom_left).copied().unwrap_or(0.0);
                 }
                 if bottom_right < b_out.len() {
                     b_out[bottom_right] = a.get(bottom_right).copied().unwrap_or(0.0);
@@ -7764,7 +7770,8 @@ impl BlockwiseStage {
                     output_derivative_by_block[block_idx] = d_out;
 
                     if bottom_left < n {
-                        db_da[bottom_left * n + bottom_left] = 1.0;
+                        db_da[bottom_left * n + bottom_left] = 2.0 * d_out - 1.0;
+                        db_da[bottom_left * n + bottom_right] = -2.0 * d_out;
                     }
                     if bottom_right < n {
                         db_da[bottom_right * n + bottom_right] = 1.0;

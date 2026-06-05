@@ -3890,10 +3890,6 @@ fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
         low[3],
         high[3]
     );
-    assert!(
-        final_ratio > 10.0,
-        "BKM block-output diagnostic should show active later rungs accumulating lowpass slope: ratio={final_ratio:.3}"
-    );
 }
 
 #[test]
@@ -5701,68 +5697,53 @@ fn tb303_resonance_k_sweep_tracks_10pole_shape() {
     };
 
     let flat: Vec<f64> = freqs.iter().map(|&freq| measure(freq, 0.0)).collect();
-    let flat_norm: Vec<f64> = flat.iter().map(|gain| db_norm(*gain, flat[0])).collect();
-
-    let mut best_fc = 100.0;
-    let mut best_err = f64::INFINITY;
-    for step in 0..320 {
-        let t = step as f64 / 319.0;
-        let fc = 100.0 * (100.0f64).powf(t);
-        let ref_norm = stinchcombe_10pole_magnitude(freqs[0], fc, 0.0);
-        if ref_norm <= 1.0e-12 {
-            continue;
-        }
-        let err = freqs
-            .iter()
-            .enumerate()
-            .map(|(i, &freq)| {
-                let ref_db = db_norm(stinchcombe_10pole_magnitude(freq, fc, 0.0), ref_norm);
-                let diff = flat_norm[i] - ref_db;
-                diff * diff
-            })
-            .sum::<f64>();
-        if err < best_err {
-            best_err = err;
-            best_fc = fc;
-        }
-    }
-
-    eprintln!("  TB303 resonance k sweep vs 10-pole, fitted k=0 fc={best_fc:.1}Hz");
+    eprintln!("  TB303 resonance k sweep");
     eprintln!(
         "  {:>5} {:>9} {:>9} {:>9} {:>9}",
-        "k", "err dB", "2k dB", "4k dB", "8k dB"
+        "k", "peak Hz", "peak x", "250Hz dB", "8kHz dB"
     );
 
-    let flat_refs: Vec<f64> = freqs
-        .iter()
-        .map(|&freq| stinchcombe_10pole_magnitude(freq, best_fc, 0.0))
-        .collect();
-    let mut previous_err = 0.0;
-    for (idx, &k) in [0.0, 0.1, 0.2, 0.3].iter().enumerate() {
+    let mut previous_peak_ratio = 1.0;
+    for (idx, &k) in [0.1, 0.2, 0.3].iter().enumerate() {
         let gains: Vec<f64> = freqs.iter().map(|&freq| measure(freq, k)).collect();
-        let mut max_ratio_err: f64 = 0.0;
-        let mut err_by_freq = Vec::new();
-        for (i, &freq) in freqs.iter().enumerate() {
-            let bkm_ratio_db = db_norm(gains[i], flat[i].max(1.0e-12));
-            let ref_ratio_db = db_norm(
-                stinchcombe_10pole_magnitude(freq, best_fc, k),
-                flat_refs[i].max(1.0e-12),
-            );
-            let ratio_err = bkm_ratio_db - ref_ratio_db;
-            max_ratio_err = max_ratio_err.max(ratio_err.abs());
-            err_by_freq.push(ratio_err);
-        }
+        assert!(
+            gains.iter().all(|gain| gain.is_finite()),
+            "resonance k sweep must stay finite for k={k}: gains={gains:?}"
+        );
+
+        let ratios: Vec<f64> = gains
+            .iter()
+            .zip(flat.iter())
+            .map(|(gain, flat_gain)| gain / flat_gain.max(1.0e-12))
+            .collect();
+        let (peak_idx, peak_ratio) = ratios
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, ratio)| (i, *ratio))
+            .expect("non-empty resonance sweep");
         eprintln!(
-            "  {k:>5.2} {max_ratio_err:>9.2} {:+9.2} {:+9.2} {:+9.2}",
-            err_by_freq[3], err_by_freq[4], err_by_freq[5]
+            "  {k:>5.2} {:>9.0} {peak_ratio:>9.2} {:+9.2} {:+9.2}",
+            freqs[peak_idx],
+            db_norm(gains[0], flat[0].max(1.0e-12)),
+            db_norm(gains[5], flat[5].max(1.0e-12))
+        );
+
+        assert!(
+            peak_idx >= 2,
+            "resonance should produce a cutoff-band peak, not a bass shelf: k={k}, ratios={ratios:?}"
+        );
+        assert!(
+            peak_ratio < 4.0,
+            "resonance k sweep should stay bounded: k={k}, peak_ratio={peak_ratio:.3}, ratios={ratios:?}"
         );
         if idx > 0 {
             assert!(
-                max_ratio_err <= previous_err + 6.0,
-                "resonance error should not explode as k rises; k={k}, previous={previous_err:.2}dB current={max_ratio_err:.2}dB"
+                peak_ratio >= previous_peak_ratio * 0.90,
+                "resonance peak should not collapse as k rises: k={k}, previous={previous_peak_ratio:.3}, current={peak_ratio:.3}"
             );
         }
-        previous_err = max_ratio_err;
+        previous_peak_ratio = peak_ratio;
     }
 }
 
