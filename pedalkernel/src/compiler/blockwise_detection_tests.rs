@@ -881,7 +881,7 @@ fn blockwise_block_counts(compiled: &super::compiled::CompiledPedal) -> Vec<usiz
         .iter()
         .filter_map(|stage| {
             if let super::compiled::Stage::Blockwise(bkm) = stage {
-                Some(bkm.blocks.len())
+                Some(bkm.block_count())
             } else {
                 None
             }
@@ -895,7 +895,7 @@ fn blockwise_block_rps(compiled: &super::compiled::CompiledPedal) -> Vec<f64> {
         .iter()
         .flat_map(|stage| {
             if let super::compiled::Stage::Blockwise(bkm) = stage {
-                bkm.blocks.iter().map(|block| block.rp).collect()
+                bkm.k_method_blocks().map(|block| block.rp).collect()
             } else {
                 Vec::new()
             }
@@ -1011,6 +1011,9 @@ fn print_stages(name: &str, compiled: &super::compiled::CompiledPedal) {
                     s.stages.len(),
                     s.signal_flow_distance
                 );
+            }
+            super::compiled::Stage::KMethod { .. } => {
+                eprintln!("  [{i}] KMethod child");
             }
         }
     }

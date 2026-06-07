@@ -18,7 +18,9 @@ use pedalkernel_rt::boundary_math::{
     OnePortKind, PortSpec, PortTerminals, RuntimeOnePort, RuntimeState, ScatteringPortId,
     WdfPortTerminals,
 };
-use pedalkernel_rt::stage::{BlockwiseSubStage, OwnedPortBinding, OwnedPortRole};
+use pedalkernel_rt::processor::Stage;
+use pedalkernel_rt::route::{BindingId, PortBinding};
+use pedalkernel_rt::stage::{KMethodBlock, OwnedPortRole};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 fn push_coupling_port(
@@ -33,6 +35,51 @@ fn push_coupling_port(
         PortSpec::new(mna_terminals.map(MnaNodeId::new), resistance),
     ));
     port_idx
+}
+
+fn bindings_for_coupling_port(ports: &[CircuitMappedPort], port_idx: usize) -> Vec<PortBinding> {
+    let Some(terminals) = ports.get(port_idx).map(|port| port.graph.raw()) else {
+        return Vec::new();
+    };
+    let (pos, neg) = terminals.as_tuple();
+    pos.into_iter()
+        .chain(neg)
+        .map(|node| PortBinding::new(BindingId::new(node), port_idx))
+        .collect()
+}
+
+fn push_k_method_port(
+    sub_stages: &mut [Stage],
+    block_idx: usize,
+    role: OwnedPortRole,
+    ports: &[CircuitMappedPort],
+    port_idx: usize,
+) {
+    let Some(Stage::KMethod {
+        ports: stage_ports, ..
+    }) = sub_stages.get_mut(block_idx)
+    else {
+        return;
+    };
+    stage_ports.extend(
+        bindings_for_coupling_port(ports, port_idx)
+            .into_iter()
+            .map(|binding| (role, binding)),
+    );
+}
+
+fn k_method_block(stage: &Stage) -> Option<&KMethodBlock> {
+    match stage {
+        Stage::KMethod { block, .. } => Some(block),
+        _ => None,
+    }
+}
+
+fn k_method_ports(stage: &Stage) -> Option<&[(OwnedPortRole, PortBinding)]> {
+    match stage {
+        Stage::KMethod { ports, .. } => Some(ports.as_slice()),
+        _ => None,
+    }
 }
 
 /// Compiler-recognized topology for a blockwise nonlinear unit.
@@ -2445,7 +2492,7 @@ pub(super) fn try_build_blockwise(
             .blocks
             .iter()
             .any(|block| matches!(block.topology, BlockTopology::DifferentialDiodeRung { .. }));
-        let mut k_blocks = Vec::new();
+        let mut sub_stages: Vec<Stage> = Vec::new();
         let mut plan_block_to_k_block = vec![None; plan.blocks.len()];
         for (stage_idx, built) in all_stages.iter_mut().enumerate() {
             let bi = all_stage_plan_blocks
@@ -2619,31 +2666,34 @@ pub(super) fn try_build_blockwise(
                     // by the circuit: the cascade node (Q.emitter) is where
                     // the cap connects, which is the right child of the
                     // Series(VS, Cap) adaptor.
-                    let k_block_idx = k_blocks.len();
+                    let k_block_idx = sub_stages.len();
                     if bi < plan_block_to_k_block.len() {
                         plan_block_to_k_block[bi] = Some(k_block_idx);
                     }
-                    k_blocks.push(pedalkernel_rt::stage::KMethodBlock {
-                        tree: wdf.tree.clone(),
-                        runtime_state: wdf.runtime_state.clone(),
-                        k_table: k_table.clone(),
-                        explicit_diode_root: match &wdf.root {
-                            pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => {
-                                Some(*root)
-                            }
-                            _ => None,
+                    sub_stages.push(Stage::KMethod {
+                        block: pedalkernel_rt::stage::KMethodBlock {
+                            tree: wdf.tree.clone(),
+                            runtime_state: wdf.runtime_state.clone(),
+                            k_table: k_table.clone(),
+                            explicit_diode_root: match &wdf.root {
+                                pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => {
+                                    Some(*root)
+                                }
+                                _ => None,
+                            },
+                            nominal_vs_rp: block_source_r,
+                            diode_cutoff,
+                            rp: wdf.tree.port_resistance(),
+                            vbe_bias,
+                            dc_offset,
+                            cascade_from_passive: true,
+                            cascade_probe_id: wdf.output_probe.clone(),
+                            source_polarity,
+                            k_table_control_polarity,
+                            shared_diode_bias_voltage: None,
+                            control_from_drive,
                         },
-                        nominal_vs_rp: block_source_r,
-                        diode_cutoff,
-                        rp: wdf.tree.port_resistance(),
-                        vbe_bias,
-                        dc_offset,
-                        cascade_from_passive: true,
-                        cascade_probe_id: wdf.output_probe.clone(),
-                        source_polarity,
-                        k_table_control_polarity,
-                        shared_diode_bias_voltage: None,
-                        control_from_drive,
+                        ports: Vec::new(),
                     });
                 }
             }
@@ -2679,7 +2729,7 @@ pub(super) fn try_build_blockwise(
             CouplingFormulation::None | CouplingFormulation::BlockwiseCoupled { .. } => {}
         }
 
-        let n_blocks = k_blocks.len();
+        let n_blocks = sub_stages.len();
         if n_blocks < 2 {
             // Not enough K-table blocks to preserve the coupling network.
             // Returning separate stages here is only valid for true cascades;
@@ -2994,7 +3044,6 @@ pub(super) fn try_build_blockwise(
         // ── Define WDF ports ────────────────────────────────────────────
         // One port per block (at the block's coupling node) + one adapted VS port
         let mut ports = Vec::new();
-        let mut sub_stages: Vec<BlockwiseSubStage> = vec![BlockwiseSubStage::default(); n_blocks];
 
         // Sub-stage ports: find each block's UNIQUE coupling node.
         //
@@ -3016,7 +3065,9 @@ pub(super) fn try_build_blockwise(
                 continue;
             };
             if let Some(rung_ports) = differential_rung_ports(block, graph) {
-                let rp = k_blocks[kbi].nominal_vs_rp;
+                let rp = k_method_block(&sub_stages[kbi])
+                    .map(|block| block.nominal_vs_rp)
+                    .unwrap_or(r_source_cascade);
                 for (label, node, role) in [
                     (
                         "diff_pos",
@@ -3035,9 +3086,7 @@ pub(super) fn try_build_blockwise(
                         WdfPortTerminals::maybe_single_ended(node_to_mna.get(&node).copied()),
                         rp,
                     );
-                    sub_stages[kbi]
-                        .ports
-                        .push(OwnedPortBinding::new(port_idx, role));
+                    push_k_method_port(&mut sub_stages, kbi, role, &ports, port_idx);
                     #[cfg(test)]
                     eprintln!(
                         "    block {bi}: {label}=Some({node}) → mna_node={:?}, scattering_port={port_idx}",
@@ -3054,10 +3103,13 @@ pub(super) fn try_build_blockwise(
                         WdfPortTerminals::differential(left_idx, right_idx),
                         rp,
                     );
-                    sub_stages[kbi].ports.push(OwnedPortBinding::new(
-                        port_idx,
+                    push_k_method_port(
+                        &mut sub_stages,
+                        kbi,
                         OwnedPortRole::DifferentialOutput,
-                    ));
+                        &ports,
+                        port_idx,
+                    );
                     #[cfg(test)]
                     eprintln!(
                         "    block {bi}: diff_out=Some(({},{})) → mna_node=Some(({left_idx},{right_idx})), scattering_port={port_idx}",
@@ -3088,16 +3140,22 @@ pub(super) fn try_build_blockwise(
 
             if let Some(pn) = best_node {
                 let mna_idx = node_to_mna[&pn];
-                let rp = k_blocks[kbi].nominal_vs_rp;
+                let rp = k_method_block(&sub_stages[kbi])
+                    .map(|block| block.nominal_vs_rp)
+                    .unwrap_or(r_source_cascade);
                 let port_idx = push_coupling_port(
                     &mut ports,
                     WdfPortTerminals::single_ended(pn),
                     WdfPortTerminals::single_ended(mna_idx),
                     rp,
                 );
-                sub_stages[kbi]
-                    .ports
-                    .push(OwnedPortBinding::primary(port_idx));
+                push_k_method_port(
+                    &mut sub_stages,
+                    kbi,
+                    OwnedPortRole::Primary,
+                    &ports,
+                    port_idx,
+                );
                 used_ports.insert(pn);
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=Some({pn}) → mna_node=Some({mna_idx})");
@@ -3109,9 +3167,13 @@ pub(super) fn try_build_blockwise(
                     WdfPortTerminals::grounded(),
                     1000.0,
                 );
-                sub_stages[kbi]
-                    .ports
-                    .push(OwnedPortBinding::primary(port_idx));
+                push_k_method_port(
+                    &mut sub_stages,
+                    kbi,
+                    OwnedPortRole::Primary,
+                    &ports,
+                    port_idx,
+                );
                 #[cfg(test)]
                 eprintln!("    block {bi}: port_node=None (no unique coupling node)");
             }
@@ -3119,18 +3181,18 @@ pub(super) fn try_build_blockwise(
 
         let use_coupled_solve = n_blocks >= 2
             && sub_stages.iter().all(|sub_stage| {
-                sub_stage
-                    .ports
+                let Some(ports) = k_method_ports(sub_stage) else {
+                    return false;
+                };
+                ports
                     .iter()
-                    .any(|binding| binding.role == OwnedPortRole::DifferentialPositive)
-                    && sub_stage
-                        .ports
+                    .any(|(role, _)| *role == OwnedPortRole::DifferentialPositive)
+                    && ports
                         .iter()
-                        .any(|binding| binding.role == OwnedPortRole::DifferentialNegative)
-                    && sub_stage
-                        .ports
+                        .any(|(role, _)| *role == OwnedPortRole::DifferentialNegative)
+                    && ports
                         .iter()
-                        .any(|binding| binding.role == OwnedPortRole::DifferentialOutput)
+                        .any(|(role, _)| *role == OwnedPortRole::DifferentialOutput)
             });
         let mut feedback_port_map: Vec<(usize, usize)> = Vec::new();
         let output_block_idx = n_blocks.saturating_sub(1);
@@ -3158,8 +3220,9 @@ pub(super) fn try_build_blockwise(
             let Some(&mna_idx) = node_to_mna.get(&output_node) else {
                 continue;
             };
-            let rp = k_blocks
+            let rp = sub_stages
                 .get(bi)
+                .and_then(k_method_block)
                 .map(|block| block.rp)
                 .unwrap_or(r_source_cascade);
             let scattering_idx = push_coupling_port(
@@ -3360,8 +3423,11 @@ pub(super) fn try_build_blockwise(
             .blocks
             .first()
             .and_then(|block| block_coupling_port_node(&block.nl_edges, &block.port_nodes, graph));
-        let all_explicit_diode_blocks =
-            k_blocks.len() >= 2 && k_blocks.iter().all(|b| b.explicit_diode_root.is_some());
+        let all_explicit_diode_blocks = sub_stages.len() >= 2
+            && sub_stages
+                .iter()
+                .filter_map(k_method_block)
+                .all(|b| b.explicit_diode_root.is_some());
         let shared_current_ladder = all_explicit_diode_blocks || use_coupled_solve;
         let shared_diode_cutoff_pot = if shared_current_ladder {
             first_block_port_node
@@ -3525,7 +3591,6 @@ pub(super) fn try_build_blockwise(
             }
         }
         let bkm = pedalkernel_rt::stage::BlockwiseStage {
-            blocks: k_blocks,
             coupling_s: scattering,
             coupling_n_mna: n_mna,
             coupling_ports: ports,
@@ -3576,7 +3641,7 @@ pub(super) fn try_build_blockwise(
 
         eprintln!(
             "  [blockwise] built BlockwiseStage: {} blocks, {} ports",
-            bkm.blocks.len(),
+            bkm.block_count(),
             bkm.n_ports
         );
 

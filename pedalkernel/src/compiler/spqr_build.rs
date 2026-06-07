@@ -1168,6 +1168,7 @@ pub fn compile_via_spqr_with_options(
         Stage::MultiNl(m) => m.signal_flow_distance,
         Stage::BlackFeedback(b) => b.signal_flow_distance,
         Stage::Blockwise(k) => k.signal_flow_distance,
+        Stage::KMethod { .. } => usize::MAX,
         Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
     });
 
@@ -1419,6 +1420,7 @@ pub fn compile_via_spqr_with_options(
             Stage::MultiNl(m) => (m.signal_flow_distance, false),
             Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
             Stage::Blockwise(k) => (k.signal_flow_distance, false),
+            Stage::KMethod { .. } => (usize::MAX, false),
             Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
         };
         (d, ff as u8) // false=0 sorts before true=1
@@ -1432,6 +1434,7 @@ pub fn compile_via_spqr_with_options(
             Stage::MultiNl(m) => (m.signal_flow_distance, false),
             Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
             Stage::Blockwise(k) => (k.signal_flow_distance, false),
+            Stage::KMethod { .. } => (usize::MAX, false),
             Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
         };
         (d, ff as u8)

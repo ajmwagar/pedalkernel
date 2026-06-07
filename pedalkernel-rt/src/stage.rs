@@ -6791,74 +6791,6 @@ impl OwnedPortBinding {
     }
 }
 
-/// One evaluator inside a blockwise coupled stage.
-///
-/// This is the recursive stage layer for blockwise decomposition: the parent
-/// owns the linear coupling adaptor, while each child sub-stage declares which
-/// coupling ports it consumes/produces. The nonlinear math still lives in the
-/// matching `KMethodBlock`; this type is the routing/binding surface.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-pub struct BlockwiseSubStage {
-    pub ports: Vec<OwnedPortBinding>,
-}
-
-impl BlockwiseSubStage {
-    pub fn new(ports: Vec<OwnedPortBinding>) -> Self {
-        Self { ports }
-    }
-
-    pub fn primary(port_idx: usize) -> Self {
-        Self::new(vec![OwnedPortBinding::primary(port_idx)])
-    }
-
-    pub fn owned_port_for_role(&self, role: OwnedPortRole) -> Option<usize> {
-        self.ports
-            .iter()
-            .find(|binding| binding.role == role)
-            .map(|binding| binding.port)
-            .or_else(|| {
-                (role == OwnedPortRole::Primary)
-                    .then(|| self.ports.first().map(|binding| binding.port))
-                    .flatten()
-            })
-    }
-
-    pub fn owned_port_ids(&self) -> impl Iterator<Item = usize> + '_ {
-        self.ports.iter().map(|binding| binding.port)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.ports.is_empty()
-    }
-
-    fn bindings_for_coupling_port(
-        coupling_ports: &[CircuitMappedPort],
-        port_idx: usize,
-    ) -> Vec<PortBinding> {
-        let Some(terminals) = coupling_ports.get(port_idx).map(|port| port.graph.raw()) else {
-            return Vec::new();
-        };
-        let (pos, neg) = terminals.as_tuple();
-        pos.into_iter()
-            .chain(neg)
-            .map(|node| PortBinding::new(BindingId::new(node), port_idx))
-            .collect()
-    }
-
-    pub fn ins(&self, coupling_ports: &[CircuitMappedPort]) -> Vec<PortBinding> {
-        self.ports
-            .iter()
-            .flat_map(|binding| Self::bindings_for_coupling_port(coupling_ports, binding.port))
-            .collect()
-    }
-
-    pub fn outs(&self, coupling_ports: &[CircuitMappedPort]) -> Vec<PortBinding> {
-        self.ins(coupling_ports)
-    }
-}
-
 /// Blockwise K-method stage: N coupled NL blocks with linear coupling.
 ///
 /// Each block is a WDF tree + K-table (composite NL device).
@@ -6874,8 +6806,6 @@ impl BlockwiseSubStage {
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BlockwiseStage {
-    /// NL blocks in signal-flow order.
-    pub blocks: Vec<KMethodBlock>,
     /// Coupling scattering matrix (n_ports × n_ports, row-major).
     /// Port ordering: [block_0, block_1, ..., block_{N-1}, VS_input].
     pub coupling_s: Vec<crate::Wave>,
@@ -6895,7 +6825,7 @@ pub struct BlockwiseStage {
         feature = "serde",
         serde(default, alias = "owned_ports", alias = "block_ports")
     )]
-    pub sub_stages: Vec<BlockwiseSubStage>,
+    pub sub_stages: Vec<crate::processor::Stage>,
     /// Linear elements stamped into the coupling MNA. Pot entries keep enough
     /// metadata to recompute `coupling_s` when a coupling control moves.
     pub coupling_elements: Vec<CouplingElement>,
@@ -7014,7 +6944,7 @@ impl core::fmt::Debug for BlockwiseStage {
         write!(
             f,
             "BlockwiseStage({}blocks, {}ports)",
-            self.blocks.len(),
+            self.block_count(),
             self.n_ports
         )
     }
@@ -7039,15 +6969,81 @@ impl BlockwiseStage {
     /// turning the explicit delay into an artificial energy source.
     const DELAYED_COUPLING_RELAXATION: crate::Wave = 0.25;
 
-    pub fn owned_port_for_role(&self, block_idx: usize, role: OwnedPortRole) -> Option<usize> {
-        self.sub_stages.get(block_idx)?.owned_port_for_role(role)
+    pub fn block_count(&self) -> usize {
+        self.sub_stages
+            .iter()
+            .filter(|stage| matches!(stage, crate::processor::Stage::KMethod { .. }))
+            .count()
     }
 
-    pub fn owned_port_ids(&self, block_idx: usize) -> impl Iterator<Item = usize> + '_ {
-        self.sub_stages
-            .get(block_idx)
-            .into_iter()
-            .flat_map(BlockwiseSubStage::owned_port_ids)
+    pub fn k_method_block(&self, block_idx: usize) -> Option<&KMethodBlock> {
+        match self.sub_stages.get(block_idx)? {
+            crate::processor::Stage::KMethod { block, .. } => Some(block),
+            _ => None,
+        }
+    }
+
+    pub fn k_method_block_mut(&mut self, block_idx: usize) -> Option<&mut KMethodBlock> {
+        match self.sub_stages.get_mut(block_idx)? {
+            crate::processor::Stage::KMethod { block, .. } => Some(block),
+            _ => None,
+        }
+    }
+
+    pub fn k_method_blocks(&self) -> impl Iterator<Item = &KMethodBlock> {
+        self.sub_stages.iter().filter_map(|stage| match stage {
+            crate::processor::Stage::KMethod { block, .. } => Some(block),
+            _ => None,
+        })
+    }
+
+    pub fn k_method_blocks_mut(&mut self) -> impl Iterator<Item = &mut KMethodBlock> {
+        self.sub_stages.iter_mut().filter_map(|stage| match stage {
+            crate::processor::Stage::KMethod { block, .. } => Some(block),
+            _ => None,
+        })
+    }
+
+    pub fn k_method_ports(&self, block_idx: usize) -> Option<&[(OwnedPortRole, PortBinding)]> {
+        match self.sub_stages.get(block_idx)? {
+            crate::processor::Stage::KMethod { ports, .. } => Some(ports.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn k_method_ports_mut(
+        &mut self,
+        block_idx: usize,
+    ) -> Option<&mut Vec<(OwnedPortRole, PortBinding)>> {
+        match self.sub_stages.get_mut(block_idx)? {
+            crate::processor::Stage::KMethod { ports, .. } => Some(ports),
+            _ => None,
+        }
+    }
+
+    pub fn owned_port_for_role(&self, block_idx: usize, role: OwnedPortRole) -> Option<usize> {
+        let ports = self.k_method_ports(block_idx)?;
+        ports
+            .iter()
+            .find(|(owned_role, _)| *owned_role == role)
+            .map(|(_, binding)| binding.local_port)
+            .or_else(|| {
+                (role == OwnedPortRole::Primary)
+                    .then(|| ports.first().map(|(_, binding)| binding.local_port))
+                    .flatten()
+            })
+    }
+
+    pub fn owned_port_ids(&self, block_idx: usize) -> Vec<usize> {
+        let mut ports = Vec::new();
+        if let Some(bindings) = self.k_method_ports(block_idx) {
+            for (_, binding) in bindings {
+                if !ports.contains(&binding.local_port) {
+                    ports.push(binding.local_port);
+                }
+            }
+        }
+        ports
     }
 
     fn bindings_for_coupling_port(&self, port_idx: usize) -> Vec<PortBinding> {
@@ -7143,19 +7139,7 @@ impl BlockwiseStage {
         block.k_table_control_polarity * physical_voltage
     }
 
-    fn ensure_sub_stages(&mut self) {
-        if self.sub_stages.len() == self.blocks.len()
-            && self
-                .sub_stages
-                .iter()
-                .all(|sub_stage| !sub_stage.is_empty())
-        {
-            return;
-        }
-        self.sub_stages = (0..self.blocks.len())
-            .map(BlockwiseSubStage::primary)
-            .collect();
-    }
+    fn ensure_sub_stages(&mut self) {}
 
     fn ensure_coupling_runtime_state(&mut self) {
         let Some(required_len) = self
@@ -7216,7 +7200,7 @@ impl BlockwiseStage {
     }
 
     fn ensure_block_runtime_states(&mut self) {
-        for block in &mut self.blocks {
+        for block in self.k_method_blocks_mut() {
             if block.runtime_state.states.len() != block.runtime_state.wave_cache.len()
                 || block.runtime_state.is_empty()
             {
@@ -7231,11 +7215,8 @@ impl BlockwiseStage {
     }
 
     fn port_is_block_owned(&self, port_idx: usize) -> bool {
-        self.sub_stages.iter().any(|sub_stage| {
-            sub_stage
-                .owned_port_ids()
-                .any(|owned_port| owned_port == port_idx)
-        }) || port_idx < self.blocks.len()
+        (0..self.block_count()).any(|block_idx| self.owned_port_ids(block_idx).contains(&port_idx))
+            || port_idx < self.block_count()
     }
 
     fn scatter_owned_ports(
@@ -7257,7 +7238,7 @@ impl BlockwiseStage {
             Self::MAX_BLOCK_INCIDENT_VOLTAGE,
         );
 
-        if let Some(sub_stage) = self.sub_stages.get(block_idx) {
+        if self.k_method_block(block_idx).is_some() {
             if let Some((positive_port, negative_port, output_port)) =
                 self.differential_owned_ports(block_idx)
             {
@@ -7271,11 +7252,11 @@ impl BlockwiseStage {
                     -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
                     Self::MAX_BLOCK_INCIDENT_VOLTAGE,
                 );
-                let (raw_voltage, ac_voltage, _) = Self::solve_block_port(
-                    &mut self.blocks[block_idx],
-                    differential_incident,
-                    update_state,
-                );
+                let Some(block) = self.k_method_block_mut(block_idx) else {
+                    return 0.0;
+                };
+                let (raw_voltage, ac_voltage, _) =
+                    Self::solve_block_port(block, differential_incident, update_state);
 
                 // Reflect the solved physical voltage on every evaluator-owned
                 // output port so passive coupling observes the live block state,
@@ -7294,9 +7275,15 @@ impl BlockwiseStage {
                 return ac_voltage;
             }
 
+            let is_multiport_block = self
+                .k_method_ports(block_idx)
+                .map(|ports| ports.len() > 1)
+                .unwrap_or(false);
+            let Some(block) = self.k_method_block_mut(block_idx) else {
+                return 0.0;
+            };
             let (raw_voltage, ac_voltage, primary_reflected) =
-                Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
-            let is_multiport_block = sub_stage.ports.len() > 1;
+                Self::solve_block_port(block, incident, update_state);
             if primary_port < b_out.len() {
                 b_out[primary_port] = if is_multiport_block {
                     2.0 * incident - a.get(primary_port).copied().unwrap_or(0.0)
@@ -7305,23 +7292,28 @@ impl BlockwiseStage {
                 };
             }
 
-            for port_idx in sub_stage
-                .owned_port_ids()
-                .filter(|&port_idx| port_idx != primary_port)
-            {
+            for port_idx in self.owned_port_ids(block_idx) {
+                if port_idx == primary_port {
+                    continue;
+                }
                 if port_idx < b_out.len() {
                     b_out[port_idx] = 2.0 * raw_voltage - a.get(port_idx).copied().unwrap_or(0.0);
                 }
             }
             ac_voltage
         } else if primary_port < b_out.len() {
+            let Some(block) = self.k_method_block_mut(block_idx) else {
+                return 0.0;
+            };
             let (_, ac_voltage, primary_reflected) =
-                Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
+                Self::solve_block_port(block, incident, update_state);
             b_out[primary_port] = primary_reflected;
             ac_voltage
         } else {
-            let (_, ac_voltage, _) =
-                Self::solve_block_port(&mut self.blocks[block_idx], incident, update_state);
+            let Some(block) = self.k_method_block_mut(block_idx) else {
+                return 0.0;
+            };
+            let (_, ac_voltage, _) = Self::solve_block_port(block, incident, update_state);
             ac_voltage
         }
     }
@@ -7544,17 +7536,20 @@ impl BlockwiseStage {
     ) -> crate::Wave {
         let mut cascade_drive = 0.0;
         let mut cascade_out = 0.0;
-        for i in 0..self.blocks.len() {
+        for i in 0..self.block_count() {
             let v_coupling = (self.work_a[i] + self.work_b[i]) / 2.0;
             let v_block = if include_cascade {
                 v_coupling + if i == 0 { serial_input } else { cascade_drive }
             } else {
                 v_coupling
             };
+            let Some(block) = self.k_method_block_mut(i) else {
+                continue;
+            };
             let (a_root, _, _raw_cascade, ac_cascade) = if update_state {
-                Self::solve_block_and_update_state(&mut self.blocks[i], v_block)
+                Self::solve_block_and_update_state(block, v_block)
             } else {
-                Self::solve_block_without_state_update(&mut self.blocks[i], v_block)
+                Self::solve_block_without_state_update(block, v_block)
             };
             cascade_drive = ac_cascade;
             cascade_out = ac_cascade;
@@ -7631,7 +7626,7 @@ impl BlockwiseStage {
         for v in b_out.iter_mut() {
             *v = 0.0;
         }
-        for block_idx in 0..self.blocks.len() {
+        for block_idx in 0..self.block_count() {
             let block_output = self.scatter_owned_ports(
                 block_idx,
                 a,
@@ -7725,8 +7720,8 @@ impl BlockwiseStage {
             }
         }
 
-        let mut output_derivative_by_block = alloc::vec![0.0; self.blocks.len()];
-        for block_idx in 0..self.blocks.len() {
+        let mut output_derivative_by_block = alloc::vec![0.0; self.block_count()];
+        for block_idx in 0..self.block_count() {
             let Some(primary_port) = self.primary_port_for_block(block_idx) else {
                 continue;
             };
@@ -7740,17 +7735,18 @@ impl BlockwiseStage {
                 -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
                 Self::MAX_BLOCK_INCIDENT_VOLTAGE,
             );
-            let (_, d_refl, d_out) = Self::solve_block_without_state_update_with_derivative(
-                &mut self.blocks[block_idx],
-                incident,
-            );
+            let Some(block) = self.k_method_block_mut(block_idx) else {
+                continue;
+            };
+            let (_, d_refl, d_out) =
+                Self::solve_block_without_state_update_with_derivative(block, incident);
             let d_out = d_out.clamp(-1.0e6, 1.0e6);
             let d_refl = d_refl.clamp(-1.0e6, 1.0e6);
             let d_out = if d_out.is_finite() { d_out } else { 0.0 };
             let d_refl = if d_refl.is_finite() { d_refl } else { 0.0 };
             output_derivative_by_block[block_idx] = d_out;
 
-            if let Some(sub_stage) = self.sub_stages.get(block_idx) {
+            if self.k_method_block(block_idx).is_some() {
                 if let Some((positive_port, negative_port, output_port)) =
                     self.differential_owned_ports(block_idx)
                 {
@@ -7764,8 +7760,11 @@ impl BlockwiseStage {
                         -Self::MAX_BLOCK_INCIDENT_VOLTAGE,
                         Self::MAX_BLOCK_INCIDENT_VOLTAGE,
                     );
+                    let Some(block) = self.k_method_block_mut(block_idx) else {
+                        continue;
+                    };
                     let (_, _, d_out) = Self::solve_block_without_state_update_with_derivative(
-                        &mut self.blocks[block_idx],
+                        block,
                         differential_incident,
                     );
                     let d_out = d_out.clamp(-1.0e6, 1.0e6);
@@ -7787,7 +7786,10 @@ impl BlockwiseStage {
                     continue;
                 }
 
-                let is_multiport_block = sub_stage.ports.len() > 1;
+                let is_multiport_block = self
+                    .k_method_ports(block_idx)
+                    .map(|ports| ports.len() > 1)
+                    .unwrap_or(false);
                 db_da[primary_port * n + primary_port] = if is_multiport_block {
                     // Multiport block primary ports currently reflect the
                     // imposed physical incident voltage: b = 2*incident - a.
@@ -7795,10 +7797,10 @@ impl BlockwiseStage {
                 } else {
                     d_refl
                 };
-                for port_idx in sub_stage
-                    .owned_port_ids()
-                    .filter(|&port_idx| port_idx != primary_port)
-                {
+                for port_idx in self.owned_port_ids(block_idx) {
+                    if port_idx == primary_port {
+                        continue;
+                    }
                     if port_idx < n {
                         db_da[port_idx * n + primary_port] = 2.0 * d_out;
                         db_da[port_idx * n + port_idx] = -1.0;
@@ -7810,7 +7812,7 @@ impl BlockwiseStage {
         }
 
         for &(block_idx, port_idx) in &self.feedback_port_map {
-            if port_idx >= n || block_idx >= self.blocks.len() {
+            if port_idx >= n || block_idx >= self.block_count() {
                 continue;
             }
             if !self.feedback_port_is_active(port_idx) {
@@ -7944,7 +7946,7 @@ impl BlockwiseStage {
         serial_input: crate::Wave,
         mut block_outputs: Option<&mut alloc::vec::Vec<crate::Wave>>,
     ) -> crate::Wave {
-        let n_blocks = self.blocks.len();
+        let n_blocks = self.block_count();
         let n_ports = self.n_ports;
         let mut scratch = core::mem::take(&mut self.coupled_scratch);
         scratch.load_a_from(&self.work_a, n_ports);
@@ -7966,8 +7968,8 @@ impl BlockwiseStage {
                 outputs.push(port_voltage);
             }
         }
-        for sub_stage in &self.sub_stages {
-            for port_idx in sub_stage.owned_port_ids() {
+        for block_idx in 0..self.block_count() {
+            for port_idx in self.owned_port_ids(block_idx) {
                 if port_idx < self.work_b.len() && port_idx < scratch.b.len() {
                     self.work_b[port_idx] = if update_state {
                         scratch.b[port_idx]
@@ -7999,14 +8001,14 @@ impl BlockwiseStage {
                 .iter()
                 .filter_map(|one_port| one_port.state_slot())
                 .any(|slot| slot.0 >= self.coupling_runtime_state.len())
-            || self.blocks.iter().any(|block| {
+            || self.k_method_blocks().any(|block| {
                 block.runtime_state.states.len() != block.runtime_state.wave_cache.len()
             })
         {
             self.init_buffers();
         }
 
-        let mut outputs = alloc::vec::Vec::with_capacity(self.blocks.len());
+        let mut outputs = alloc::vec::Vec::with_capacity(self.block_count());
         let output = if matches!(
             self.solve_mode,
             BlockwiseSolveMode::CoupledFixedPoint | BlockwiseSolveMode::CoupledNewton
@@ -8027,7 +8029,7 @@ impl BlockwiseStage {
     }
 
     pub fn debug_current_differential_incidents(&self) -> alloc::vec::Vec<crate::Wave> {
-        (0..self.blocks.len())
+        (0..self.block_count())
             .map(|block_idx| {
                 self.differential_owned_ports(block_idx)
                     .map(|(positive_port, negative_port, _)| {
@@ -8114,7 +8116,7 @@ impl BlockwiseStage {
         let wb_id = alloc::format!("{comp_id}__wb");
         let mut found = false;
 
-        for block in &mut self.blocks {
+        for block in self.k_method_blocks_mut() {
             let mut block_found = false;
             block_found |= block.tree.set_pot_dirty(comp_id, value);
             block_found |= block.tree.set_pot_dirty(&aw_id, value);
@@ -8172,7 +8174,7 @@ impl BlockwiseStage {
         let Some(comp_id) = self.shared_diode_cutoff_pot.as_deref() else {
             return;
         };
-        let Some(first_block) = self.blocks.first() else {
+        let Some(first_block) = self.k_method_block(0) else {
             return;
         };
         let Some(calibration) = first_block.diode_cutoff.as_ref() else {
@@ -8205,13 +8207,13 @@ impl BlockwiseStage {
 
         if let Some(model) = first_block.explicit_diode_root.map(|root| root.model) {
             let v_bias = diode_bias_voltage_from_current(model, i_f);
-            for block in &mut self.blocks {
+            for block in self.k_method_blocks_mut() {
                 if block.explicit_diode_root.is_some() {
                     block.shared_diode_bias_voltage = Some(v_bias);
                 }
             }
         } else {
-            for block in &mut self.blocks {
+            for block in self.k_method_blocks_mut() {
                 if block.diode_cutoff.is_some() {
                     let i_bias = block.vbe_bias.max(1.0e-9);
                     let ctrl = (i_f / i_bias - 1.0).clamp(-0.9, 4.0);
@@ -8290,7 +8292,7 @@ impl BlockwiseStage {
             // the audio WDF with floating AC-coupled boundary nodes can converge
             // to arbitrary huge offsets. Keep the small-signal BKM state centered
             // until we have a true static open-cap MNA operating-point pass.
-            for block in &mut self.blocks {
+            for block in self.k_method_blocks_mut() {
                 block.dc_offset = 0.0;
             }
             for passive in &self.coupling_passives {
@@ -8320,10 +8322,12 @@ impl BlockwiseStage {
         //
         // Run one more sample at DC to get the final voltages.
         self.process_inner(&zeros, false, 0.0, &[]);
-        let n_blocks = self.blocks.len();
+        let n_blocks = self.block_count();
         for i in 0..n_blocks {
             // Re-extract at the current converged state
-            let block = &mut self.blocks[i];
+            let Some(block) = self.k_method_block_mut(i) else {
+                continue;
+            };
             let b_tree = block.tree.reflected_with_state(&mut block.runtime_state);
             let a_root = Self::block_root_incident(block, b_tree, 0.0);
             block.dc_offset = if block.cascade_from_passive {
@@ -8349,7 +8353,7 @@ impl BlockwiseStage {
 
         #[cfg(feature = "std")]
         {
-            for (i, block) in self.blocks.iter().enumerate() {
+            for (i, block) in self.k_method_blocks().enumerate() {
                 let mut t = block.tree.clone();
                 let mut runtime_state = block.runtime_state.clone();
                 t.set_voltage(0.0);
@@ -8376,7 +8380,7 @@ impl BlockwiseStage {
         }
         self.coupled_scratch.resize(n);
         // Ensure K-table scales are precomputed
-        for block in &mut self.blocks {
+        for block in self.k_method_blocks_mut() {
             block.k_table.precompute_scales();
         }
         if let Some(core) = &mut self.diode_ladder_core {
@@ -8465,7 +8469,7 @@ impl BlockwiseStage {
                 .iter()
                 .filter_map(|one_port| one_port.state_slot())
                 .any(|slot| slot.0 >= self.coupling_runtime_state.len())
-            || self.blocks.iter().any(|block| {
+            || self.k_method_blocks().any(|block| {
                 block.runtime_state.states.len() != block.runtime_state.wave_cache.len()
             })
         {
@@ -8712,7 +8716,7 @@ impl BlockwiseStage {
             .fold(0.0 as crate::Wave, crate::Wave::max);
         format!(
             "Blockwise({}blocks, {}ports, mode={:?}, vs_ports={}, feedback_ports={}, output_coeff_max={:.3e})",
-            self.blocks.len(),
+            self.block_count(),
             self.n_ports,
             self.solve_mode,
             self.vs_port_map.len(),
@@ -8803,15 +8807,34 @@ mod blockwise_stage_tests {
         owned_ports: Vec<Vec<OwnedPortBinding>>,
     ) -> BlockwiseStage {
         let n_ports = coupling_ports.len();
+        let sub_stages = blocks
+            .into_iter()
+            .zip(owned_ports)
+            .map(|(block, owned_ports)| crate::processor::Stage::KMethod {
+                block,
+                ports: owned_ports
+                    .into_iter()
+                    .flat_map(|owned| {
+                        let terminals = coupling_ports
+                            .get(owned.port)
+                            .map(|port| port.graph.raw())
+                            .unwrap_or_else(WdfPortTerminals::grounded);
+                        let (pos, neg) = terminals.as_tuple();
+                        pos.into_iter().chain(neg).map(move |node| {
+                            (
+                                owned.role,
+                                PortBinding::new(BindingId::new(node), owned.port),
+                            )
+                        })
+                    })
+                    .collect(),
+            })
+            .collect();
         BlockwiseStage {
-            blocks,
             coupling_s: vec![0.0; n_ports * n_ports],
             coupling_n_mna: 0,
             coupling_ports,
-            sub_stages: owned_ports
-                .into_iter()
-                .map(BlockwiseSubStage::new)
-                .collect(),
+            sub_stages,
             coupling_elements: vec![],
             coupling_passives: vec![],
             coupling_one_ports: vec![],
@@ -8922,8 +8945,8 @@ mod blockwise_stage_tests {
             vec![(10, 0), (20, 1), (30, 2), (31, 2)]
         );
         assert_eq!(stage.sub_stages.len(), 1);
-        assert_eq!(stage.sub_stages[0].ins(&stage.coupling_ports), boundary);
-        assert_eq!(stage.sub_stages[0].outs(&stage.coupling_ports), boundary);
+        assert_eq!(stage.sub_stages[0].ins(), boundary);
+        assert_eq!(stage.sub_stages[0].outs(), boundary);
     }
 
     #[test]
@@ -9088,13 +9111,13 @@ mod blockwise_stage_tests {
         stage.coupling_s = vec![1.0];
         stage.vs_port_map = vec![(alloc::string::String::from("cv_cutoff"), 0)];
         stage.cutoff_cv_port = Some(alloc::string::String::from("cv_cutoff"));
-        let rp_before = stage.blocks[0].tree.port_resistance();
+        let rp_before = stage.k_method_block(0).unwrap().tree.port_resistance();
 
         stage.write_vs_ports(&[3.0]);
 
         assert_eq!(stage.work_b[0], 6.0);
         assert!(
-            (stage.blocks[0].tree.port_resistance() - rp_before).abs() < 1e-12,
+            (stage.k_method_block(0).unwrap().tree.port_resistance() - rp_before).abs() < 1e-12,
             "writing cv_cutoff volts should update the coupling VS wave, not mutate block Rp"
         );
     }
@@ -9179,54 +9202,31 @@ mod blockwise_stage_tests {
 
     #[test]
     fn bkm_inactive_feedback_port_clears_stale_wave() {
-        let mut stage = BlockwiseStage {
-            blocks: vec![test_block(1.0)],
-            coupling_s: vec![1.0, 0.0, 0.0, 1.0],
-            coupling_n_mna: 1,
-            coupling_ports: vec![
+        let mut stage = blockwise_stage_fixture(
+            vec![test_block(1.0)],
+            vec![
                 mapped_port(WdfPortTerminals::grounded(), 1.0),
                 mapped_port(WdfPortTerminals::single_ended(0), 1.0),
             ],
-            sub_stages: vec![BlockwiseSubStage::new(vec![OwnedPortBinding::primary(0)])],
-            coupling_elements: vec![CouplingElement {
-                comp_id: alloc::string::String::from("Resonance"),
-                node_a: Some(0),
-                node_b: None,
-                graph_node_a: Some(0),
-                graph_node_b: None,
-                resistance: 100_000.0,
-                pot_max_resistance: Some(100_000.0),
-                taper: crate::pot_taper::PotTaper::B,
-                invert_control: true,
-            }],
-            coupling_passives: vec![],
-            coupling_one_ports: vec![],
-            coupling_runtime_state: RuntimeState::new(),
-            coupling_passive_by_port: vec![],
-            coupling_vcvss: vec![],
-            n_ports: 2,
-            output_block: 0,
-            output_port_index: None,
-            supply_voltage: 9.0,
-            vs_port_map: vec![],
-            cutoff_cv_port: None,
-            shared_diode_cutoff_pot: None,
-            feedback_port_map: vec![(0, 1)],
-            output_extraction: ExtractionProbe::default(),
-            compensation: 1.0,
-            oversampler: crate::oversampling::Oversampler::new(
-                crate::oversampling::OversamplingFactor::X1,
-            ),
-            signal_flow_distance: 0,
-            bypass_serial: false,
-            solve_mode: BlockwiseSolveMode::Cascade,
-            diode_ladder_core: None,
-            b_warm: vec![0.0, 0.0],
-            work_b: vec![0.0, 123.0],
-            work_a: vec![0.0, 5.0],
-            coupled_scratch: CoupledSolveScratch::default(),
-            port_index_cache: vec![],
-        };
+            vec![vec![OwnedPortBinding::primary(0)]],
+        );
+        stage.coupling_s = vec![1.0, 0.0, 0.0, 1.0];
+        stage.coupling_n_mna = 1;
+        stage.coupling_elements = vec![CouplingElement {
+            comp_id: alloc::string::String::from("Resonance"),
+            node_a: Some(0),
+            node_b: None,
+            graph_node_a: Some(0),
+            graph_node_b: None,
+            resistance: 100_000.0,
+            pot_max_resistance: Some(100_000.0),
+            taper: crate::pot_taper::PotTaper::B,
+            invert_control: true,
+        }];
+        stage.feedback_port_map = vec![(0, 1)];
+        stage.b_warm = vec![0.0, 0.0];
+        stage.work_b = vec![0.0, 123.0];
+        stage.work_a = vec![0.0, 5.0];
 
         stage.write_feedback_ports(0.75);
 
@@ -9239,51 +9239,26 @@ mod blockwise_stage_tests {
 
     #[test]
     fn bkm_active_feedback_port_reflects_incident_coupling_wave() {
-        let mut stage = BlockwiseStage {
-            blocks: vec![test_block(1.0)],
-            coupling_s: vec![1.0],
-            coupling_n_mna: 1,
-            coupling_ports: vec![mapped_port(WdfPortTerminals::single_ended(0), 1.0)],
-            sub_stages: vec![BlockwiseSubStage::new(vec![OwnedPortBinding::primary(0)])],
-            coupling_elements: vec![CouplingElement {
-                comp_id: alloc::string::String::from("Resonance"),
-                node_a: Some(0),
-                node_b: None,
-                graph_node_a: Some(0),
-                graph_node_b: None,
-                resistance: 10_000.0,
-                pot_max_resistance: Some(100_000.0),
-                taper: crate::pot_taper::PotTaper::B,
-                invert_control: true,
-            }],
-            coupling_passives: vec![],
-            coupling_one_ports: vec![],
-            coupling_runtime_state: RuntimeState::new(),
-            coupling_passive_by_port: vec![],
-            coupling_vcvss: vec![],
-            n_ports: 1,
-            output_block: 0,
-            output_port_index: None,
-            supply_voltage: 9.0,
-            vs_port_map: vec![],
-            cutoff_cv_port: None,
-            shared_diode_cutoff_pot: None,
-            feedback_port_map: vec![(0, 0)],
-            output_extraction: ExtractionProbe::default(),
-            compensation: 1.0,
-            oversampler: crate::oversampling::Oversampler::new(
-                crate::oversampling::OversamplingFactor::X1,
-            ),
-            signal_flow_distance: 0,
-            bypass_serial: false,
-            solve_mode: BlockwiseSolveMode::Cascade,
-            diode_ladder_core: None,
-            b_warm: vec![0.0],
-            work_b: vec![0.0],
-            work_a: vec![0.25],
-            coupled_scratch: CoupledSolveScratch::default(),
-            port_index_cache: vec![],
-        };
+        let mut stage = blockwise_stage_fixture(
+            vec![test_block(1.0)],
+            vec![mapped_port(WdfPortTerminals::single_ended(0), 1.0)],
+            vec![vec![OwnedPortBinding::primary(0)]],
+        );
+        stage.coupling_s = vec![1.0];
+        stage.coupling_n_mna = 1;
+        stage.coupling_elements = vec![CouplingElement {
+            comp_id: alloc::string::String::from("Resonance"),
+            node_a: Some(0),
+            node_b: None,
+            graph_node_a: Some(0),
+            graph_node_b: None,
+            resistance: 10_000.0,
+            pot_max_resistance: Some(100_000.0),
+            taper: crate::pot_taper::PotTaper::B,
+            invert_control: true,
+        }];
+        stage.feedback_port_map = vec![(0, 0)];
+        stage.work_a = vec![0.25];
 
         stage.write_feedback_ports(0.75);
 
@@ -9305,48 +9280,25 @@ mod blockwise_stage_tests {
             ),
             cap_slot,
         )];
-        let mut stage = BlockwiseStage {
-            blocks: vec![],
-            coupling_s: vec![1.0],
-            coupling_n_mna: 1,
-            coupling_ports: vec![mapped_port(
+        let mut stage = blockwise_stage_fixture(
+            vec![],
+            vec![mapped_port(
                 WdfPortTerminals::single_ended(0),
                 104.1666666667,
             )],
-            sub_stages: vec![],
-            coupling_elements: vec![],
-            coupling_passives: vec![CouplingPassive {
-                comp_id: alloc::string::String::from("C_out"),
-                port_idx: 0,
-                one_port_idx: 0,
-            }],
-            coupling_one_ports,
-            coupling_runtime_state,
-            coupling_passive_by_port: vec![Some(0)],
-            coupling_vcvss: vec![],
-            n_ports: 1,
-            output_block: 0,
-            output_port_index: None,
-            supply_voltage: 9.0,
-            vs_port_map: vec![],
-            cutoff_cv_port: None,
-            shared_diode_cutoff_pot: None,
-            feedback_port_map: vec![],
-            output_extraction: ExtractionProbe::default(),
-            compensation: 1.0,
-            oversampler: crate::oversampling::Oversampler::new(
-                crate::oversampling::OversamplingFactor::X1,
-            ),
-            signal_flow_distance: 0,
-            bypass_serial: false,
-            solve_mode: BlockwiseSolveMode::CoupledNewton,
-            diode_ladder_core: None,
-            b_warm: vec![0.0],
-            work_b: vec![0.0],
-            work_a: vec![0.0],
-            coupled_scratch: CoupledSolveScratch::default(),
-            port_index_cache: vec![],
-        };
+            vec![],
+        );
+        stage.coupling_s = vec![1.0];
+        stage.coupling_n_mna = 1;
+        stage.coupling_passives = vec![CouplingPassive {
+            comp_id: alloc::string::String::from("C_out"),
+            port_idx: 0,
+            one_port_idx: 0,
+        }];
+        stage.coupling_one_ports = coupling_one_ports;
+        stage.coupling_runtime_state = coupling_runtime_state;
+        stage.coupling_passive_by_port = vec![Some(0)];
+        stage.solve_mode = BlockwiseSolveMode::CoupledNewton;
 
         let mut b = vec![0.0];
         let output = stage.coupled_eval_b_for_a(&[1.25], &[], 0.0, &[], true, &mut b);
@@ -9380,54 +9332,31 @@ mod blockwise_stage_tests {
 
     #[test]
     fn bkm_coupling_recompute_preserves_static_vcvs_stamps() {
-        let base = BlockwiseStage {
-            blocks: vec![],
-            coupling_s: vec![0.0; 4],
-            coupling_n_mna: 2,
-            coupling_ports: vec![
+        let mut base = blockwise_stage_fixture(
+            vec![],
+            vec![
                 mapped_port(WdfPortTerminals::single_ended(0), 1.0),
                 mapped_port(WdfPortTerminals::single_ended(1), 1.0),
             ],
-            sub_stages: vec![],
-            coupling_elements: vec![CouplingElement {
-                comp_id: alloc::string::String::from("Rload"),
-                node_a: Some(1),
-                node_b: None,
-                graph_node_a: Some(1),
-                graph_node_b: None,
-                resistance: 10_000.0,
-                pot_max_resistance: None,
-                taper: crate::pot_taper::PotTaper::B,
-                invert_control: false,
-            }],
-            coupling_passives: vec![],
-            coupling_one_ports: vec![],
-            coupling_runtime_state: RuntimeState::new(),
-            coupling_passive_by_port: vec![],
-            coupling_vcvss: vec![],
-            n_ports: 2,
-            output_block: 0,
-            output_port_index: None,
-            supply_voltage: 9.0,
-            vs_port_map: vec![],
-            cutoff_cv_port: None,
-            shared_diode_cutoff_pot: None,
-            feedback_port_map: vec![],
-            output_extraction: ExtractionProbe::default(),
-            compensation: 1.0,
-            oversampler: crate::oversampling::Oversampler::new(
-                crate::oversampling::OversamplingFactor::X1,
-            ),
-            signal_flow_distance: 0,
-            bypass_serial: false,
-            solve_mode: BlockwiseSolveMode::CoupledNewton,
-            diode_ladder_core: None,
-            b_warm: vec![0.0; 2],
-            work_b: vec![0.0; 2],
-            work_a: vec![0.0; 2],
-            coupled_scratch: CoupledSolveScratch::default(),
-            port_index_cache: vec![],
-        };
+            vec![],
+        );
+        base.coupling_s = vec![0.0; 4];
+        base.coupling_n_mna = 2;
+        base.coupling_elements = vec![CouplingElement {
+            comp_id: alloc::string::String::from("Rload"),
+            node_a: Some(1),
+            node_b: None,
+            graph_node_a: Some(1),
+            graph_node_b: None,
+            resistance: 10_000.0,
+            pot_max_resistance: None,
+            taper: crate::pot_taper::PotTaper::B,
+            invert_control: false,
+        }];
+        base.solve_mode = BlockwiseSolveMode::CoupledNewton;
+        base.b_warm = vec![0.0; 2];
+        base.work_b = vec![0.0; 2];
+        base.work_a = vec![0.0; 2];
 
         let mut passive = base.clone();
         passive.recompute_coupling_scattering();
@@ -9454,62 +9383,41 @@ mod blockwise_stage_tests {
 
     #[test]
     fn bkm_sparse_coupled_jacobian_matches_dense_finite_difference() {
-        let mut stage = BlockwiseStage {
-            blocks: vec![{
+        let mut stage = blockwise_stage_fixture(
+            vec![{
                 let mut block = test_block(1.0);
                 block.k_table = one_dimensional_table();
                 block
             }],
-            coupling_s: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-            coupling_n_mna: 1,
-            coupling_ports: vec![
+            vec![
                 mapped_port(WdfPortTerminals::single_ended(0), 1.0),
                 mapped_port(WdfPortTerminals::single_ended(0), 1.0),
                 mapped_port(WdfPortTerminals::single_ended(0), 1.0),
             ],
-            sub_stages: vec![BlockwiseSubStage::new(vec![
+            vec![vec![
                 OwnedPortBinding::primary(0),
                 OwnedPortBinding::new(1, OwnedPortRole::DifferentialOutput),
-            ])],
-            coupling_elements: vec![CouplingElement {
-                comp_id: alloc::string::String::from("Resonance"),
-                node_a: Some(0),
-                node_b: None,
-                graph_node_a: Some(0),
-                graph_node_b: None,
-                resistance: 10_000.0,
-                pot_max_resistance: Some(100_000.0),
-                taper: crate::pot_taper::PotTaper::B,
-                invert_control: true,
-            }],
-            coupling_passives: vec![],
-            coupling_one_ports: vec![],
-            coupling_runtime_state: RuntimeState::new(),
-            coupling_passive_by_port: vec![],
-            coupling_vcvss: vec![],
-            n_ports: 3,
-            output_block: 0,
-            output_port_index: None,
-            supply_voltage: 9.0,
-            vs_port_map: vec![(alloc::string::String::from("audio_in"), 2)],
-            cutoff_cv_port: None,
-            shared_diode_cutoff_pot: None,
-            feedback_port_map: vec![(0, 2)],
-            output_extraction: ExtractionProbe::default(),
-            compensation: 1.0,
-            oversampler: crate::oversampling::Oversampler::new(
-                crate::oversampling::OversamplingFactor::X1,
-            ),
-            signal_flow_distance: 0,
-            bypass_serial: false,
-            solve_mode: BlockwiseSolveMode::CoupledNewton,
-            diode_ladder_core: None,
-            b_warm: vec![0.0; 3],
-            work_b: vec![0.0; 3],
-            work_a: vec![0.0; 3],
-            coupled_scratch: CoupledSolveScratch::default(),
-            port_index_cache: vec![],
-        };
+            ]],
+        );
+        stage.coupling_s = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        stage.coupling_n_mna = 1;
+        stage.coupling_elements = vec![CouplingElement {
+            comp_id: alloc::string::String::from("Resonance"),
+            node_a: Some(0),
+            node_b: None,
+            graph_node_a: Some(0),
+            graph_node_b: None,
+            resistance: 10_000.0,
+            pot_max_resistance: Some(100_000.0),
+            taper: crate::pot_taper::PotTaper::B,
+            invert_control: true,
+        }];
+        stage.vs_port_map = vec![(alloc::string::String::from("audio_in"), 2)];
+        stage.feedback_port_map = vec![(0, 2)];
+        stage.solve_mode = BlockwiseSolveMode::CoupledNewton;
+        stage.b_warm = vec![0.0; 3];
+        stage.work_b = vec![0.0; 3];
+        stage.work_a = vec![0.0; 3];
         let a = vec![0.25, -0.125, 0.5];
         let vs = vec![0.75];
         let n = stage.n_ports;
@@ -9586,8 +9494,8 @@ mod blockwise_stage_tests {
             min_rp: 10.0,
             max_rp: 100_000.0,
         };
-        let mut stage = BlockwiseStage {
-            blocks: vec![
+        let mut stage = blockwise_stage_fixture(
+            vec![
                 {
                     let mut block = test_block(1.0);
                     block.explicit_diode_root = Some(diode_root);
@@ -9601,62 +9509,48 @@ mod blockwise_stage_tests {
                     block
                 },
             ],
-            coupling_s: vec![1.0],
-            coupling_n_mna: 0,
-            coupling_ports: vec![mapped_port(WdfPortTerminals::grounded(), 1.0)],
-            sub_stages: vec![
-                BlockwiseSubStage::new(vec![OwnedPortBinding::primary(0)]),
-                BlockwiseSubStage::new(vec![OwnedPortBinding::primary(0)]),
+            vec![mapped_port(WdfPortTerminals::grounded(), 1.0)],
+            vec![
+                vec![OwnedPortBinding::primary(0)],
+                vec![OwnedPortBinding::primary(0)],
             ],
-            coupling_elements: vec![CouplingElement {
-                comp_id: alloc::string::String::from("Cutoff"),
-                node_a: Some(0),
-                node_b: None,
-                graph_node_a: Some(0),
-                graph_node_b: None,
-                resistance: 50_000.0,
-                pot_max_resistance: Some(100_000.0),
-                taper: crate::pot_taper::PotTaper::B,
-                invert_control: false,
-            }],
-            coupling_passives: vec![],
-            coupling_one_ports: vec![],
-            coupling_runtime_state: RuntimeState::new(),
-            coupling_passive_by_port: vec![],
-            coupling_vcvss: vec![],
-            n_ports: 1,
-            output_block: 1,
-            output_port_index: None,
-            supply_voltage: 9.0,
-            vs_port_map: vec![(alloc::string::String::from("cv_cutoff"), 0)],
-            cutoff_cv_port: Some(alloc::string::String::from("cv_cutoff")),
-            shared_diode_cutoff_pot: Some(alloc::string::String::from("Cutoff")),
-            feedback_port_map: vec![],
-            output_extraction: ExtractionProbe::default(),
-            compensation: 1.0,
-            oversampler: crate::oversampling::Oversampler::new(
-                crate::oversampling::OversamplingFactor::X1,
-            ),
-            signal_flow_distance: 0,
-            bypass_serial: false,
-            solve_mode: BlockwiseSolveMode::Cascade,
-            diode_ladder_core: None,
-            b_warm: vec![0.0],
-            work_b: vec![0.0],
-            work_a: vec![0.0],
-            coupled_scratch: CoupledSolveScratch::default(),
-            port_index_cache: vec![],
-        };
+        );
+        stage.coupling_s = vec![1.0];
+        stage.coupling_n_mna = 0;
+        stage.coupling_elements = vec![CouplingElement {
+            comp_id: alloc::string::String::from("Cutoff"),
+            node_a: Some(0),
+            node_b: None,
+            graph_node_a: Some(0),
+            graph_node_b: None,
+            resistance: 50_000.0,
+            pot_max_resistance: Some(100_000.0),
+            taper: crate::pot_taper::PotTaper::B,
+            invert_control: false,
+        }];
+        stage.output_block = 1;
+        stage.vs_port_map = vec![(alloc::string::String::from("cv_cutoff"), 0)];
+        stage.cutoff_cv_port = Some(alloc::string::String::from("cv_cutoff"));
+        stage.shared_diode_cutoff_pot = Some(alloc::string::String::from("Cutoff"));
 
         stage.update_shared_diode_cutoff_bias_from_ports(&[0.0]);
-        let base_bias = stage.blocks[0].shared_diode_bias_voltage.unwrap();
+        let base_bias = stage
+            .k_method_block(0)
+            .unwrap()
+            .shared_diode_bias_voltage
+            .unwrap();
         assert_eq!(
-            stage.blocks[0].shared_diode_bias_voltage, stage.blocks[1].shared_diode_bias_voltage,
+            stage.k_method_block(0).unwrap().shared_diode_bias_voltage,
+            stage.k_method_block(1).unwrap().shared_diode_bias_voltage,
             "one cutoff current must set every explicit diode rung coherently"
         );
 
         stage.update_shared_diode_cutoff_bias_from_ports(&[2.0]);
-        let cv_bias = stage.blocks[0].shared_diode_bias_voltage.unwrap();
+        let cv_bias = stage
+            .k_method_block(0)
+            .unwrap()
+            .shared_diode_bias_voltage
+            .unwrap();
         assert!(
             cv_bias > base_bias,
             "positive cutoff CV must raise the shared diode operating bias"

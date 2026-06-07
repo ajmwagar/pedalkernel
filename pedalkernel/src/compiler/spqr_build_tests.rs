@@ -458,6 +458,7 @@ fn compile_via_spqr_808_kick_v2_bjt_sweep_compiles() {
             Stage::BlackFeedback(stage) => !stage.bypass_serial,
             Stage::Blockwise(_) => true,
             Stage::SerialDelayedFeedback(stage) => !stage.bypass_serial,
+            Stage::KMethod { .. } => false,
         })
         .collect();
     assert!(

@@ -107,8 +107,7 @@ fn blockwise_k_table_dims(compiled: &super::compiled::CompiledPedal) -> Vec<usiz
         .iter()
         .flat_map(|stage| {
             if let super::compiled::Stage::Blockwise(bkm) = stage {
-                bkm.blocks
-                    .iter()
+                bkm.k_method_blocks()
                     .map(|block| block.k_table.dims)
                     .collect::<Vec<_>>()
             } else {

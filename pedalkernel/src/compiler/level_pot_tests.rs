@@ -53,6 +53,7 @@ fn screamer_legend_level_debug_trace() {
                 s.stages.len(),
                 s.signal_flow_distance
             ),
+            Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  stage[{i}]: {tag}");
     }

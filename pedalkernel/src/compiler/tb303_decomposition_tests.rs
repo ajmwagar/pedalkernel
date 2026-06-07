@@ -758,8 +758,8 @@ fn bkm_identity_isolated_block_rows(bkm: &pedalkernel_rt::stage::BlockwiseStage)
             if sub_stage.is_empty() {
                 return Some(block_idx);
             }
-            let all_identity = sub_stage.ports.iter().all(|binding| {
-                let row = binding.port;
+            let all_identity = sub_stage.k_method_ports().iter().all(|binding| {
+                let row = binding.1.local_port;
                 if row >= bkm.n_ports {
                     return true;
                 }
@@ -1257,9 +1257,9 @@ fn tb303_coupled_differential_ladder_compiles_to_bkm_not_monolithic_mna() {
     );
 
     let bkm = bkm.unwrap();
-    assert_eq!(bkm.blocks.len(), 4);
+    assert_eq!(bkm.block_count(), 4);
     assert!(
-        bkm.blocks.iter().all(|block| block.k_table.dims == 2),
+        bkm.k_method_blocks().all(|block| block.k_table.dims == 2),
         "differential diode rung BKM blocks should use 2D K-tables"
     );
 }
@@ -1531,7 +1531,7 @@ fn tb303_bkm_pulls_input_coupling_caps_into_adaptor() {
         );
     }
 
-    for (idx, block) in bkm.blocks.iter().enumerate() {
+    for (idx, block) in bkm.k_method_blocks().enumerate() {
         assert!(
             block.dc_offset.is_finite() && block.dc_offset.abs() < 10.0,
             "AC-coupled BKM input caps must not poison DC initialization; block {idx} dc_offset={}",
@@ -1619,7 +1619,7 @@ fn tb303_bkm_differential_rungs_have_side_aware_sub_stage_ports() {
         })
         .expect("TB303 should compile to BKM");
 
-    assert_eq!(bkm.blocks.len(), 4);
+    assert_eq!(bkm.block_count(), 4);
     assert_eq!(
         bkm.solve_mode,
         pedalkernel_rt::stage::BlockwiseSolveMode::CoupledNewton,
@@ -1634,20 +1634,20 @@ fn tb303_bkm_differential_rungs_have_side_aware_sub_stage_ports() {
         "coupled BKM should keep feedback in the coupling matrix instead of adding a synthetic feedback drive port"
     );
     assert!(
-        bkm.coupling_ports.len() >= bkm.blocks.len(),
+        bkm.coupling_ports.len() >= bkm.block_count(),
         "BKM should expose one coupling port per rung"
     );
     assert_eq!(
         bkm.sub_stages.len(),
-        bkm.blocks.len(),
+        bkm.block_count(),
         "BKM must track which coupling ports are owned by each sub-stage"
     );
 
     for (block_idx, sub_stage) in bkm.sub_stages.iter().enumerate() {
         assert!(
-            sub_stage.ports.len() >= 3,
+            sub_stage.k_method_ports().len() >= 3,
             "differential rung block {block_idx} should expose bottom left/right side ports plus a top differential port, got {:?}",
-            sub_stage.ports
+            sub_stage.k_method_ports()
         );
         let (bottom_left_idx, bottom_right_idx, top_diff_idx) = bkm
             .differential_owned_ports(block_idx)
@@ -1780,15 +1780,15 @@ fn tb303_bkm_differential_rungs_own_multiple_coupling_ports() {
 
     eprintln!("  TB303 BKM sub_stages: {:?}", bkm.sub_stages);
 
-    assert_eq!(bkm.blocks.len(), 4);
+    assert_eq!(bkm.block_count(), 4);
     assert!(
         bkm.sub_stages
             .iter()
-            .all(|sub_stage| sub_stage.ports.len() >= 3),
+            .all(|sub_stage| sub_stage.k_method_ports().len() >= 3),
         "each differential rung must own bottom left/right ports and a top differential port"
     );
     assert!(
-        bkm.n_ports >= bkm.blocks.len() * 3,
+        bkm.n_ports >= bkm.block_count() * 3,
         "side-aware differential BKM should include block boundary ports in addition to source ports"
     );
 }
@@ -1885,10 +1885,10 @@ fn tb303_coupled_bkm_stays_finite_on_silence() {
         .expect("TB303 should compile to BKM");
 
     assert!(
-        bkm.blocks.iter().all(|block| block.dc_offset.is_finite()),
+        bkm.k_method_blocks()
+            .all(|block| block.dc_offset.is_finite()),
         "BKM DC operating-point solve must leave finite block DC offsets: {:?}",
-        bkm.blocks
-            .iter()
+        bkm.k_method_blocks()
             .map(|block| block.dc_offset)
             .collect::<Vec<_>>()
     );
@@ -2430,7 +2430,7 @@ fn q12_to_two_rung_differential_diode_ladder_routes_into_bkm_boundary() {
         })
         .expect("Q12 handoff fixture should build the ladder as BKM");
     assert_eq!(
-        bkm.blocks.len(),
+        bkm.block_count(),
         2,
         "Q12 handoff fixture should keep the two diode rungs in one BKM ladder"
     );
@@ -2909,7 +2909,7 @@ fn two_rung_normal_diode_ladder_cutoff_uses_circuit_calibration() {
             .iter()
             .find_map(|stage| {
                 if let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage {
-                    Some(bkm.blocks[0].rp)
+                    Some(bkm.k_method_block(0).unwrap().rp)
                 } else {
                     None
                 }
@@ -3808,7 +3808,7 @@ fn tb303_bkm_max_resonance_remains_finite() {
                 "BKM work buffers must remain finite at max resonance"
             );
             assert!(
-                bkm.blocks.iter().all(|block| {
+                bkm.k_method_blocks().all(|block| {
                     block.dc_offset.is_finite()
                         && block.rp.is_finite()
                         && block.k_table.entries.iter().all(|v| v.is_finite())
@@ -3863,7 +3863,7 @@ fn tb303_bkm_block_outputs_show_shallow_lowpass_shape() {
             let _ = bkm.debug_process_with_block_outputs_with_serial_input(input, &vs);
         }
 
-        let mut values = vec![Vec::new(); bkm.blocks.len()];
+        let mut values = vec![Vec::new(); bkm.block_count()];
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
             let vs = tb303_bkm_vs_signals_with_vco(bkm, 0.0, 0.0, 0.0);
@@ -3962,7 +3962,7 @@ fn tb303_bkm_rung_response_accumulates_coupled_lowpass_poles() {
             let _ = bkm.debug_process_with_block_outputs_with_serial_input(input, &vs);
         }
 
-        let mut values = vec![Vec::new(); bkm.blocks.len()];
+        let mut values = vec![Vec::new(); bkm.block_count()];
         for i in 0..9600 {
             let input = 0.1 * (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
             let vs = tb303_bkm_vs_signals_with_vco(bkm, 0.0, 0.0, 0.0);
@@ -4810,7 +4810,7 @@ fn tb303_bkm_direct_block_matches_forced_serial_first_rung_order() {
         }
         let dc_drive = (bkm.work_a[0] + bkm.work_b[0]) / 2.0;
 
-        let mut block = bkm.blocks[0].clone();
+        let mut block = bkm.k_method_block(0).unwrap().clone();
         block.runtime_state = block.tree.bind_runtime_state();
         block.k_table.precompute_scales();
 
@@ -4918,21 +4918,22 @@ fn tb303_bkm_direct_blocks_each_have_lowpass_order() {
             }
             bkm.work_a[row] = sum;
         }
-        let dc_drives: Vec<f64> = (0..bkm.blocks.len())
+        let dc_drives: Vec<f64> = (0..bkm.block_count())
             .map(|i| (bkm.work_a[i] + bkm.work_b[i]) / 2.0)
             .collect();
         eprintln!(
             "  direct BKM probes: {:?}",
-            bkm.blocks
-                .iter()
+            bkm.k_method_blocks()
                 .map(|block| block.cascade_probe_id.as_deref().unwrap_or("<root>"))
                 .collect::<Vec<_>>()
         );
         eprintln!(
             "  direct BKM rp: {:?}",
-            bkm.blocks.iter().map(|block| block.rp).collect::<Vec<_>>()
+            bkm.k_method_blocks()
+                .map(|block| block.rp)
+                .collect::<Vec<_>>()
         );
-        let mut blocks = bkm.blocks.clone();
+        let mut blocks = bkm.k_method_blocks().cloned().collect::<Vec<_>>();
         for block in &mut blocks {
             block.runtime_state = block.tree.bind_runtime_state();
             block.k_table.precompute_scales();
@@ -5051,11 +5052,10 @@ fn tb303_bkm_k_tables_are_generated_per_rung_not_shared() {
         })
         .expect("TB303 should compile to blockwise K-method");
 
-    assert_eq!(bkm.blocks.len(), 4);
+    assert_eq!(bkm.block_count(), 4);
 
     let table_ptrs: Vec<usize> = bkm
-        .blocks
-        .iter()
+        .k_method_blocks()
         .map(|block| block.k_table.entries.as_ptr() as usize)
         .collect();
     let mut unique_ptrs = table_ptrs.clone();
@@ -5070,8 +5070,8 @@ fn tb303_bkm_k_tables_are_generated_per_rung_not_shared() {
     );
 
     let table_delta = |a: usize, b: usize| -> f64 {
-        let ta = &bkm.blocks[a].k_table;
-        let tb = &bkm.blocks[b].k_table;
+        let ta = &bkm.k_method_block(a).unwrap().k_table;
+        let tb = &bkm.k_method_block(b).unwrap().k_table;
         assert_eq!(ta.dims, tb.dims);
         assert_eq!(ta.steps, tb.steps);
         assert_eq!(ta.entries.len(), tb.entries.len());
@@ -5195,6 +5195,7 @@ fn tb303_forced_serial_stage_outputs_show_reference_shape() {
                         bkm.process(&[x, 0.0, 0.0, 0.0])
                     }
                     pedalkernel_rt::processor::Stage::SerialDelayedFeedback(s) => s.process(x),
+                    pedalkernel_rt::processor::Stage::KMethod { .. } => x,
                 };
                 sums[si] += x * x;
             }
@@ -5269,7 +5270,7 @@ fn two_rung_feedback_bkm_stays_bounded_on_silence() {
                 })
                 .expect("two-rung feedback ladder should compile to BKM");
 
-            for (bi, block) in bkm.blocks.iter().enumerate() {
+            for (bi, block) in bkm.k_method_blocks().enumerate() {
                 let mut tree = block.tree.clone();
                 tree.set_voltage(0.0);
                 let b = tree.reflected();
@@ -5410,7 +5411,7 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
     assert!(
         bkm.sub_stages
             .iter()
-            .all(|sub_stage| sub_stage.ports.len() >= 2),
+            .all(|sub_stage| sub_stage.k_method_ports().len() >= 2),
         "differential ladder rungs should expose at least bottom/top coupling ports: {:?}",
         bkm.sub_stages
     );
@@ -5420,12 +5421,12 @@ fn tb303_resonance_matrix_routes_output_back_to_input_ports() {
     assert!(bkm.set_pot("Resonance", 0.95));
     let n = bkm.n_ports;
 
-    let input_ports: Vec<_> = bkm.owned_port_ids(0).collect();
+    let input_ports: Vec<_> = bkm.owned_port_ids(0).into_iter().collect();
     assert!(
         bkm.feedback_port_map.is_empty(),
         "coupled BKM resonance must be represented by passive coupling elements, not synthetic feedback source ports"
     );
-    let output_ports: Vec<_> = bkm.owned_port_ids(bkm.output_block).collect();
+    let output_ports: Vec<_> = bkm.owned_port_ids(bkm.output_block).into_iter().collect();
     let mut best_feedback_delta = 0.0f64;
     let mut best_feedback_entry = None;
     for &row in &input_ports {
@@ -5993,7 +5994,7 @@ fn tb303_single_block_filters() {
 
     // Process a single block directly
     let measure_block = |block_idx: usize, freq: f64| -> f64 {
-        let mut block = bkm.blocks[block_idx].clone();
+        let mut block = bkm.k_method_block(block_idx).unwrap().clone();
         block.k_table.precompute_scales();
         // Warm up
         for _ in 0..2400 {
@@ -6015,7 +6016,7 @@ fn tb303_single_block_filters() {
         peak
     };
 
-    for bi in 0..bkm.blocks.len().min(4) {
+    for bi in 0..bkm.block_count().min(4) {
         let g100 = measure_block(bi, 100.0);
         let g1k = measure_block(bi, 1000.0);
         let g10k = measure_block(bi, 10000.0);
@@ -6208,7 +6209,8 @@ fn tb303_cutoff_cv_updates_shared_diffpair_tail_current_axis() {
             .find_map(|stage| {
                 if let pedalkernel_rt::processor::Stage::Blockwise(bkm) = stage {
                     Some(
-                        bkm.blocks[1]
+                        bkm.k_method_block(1)
+                            .unwrap()
                             .shared_diode_bias_voltage
                             .expect("shared cutoff control should update all diffpair rungs"),
                     )
@@ -6376,7 +6378,7 @@ fn tb303_k_table_not_identity() {
     let bkm = bkm.unwrap();
 
     // Check each block's K-table: evaluate at several b values
-    for (bi, block) in bkm.blocks.iter().enumerate() {
+    for (bi, block) in bkm.k_method_blocks().enumerate() {
         let mut table = block.k_table.clone();
         table.precompute_scales();
 
@@ -7265,7 +7267,7 @@ fn tb303_trace_cascade_one_sample() {
         })
         .expect("BKM stage");
 
-    let n_blocks = bkm.blocks.len();
+    let n_blocks = bkm.block_count();
     let n = bkm.n_ports;
 
     // Manually trace one cascade
@@ -7294,12 +7296,16 @@ fn tb303_trace_cascade_one_sample() {
     eprintln!("  FEEDBACK: {feedback:.6}, cascade_start: {cascade:.6}");
 
     for i in 0..n_blocks {
-        bkm.blocks[i].tree.set_voltage(cascade);
-        let b_tree = bkm.blocks[i].tree.reflected();
+        bkm.k_method_block_mut(i).unwrap().tree.set_voltage(cascade);
+        let b_tree = bkm.k_method_block_mut(i).unwrap().tree.reflected();
         let ctrl = cascade;
-        let a_root = bkm.blocks[i].k_table.lookup_2d(b_tree, ctrl);
+        let a_root = bkm
+            .k_method_block(i)
+            .unwrap()
+            .k_table
+            .lookup_2d(b_tree, ctrl);
         let v_out = (a_root + b_tree) / 2.0;
-        let dc = bkm.blocks[i].dc_offset;
+        let dc = bkm.k_method_block(i).unwrap().dc_offset;
         let v_ac = v_out - dc;
         eprintln!("  BLOCK {i}: cascade_in={cascade:.6}, b_tree={b_tree:.6}, ctrl={ctrl:.6}, a_root={a_root:.6}, v_out={v_out:.6}, dc={dc:.6}, v_ac={v_ac:.6}");
         cascade = v_ac;
@@ -7348,7 +7354,7 @@ fn tb303_trace_small_signal() {
         })
         .expect("BKM stage");
 
-    let n_blocks = bkm.blocks.len();
+    let n_blocks = bkm.block_count();
     let n = bkm.n_ports;
     let audio_vs_idx = bkm
         .vs_port_map
@@ -7370,12 +7376,16 @@ fn tb303_trace_small_signal() {
     eprintln!("  INPUT: {input}, feedback: {feedback:.6}, cascade_start: {cascade:.6}");
 
     for i in 0..n_blocks {
-        bkm.blocks[i].tree.set_voltage(cascade);
-        let b_tree = bkm.blocks[i].tree.reflected();
+        bkm.k_method_block_mut(i).unwrap().tree.set_voltage(cascade);
+        let b_tree = bkm.k_method_block_mut(i).unwrap().tree.reflected();
         let ctrl = cascade;
-        let a_root = bkm.blocks[i].k_table.lookup_2d(b_tree, ctrl);
+        let a_root = bkm
+            .k_method_block(i)
+            .unwrap()
+            .k_table
+            .lookup_2d(b_tree, ctrl);
         let v_out = (a_root + b_tree) / 2.0;
-        let dc = bkm.blocks[i].dc_offset;
+        let dc = bkm.k_method_block(i).unwrap().dc_offset;
         let v_ac = v_out - dc;
         eprintln!("  BLOCK {i}: cascade={cascade:.6}, ctrl={ctrl:.6}, b_tree={b_tree:.6}, a_root={a_root:.6}, v_out={v_out:.6}, dc={dc:.4}, v_ac={v_ac:.6}");
         cascade = v_ac;
@@ -7424,7 +7434,7 @@ fn tb303_cap_state_bounded_during_warmup() {
                 }
             });
             if let Some(bkm) = bkm {
-                for (bi, block) in bkm.blocks.iter().enumerate() {
+                for (bi, block) in bkm.k_method_blocks().enumerate() {
                     let probe_v = block
                         .cascade_probe_id
                         .as_deref()
@@ -7461,7 +7471,7 @@ fn tb303_cap_state_bounded_during_warmup() {
         })
         .expect("BKM");
 
-    for (bi, block) in bkm.blocks.iter().enumerate() {
+    for (bi, block) in bkm.k_method_blocks().enumerate() {
         let mut t = block.tree.clone();
         t.set_voltage(0.0);
         let b = t.reflected();
@@ -7949,7 +7959,7 @@ fn tb303_serial_path_ordering_check() {
                 )
             }
             pedalkernel_rt::processor::Stage::Blockwise(k) => {
-                format!("BKM({}blocks, {}ports)", k.blocks.len(), k.n_ports)
+                format!("BKM({}blocks, {}ports)", k.block_count(), k.n_ports)
             }
             _ => format!("other"),
         };
@@ -7997,7 +8007,7 @@ fn tb303_stage_ordering_debug() {
                 eprintln!(
                     "  Stage {i}: BKM flow_dist={} blocks={}",
                     k.signal_flow_distance,
-                    k.blocks.len()
+                    k.block_count()
                 );
             }
             _ => {
@@ -8047,7 +8057,7 @@ fn tb303_per_block_signal_trace() {
         .expect("BKM stage");
 
     let n = bkm.n_ports;
-    let n_blocks = bkm.blocks.len();
+    let n_blocks = bkm.block_count();
 
     eprintln!("  === BKM state after warmup ===");
     eprintln!("  n_ports={n}, n_blocks={n_blocks}");
@@ -8074,7 +8084,7 @@ fn tb303_per_block_signal_trace() {
     );
 
     // Print per-block tree state
-    for (bi, block) in bkm.blocks.iter_mut().enumerate() {
+    for (bi, block) in bkm.k_method_blocks_mut().enumerate() {
         let mut t = block.tree.clone();
         t.set_voltage(0.0);
         let b = t.reflected();
@@ -8139,9 +8149,9 @@ fn tb303_per_block_signal_trace() {
 
     for i in 0..n_blocks {
         let vs_in = -cascade; // negated for WDF sign convention
-        bkm.blocks[i].tree.set_voltage(vs_in);
-        let b_tree = bkm.blocks[i].tree.reflected();
-        let a_root = bkm.blocks[i].k_table.lookup_1d(b_tree);
+        bkm.k_method_block_mut(i).unwrap().tree.set_voltage(vs_in);
+        let b_tree = bkm.k_method_block_mut(i).unwrap().tree.reflected();
+        let a_root = bkm.k_method_block(i).unwrap().k_table.lookup_1d(b_tree);
         let v_out = (a_root + b_tree) / 2.0;
         eprintln!("  block {i}: cascade_in={cascade:+.6}, VS={vs_in:+.6}, b_tree={b_tree:+.6}, a_root={a_root:+.6}, V_out={v_out:+.6}");
         cascade = v_out;

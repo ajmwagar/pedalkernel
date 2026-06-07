@@ -271,6 +271,7 @@ fn screamer_tone_stage_not_dead() {
                 super::compiled::Stage::SerialDelayedFeedback(s) => {
                     ("serial_feedback", s.bypass_serial)
                 }
+                super::compiled::Stage::KMethod { .. } => ("k_method", true),
             };
             if bypass {
                 continue;

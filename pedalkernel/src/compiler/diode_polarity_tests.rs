@@ -123,6 +123,7 @@ fn dump_stage_metering(compiled: &mut CompiledPedal, amp: f64, warmup: usize, me
                 "serial_feedback",
                 s.bypass_serial,
             ),
+            super::compiled::Stage::KMethod { .. } => ("KMethod", usize::MAX, "k_method", true),
         };
         let bypass_tag = if bypass { " BYPASS" } else { "" };
         eprintln!("    stage {i}: [{stage_type}] dist={dist} [{label}]{bypass_tag} → {lvl:.4} ({db:.1} dB)");

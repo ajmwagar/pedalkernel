@@ -276,6 +276,7 @@ fn trace_mfb_pot_compilation() {
                     s.signal_flow_distance
                 )
             }
+            super::compiled::Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  [{i}] {kind}");
     }
@@ -346,6 +347,7 @@ fn trace_mfb_hpf_compilation() {
                     s.signal_flow_distance
                 )
             }
+            super::compiled::Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  [{i}] {kind}");
     }
@@ -431,6 +433,7 @@ fn trace_mfb_hpf_fixed_compilation() {
                     s.signal_flow_distance
                 )
             }
+            super::compiled::Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  [{i}] {kind}");
     }
@@ -481,6 +484,7 @@ fn trace_mfb_fixed_compilation() {
                     s.signal_flow_distance
                 )
             }
+            super::compiled::Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  [{i}] {kind}");
     }

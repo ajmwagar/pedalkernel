@@ -77,6 +77,7 @@ fn stage_label(stage: &super::compiled::Stage) -> &str {
         super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
         super::compiled::Stage::Blockwise(_) => "blockwise",
         super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
+        super::compiled::Stage::KMethod { .. } => "k_method",
     }
 }
 
@@ -208,6 +209,7 @@ fn goldenrod_stage_dump() {
                     s.bypass_serial,
                     s.signal_flow_distance,
                 ),
+                super::compiled::Stage::KMethod { .. } => ("KMethod", "k_method", true, usize::MAX),
             };
             let bp = if bypass { " BYPASS" } else { "" };
             eprintln!("  stage {i}: [{stype}] dist={dist} [{lbl}]{bp} → {lvl:.4} ({db:.1} dB)");

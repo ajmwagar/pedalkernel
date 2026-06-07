@@ -1015,6 +1015,7 @@ fn screamer_pot_stage_diagnostic() {
                 serial.has_pot("Level"),
                 serial.has_pot("Drive"),
             ),
+            pedalkernel_rt::processor::Stage::KMethod { .. } => ("KMethod", false, false, false),
         };
         eprintln!("  stage {i} ({stype}): Tone={has_tone}, Level={has_level}, Drive={has_drive}");
     }

@@ -193,6 +193,7 @@ fn screamer_per_stage_signal_levels() {
                 super::compiled::Stage::SerialDelayedFeedback(s) => {
                     ("SerialFB", "serial_feedback", s.bypass_serial)
                 }
+                super::compiled::Stage::KMethod { .. } => ("KMethod", "k_method", true),
             };
             if !bypass {
                 let arrow = if delta > 3.0 {
@@ -234,6 +235,7 @@ fn screamer_per_stage_signal_levels() {
             super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
             super::compiled::Stage::Blockwise(bk) => bk.bypass_serial,
             super::compiled::Stage::SerialDelayedFeedback(s) => s.bypass_serial,
+            super::compiled::Stage::KMethod { .. } => true,
         };
         if bypass {
             continue;
@@ -248,6 +250,7 @@ fn screamer_per_stage_signal_levels() {
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::Blockwise(_) => "blockwise",
                 super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
+                super::compiled::Stage::KMethod { .. } => "k_method",
             };
             assert!(
                 db > -60.0,
@@ -298,6 +301,7 @@ fn ratking_per_stage_signal_levels() {
                 super::compiled::Stage::SerialDelayedFeedback(s) => {
                     ("SerialFB", "serial_feedback", s.bypass_serial)
                 }
+                super::compiled::Stage::KMethod { .. } => ("KMethod", "k_method", true),
             };
             if !bypass {
                 let arrow = if delta > 3.0 {
@@ -339,6 +343,7 @@ fn ratking_per_stage_signal_levels() {
             super::compiled::Stage::BlackFeedback(b) => b.bypass_serial,
             super::compiled::Stage::Blockwise(bk) => bk.bypass_serial,
             super::compiled::Stage::SerialDelayedFeedback(s) => s.bypass_serial,
+            super::compiled::Stage::KMethod { .. } => true,
         };
         if bypass {
             continue;
@@ -353,6 +358,7 @@ fn ratking_per_stage_signal_levels() {
                 super::compiled::Stage::BlackFeedback(b) => b.debug_label.as_str(),
                 super::compiled::Stage::Blockwise(_) => "blockwise",
                 super::compiled::Stage::SerialDelayedFeedback(_) => "serial_feedback",
+                super::compiled::Stage::KMethod { .. } => "k_method",
             };
             assert!(
                 db > -60.0,

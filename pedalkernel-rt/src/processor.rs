@@ -37,7 +37,24 @@ pub enum Stage {
     BlackFeedback(crate::stage::BlackFeedbackStage),
     #[cfg_attr(feature = "serde", serde(alias = "BlockwiseKMethod"))]
     Blockwise(crate::stage::BlockwiseStage),
+    KMethod {
+        block: crate::stage::KMethodBlock,
+        ports: Vec<(crate::stage::OwnedPortRole, PortBinding)>,
+    },
     SerialDelayedFeedback(SerialDelayedFeedbackStage),
+}
+
+impl Clone for Stage {
+    fn clone(&self) -> Self {
+        match self {
+            Stage::Blockwise(stage) => Stage::Blockwise(stage.clone()),
+            Stage::KMethod { block, ports } => Stage::KMethod {
+                block: block.clone(),
+                ports: ports.clone(),
+            },
+            _ => panic!("only blockwise recursive stages are cloneable"),
+        }
+    }
 }
 
 impl core::fmt::Debug for Stage {
@@ -49,6 +66,7 @@ impl core::fmt::Debug for Stage {
             Stage::StateSpace(_) => write!(f, "Stage::StateSpace(..)"),
             Stage::BlackFeedback(_) => write!(f, "Stage::BlackFeedback(..)"),
             Stage::Blockwise(_) => write!(f, "Stage::Blockwise(..)"),
+            Stage::KMethod { .. } => write!(f, "Stage::KMethod(..)"),
             Stage::SerialDelayedFeedback(_) => {
                 write!(f, "Stage::SerialDelayedFeedback(..)")
             }
@@ -57,6 +75,27 @@ impl core::fmt::Debug for Stage {
 }
 
 impl Stage {
+    pub fn k_method_ports(&self) -> &[(crate::stage::OwnedPortRole, PortBinding)] {
+        match self {
+            Stage::KMethod { ports, .. } => ports.as_slice(),
+            _ => &[],
+        }
+    }
+
+    pub fn owned_port_ids(&self) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for (_, binding) in self.k_method_ports() {
+            if !ids.contains(&binding.local_port) {
+                ids.push(binding.local_port);
+            }
+        }
+        ids
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.k_method_ports().is_empty()
+    }
+
     /// Declarative input bindings exposed by this stage.
     ///
     /// This reports current boundary metadata only. It does not imply a
@@ -77,6 +116,7 @@ impl Stage {
                 })
                 .collect(),
             Stage::Blockwise(bkm) => bkm.ins(),
+            Stage::KMethod { ports, .. } => ports.iter().map(|(_, binding)| *binding).collect(),
             _ => Vec::new(),
         }
     }
@@ -94,6 +134,7 @@ impl Stage {
                 })
                 .collect(),
             Stage::Blockwise(bkm) => bkm.outs(),
+            Stage::KMethod { ports, .. } => ports.iter().map(|(_, binding)| *binding).collect(),
             _ => Vec::new(),
         }
     }
@@ -137,7 +178,7 @@ impl Stage {
                 .has_pot(comp_id)
                 .then_some(ControlTarget::PotInBlackFeedbackStage(stage_idx)),
             Stage::Blockwise(bkm) => {
-                for block in &bkm.blocks {
+                for block in bkm.k_method_blocks() {
                     if block.tree.get_pot_position(comp_id).is_some()
                         || block.tree.get_pot_position(&aw_id).is_some()
                         || block.tree.get_pot_position(&wb_id).is_some()
@@ -156,6 +197,7 @@ impl Stage {
             Stage::StateSpace(ss) => ss
                 .has_pot(comp_id)
                 .then_some(ControlTarget::PotInStage(stage_idx)),
+            Stage::KMethod { .. } => None,
         }
     }
 
@@ -206,6 +248,7 @@ impl Stage {
                     false
                 }
             }
+            Stage::KMethod { .. } => false,
         }
     }
 
@@ -2412,6 +2455,9 @@ impl CompiledPedal {
                         k.debug_label()
                     ));
                 }
+                Stage::KMethod { .. } => {
+                    s.push_str(&format!("\n[Stage {} (KMethod child)]\n", i));
+                }
                 Stage::SerialDelayedFeedback(serial) => {
                     s.push_str(&format!(
                         "\n[Stage {} (SerialDelayedFeedback)] {} WDF rungs, gain={:+.3}\n",
@@ -2988,6 +3034,7 @@ impl PedalProcessor for CompiledPedal {
                 Stage::StateSpace(s) => s.bypass_serial,
                 Stage::BlackFeedback(b) => b.bypass_serial,
                 Stage::Blockwise(k) => k.bypass_serial,
+                Stage::KMethod { .. } => true,
                 Stage::SerialDelayedFeedback(s) => s.bypass_serial,
             };
 
@@ -3015,6 +3062,7 @@ impl PedalProcessor for CompiledPedal {
                     Stage::Blockwise(k) => {
                         let _ = k.process(&[]);
                     }
+                    Stage::KMethod { .. } => {}
                     Stage::SerialDelayedFeedback(s) => {
                         let _ = s.process(0.0);
                     }
@@ -3839,6 +3887,7 @@ impl PedalProcessor for CompiledPedal {
                 Stage::StateSpace(_) => "StateSpace",
                 Stage::BlackFeedback(_) => "BlackFB",
                 Stage::Blockwise(_) => "Blockwise",
+                Stage::KMethod { .. } => "KMethod",
                 Stage::SerialDelayedFeedback(_) => "SerialFB",
             };
             out.push((format!("{{S{si}}} {type_name}"), 0.0, 0.0));
@@ -3894,7 +3943,7 @@ impl PedalProcessor for CompiledPedal {
                     }
                 }
                 Stage::Blockwise(bkm) => {
-                    for (bi, block) in bkm.blocks.iter().enumerate() {
+                    for (bi, block) in bkm.k_method_blocks().enumerate() {
                         block.tree.for_each_leaf(&mut |leaf| {
                             if leaf.type_tag() == "pot" {
                                 if let Some(id) = leaf.comp_id() {

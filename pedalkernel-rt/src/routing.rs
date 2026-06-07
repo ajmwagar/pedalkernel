@@ -562,7 +562,6 @@ mod tests {
 
     fn empty_bkm_with_port(node_id: usize) -> BlockwiseStage {
         BlockwiseStage {
-            blocks: vec![],
             coupling_s: vec![0.0],
             coupling_n_mna: 0,
             coupling_ports: vec![mapped_port(WdfPortTerminals::single_ended(node_id), 1.0)],
