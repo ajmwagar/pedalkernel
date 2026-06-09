@@ -6,8 +6,8 @@
 //! to the runtime types.
 
 use crate::models::{
-    bjt_by_name, jfet_by_name, pentode_by_name, triode_by_name, SpiceBjtModel, SpiceJfetModel,
-    SpicePentodeModel, SpiceTriodeModel,
+    bjt_by_name, jfet_by_name, opamp_by_name, pentode_by_name, triode_by_name, SpiceBjtModel,
+    SpiceJfetModel, SpiceOpAmpModel, SpicePentodeModel, SpiceTriodeModel,
 };
 use pedalkernel_rt::elements::nonlinear::{
     GummelPoonModel, JfetModel, OpAmpModel, PentodeModel, TriodeModel,
@@ -149,20 +149,52 @@ fn bjt_from_spice(spice: &SpiceBjtModel) -> GummelPoonModel {
 
 // ── Op-Amp ──────────────────────────────────────────────────────────────
 
+/// Look up a compact op-amp model by name from the model registry.
+/// Panics if the model name is not found.
+pub fn opamp_model_by_name(name: &str) -> OpAmpModel {
+    opamp_try_by_name(name).unwrap_or_else(|| panic!("Unknown op-amp model: '{name}'"))
+}
+
+/// Try to look up a compact op-amp model by name. Returns `None` if not found.
+pub fn opamp_try_by_name(name: &str) -> Option<OpAmpModel> {
+    opamp_by_name(name).map(opamp_from_spice)
+}
+
+fn opamp_from_spice(spice: &SpiceOpAmpModel) -> OpAmpModel {
+    OpAmpModel {
+        open_loop_gain: spice.open_loop_gain,
+        gbw: spice.gbw,
+        slew_rate: spice.slew_rate,
+        v_rail_pos: spice.v_rail_pos,
+        v_rail_neg: spice.v_rail_neg,
+        output_impedance: spice.output_impedance,
+        output_capacitance: spice.output_capacitance,
+    }
+}
+
 /// Convert from DSL OpAmpType to runtime OpAmpModel.
 pub fn opamp_model_from_type(ot: &crate::dsl::OpAmpType) -> OpAmpModel {
+    opamp_model_by_name(opamp_type_model_name(ot))
+}
+
+/// Return an OTA transconductance from the model registry.
+pub fn ota_gm_from_type(ot: &crate::dsl::OpAmpType) -> Option<f64> {
+    let model = opamp_by_name(opamp_type_model_name(ot))?;
+    model.is_ota.then_some(model.ota_gm)
+}
+
+fn opamp_type_model_name(ot: &crate::dsl::OpAmpType) -> &'static str {
     use crate::dsl::OpAmpType;
     match ot {
-        OpAmpType::Generic => OpAmpModel::generic(),
-        OpAmpType::Tl072 => OpAmpModel::tl072(),
-        OpAmpType::Tl082 => OpAmpModel::tl082(),
-        OpAmpType::Jrc4558 => OpAmpModel::jrc4558(),
-        OpAmpType::Rc4558 => OpAmpModel::rc4558(),
-        OpAmpType::Lm308 => OpAmpModel::lm308(),
-        OpAmpType::Lm741 => OpAmpModel::lm741(),
-        OpAmpType::Ne5532 => OpAmpModel::ne5532(),
-        OpAmpType::Op07 => OpAmpModel::op07(),
-        // OTAs (CA3080) are handled separately as OtaRoot, not OpAmpRoot
-        OpAmpType::Ca3080 => OpAmpModel::generic(),
+        OpAmpType::Generic => "GENERIC",
+        OpAmpType::Tl072 => "TL072",
+        OpAmpType::Tl082 => "TL082",
+        OpAmpType::Jrc4558 => "JRC4558",
+        OpAmpType::Rc4558 => "RC4558",
+        OpAmpType::Lm308 => "LM308",
+        OpAmpType::Lm741 => "LM741",
+        OpAmpType::Ne5532 => "NE5532",
+        OpAmpType::Op07 => "OP07",
+        OpAmpType::Ca3080 => "CA3080",
     }
 }

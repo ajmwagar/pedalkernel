@@ -54,15 +54,16 @@ enum Command {
         #[arg(long)]
         fix: bool,
     },
-    /// List and search available component models (BJTs, JFETs, etc.)
+    /// List and search available component models (BJTs, JFETs, op-amps, etc.)
     ///
     /// Examples:
     ///   pedalkernel models                   # List all models
     ///   pedalkernel models --type bjt         # Only BJTs
     ///   pedalkernel models --type jfet -s 2N5 # Search JFETs matching "2N5"
+    ///   pedalkernel models --type opamp      # Only op-amps and OTAs
     ///   pedalkernel models --show 2N3904      # Show full details for a model
     Models {
-        /// Filter by component type: bjt, npn, pnp, jfet, njf, pjf
+        /// Filter by component type: bjt, npn, pnp, jfet, njf, pjf, triode, pentode, opamp, ota
         #[arg(short = 't', long = "type")]
         model_type: Option<String>,
         /// Search model names (case-insensitive substring match)

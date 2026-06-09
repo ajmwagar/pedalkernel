@@ -22,6 +22,7 @@ static DIODE_MODELS_SRC: &str = include_str!("../models/diodes.model");
 static LED_MODELS_SRC: &str = include_str!("../models/leds.model");
 static SCHOTTKY_MODELS_SRC: &str = include_str!("../models/schottky.model");
 static ZENER_MODELS_SRC: &str = include_str!("../models/zeners.model");
+static OPAMP_MODELS_SRC: &str = include_str!("../models/opamps.model");
 
 // ---------------------------------------------------------------------------
 // Parsed model registry (lazy-initialized)
@@ -58,6 +59,10 @@ pub static SCHOTTKY_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> =
 /// All Zener diode models parsed from the embedded zeners.model file.
 pub static ZENER_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> =
     LazyLock::new(|| parse_diode_models(ZENER_MODELS_SRC));
+
+/// All op-amp and OTA models parsed from the embedded opamps.model file.
+pub static OPAMP_MODELS: LazyLock<HashMap<String, SpiceOpAmpModel>> =
+    LazyLock::new(|| parse_opamp_models(OPAMP_MODELS_SRC));
 
 // ---------------------------------------------------------------------------
 // Parsed SPICE BJT model
@@ -314,6 +319,52 @@ pub struct SpicePentodeModel {
     /// Plate resistance at typical operating point (Ω). Datasheet rp.
     /// Power pentodes: 15k–50kΩ. Signal pentodes (EF86): ~2.5MΩ.
     pub rp: f64,
+}
+
+// ---------------------------------------------------------------------------
+// Parsed op-amp / OTA model
+// ---------------------------------------------------------------------------
+
+/// Compact behavioral op-amp and OTA parameters.
+///
+/// Format:
+/// - `.OPAMP <name> A0= GBW= SR= VPOS= VNEG= RO= COUT=`
+/// - `.OTA <name> A0= GBW= SR= VPOS= VNEG= RO= COUT= IABC= VT= GM= RLOAD=`
+#[derive(Debug, Clone)]
+pub struct SpiceOpAmpModel {
+    pub name: String,
+    pub is_ota: bool,
+    pub open_loop_gain: f64,
+    pub gbw: f64,
+    pub slew_rate: f64,
+    pub v_rail_pos: f64,
+    pub v_rail_neg: f64,
+    pub output_impedance: f64,
+    pub output_capacitance: f64,
+    pub ota_iabc: f64,
+    pub ota_vt: f64,
+    pub ota_gm: f64,
+    pub ota_r_load: f64,
+}
+
+impl SpiceOpAmpModel {
+    fn defaults(name: &str, is_ota: bool) -> Self {
+        Self {
+            name: name.to_uppercase(),
+            is_ota,
+            open_loop_gain: 100_000.0,
+            gbw: 1e6,
+            slew_rate: 1.0,
+            v_rail_pos: 12.0,
+            v_rail_neg: 12.0,
+            output_impedance: 75.0,
+            output_capacitance: 20e-12,
+            ota_iabc: 100e-6,
+            ota_vt: 25.85e-3,
+            ota_gm: 0.0,
+            ota_r_load: 10_000.0,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -780,6 +831,74 @@ fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
 }
 
 // ---------------------------------------------------------------------------
+// Op-amp / OTA model parser
+// ---------------------------------------------------------------------------
+
+/// Parse all `.OPAMP` and `.OTA` entries from a model file string.
+fn parse_opamp_models(src: &str) -> HashMap<String, SpiceOpAmpModel> {
+    let mut models = HashMap::new();
+
+    for line in src.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let upper = trimmed.to_uppercase();
+        if !upper.starts_with(".OPAMP") && !upper.starts_with(".OTA") {
+            continue;
+        }
+
+        if let Some(model) = parse_opamp_model_line(trimmed) {
+            models.insert(model.name.clone(), model);
+        }
+    }
+
+    models
+}
+
+/// Parse a single `.OPAMP <name> ...` or `.OTA <name> ...` line.
+fn parse_opamp_model_line(line: &str) -> Option<SpiceOpAmpModel> {
+    let upper = line.to_uppercase();
+    let (prefix_len, is_ota) = if upper.starts_with(".OPAMP") {
+        (6, false)
+    } else if upper.starts_with(".OTA") {
+        (4, true)
+    } else {
+        return None;
+    };
+
+    let rest = line[prefix_len..].trim_start();
+    let (name, params) = rest.split_once(|c: char| c.is_whitespace())?;
+    let mut model = SpiceOpAmpModel::defaults(name, is_ota);
+
+    for pair in params.split_whitespace() {
+        if let Some((key, val_str)) = pair.split_once('=') {
+            let key_upper = key.to_uppercase();
+            if let Some(val) = parse_spice_value(val_str) {
+                match key_upper.as_str() {
+                    "A0" | "AOL" | "OPEN_LOOP_GAIN" => model.open_loop_gain = val,
+                    "GBW" | "GBP" => model.gbw = val,
+                    "SR" | "SLEW" | "SLEW_RATE" => model.slew_rate = val,
+                    "VPOS" | "VRAILPOS" | "V_RAIL_POS" => model.v_rail_pos = val,
+                    "VNEG" | "VRAILNEG" | "V_RAIL_NEG" => model.v_rail_neg = val,
+                    "RO" | "ROUT" | "OUTPUT_IMPEDANCE" => model.output_impedance = val,
+                    "COUT" | "OUTPUT_CAPACITANCE" => model.output_capacitance = val,
+                    "IABC" => model.ota_iabc = val,
+                    "VT" => model.ota_vt = val,
+                    "GM" | "GMO" => model.ota_gm = val,
+                    "RLOAD" | "RL" => model.ota_r_load = val,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Some(model)
+}
+
+// ---------------------------------------------------------------------------
 // Public lookup API
 // ---------------------------------------------------------------------------
 
@@ -885,6 +1004,16 @@ pub fn zener_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
 /// List all available Zener diode model names.
 pub fn zener_model_names() -> Vec<&'static str> {
     ZENER_MODELS.keys().map(|s| s.as_str()).collect()
+}
+
+/// Look up an op-amp or OTA model by name (case-insensitive).
+pub fn opamp_by_name(name: &str) -> Option<&'static SpiceOpAmpModel> {
+    OPAMP_MODELS.get(&name.to_uppercase())
+}
+
+/// List all available op-amp and OTA model names.
+pub fn opamp_model_names() -> Vec<&'static str> {
+    OPAMP_MODELS.keys().map(|s| s.as_str()).collect()
 }
 
 /// Look up any diode-type model by name across all registries.
@@ -1238,6 +1367,57 @@ mod tests {
         let p6ca7 = pentode_by_name("6CA7").unwrap();
         assert!((el34.mu - p6ca7.mu).abs() < 1e-10);
         assert!((el34.kp - p6ca7.kp).abs() < 1e-10);
+    }
+
+    // -----------------------------------------------------------------------
+    // Op-amp / OTA tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_opamp_line() {
+        let line = ".OPAMP TL072 A0=200k GBW=3MEG SR=13 VPOS=12 VNEG=12 RO=75 COUT=20p";
+        let model = parse_opamp_model_line(line).unwrap();
+        assert_eq!(model.name, "TL072");
+        assert!(!model.is_ota);
+        assert!((model.open_loop_gain - 200_000.0).abs() < 1e-10);
+        assert!((model.gbw - 3e6).abs() < 1e-3);
+        assert!((model.slew_rate - 13.0).abs() < 1e-10);
+        assert!((model.output_capacitance - 20e-12).abs() < 1e-20);
+    }
+
+    #[test]
+    fn parse_ota_line() {
+        let line = ".OTA CA3080 A0=100k GBW=2MEG SR=50 IABC=100u VT=25.85m GM=2m RLOAD=10k";
+        let model = parse_opamp_model_line(line).unwrap();
+        assert_eq!(model.name, "CA3080");
+        assert!(model.is_ota);
+        assert!((model.gbw - 2e6).abs() < 1e-3);
+        assert!((model.ota_iabc - 100e-6).abs() < 1e-15);
+        assert!((model.ota_vt - 25.85e-3).abs() < 1e-12);
+        assert!((model.ota_gm - 2e-3).abs() < 1e-15);
+        assert!((model.ota_r_load - 10_000.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn opamp_embedded_models_load() {
+        let names = [
+            "GENERIC", "TL072", "TL082", "JRC4558", "RC4558", "LM308", "LM741", "NE5532", "OP07",
+            "CA3080",
+        ];
+        for name in &names {
+            assert!(
+                opamp_by_name(name).is_some(),
+                "Op-amp model '{}' not found in embedded opamps.model",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn opamp_case_insensitive() {
+        assert!(opamp_by_name("tl072").is_some());
+        assert!(opamp_by_name("jrc4558").is_some());
+        assert!(opamp_by_name("ca3080").is_some());
     }
 
     // -----------------------------------------------------------------------

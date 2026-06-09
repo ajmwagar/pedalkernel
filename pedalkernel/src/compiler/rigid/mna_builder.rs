@@ -286,10 +286,9 @@ pub(super) fn build_mna(
 }
 
 fn linear_ota_transconductance(op_type: Option<crate::dsl::OpAmpType>) -> f64 {
-    match op_type {
-        Some(crate::dsl::OpAmpType::Ca3080) => 0.002,
-        _ => 0.0,
-    }
+    op_type
+        .and_then(|op_type| crate::model_lookup::ota_gm_from_type(&op_type))
+        .unwrap_or(0.0)
 }
 
 fn nearest_stage_input_node(node_set: &[NodeId], graph: &CircuitGraph) -> Option<NodeId> {
