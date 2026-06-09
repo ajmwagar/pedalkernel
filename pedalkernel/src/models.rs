@@ -367,6 +367,31 @@ impl SpiceOpAmpModel {
     }
 }
 
+trait NamedModel {
+    fn model_name(&self) -> &str;
+}
+
+macro_rules! impl_named_model {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl NamedModel for $ty {
+                fn model_name(&self) -> &str {
+                    &self.name
+                }
+            }
+        )+
+    };
+}
+
+impl_named_model!(
+    SpiceBjtModel,
+    SpiceJfetModel,
+    ShockleyDiodeModel,
+    SpiceTriodeModel,
+    SpicePentodeModel,
+    SpiceOpAmpModel,
+);
+
 // ---------------------------------------------------------------------------
 // SPICE engineering suffix parser
 // ---------------------------------------------------------------------------
@@ -426,39 +451,80 @@ fn parse_spice_value(s: &str) -> Option<f64> {
     Some(base * multiplier)
 }
 
-// ---------------------------------------------------------------------------
-// .MODEL line parser
-// ---------------------------------------------------------------------------
-
-/// Parse all `.MODEL` BJT entries from a SPICE model file string.
-fn parse_bjt_models(src: &str) -> HashMap<String, SpiceBjtModel> {
+fn parse_model_registry<T, F>(src: &str, mut parse_line: F) -> HashMap<String, T>
+where
+    T: NamedModel,
+    F: FnMut(&str) -> Option<T>,
+{
     let mut models = HashMap::new();
 
     for line in src.lines() {
         let trimmed = line.trim();
-
-        // Skip comments and empty lines
         if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
             continue;
         }
 
-        // Must start with .MODEL (case-insensitive)
-        if !trimmed.to_uppercase().starts_with(".MODEL") {
-            continue;
-        }
-
-        if let Some(model) = parse_model_line(trimmed) {
-            models.insert(model.name.clone(), model);
+        if let Some(model) = parse_line(trimmed) {
+            models.insert(model.model_name().to_string(), model);
         }
     }
 
     models
 }
 
+fn for_each_param<F>(params: &str, mut apply: F)
+where
+    F: FnMut(&str, f64),
+{
+    for pair in params.split_whitespace() {
+        if let Some((key, val_str)) = pair.split_once('=') {
+            if let Some(val) = parse_spice_value(val_str) {
+                let key_upper = key.to_uppercase();
+                apply(&key_upper, val);
+            }
+        }
+    }
+}
+
+fn strip_directive<'a>(line: &'a str, directive: &str) -> Option<&'a str> {
+    let trimmed = line.trim_start();
+    let prefix = trimmed.get(..directive.len())?;
+    if !prefix.eq_ignore_ascii_case(directive) {
+        return None;
+    }
+
+    let rest = &trimmed[directive.len()..];
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_ascii_whitespace())
+    {
+        return None;
+    }
+
+    Some(rest.trim_start())
+}
+
+fn lookup_model<'a, T>(models: &'a HashMap<String, T>, name: &str) -> Option<&'a T> {
+    models.get(&name.to_uppercase())
+}
+
+fn model_names<T>(models: &'static HashMap<String, T>) -> Vec<&'static str> {
+    models.keys().map(|s| s.as_str()).collect()
+}
+
+// ---------------------------------------------------------------------------
+// .MODEL line parser
+// ---------------------------------------------------------------------------
+
+/// Parse all `.MODEL` BJT entries from a SPICE model file string.
+fn parse_bjt_models(src: &str) -> HashMap<String, SpiceBjtModel> {
+    parse_model_registry(src, parse_model_line)
+}
+
 /// Parse a single `.MODEL <name> <type>(<params>)` line.
 fn parse_model_line(line: &str) -> Option<SpiceBjtModel> {
-    // Strip ".MODEL " prefix (case-insensitive)
-    let rest = &line[6..].trim_start();
+    let rest = strip_directive(line, ".MODEL")?;
 
     // Extract model name (first token)
     let (name, rest) = rest.split_once(|c: char| c.is_whitespace())?;
@@ -484,42 +550,34 @@ fn parse_model_line(line: &str) -> Option<SpiceBjtModel> {
 
     let mut model = SpiceBjtModel::defaults(name, is_pnp);
 
-    // Parse key=value pairs
-    for pair in params_block.split_whitespace() {
-        if let Some((key, val_str)) = pair.split_once('=') {
-            let key_upper = key.to_uppercase();
-            if let Some(val) = parse_spice_value(val_str) {
-                match key_upper.as_str() {
-                    "IS" => model.is = val,
-                    "BF" => model.bf = val,
-                    "BR" => model.br = val,
-                    "NF" => model.nf = val,
-                    "NR" => model.nr = val,
-                    "VT" => {} // We compute VT from temperature, ignore file value
-                    "VAF" | "VA" => model.vaf = val,
-                    "VAR" | "VB" => model.var = val,
-                    "IKF" | "JBF" => model.ikf = val,
-                    "IKR" | "JBR" => model.ikr = val,
-                    "ISE" => model.ise = val,
-                    "NE" => model.ne = val,
-                    "ISC" => model.isc = val,
-                    "NC" => model.nc = val,
-                    "RB" => model.rb = val,
-                    "RE" => model.re = val,
-                    "RC" => model.rc = val,
-                    "CJE" | "CEB" => model.cje = val,
-                    "VJE" | "PE" => model.vje = val,
-                    "MJE" | "ME" => model.mje = val,
-                    "CJC" | "CCB" => model.cjc = val,
-                    "VJC" | "PC" => model.vjc = val,
-                    "MJC" | "MC" => model.mjc = val,
-                    "TF" => model.tf = val,
-                    "TR" => model.tr = val,
-                    _ => {} // Ignore unknown parameters
-                }
-            }
-        }
-    }
+    for_each_param(params_block, |key, val| match key {
+        "IS" => model.is = val,
+        "BF" => model.bf = val,
+        "BR" => model.br = val,
+        "NF" => model.nf = val,
+        "NR" => model.nr = val,
+        "VT" => {} // We compute VT from temperature, ignore file value
+        "VAF" | "VA" => model.vaf = val,
+        "VAR" | "VB" => model.var = val,
+        "IKF" | "JBF" => model.ikf = val,
+        "IKR" | "JBR" => model.ikr = val,
+        "ISE" => model.ise = val,
+        "NE" => model.ne = val,
+        "ISC" => model.isc = val,
+        "NC" => model.nc = val,
+        "RB" => model.rb = val,
+        "RE" => model.re = val,
+        "RC" => model.rc = val,
+        "CJE" | "CEB" => model.cje = val,
+        "VJE" | "PE" => model.vje = val,
+        "MJE" | "ME" => model.mje = val,
+        "CJC" | "CCB" => model.cjc = val,
+        "VJC" | "PC" => model.vjc = val,
+        "MJC" | "MC" => model.mjc = val,
+        "TF" => model.tf = val,
+        "TR" => model.tr = val,
+        _ => {} // Ignore unknown parameters
+    });
 
     Some(model)
 }
@@ -530,30 +588,12 @@ fn parse_model_line(line: &str) -> Option<SpiceBjtModel> {
 
 /// Parse all `.MODEL` JFET entries (NJF/PJF) from a SPICE model file string.
 fn parse_jfet_models(src: &str) -> HashMap<String, SpiceJfetModel> {
-    let mut models = HashMap::new();
-
-    for line in src.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
-            continue;
-        }
-
-        if !trimmed.to_uppercase().starts_with(".MODEL") {
-            continue;
-        }
-
-        if let Some(model) = parse_jfet_model_line(trimmed) {
-            models.insert(model.name.clone(), model);
-        }
-    }
-
-    models
+    parse_model_registry(src, parse_jfet_model_line)
 }
 
 /// Parse a single `.MODEL <name> NJF|PJF(<params>)` line.
 fn parse_jfet_model_line(line: &str) -> Option<SpiceJfetModel> {
-    let rest = &line[6..].trim_start();
+    let rest = strip_directive(line, ".MODEL")?;
     let (name, rest) = rest.split_once(|c: char| c.is_whitespace())?;
     let rest = rest.trim_start();
 
@@ -584,26 +624,19 @@ fn parse_jfet_model_line(line: &str) -> Option<SpiceJfetModel> {
 
     let mut model = SpiceJfetModel::defaults(name, is_n_channel);
 
-    for pair in params_block.split_whitespace() {
-        if let Some((key, val_str)) = pair.split_once('=') {
-            let key_upper = key.to_uppercase();
-            if let Some(val) = parse_spice_value(val_str) {
-                match key_upper.as_str() {
-                    "VTO" => model.vto = val,
-                    "BETA" => model.beta = val,
-                    "LAMBDA" => model.lambda = val,
-                    "IS" => model.is = val,
-                    "N" => model.n = val,
-                    "RD" => model.rd = val,
-                    "RS" => model.rs = val,
-                    "CGS" => model.cgs = val,
-                    "CGD" => model.cgd = val,
-                    "PB" => model.pb = val,
-                    _ => {} // Ignore unknown parameters (AF, FC, BETATCE, etc.)
-                }
-            }
-        }
-    }
+    for_each_param(params_block, |key, val| match key {
+        "VTO" => model.vto = val,
+        "BETA" => model.beta = val,
+        "LAMBDA" => model.lambda = val,
+        "IS" => model.is = val,
+        "N" => model.n = val,
+        "RD" => model.rd = val,
+        "RS" => model.rs = val,
+        "CGS" => model.cgs = val,
+        "CGD" => model.cgd = val,
+        "PB" => model.pb = val,
+        _ => {} // Ignore unknown parameters (AF, FC, BETATCE, etc.)
+    });
 
     Some(model)
 }
@@ -617,30 +650,12 @@ fn parse_jfet_model_line(line: &str) -> Option<SpiceJfetModel> {
 /// Handles standard diodes, LEDs, Schottky, and Zener diodes — they all
 /// share the same SPICE `D` type and parameter set.
 fn parse_diode_models(src: &str) -> HashMap<String, ShockleyDiodeModel> {
-    let mut models = HashMap::new();
-
-    for line in src.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
-            continue;
-        }
-
-        if !trimmed.to_uppercase().starts_with(".MODEL") {
-            continue;
-        }
-
-        if let Some(model) = parse_diode_model_line(trimmed) {
-            models.insert(model.name.clone(), model);
-        }
-    }
-
-    models
+    parse_model_registry(src, parse_diode_model_line)
 }
 
 /// Parse a single `.MODEL <name> D(<params>)` line.
 fn parse_diode_model_line(line: &str) -> Option<ShockleyDiodeModel> {
-    let rest = &line[6..].trim_start();
+    let rest = strip_directive(line, ".MODEL")?;
     let (name, rest) = rest.split_once(|c: char| c.is_whitespace())?;
     let rest = rest.trim_start();
 
@@ -660,27 +675,20 @@ fn parse_diode_model_line(line: &str) -> Option<ShockleyDiodeModel> {
 
     let mut model = ShockleyDiodeModel::defaults(name);
 
-    for pair in params_block.split_whitespace() {
-        if let Some((key, val_str)) = pair.split_once('=') {
-            let key_upper = key.to_uppercase();
-            if let Some(val) = parse_spice_value(val_str) {
-                match key_upper.as_str() {
-                    "IS" => model.is = val,
-                    "RS" => model.rs = val,
-                    "N" => model.n = val,
-                    "TT" => model.tt = val,
-                    "CJO" => model.cjo = val,
-                    "VJ" => model.vj = val,
-                    "M" => model.m = val,
-                    "BV" => model.bv = val,
-                    "IBV" => model.ibv = val,
-                    "EG" => model.eg = val,
-                    "XTI" => model.xti = val,
-                    _ => {} // Ignore unknown parameters (KF, AF, FC, etc.)
-                }
-            }
-        }
-    }
+    for_each_param(params_block, |key, val| match key {
+        "IS" => model.is = val,
+        "RS" => model.rs = val,
+        "N" => model.n = val,
+        "TT" => model.tt = val,
+        "CJO" => model.cjo = val,
+        "VJ" => model.vj = val,
+        "M" => model.m = val,
+        "BV" => model.bv = val,
+        "IBV" => model.ibv = val,
+        "EG" => model.eg = val,
+        "XTI" => model.xti = val,
+        _ => {} // Ignore unknown parameters (KF, AF, FC, etc.)
+    });
 
     Some(model)
 }
@@ -691,31 +699,12 @@ fn parse_diode_model_line(line: &str) -> Option<ShockleyDiodeModel> {
 
 /// Parse all `.TRIODE` entries from a model file string.
 fn parse_triode_models(src: &str) -> HashMap<String, SpiceTriodeModel> {
-    let mut models = HashMap::new();
-
-    for line in src.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
-            continue;
-        }
-
-        if !trimmed.to_uppercase().starts_with(".TRIODE") {
-            continue;
-        }
-
-        if let Some(model) = parse_triode_model_line(trimmed) {
-            models.insert(model.name.clone(), model);
-        }
-    }
-
-    models
+    parse_model_registry(src, parse_triode_model_line)
 }
 
 /// Parse a single `.TRIODE <name> MU= EX= KG1= KP= KVB= RP=` line.
 fn parse_triode_model_line(line: &str) -> Option<SpiceTriodeModel> {
-    // Strip ".TRIODE" prefix
-    let rest = line[7..].trim_start();
+    let rest = strip_directive(line, ".TRIODE")?;
     let (name, params) = rest.split_once(|c: char| c.is_whitespace())?;
 
     let mut mu = 100.0;
@@ -725,22 +714,15 @@ fn parse_triode_model_line(line: &str) -> Option<SpiceTriodeModel> {
     let mut kvb = 300.0;
     let mut rp = 62500.0; // Default: 12AX7 plate resistance
 
-    for pair in params.split_whitespace() {
-        if let Some((key, val_str)) = pair.split_once('=') {
-            let key_upper = key.to_uppercase();
-            if let Some(val) = parse_spice_value(val_str) {
-                match key_upper.as_str() {
-                    "MU" => mu = val,
-                    "EX" => ex = val,
-                    "KG1" => kg1 = val,
-                    "KP" => kp = val,
-                    "KVB" => kvb = val,
-                    "RP" => rp = val,
-                    _ => {}
-                }
-            }
-        }
-    }
+    for_each_param(params, |key, val| match key {
+        "MU" => mu = val,
+        "EX" => ex = val,
+        "KG1" => kg1 = val,
+        "KP" => kp = val,
+        "KVB" => kvb = val,
+        "RP" => rp = val,
+        _ => {}
+    });
 
     Some(SpiceTriodeModel {
         name: name.to_uppercase(),
@@ -759,31 +741,12 @@ fn parse_triode_model_line(line: &str) -> Option<SpiceTriodeModel> {
 
 /// Parse all `.PENTODE` entries from a model file string.
 fn parse_pentode_models(src: &str) -> HashMap<String, SpicePentodeModel> {
-    let mut models = HashMap::new();
-
-    for line in src.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
-            continue;
-        }
-
-        if !trimmed.to_uppercase().starts_with(".PENTODE") {
-            continue;
-        }
-
-        if let Some(model) = parse_pentode_model_line(trimmed) {
-            models.insert(model.name.clone(), model);
-        }
-    }
-
-    models
+    parse_model_registry(src, parse_pentode_model_line)
 }
 
 /// Parse a single `.PENTODE <name> MU= EX= KG1= KG2= KP= KVB= KVB2= VG2= RP=` line.
 fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
-    // Strip ".PENTODE" prefix
-    let rest = line[8..].trim_start();
+    let rest = strip_directive(line, ".PENTODE")?;
     let (name, params) = rest.split_once(|c: char| c.is_whitespace())?;
 
     let mut mu = 10.0;
@@ -796,25 +759,18 @@ fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
     let mut vg2_default = 250.0;
     let mut rp = 50000.0; // Default: mid-range power pentode
 
-    for pair in params.split_whitespace() {
-        if let Some((key, val_str)) = pair.split_once('=') {
-            let key_upper = key.to_uppercase();
-            if let Some(val) = parse_spice_value(val_str) {
-                match key_upper.as_str() {
-                    "MU" => mu = val,
-                    "EX" => ex = val,
-                    "KG1" => kg1 = val,
-                    "KG2" => kg2 = val,
-                    "KP" => kp = val,
-                    "KVB" => kvb = val,
-                    "KVB2" => kvb2 = val,
-                    "VG2" => vg2_default = val,
-                    "RP" => rp = val,
-                    _ => {}
-                }
-            }
-        }
-    }
+    for_each_param(params, |key, val| match key {
+        "MU" => mu = val,
+        "EX" => ex = val,
+        "KG1" => kg1 = val,
+        "KG2" => kg2 = val,
+        "KP" => kp = val,
+        "KVB" => kvb = val,
+        "KVB2" => kvb2 = val,
+        "VG2" => vg2_default = val,
+        "RP" => rp = val,
+        _ => {}
+    });
 
     Some(SpicePentodeModel {
         name: name.to_uppercase(),
@@ -836,64 +792,36 @@ fn parse_pentode_model_line(line: &str) -> Option<SpicePentodeModel> {
 
 /// Parse all `.OPAMP` and `.OTA` entries from a model file string.
 fn parse_opamp_models(src: &str) -> HashMap<String, SpiceOpAmpModel> {
-    let mut models = HashMap::new();
-
-    for line in src.lines() {
-        let trimmed = line.trim();
-
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let upper = trimmed.to_uppercase();
-        if !upper.starts_with(".OPAMP") && !upper.starts_with(".OTA") {
-            continue;
-        }
-
-        if let Some(model) = parse_opamp_model_line(trimmed) {
-            models.insert(model.name.clone(), model);
-        }
-    }
-
-    models
+    parse_model_registry(src, parse_opamp_model_line)
 }
 
 /// Parse a single `.OPAMP <name> ...` or `.OTA <name> ...` line.
 fn parse_opamp_model_line(line: &str) -> Option<SpiceOpAmpModel> {
-    let upper = line.to_uppercase();
-    let (prefix_len, is_ota) = if upper.starts_with(".OPAMP") {
-        (6, false)
-    } else if upper.starts_with(".OTA") {
-        (4, true)
+    let (rest, is_ota) = if let Some(rest) = strip_directive(line, ".OPAMP") {
+        (rest, false)
+    } else if let Some(rest) = strip_directive(line, ".OTA") {
+        (rest, true)
     } else {
         return None;
     };
 
-    let rest = line[prefix_len..].trim_start();
     let (name, params) = rest.split_once(|c: char| c.is_whitespace())?;
     let mut model = SpiceOpAmpModel::defaults(name, is_ota);
 
-    for pair in params.split_whitespace() {
-        if let Some((key, val_str)) = pair.split_once('=') {
-            let key_upper = key.to_uppercase();
-            if let Some(val) = parse_spice_value(val_str) {
-                match key_upper.as_str() {
-                    "A0" | "AOL" | "OPEN_LOOP_GAIN" => model.open_loop_gain = val,
-                    "GBW" | "GBP" => model.gbw = val,
-                    "SR" | "SLEW" | "SLEW_RATE" => model.slew_rate = val,
-                    "VPOS" | "VRAILPOS" | "V_RAIL_POS" => model.v_rail_pos = val,
-                    "VNEG" | "VRAILNEG" | "V_RAIL_NEG" => model.v_rail_neg = val,
-                    "RO" | "ROUT" | "OUTPUT_IMPEDANCE" => model.output_impedance = val,
-                    "COUT" | "OUTPUT_CAPACITANCE" => model.output_capacitance = val,
-                    "IABC" => model.ota_iabc = val,
-                    "VT" => model.ota_vt = val,
-                    "GM" | "GMO" => model.ota_gm = val,
-                    "RLOAD" | "RL" => model.ota_r_load = val,
-                    _ => {}
-                }
-            }
-        }
-    }
+    for_each_param(params, |key, val| match key {
+        "A0" | "AOL" | "OPEN_LOOP_GAIN" => model.open_loop_gain = val,
+        "GBW" | "GBP" => model.gbw = val,
+        "SR" | "SLEW" | "SLEW_RATE" => model.slew_rate = val,
+        "VPOS" | "VRAILPOS" | "V_RAIL_POS" => model.v_rail_pos = val,
+        "VNEG" | "VRAILNEG" | "V_RAIL_NEG" => model.v_rail_neg = val,
+        "RO" | "ROUT" | "OUTPUT_IMPEDANCE" => model.output_impedance = val,
+        "COUT" | "OUTPUT_CAPACITANCE" => model.output_capacitance = val,
+        "IABC" => model.ota_iabc = val,
+        "VT" => model.ota_vt = val,
+        "GM" | "GMO" => model.ota_gm = val,
+        "RLOAD" | "RL" => model.ota_r_load = val,
+        _ => {}
+    });
 
     Some(model)
 }
@@ -906,7 +834,7 @@ fn parse_opamp_model_line(line: &str) -> Option<SpiceOpAmpModel> {
 ///
 /// Returns `None` if the model name is not found in the embedded model file.
 pub fn bjt_by_name(name: &str) -> Option<&'static SpiceBjtModel> {
-    BJT_MODELS.get(&name.to_uppercase())
+    lookup_model(&BJT_MODELS, name)
 }
 
 /// Check if a BJT model is germanium based on its saturation current.
@@ -924,51 +852,51 @@ pub fn bjt_is_pnp(name: &str) -> bool {
 
 /// List all available BJT model names.
 pub fn bjt_model_names() -> Vec<&'static str> {
-    BJT_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&BJT_MODELS)
 }
 
 /// Look up a JFET model by name (case-insensitive).
 ///
 /// Returns `None` if the model name is not found in the embedded model file.
 pub fn jfet_by_name(name: &str) -> Option<&'static SpiceJfetModel> {
-    JFET_MODELS.get(&name.to_uppercase())
+    lookup_model(&JFET_MODELS, name)
 }
 
 /// List all available JFET model names.
 pub fn jfet_model_names() -> Vec<&'static str> {
-    JFET_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&JFET_MODELS)
 }
 
 /// Look up a triode model by name (case-insensitive).
 pub fn triode_by_name(name: &str) -> Option<&'static SpiceTriodeModel> {
-    TRIODE_MODELS.get(&name.to_uppercase())
+    lookup_model(&TRIODE_MODELS, name)
 }
 
 /// List all available triode model names.
 pub fn triode_model_names() -> Vec<&'static str> {
-    TRIODE_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&TRIODE_MODELS)
 }
 
 /// Look up a pentode model by name (case-insensitive).
 pub fn pentode_by_name(name: &str) -> Option<&'static SpicePentodeModel> {
-    PENTODE_MODELS.get(&name.to_uppercase())
+    lookup_model(&PENTODE_MODELS, name)
 }
 
 /// List all available pentode model names.
 pub fn pentode_model_names() -> Vec<&'static str> {
-    PENTODE_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&PENTODE_MODELS)
 }
 
 /// Look up a diode model by name (case-insensitive).
 ///
 /// Searches the standard diodes library (1N34, 1N914, 1N4148, 1N4001–1N4007, etc.)
 pub fn diode_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
-    DIODE_MODELS.get(&name.to_uppercase())
+    lookup_model(&DIODE_MODELS, name)
 }
 
 /// List all available diode model names.
 pub fn diode_model_names() -> Vec<&'static str> {
-    DIODE_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&DIODE_MODELS)
 }
 
 /// Look up an LED model by name (case-insensitive).
@@ -976,44 +904,44 @@ pub fn diode_model_names() -> Vec<&'static str> {
 /// Available names: LED_IR, LED_RED, LED_GREEN, LED_YELLOW, LED_AMBER, LED_BLUE,
 /// DLED0–DLED3.
 pub fn led_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
-    LED_MODELS.get(&name.to_uppercase())
+    lookup_model(&LED_MODELS, name)
 }
 
 /// List all available LED model names.
 pub fn led_model_names() -> Vec<&'static str> {
-    LED_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&LED_MODELS)
 }
 
 /// Look up a Schottky diode model by name (case-insensitive).
 pub fn schottky_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
-    SCHOTTKY_MODELS.get(&name.to_uppercase())
+    lookup_model(&SCHOTTKY_MODELS, name)
 }
 
 /// List all available Schottky diode model names.
 pub fn schottky_model_names() -> Vec<&'static str> {
-    SCHOTTKY_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&SCHOTTKY_MODELS)
 }
 
 /// Look up a Zener diode model by name (case-insensitive).
 ///
 /// Searches the zener library (1N746–1N759, 1N4728–1N4764, 1N5221–1N5267B, etc.)
 pub fn zener_by_name(name: &str) -> Option<&'static ShockleyDiodeModel> {
-    ZENER_MODELS.get(&name.to_uppercase())
+    lookup_model(&ZENER_MODELS, name)
 }
 
 /// List all available Zener diode model names.
 pub fn zener_model_names() -> Vec<&'static str> {
-    ZENER_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&ZENER_MODELS)
 }
 
 /// Look up an op-amp or OTA model by name (case-insensitive).
 pub fn opamp_by_name(name: &str) -> Option<&'static SpiceOpAmpModel> {
-    OPAMP_MODELS.get(&name.to_uppercase())
+    lookup_model(&OPAMP_MODELS, name)
 }
 
 /// List all available op-amp and OTA model names.
 pub fn opamp_model_names() -> Vec<&'static str> {
-    OPAMP_MODELS.keys().map(|s| s.as_str()).collect()
+    model_names(&OPAMP_MODELS)
 }
 
 /// Look up any diode-type model by name across all registries.
