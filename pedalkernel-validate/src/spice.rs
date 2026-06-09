@@ -237,24 +237,26 @@ VIN v_in 0 PWL({pwl_data})
     fn generate_pwl_inline(&self, signal: &[f64]) -> String {
         let dt = self.config.timestep();
 
-        // Keep normal validation signals sample-exact. Decimating a sine or
-        // sweep changes the stimulus seen by SPICE, which then shows up as a
-        // false component mismatch against the WDF path. Very long stress
-        // signals are still decimated to keep generated netlists practical.
-        let decimate_factor = if signal.len() <= 100_000 {
+        // Keep shorter validation signals sample-exact. Very long signals are
+        // decimated to keep generated netlists practical, but the final sample
+        // below is always emitted so PWL does not hold a stale decimated value
+        // through the end of the transient.
+        let max_pwl_points = 200_000;
+        let decimate_factor = if signal.len() <= max_pwl_points {
             1
         } else {
-            signal.len().div_ceil(100_000)
+            signal.len().div_ceil(max_pwl_points)
         };
 
         let mut pwl_points = Vec::new();
-        for (i, &sample) in signal.iter().enumerate().step_by(decimate_factor) {
+        for i in (0..signal.len()).step_by(decimate_factor) {
             let t = i as f64 * dt;
-            pwl_points.push(format!("{:.9e} {:.9e}", t, sample));
+            pwl_points.push(format!("{:.9e} {:.9e}", t, signal[i]));
         }
 
-        // Ensure we include the last point
-        if signal.len() % decimate_factor != 0 {
+        // Ensure the final sample is always present. Without this, PWL holds
+        // the last decimated value through the end of the transient.
+        if !signal.is_empty() && (signal.len() - 1) % decimate_factor != 0 {
             let t = (signal.len() - 1) as f64 * dt;
             pwl_points.push(format!("{:.9e} {:.9e}", t, signal[signal.len() - 1]));
         }
@@ -412,5 +414,27 @@ mod tests {
         assert_eq!(pairs[1], "0.000000000e0");
         assert_eq!(pairs[3], "1.000000000e0");
         assert_eq!(pairs[23], "1.100000000e1");
+    }
+
+    #[test]
+    fn pwl_generation_keeps_long_signal_tail_exact() {
+        let runner = SpiceRunner::new(SpiceConfig::default());
+        let signal: Vec<f64> = (0..384_000).map(|i| i as f64).collect();
+
+        let pwl = runner.generate_pwl_inline(&signal);
+        let pairs = pwl.split_whitespace().collect::<Vec<_>>();
+        let values: Vec<f64> = pairs
+            .chunks_exact(2)
+            .map(|pair| pair[1].parse::<f64>().unwrap())
+            .collect();
+
+        assert!(
+            values.len() < signal.len(),
+            "long signal should still be decimated"
+        );
+        assert!(values.windows(2).any(|w| (w[1] - w[0]).abs() > 1.0));
+        assert_eq!(values[values.len() - 3], 383_996.0);
+        assert_eq!(values[values.len() - 2], 383_998.0);
+        assert_eq!(values[values.len() - 1], 383_999.0);
     }
 }

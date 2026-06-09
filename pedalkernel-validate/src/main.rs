@@ -122,6 +122,10 @@ enum Commands {
         #[arg(short, long, default_value = "all")]
         suite: String,
 
+        /// Specific test to generate within the suite
+        #[arg(long)]
+        test: Option<String>,
+
         /// Directory containing .spice circuit files
         #[arg(long, default_value = "spice-circuits")]
         spice_dir: PathBuf,
@@ -153,8 +157,12 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Bootstrap { suite }) => {
             bootstrap_golden(&cli, suite)?;
         }
-        Some(Commands::GenerateSpice { suite, spice_dir }) => {
-            generate_spice_golden(&cli, suite, spice_dir)?;
+        Some(Commands::GenerateSpice {
+            suite,
+            test,
+            spice_dir,
+        }) => {
+            generate_spice_golden(&cli, suite, test.as_deref(), spice_dir)?;
         }
         Some(Commands::CheckSpice) => {
             check_spice()?;
@@ -736,6 +744,7 @@ fn check_spice() -> anyhow::Result<()> {
 fn generate_spice_golden(
     cli: &Cli,
     suite: &str,
+    test_filter: Option<&str>,
     spice_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
     use pedalkernel_validate::npy;
@@ -772,6 +781,12 @@ fn generate_spice_golden(
         ValidationConfig::default_config()
     };
 
+    if suite == "all" && test_filter.is_some() {
+        return Err(anyhow::anyhow!(
+            "--test requires a specific --suite; use --suite <name> --test <test>"
+        ));
+    }
+
     // Build list of suites to process
     let suites_to_process: Vec<(String, pedalkernel_validate::TestSuite)> = if suite == "all" {
         validation_config
@@ -780,11 +795,19 @@ fn generate_spice_golden(
             .map(|(n, s)| (n.clone(), s.clone()))
             .collect()
     } else {
-        let suite_config = validation_config
+        let mut suite_config = validation_config
             .suites
             .get(suite)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("Suite '{}' not found", suite))?;
-        vec![(suite.to_string(), suite_config.clone())]
+        if let Some(test_name) = test_filter {
+            let test_case = suite_config.tests.get(test_name).cloned().ok_or_else(|| {
+                anyhow::anyhow!("Test '{}' not found in suite '{}'", test_name, suite)
+            })?;
+            suite_config.tests.clear();
+            suite_config.tests.insert(test_name.to_string(), test_case);
+        }
+        vec![(suite.to_string(), suite_config)]
     };
 
     let mut total_generated = 0;
