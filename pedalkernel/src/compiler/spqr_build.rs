@@ -23,49 +23,6 @@ use crate::oversampling::{Oversampler, OversamplingFactor};
 use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaVariableResistorBinding};
 use pedalkernel_rt::tree::{MnaSystem, WdfPort};
 
-fn output_coupling_dc_block(
-    graph: &CircuitGraph,
-    sample_rate: f64,
-) -> Option<(f64, f64, f64, f64)> {
-    let output_node = graph.out_node;
-    let mut output_cap = None;
-    let mut output_load = None;
-
-    for edge in &graph.edges {
-        let comp = &graph.components[edge.comp_idx];
-        let touches_output = edge.node_a == output_node || edge.node_b == output_node;
-        if !touches_output {
-            continue;
-        }
-
-        if let Some(c) = comp.kind.capacitance() {
-            output_cap = Some(c);
-        }
-
-        if let Some(r) = comp.kind.resistance() {
-            let other = if edge.node_a == output_node {
-                edge.node_b
-            } else {
-                edge.node_a
-            };
-            if other == graph.gnd_node || graph.ac_ground_nodes.contains(&other) {
-                output_load = Some(r);
-            }
-        }
-    }
-
-    let (Some(c), Some(r)) = (output_cap, output_load) else {
-        return None;
-    };
-    if !(c.is_finite() && c > 0.0 && r.is_finite() && r > 0.0 && sample_rate > 0.0) {
-        return None;
-    }
-
-    let rc = r * c;
-    let alpha = rc / (rc + 1.0 / sample_rate);
-    Some((alpha, alpha, 0.0, 0.0))
-}
-
 /// A stage built from the SPQR pipeline.
 pub(super) enum BuiltStage {
     Wdf(WdfStage),
@@ -213,7 +170,7 @@ pub fn compile_via_spqr_with_options(
             metrics_buffer: None,
             input_loading: None,
             output_loading: None,
-            output_dc_block: output_coupling_dc_block(&graph, sample_rate),
+            output_dc_block: None,
             sidechains: Vec::new(),
             subcircuit_processors: Vec::new(),
             subcircuit_routing: Vec::new(),
@@ -1466,7 +1423,7 @@ pub fn compile_via_spqr_with_options(
         metrics_buffer: None,
         input_loading: None,
         output_loading: None,
-        output_dc_block: output_coupling_dc_block(&graph, sample_rate),
+        output_dc_block: None,
         sidechains: Vec::new(),
         subcircuit_processors: Vec::new(),
         subcircuit_routing: Vec::new(),
@@ -1690,62 +1647,6 @@ pub(super) fn with_voltage_source_rp(passive_tree: DynNode, rp: f64) -> DynNode 
     DynNode::Series(Box::new(vs), Box::new(passive_tree))
 }
 
-fn build_grounded_series_reactive_load(
-    edge_indices: &[usize],
-    graph: &CircuitGraph,
-    sample_rate: f64,
-) -> Option<WdfStage> {
-    if edge_indices.len() != 2 {
-        return None;
-    }
-
-    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
-
-    let mut reactive_edge = None;
-    let mut load_edge = None;
-    for &eidx in edge_indices {
-        match graph.effective_edge_kind(eidx) {
-            super::component::EdgeKind::Reactive => reactive_edge = Some(eidx),
-            super::component::EdgeKind::Linear => {
-                let e = &graph.edges[eidx];
-                if is_gnd(e.node_a) || is_gnd(e.node_b) {
-                    load_edge = Some(eidx);
-                }
-            }
-            _ => return None,
-        }
-    }
-
-    let reactive_edge = reactive_edge?;
-    let load_edge = load_edge?;
-    let load = &graph.edges[load_edge];
-    let load_node = if is_gnd(load.node_a) {
-        load.node_b
-    } else {
-        load.node_a
-    };
-    let reactive = &graph.edges[reactive_edge];
-    if reactive.node_a != load_node && reactive.node_b != load_node {
-        return None;
-    }
-
-    let reactive_comp = &graph.components[graph.edges[reactive_edge].comp_idx];
-    let load_comp = &graph.components[graph.edges[load_edge].comp_idx];
-    let reactive_leaf = reactive_comp
-        .kind
-        .make_leaf(&reactive_comp.id, sample_rate)?;
-    let load_leaf = load_comp.kind.make_leaf(&load_comp.id, sample_rate)?;
-
-    let passive_tree = DynNode::Series(Box::new(reactive_leaf), Box::new(load_leaf));
-    let mut wdf = WdfStage::new(
-        with_voltage_source(passive_tree),
-        RootKind::ShortCircuit,
-        Oversampler::new(OversamplingFactor::X1),
-    );
-    wdf.output_probe = Some(load_comp.id.clone());
-    Some(wdf)
-}
-
 /// Build a runnable `WdfStage` from an `SpqrStage`.
 ///
 /// - **PassiveWdf**: VS + DynNode tree + Passthrough root
@@ -1772,12 +1673,6 @@ pub(super) fn build_spqr_stage_with_options(
             tree, edge_indices, ..
         } => {
             if let Some(wdf) = build_passive_rtype_stage(&edge_indices, graph, _sample_rate) {
-                return Ok(BuiltStage::Wdf(wdf));
-            }
-
-            if let Some(wdf) =
-                build_grounded_series_reactive_load(&edge_indices, graph, _sample_rate)
-            {
                 return Ok(BuiltStage::Wdf(wdf));
             }
 
@@ -1937,57 +1832,6 @@ pub(super) fn build_spqr_stage_with_options(
     }
 }
 
-fn passive_pot_reactive_needs_rtype(edge_indices: &[usize], graph: &CircuitGraph) -> bool {
-    let mut has_pot = false;
-    let mut has_reactive = false;
-    let mut has_split_pot = false;
-    let mut split_pot_nodes = std::collections::HashSet::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for &eidx in edge_indices {
-        let comp_idx = graph.edges[eidx].comp_idx;
-        let comp = &graph.components[comp_idx];
-        if comp.kind.capacitance().is_some() || comp.kind.inductance().is_some() {
-            has_reactive = true;
-        }
-        if !seen.insert(comp_idx) {
-            continue;
-        }
-        if !comp.kind.is_pot() {
-            continue;
-        }
-        has_pot = true;
-
-        let pot_edges = edge_indices
-            .iter()
-            .filter(|&&other| graph.edges[other].comp_idx == comp_idx)
-            .count();
-        if pot_edges > 1 {
-            has_split_pot = true;
-            for pin in ["a", "w", "wiper", "b"] {
-                if let Some(&node) = graph.node_names.get(&format!("{}.{}", comp.id, pin)) {
-                    split_pot_nodes.insert(node);
-                }
-            }
-        }
-    }
-
-    if has_pot && has_reactive {
-        return true;
-    }
-
-    if !has_split_pot {
-        return false;
-    }
-
-    edge_indices.iter().any(|&eidx| {
-        let edge = &graph.edges[eidx];
-        let comp = &graph.components[edge.comp_idx];
-        (comp.kind.capacitance().is_some() || comp.kind.inductance().is_some())
-            && (split_pot_nodes.contains(&edge.node_a) || split_pot_nodes.contains(&edge.node_b))
-    })
-}
-
 fn build_passive_rtype_stage(
     edge_indices: &[usize],
     graph: &CircuitGraph,
@@ -2080,9 +1924,16 @@ fn build_passive_rtype_stage(
         } else if comp.kind.capacitance().is_some() || comp.kind.inductance().is_some() {
             let child = comp.kind.make_leaf(&comp.id, sample_rate)?;
             let rp = child.port_resistance();
+            let (port_pos, port_neg) = if edge.node_a == input_node {
+                (n2, n1)
+            } else if edge.node_b == input_node {
+                (n1, n2)
+            } else {
+                (n1, n2)
+            };
             ports.push(WdfPort {
-                node_pos: n1,
-                node_neg: n2,
+                node_pos: port_pos,
+                node_neg: port_neg,
                 resistance: rp,
             });
             children.insert(ports.len() - 1, child);

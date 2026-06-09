@@ -107,6 +107,52 @@ fn debug_rc_lowpass_structure() {
 }
 
 #[test]
+fn debug_rc_highpass_structure() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/circuits/linear/rc_highpass.pedal"
+    );
+    let source = fs::read_to_string(path).expect("Failed to read rc_highpass.pedal");
+    let def = parse_pedal_file(&source).expect("Failed to parse");
+
+    let sample_rate = 48000.0;
+    let compiled = compile_pedal(&def, sample_rate).expect("Failed to compile");
+
+    println!("\n{}", compiled.debug_dump());
+
+    let mut proc = compiled;
+    let freq = 1000.0;
+    let fc = 1.0 / (2.0 * std::f64::consts::PI * 10_000.0 * 100e-9);
+    let expected_gain = (freq / fc) / (1.0 + (freq / fc).powi(2)).sqrt();
+
+    let samples_per_cycle = (sample_rate / freq) as usize;
+    let mut max_out = 0.0f64;
+    let input_amp = 1.0;
+
+    for i in 0..(10 * samples_per_cycle) {
+        let t = i as f64 / sample_rate;
+        let input = input_amp * (2.0 * std::f64::consts::PI * freq * t).sin();
+        let output = proc.process(input);
+        max_out = max_out.max(output.abs());
+    }
+
+    println!("\n=== RC Highpass @ 1kHz ===");
+    println!("Cutoff: {:.1} Hz", fc);
+    println!("Test freq: {:.0} Hz", freq);
+    println!(
+        "Expected gain: {:.4} ({:.2} dB)",
+        expected_gain,
+        20.0 * expected_gain.log10()
+    );
+    println!(
+        "Actual gain:   {:.4} ({:.2} dB)",
+        max_out,
+        20.0 * max_out.log10()
+    );
+    println!("Error: {:.2} dB", 20.0 * (max_out / expected_gain).log10());
+}
+
+#[test]
 fn trace_wave_variables() {
     // Trace wave variables through resistor divider
     let path = concat!(

@@ -3236,6 +3236,8 @@ impl WdfStage {
             n_ports,
             children,
             output_port,
+            extraction_coeffs,
+            extraction_vs,
             ..
         } = &self.root
         {
@@ -3274,6 +3276,14 @@ impl WdfStage {
                 s.push_str(&format!("{:+.4}", k));
             }
             s.push_str("]\n");
+            s.push_str("  extract: [");
+            for (i, coeff) in extraction_coeffs.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&format!("{:+.4}", coeff));
+            }
+            s.push_str(&format!("], vs={:+.4}\n", extraction_vs));
         }
         s
     }
