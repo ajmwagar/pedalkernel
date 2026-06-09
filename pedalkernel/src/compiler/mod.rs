@@ -38,4 +38,6 @@ pub use validate::{validate_pedal, validate_pedal_files, PedalWarning, Severity}
 pub use warnings::{check_voltage_compatibility, VoltageWarning, WarningSeverity};
 
 #[cfg(test)]
+mod opamp_gain_tests;
+#[cfg(test)]
 mod tests;
