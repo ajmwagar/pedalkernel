@@ -42,6 +42,10 @@ pub(super) enum DynNode {
         gamma: f64,
         b1: f64,
         b2: f64,
+        /// True when a descendant leaf has changed and adaptor coefficients need recompute.
+        dirty: bool,
+        /// True when any descendant leaf is dynamic (pot, photocoupler, etc.).
+        has_dynamic: bool,
     },
 
     /// Ideal transformer adaptor.
@@ -50,6 +54,10 @@ pub(super) enum DynNode {
         turns_ratio: f64,
         rp: f64,
         b_sec: f64,
+        /// True when a descendant leaf has changed and adaptor coefficients need recompute.
+        dirty: bool,
+        /// True when any descendant leaf is dynamic (pot, photocoupler, etc.).
+        has_dynamic: bool,
     },
 
     /// N-port R-type adaptor (MNA-derived scattering).
@@ -71,6 +79,8 @@ impl Clone for DynNode {
                 gamma,
                 b1,
                 b2,
+                dirty,
+                has_dynamic,
             } => Self::Binary {
                 kind: *kind,
                 left: left.clone(),
@@ -79,17 +89,23 @@ impl Clone for DynNode {
                 gamma: *gamma,
                 b1: *b1,
                 b2: *b2,
+                dirty: *dirty,
+                has_dynamic: *has_dynamic,
             },
             Self::Transformer {
                 secondary,
                 turns_ratio,
                 rp,
                 b_sec,
+                dirty,
+                has_dynamic,
             } => Self::Transformer {
                 secondary: secondary.clone(),
                 turns_ratio: *turns_ratio,
                 rp: *rp,
                 b_sec: *b_sec,
+                dirty: *dirty,
+                has_dynamic: *has_dynamic,
             },
             Self::RType { adaptor, children } => Self::RType {
                 adaptor: adaptor.clone(),
@@ -244,6 +260,8 @@ impl DynNode {
             gamma,
             b1: 0.0,
             b2: 0.0,
+            dirty: true,
+            has_dynamic: true,
         }
     }
 
@@ -261,6 +279,8 @@ impl DynNode {
             gamma,
             b1: 0.0,
             b2: 0.0,
+            dirty: true,
+            has_dynamic: true,
         }
     }
 
@@ -272,6 +292,8 @@ impl DynNode {
             turns_ratio,
             rp,
             b_sec: 0.0,
+            dirty: true,
+            has_dynamic: true,
         }
     }
 }
@@ -588,6 +610,7 @@ impl DynNode {
     }
 
     /// Recompute all adaptor coefficients bottom-up (call after pot changes).
+    /// Also clears dirty flags so incremental recompute starts clean.
     pub fn recompute(&mut self) {
         match self {
             Self::Binary {
@@ -596,6 +619,7 @@ impl DynNode {
                 right,
                 rp,
                 gamma,
+                dirty,
                 ..
             } => {
                 left.recompute();
@@ -617,16 +641,19 @@ impl DynNode {
                         *gamma = if sum > 0.0 { r2 / sum } else { 0.5 };
                     }
                 }
+                *dirty = false;
             }
             Self::Transformer {
                 secondary,
                 turns_ratio,
                 rp,
+                dirty,
                 ..
             } => {
                 secondary.recompute();
                 let r_sec = secondary.port_resistance();
                 *rp = *turns_ratio * *turns_ratio * r_sec;
+                *dirty = false;
             }
             Self::RType {
                 adaptor: _,
@@ -637,6 +664,158 @@ impl DynNode {
                 }
             }
             Self::Leaf(_) => {}
+        }
+    }
+
+    /// Post-construction pass: sets `has_dynamic` based on whether any descendant
+    /// leaf is dynamic. Call once after tree construction.
+    pub fn compute_dynamic_flags(&mut self) -> bool {
+        match self {
+            Self::Leaf(leaf) => leaf.is_dynamic(),
+            Self::Binary {
+                left,
+                right,
+                has_dynamic,
+                dirty,
+                ..
+            } => {
+                let left_dyn = left.compute_dynamic_flags();
+                let right_dyn = right.compute_dynamic_flags();
+                *has_dynamic = left_dyn || right_dyn;
+                *dirty = false;
+                *has_dynamic
+            }
+            Self::Transformer {
+                secondary,
+                has_dynamic,
+                dirty,
+                ..
+            } => {
+                let sec_dyn = secondary.compute_dynamic_flags();
+                *has_dynamic = sec_dyn;
+                *dirty = false;
+                *has_dynamic
+            }
+            Self::RType { children, .. } => {
+                let mut any_dyn = false;
+                for child in children.iter_mut() {
+                    any_dyn |= child.compute_dynamic_flags();
+                }
+                any_dyn
+            }
+        }
+    }
+
+    /// Set a pot's position AND mark ancestors dirty on the way back up.
+    /// Returns true if the pot was found (signals parent to mark dirty).
+    ///
+    /// Uses bitwise OR (not short-circuit) so split pots (__aw/__wb) that
+    /// appear in both subtrees are both updated.
+    pub fn set_pot_dirty(&mut self, target_id: &str, pos: f64) -> bool {
+        match self {
+            Self::Leaf(leaf) => leaf.set_control(target_id, pos),
+            Self::Binary {
+                left,
+                right,
+                dirty,
+                ..
+            } => {
+                let a = left.set_pot_dirty(target_id, pos);
+                let b = right.set_pot_dirty(target_id, pos);
+                let found = a | b;
+                if found {
+                    *dirty = true;
+                }
+                found
+            }
+            Self::Transformer {
+                secondary, dirty, ..
+            } => {
+                let found = secondary.set_pot_dirty(target_id, pos);
+                if found {
+                    *dirty = true;
+                }
+                found
+            }
+            Self::RType { children, .. } => {
+                let mut found = false;
+                for child in children.iter_mut() {
+                    found |= child.set_pot_dirty(target_id, pos);
+                }
+                found
+            }
+        }
+    }
+
+    /// Recompute only dirty subtrees. Skips entirely-static subtrees.
+    pub fn recompute_incremental(&mut self) {
+        match self {
+            Self::Leaf(_) => {}
+            Self::Binary {
+                has_dynamic: false, ..
+            } => {
+                // All static — nothing ever changes.
+            }
+            Self::Binary {
+                dirty: false, ..
+            } => {
+                // Children haven't changed since last recompute.
+            }
+            Self::Binary {
+                kind,
+                left,
+                right,
+                rp,
+                gamma,
+                dirty,
+                ..
+            } => {
+                // dirty == true here
+                left.recompute_incremental();
+                right.recompute_incremental();
+                let r1 = left.port_resistance();
+                let r2 = right.port_resistance();
+                match kind {
+                    BinaryKind::Series => {
+                        *rp = r1 + r2;
+                        *gamma = if *rp > 0.0 { r1 / *rp } else { 0.5 };
+                    }
+                    BinaryKind::Parallel => {
+                        let sum = r1 + r2;
+                        *rp = if sum > 0.0 { r1 * r2 / sum } else { 0.0 };
+                        *gamma = if sum > 0.0 { r2 / sum } else { 0.5 };
+                    }
+                }
+                *dirty = false;
+            }
+            Self::Transformer {
+                has_dynamic: false, ..
+            } => {
+                // All static.
+            }
+            Self::Transformer {
+                dirty: false, ..
+            } => {
+                // Children haven't changed.
+            }
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                rp,
+                dirty,
+                ..
+            } => {
+                // dirty == true here
+                secondary.recompute_incremental();
+                let r_sec = secondary.port_resistance();
+                *rp = *turns_ratio * *turns_ratio * r_sec;
+                *dirty = false;
+            }
+            Self::RType { children, .. } => {
+                for child in children.iter_mut() {
+                    child.recompute_incremental();
+                }
+            }
         }
     }
 
@@ -947,6 +1126,7 @@ impl DynNode {
                 gamma,
                 b1,
                 b2,
+                ..
             } => {
                 let kind_str = match kind {
                     BinaryKind::Series => "Series",

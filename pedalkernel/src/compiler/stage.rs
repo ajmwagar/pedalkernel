@@ -664,10 +664,11 @@ impl WdfStage {
     /// WdfStage { feedback_pot_id: Some("Gain".into()), ..WdfStage::new(tree, root, os) }
     /// ```
     pub(super) fn new(
-        tree: DynNode,
+        mut tree: DynNode,
         root: RootKind,
         oversampler: crate::oversampling::Oversampler,
     ) -> Self {
+        tree.compute_dynamic_flags();
         Self {
             tree,
             root,
@@ -1486,6 +1487,7 @@ impl WdfStage {
     pub(super) fn balance_vs_impedance(&mut self) {
         balance_parallel_vs(&mut self.tree);
         self.tree.recompute();
+        self.tree.compute_dynamic_flags();
     }
 
     /// Set the gate-source voltage for JFET root elements.
@@ -1697,9 +1699,9 @@ impl WdfStage {
     /// recompute_all + notify_pot_changed when any pot is found.
     pub(super) fn set_pot(&mut self, comp_id: &str, value: f64) -> bool {
         let mut found = false;
-        // Tree + zf/zg + opamp children (pots may exist in both main tree
-        // as dummy placeholder and in opamp_children for MNA adaptor).
-        if self.tree.set_pot(comp_id, value) {
+        // Main tree: use set_pot_dirty for incremental recompute.
+        // Marks only the leaf-to-root path dirty instead of full recompute.
+        if self.tree.set_pot_dirty(comp_id, value) {
             found = true;
         }
         if let Some(ref mut zf) = self.zf_child {
@@ -1740,8 +1742,10 @@ impl WdfStage {
     }
 
     /// Recompute all trees including opamp children.
+    /// Uses incremental recompute for the main tree (only dirty subtrees),
+    /// and full recompute for the smaller opamp sub-trees.
     pub(super) fn recompute_all(&mut self) {
-        self.tree.recompute();
+        self.tree.recompute_incremental();
         if let Some(ref mut zf) = self.zf_child {
             zf.recompute();
         }

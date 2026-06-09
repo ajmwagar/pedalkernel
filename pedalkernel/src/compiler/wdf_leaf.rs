@@ -86,6 +86,13 @@ pub trait WdfLeaf: Send {
         None
     }
 
+    // ── Dynamic flag ─────────────────────────────────────────────────────
+    /// Whether this leaf has a runtime-variable port resistance (pot, photocoupler, etc.).
+    /// Used by DynNode dirty-flag incremental recompute to skip static subtrees.
+    fn is_dynamic(&self) -> bool {
+        false
+    }
+
     // ── Clone support ────────────────────────────────────────────────────
     fn clone_box(&self) -> Box<dyn WdfLeaf>;
 }
@@ -146,7 +153,7 @@ impl WdfLeaf for WdfResistor {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════
 // WdfCapacitor
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -473,6 +480,9 @@ impl WdfLeaf for WdfPot {
         Some(self.max_resistance)
     }
 
+    fn is_dynamic(&self) -> bool {
+        true
+    }
     fn debug_info(&self) -> String {
         format!(
             "Pot(id=\"{}\", max={:.1}Ω, pos={:.3}, taper={:?}, Rp={:.1}Ω)",
@@ -543,6 +553,9 @@ impl WdfLeaf for WdfPhotocoupler {
         self.inner.reset();
     }
 
+    fn is_dynamic(&self) -> bool {
+        true
+    }
     fn debug_info(&self) -> String {
         format!(
             "Photocoupler(id=\"{}\", Rp={:.1}Ω)",
@@ -599,6 +612,9 @@ impl WdfLeaf for WdfJfetVr {
         self.inner.reset();
     }
 
+    fn is_dynamic(&self) -> bool {
+        true
+    }
     fn debug_info(&self) -> String {
         format!(
             "JfetVr(id=\"{}\", Vgs={:.3}V, Rds={:.1}Ω)",
@@ -673,6 +689,9 @@ impl WdfLeaf for WdfSwitchedResistor {
         }
     }
 
+    fn is_dynamic(&self) -> bool {
+        true
+    }
     fn debug_info(&self) -> String {
         format!(
             "SwitchedResistor(switch=\"{}\", path={}, pos={}, Rp={:.1}Ω)",

@@ -1044,6 +1044,8 @@ pub(super) fn build_push_pull_stages(
                 balance_parallel_vs(&mut pull_tree);
                 push_tree.recompute();
                 pull_tree.recompute();
+                push_tree.compute_dynamic_flags();
+                pull_tree.compute_dynamic_flags();
 
                 let (push_root, pull_root) = build_push_pull_roots(push_elem, pull_elem);
 
