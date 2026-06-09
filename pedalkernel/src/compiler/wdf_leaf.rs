@@ -60,6 +60,10 @@ pub trait WdfLeaf: Send {
     fn reset(&mut self) {}
 
     // ── Introspection ────────────────────────────────────────────────────
+    /// Whether this leaf's port resistance can change at runtime (pot, photocoupler, JFET, switch).
+    fn is_dynamic(&self) -> bool {
+        false
+    }
     fn is_reactive(&self) -> bool {
         false
     }
@@ -439,6 +443,9 @@ impl WdfLeaf for WdfPot {
     fn type_tag(&self) -> &'static str {
         "pot"
     }
+    fn is_dynamic(&self) -> bool {
+        true
+    }
     fn leaf_voltage(&self) -> f64 {
         self.last_a / 2.0
     }
@@ -525,6 +532,9 @@ impl WdfLeaf for WdfPhotocoupler {
     fn type_tag(&self) -> &'static str {
         "photocoupler"
     }
+    fn is_dynamic(&self) -> bool {
+        true
+    }
 
     fn set_control(&mut self, id: &str, value: f64) -> bool {
         if self.comp_id == id {
@@ -580,6 +590,9 @@ impl WdfLeaf for WdfJfetVr {
     }
     fn type_tag(&self) -> &'static str {
         "jfet_vr"
+    }
+    fn is_dynamic(&self) -> bool {
+        true
     }
 
     fn set_control(&mut self, id: &str, value: f64) -> bool {
@@ -656,6 +669,9 @@ impl WdfLeaf for WdfSwitchedResistor {
     }
     fn type_tag(&self) -> &'static str {
         "switched_resistor"
+    }
+    fn is_dynamic(&self) -> bool {
+        true
     }
 
     fn set_control(&mut self, id: &str, value: f64) -> bool {

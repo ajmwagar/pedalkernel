@@ -42,6 +42,10 @@ pub(super) enum DynNode {
         gamma: f64,
         b1: f64,
         b2: f64,
+        /// True if any descendant leaf is dynamic (pot, photocoupler, JFET, switch).
+        has_dynamic: bool,
+        /// True if a pot in this subtree changed since last recompute.
+        dirty: bool,
     },
 
     /// Ideal transformer adaptor.
@@ -50,6 +54,10 @@ pub(super) enum DynNode {
         turns_ratio: f64,
         rp: f64,
         b_sec: f64,
+        /// True if any descendant leaf is dynamic.
+        has_dynamic: bool,
+        /// True if a pot in this subtree changed since last recompute.
+        dirty: bool,
     },
 
     /// N-port R-type adaptor (MNA-derived scattering).
@@ -71,6 +79,8 @@ impl Clone for DynNode {
                 gamma,
                 b1,
                 b2,
+                has_dynamic,
+                dirty,
             } => Self::Binary {
                 kind: *kind,
                 left: left.clone(),
@@ -79,17 +89,23 @@ impl Clone for DynNode {
                 gamma: *gamma,
                 b1: *b1,
                 b2: *b2,
+                has_dynamic: *has_dynamic,
+                dirty: *dirty,
             },
             Self::Transformer {
                 secondary,
                 turns_ratio,
                 rp,
                 b_sec,
+                has_dynamic,
+                dirty,
             } => Self::Transformer {
                 secondary: secondary.clone(),
                 turns_ratio: *turns_ratio,
                 rp: *rp,
                 b_sec: *b_sec,
+                has_dynamic: *has_dynamic,
+                dirty: *dirty,
             },
             Self::RType { adaptor, children } => Self::RType {
                 adaptor: adaptor.clone(),
@@ -244,6 +260,8 @@ impl DynNode {
             gamma,
             b1: 0.0,
             b2: 0.0,
+            has_dynamic: false,
+            dirty: false,
         }
     }
 
@@ -261,6 +279,8 @@ impl DynNode {
             gamma,
             b1: 0.0,
             b2: 0.0,
+            has_dynamic: false,
+            dirty: false,
         }
     }
 
@@ -272,6 +292,8 @@ impl DynNode {
             turns_ratio,
             rp,
             b_sec: 0.0,
+            has_dynamic: false,
+            dirty: false,
         }
     }
 }
@@ -640,6 +662,157 @@ impl DynNode {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Incremental recompute
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Walk the tree bottom-up, setting `has_dynamic = true` on any Binary/Transformer
+    /// node that has at least one dynamic leaf descendant. Returns true if this subtree
+    /// contains any dynamic leaf. Also clears all `dirty` flags.
+    pub fn compute_dynamic_flags(&mut self) -> bool {
+        match self {
+            Self::Leaf(leaf) => leaf.is_dynamic(),
+            Self::Binary {
+                left,
+                right,
+                has_dynamic,
+                dirty,
+                ..
+            } => {
+                let l = left.compute_dynamic_flags();
+                let r = right.compute_dynamic_flags();
+                *has_dynamic = l || r;
+                *dirty = false;
+                *has_dynamic
+            }
+            Self::Transformer {
+                secondary,
+                has_dynamic,
+                dirty,
+                ..
+            } => {
+                *has_dynamic = secondary.compute_dynamic_flags();
+                *dirty = false;
+                *has_dynamic
+            }
+            Self::RType { children, .. } => {
+                let mut any = false;
+                for c in children.iter_mut() {
+                    any |= c.compute_dynamic_flags();
+                }
+                any
+            }
+        }
+    }
+
+    /// Mark all ancestor Binary/Transformer nodes dirty along the path to a pot leaf
+    /// matching `pot_id`. Also updates the pot's position via `set_control`.
+    /// Returns true if the pot was found.
+    pub fn set_pot_dirty(&mut self, pot_id: &str, pos: f64) -> bool {
+        match self {
+            Self::Leaf(leaf) => leaf.set_control(pot_id, pos),
+            Self::Binary {
+                left,
+                right,
+                dirty,
+                has_dynamic,
+                ..
+            } => {
+                if !*has_dynamic {
+                    return false;
+                }
+                let l = left.set_pot_dirty(pot_id, pos);
+                let r = right.set_pot_dirty(pot_id, pos);
+                let found = l | r; // bitwise: both halves of split pot
+                if found {
+                    *dirty = true;
+                }
+                found
+            }
+            Self::Transformer {
+                secondary,
+                dirty,
+                has_dynamic,
+                ..
+            } => {
+                if !*has_dynamic {
+                    return false;
+                }
+                let found = secondary.set_pot_dirty(pot_id, pos);
+                if found {
+                    *dirty = true;
+                }
+                found
+            }
+            Self::RType { children, .. } => {
+                let mut found = false;
+                for c in children.iter_mut() {
+                    found |= c.set_pot_dirty(pot_id, pos);
+                }
+                found
+            }
+        }
+    }
+
+    /// Recompute only dirty subtrees (where a pot changed). Skips static subtrees
+    /// and clean dynamic subtrees entirely. Clears dirty flags after recomputing.
+    pub fn recompute_incremental(&mut self) {
+        match self {
+            Self::Binary {
+                kind,
+                left,
+                right,
+                rp,
+                gamma,
+                dirty,
+                has_dynamic,
+                ..
+            } => {
+                if !*has_dynamic || !*dirty {
+                    return;
+                }
+                left.recompute_incremental();
+                right.recompute_incremental();
+                let r1 = left.port_resistance();
+                let r2 = right.port_resistance();
+                match kind {
+                    BinaryKind::Series => {
+                        *rp = r1 + r2;
+                        *gamma = if *rp > 0.0 { r1 / *rp } else { 0.5 };
+                    }
+                    BinaryKind::Parallel => {
+                        let sum = r1 + r2;
+                        *rp = if sum > 0.0 { r1 * r2 / sum } else { 0.0 };
+                        *gamma = if sum > 0.0 { r2 / sum } else { 0.5 };
+                    }
+                }
+                *dirty = false;
+            }
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                rp,
+                dirty,
+                has_dynamic,
+                ..
+            } => {
+                if !*has_dynamic || !*dirty {
+                    return;
+                }
+                secondary.recompute_incremental();
+                let r_sec = secondary.port_resistance();
+                *rp = *turns_ratio * *turns_ratio * r_sec;
+                *dirty = false;
+            }
+            Self::RType { children, .. } => {
+                for child in children.iter_mut() {
+                    child.recompute_incremental();
+                }
+            }
+            Self::Leaf(_) => {}
+        }
+    }
+
     /// Update sample rate for all reactive elements.
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
         self.for_each_leaf_mut(&mut |leaf| {
@@ -947,6 +1120,7 @@ impl DynNode {
                 gamma,
                 b1,
                 b2,
+                ..
             } => {
                 let kind_str = match kind {
                     BinaryKind::Series => "Series",
