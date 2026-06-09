@@ -166,6 +166,15 @@ fn debug_delay_simple() {
 
     println!("\n=== Simple Delay (10ms) ===");
     println!("{}", compiled.debug_dump());
+    assert_eq!(
+        compiled.delay_lines.len(),
+        1,
+        "simple delay fixture should compile one delay-line binding"
+    );
+    assert!(
+        compiled.stages.is_empty(),
+        "delay-only fixture should not need electrical WDF/MNA stages"
+    );
 
     let mut proc = compiled;
 
@@ -203,4 +212,13 @@ fn debug_delay_simple() {
     if found_delay == 0 {
         println!("No significant impulse detected in first 1000 samples!");
     }
+
+    assert!(
+        max_output > 0.2,
+        "expected visible delayed impulse, max output was {max_output:.4}"
+    );
+    assert!(
+        (max_sample as isize - delay_samples as isize).abs() <= 8,
+        "expected delayed impulse near sample {delay_samples}, got {max_sample}"
+    );
 }

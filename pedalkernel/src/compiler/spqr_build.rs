@@ -9,6 +9,7 @@
 use super::build::create_root;
 use super::classify::NonlinearKind;
 use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
+use super::components::DelayLineComp;
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::rigid::{
@@ -100,6 +101,7 @@ pub fn compile_via_spqr_with_options(
 
     let mut graph = CircuitGraph::from_pedal(pedal);
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
+    let delay_lines = build_delay_line_bindings(pedal, sample_rate);
 
     // When ports are declared, the first input port replaces `in` and
     // the first output port replaces `out` as the circuit's I/O nodes.
@@ -131,8 +133,61 @@ pub fn compile_via_spqr_with_options(
         .filter(|i| !active_set.contains(i))
         .collect();
 
-    if all_edges.is_empty() {
+    if all_edges.is_empty() && delay_lines.is_empty() {
         return Err("No circuit edges found".to_string());
+    }
+
+    if all_edges.is_empty() {
+        let mut compiled = CompiledPedal {
+            stages: Vec::new(),
+            stage_route_plan: pedalkernel_rt::processor::StageRoutePlan::default(),
+            push_pull_stages: Vec::new(),
+            pre_gain: 1.0,
+            output_gain: 1.0,
+            rail_saturation: RailSaturation::None,
+            rail_sat_oversampler: Oversampler::new(options.oversampling),
+            sample_rate,
+            controls: Vec::new(),
+            gain_range: (0.0, 1.0),
+            supply_voltage,
+            oversampling: options.oversampling,
+            lfos: Vec::new(),
+            envelopes: Vec::new(),
+            slew_limiters: Vec::new(),
+            bbds: Vec::new(),
+            delay_lines,
+            vcos: Vec::new(),
+            vcas: Vec::new(),
+            thermal: None,
+            tolerance_seed: 0,
+            opamp_stages: Vec::new(),
+            power_supply: None,
+            metrics_accumulator: None,
+            metrics_buffer: None,
+            input_loading: None,
+            output_loading: None,
+            output_dc_block: None,
+            sidechains: Vec::new(),
+            subcircuit_processors: Vec::new(),
+            subcircuit_routing: Vec::new(),
+            subcircuit_output_idx: None,
+            subcircuit_outputs: Vec::new(),
+            pot_smoothers: Vec::new(),
+            wiper_dividers: Vec::new(),
+            pot_mirrors: hashbrown::HashMap::new(),
+            base_grid_bias: 0.0,
+            multi_nl_recompute_counter: 0,
+            node_signals: Vec::new(),
+            triggers: Vec::new(),
+            bbd_wet_mix: 0.5,
+            bbd_mix_pot_id: None,
+            original_passive_values: hashbrown::HashMap::new(),
+            ports: Vec::new(),
+            port_values: Vec::new(),
+            initialized: false,
+        };
+        super::spqr_control::bind_controls(pedal, &mut compiled);
+        return Ok(compiled);
     }
 
     if options.collapse_nl {
@@ -159,7 +214,7 @@ pub fn compile_via_spqr_with_options(
             envelopes: Vec::new(),
             slew_limiters: Vec::new(),
             bbds: Vec::new(),
-            delay_lines: Vec::new(),
+            delay_lines,
             vcos: Vec::new(),
             vcas: Vec::new(),
             thermal: None,
@@ -1415,7 +1470,7 @@ pub fn compile_via_spqr_with_options(
         envelopes: Vec::new(),
         slew_limiters: Vec::new(),
         bbds: Vec::new(),
-        delay_lines: Vec::new(),
+        delay_lines,
         vcos: Vec::new(),
         vcas: Vec::new(),
         thermal: None,
@@ -1530,6 +1585,31 @@ pub fn compile_via_spqr_with_options(
     compiled.cache_all_vs_pointers();
 
     Ok(compiled)
+}
+
+fn build_delay_line_bindings(
+    pedal: &PedalDef,
+    sample_rate: f64,
+) -> Vec<pedalkernel_rt::processor::DelayLineBinding> {
+    pedal
+        .components
+        .iter()
+        .filter_map(|component| {
+            let delay = component.kind.as_any().downcast_ref::<DelayLineComp>()?;
+            let mut delay_line = pedalkernel_rt::elements::DelayLine::new(
+                delay.min_delay,
+                delay.max_delay,
+                sample_rate,
+                delay.interpolation,
+            );
+            delay_line.set_medium(delay.medium);
+            Some(pedalkernel_rt::processor::DelayLineBinding {
+                delay_line,
+                taps: vec![1.0],
+                comp_id: component.id.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Check if a group is a merged pot pair (aw + wb of same component).
