@@ -1064,17 +1064,10 @@ fn tb303_stage_bindings_connect_q12_collectors_to_bkm_ladder_ports() {
             "BKM stage bindings should include Q12 {collector_label} node {q12_node}"
         );
         assert!(
-            compiled
-                .stage_route_plan
-                .connections
-                .iter()
-                .any(|connection| {
-                    connection.node_id == q12_node
-                        && connection.from.stage_idx == q12_stage_idx
-                        && connection.from.port_idx == q12_port_idx
-                        && connection.to.stage_idx == bkm_stage_idx
-                }),
-            "route plan should connect Q12 {collector_label} node {q12_node} to the BKM ladder"
+            compiled.stages[q12_stage_idx].outs().iter().any(|binding| {
+                binding.binding_id.get() == q12_node && binding.local_port == q12_port_idx
+            }),
+            "Q12 should expose {collector_label} node {q12_node} as a stage output binding"
         );
     }
 }
@@ -1139,10 +1132,6 @@ fn tb303_stage_route_plan_maps_external_ports_to_bkm_vs_boundaries() {
     assert!(
         debug.primary_bkm_output_ports.contains(&audio_out_idx),
         "route plan should publish BKM output to audio_out ({audio_out_idx}), debug={debug:?}"
-    );
-    assert!(
-        debug.connection_count > 0,
-        "route plan should retain stage binding connectivity for diagnostics"
     );
 }
 

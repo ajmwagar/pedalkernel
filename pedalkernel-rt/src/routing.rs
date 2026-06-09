@@ -16,7 +16,6 @@ pub use crate::route::{BindingId, PortBinding, Route};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StageRoutePlan {
     pub primary_bkm: Option<GraphRoutedBkm>,
-    pub connections: Vec<StageRouteConnection>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -116,41 +115,9 @@ impl BkmBoundaryDrive {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum StageRouteEndpointKind {
-    Stage,
-    ExternalInput,
-    ExternalOutput,
-}
-
-impl Default for StageRouteEndpointKind {
-    fn default() -> Self {
-        Self::Stage
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StageRouteEndpoint {
-    pub kind: StageRouteEndpointKind,
-    pub graph_stage_index: usize,
-    pub stage_idx: usize,
-    pub port_idx: usize,
-}
-
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct StageRouteConnection {
-    pub node_id: usize,
-    pub from: StageRouteEndpoint,
-    pub to: StageRouteEndpoint,
-}
-
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StageRouteDebug {
-    pub connection_count: usize,
     pub primary_bkm_stage_idx: Option<usize>,
     pub primary_bkm_vs_bindings: Vec<String>,
     pub primary_bkm_output_ports: Vec<usize>,
@@ -159,16 +126,12 @@ pub struct StageRouteDebug {
 
 impl StageRoutePlan {
     pub fn from_compiled_parts(ports: &[NamedPortBinding], stages: &[Stage]) -> Self {
-        let connections = Self::route_connections(stages);
         let Some((bkm_stage_idx, Stage::Blockwise(bkm))) = stages
             .iter()
             .enumerate()
             .find(|(_, stage)| matches!(stage, Stage::Blockwise(_)))
         else {
-            return Self {
-                connections,
-                ..Self::default()
-            };
+            return Self::default();
         };
 
         let bkm_stage = &stages[bkm_stage_idx];
@@ -212,10 +175,7 @@ impl StageRoutePlan {
         }
 
         if boundary_drives.is_empty() || vs_bindings.is_empty() || output_port_indices.is_empty() {
-            return Self {
-                connections,
-                ..Self::default()
-            };
+            return Self::default();
         }
 
         Self {
@@ -225,7 +185,6 @@ impl StageRoutePlan {
                 output_port_indices,
                 boundary_drives,
             }),
-            connections,
         }
     }
 
@@ -275,7 +234,6 @@ impl StageRoutePlan {
             })
             .unwrap_or_default();
         StageRouteDebug {
-            connection_count: self.connections.len(),
             primary_bkm_stage_idx,
             primary_bkm_vs_bindings,
             primary_bkm_output_ports,
@@ -499,40 +457,6 @@ impl StageRoutePlan {
         }
         false
     }
-
-    fn route_connections(stages: &[Stage]) -> Vec<StageRouteConnection> {
-        let mut connections = Vec::new();
-        for (from_stage_idx, from_stage) in stages.iter().enumerate() {
-            for out in from_stage.outs() {
-                for (to_stage_idx, to_stage) in stages.iter().enumerate() {
-                    if from_stage_idx == to_stage_idx {
-                        continue;
-                    }
-                    for input in to_stage.ins() {
-                        if input.binding_id != out.binding_id {
-                            continue;
-                        }
-                        connections.push(StageRouteConnection {
-                            node_id: out.binding_id.get(),
-                            from: StageRouteEndpoint {
-                                kind: StageRouteEndpointKind::Stage,
-                                graph_stage_index: from_stage_idx,
-                                stage_idx: from_stage_idx,
-                                port_idx: out.local_port,
-                            },
-                            to: StageRouteEndpoint {
-                                kind: StageRouteEndpointKind::Stage,
-                                graph_stage_index: to_stage_idx,
-                                stage_idx: to_stage_idx,
-                                port_idx: input.local_port,
-                            },
-                        });
-                    }
-                }
-            }
-        }
-        connections
-    }
 }
 
 #[cfg(test)]
@@ -631,18 +555,24 @@ mod tests {
             Stage::Blockwise(empty_bkm_with_port(42)),
         ];
 
+        assert!(
+            stages[0]
+                .outs()
+                .iter()
+                .any(|binding| binding.binding_id.get() == 42),
+            "source stage should expose the shared graph node as an output binding"
+        );
+        assert!(
+            stages[1]
+                .ins()
+                .iter()
+                .any(|binding| binding.binding_id.get() == 42),
+            "BKM stage should expose the shared graph node as an input binding"
+        );
         let plan = StageRoutePlan::from_compiled_parts(&ports, &stages);
-
-        assert_eq!(plan.connections.len(), 1);
-        let connection = &plan.connections[0];
-        assert_eq!(connection.node_id, 42);
-        assert_eq!(connection.from.stage_idx, 0);
-        assert_eq!(connection.from.port_idx, 0);
-        assert_eq!(connection.to.stage_idx, 1);
-        assert_eq!(connection.to.port_idx, 0);
         assert!(
             plan.primary_bkm.is_none(),
-            "ordinary BKM voltage mapping should stay in generic route connections"
+            "ordinary BKM voltage mapping is not an executable graph-routed BKM handoff"
         );
     }
 }

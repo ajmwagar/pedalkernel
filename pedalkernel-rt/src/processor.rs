@@ -353,7 +353,6 @@ mod tests {
     use crate::oversampling::{Oversampler, OversamplingFactor};
     use crate::pot_taper::PotTaper;
     use crate::route::{BindingId, PortBinding};
-    use crate::routing::{StageRouteEndpointKind, StageRoutePlan};
     use crate::stage::{
         BlackFeedbackStage, IirData, IirPotBinding, IirStage, RootKind, StateSpaceData,
         StateSpaceStage, WdfBoundaryBinding, WdfBoundaryDirection, WdfStage,
@@ -407,51 +406,6 @@ mod tests {
 
         assert_eq!(route.from.get(), 20);
         assert_eq!(route.to.get(), 10);
-    }
-
-    #[test]
-    fn stage_route_plan_prefers_runtime_binding_direction() {
-        let mut target_wdf = WdfStage::new(
-            DynNode::VoltageSource(0.0, 1.0),
-            RootKind::ShortCircuit,
-            Oversampler::new(OversamplingFactor::X1),
-        );
-        target_wdf.boundary_bindings = vec![WdfBoundaryBinding {
-            label: "input".to_string(),
-            node_id: 42,
-            direction: WdfBoundaryDirection::Input,
-        }];
-
-        let mut source_wdf = WdfStage::new(
-            DynNode::VoltageSource(0.0, 1.0),
-            RootKind::ShortCircuit,
-            Oversampler::new(OversamplingFactor::X1),
-        );
-        source_wdf.boundary_bindings = vec![
-            WdfBoundaryBinding {
-                label: "other_input".to_string(),
-                node_id: 7,
-                direction: WdfBoundaryDirection::Input,
-            },
-            WdfBoundaryBinding {
-                label: "output".to_string(),
-                node_id: 42,
-                direction: WdfBoundaryDirection::Output,
-            },
-        ];
-
-        let stages = vec![Stage::Wdf(target_wdf), Stage::Wdf(source_wdf)];
-        let plan = StageRoutePlan::from_compiled_parts(&[], &stages);
-
-        assert_eq!(plan.connections.len(), 1);
-        let connection = &plan.connections[0];
-        assert_eq!(connection.from.kind, StageRouteEndpointKind::Stage);
-        assert_eq!(connection.from.graph_stage_index, 1);
-        assert_eq!(connection.from.stage_idx, 1);
-        assert_eq!(connection.from.port_idx, 1);
-        assert_eq!(connection.to.graph_stage_index, 0);
-        assert_eq!(connection.to.stage_idx, 0);
-        assert_eq!(connection.to.port_idx, 0);
     }
 
     #[test]
@@ -736,8 +690,8 @@ pub struct NamedPortBinding {
 }
 
 pub use crate::routing::{
-    BindingId, BkmVsRouteBinding, GraphRoutedBkm, PortBinding, Route, StageRouteConnection,
-    StageRouteDebug, StageRouteEndpoint, StageRouteEndpointKind, StageRoutePlan,
+    BindingId, BkmVsRouteBinding, GraphRoutedBkm, PortBinding, Route, StageRouteDebug,
+    StageRoutePlan,
 };
 
 /// Control binding: maps a knob label to a parameter in the processing chain.
