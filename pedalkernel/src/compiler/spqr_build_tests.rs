@@ -990,6 +990,26 @@ fn compile_via_spqr_state_space_active_filter() {
     let mut compiled =
         compile_via_spqr(&pedal, 48000.0).expect("Should compile active filter via StateSpace");
 
+    let state_space = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let Stage::StateSpace(ss) = stage {
+                Some(ss)
+            } else {
+                None
+            }
+        })
+        .expect("active filter should compile a StateSpace stage");
+    assert!(
+        !state_space.ins().is_empty(),
+        "compiled StateSpace stage should expose graph input binding"
+    );
+    assert!(
+        !state_space.outs().is_empty(),
+        "compiled StateSpace stage should expose graph output binding"
+    );
+
     // Should produce filtered output (not silence)
     for _ in 0..100 {
         compiled.process(0.1);

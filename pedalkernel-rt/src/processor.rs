@@ -117,6 +117,8 @@ impl Stage {
                 .collect(),
             Stage::Blockwise(bkm) => bkm.ins(),
             Stage::KMethod { ports, .. } => ports.iter().map(|(_, binding)| *binding).collect(),
+            Stage::Iir(iir) => iir.ins(),
+            Stage::StateSpace(ss) => ss.ins(),
             _ => Vec::new(),
         }
     }
@@ -135,6 +137,8 @@ impl Stage {
                 .collect(),
             Stage::Blockwise(bkm) => bkm.outs(),
             Stage::KMethod { ports, .. } => ports.iter().map(|(_, binding)| *binding).collect(),
+            Stage::Iir(iir) => iir.outs(),
+            Stage::StateSpace(ss) => ss.outs(),
             _ => Vec::new(),
         }
     }
@@ -348,6 +352,7 @@ mod tests {
     use crate::dyn_node::DynNode;
     use crate::oversampling::{Oversampler, OversamplingFactor};
     use crate::pot_taper::PotTaper;
+    use crate::route::{BindingId, PortBinding};
     use crate::routing::{StageRouteEndpointKind, StageRoutePlan};
     use crate::stage::{
         BlackFeedbackStage, IirData, IirPotBinding, IirStage, RootKind, StateSpaceData,
@@ -566,6 +571,27 @@ mod tests {
     }
 
     #[test]
+    fn iir_stage_exposes_declarative_route_bindings() {
+        let iir = IirData::new(
+            alloc::vec![1.0, 0.0, 0.0],
+            alloc::vec![1.0, 0.0, 0.0],
+            48_000.0,
+        );
+        let mut iir_stage = IirStage::new(iir);
+        iir_stage.bind_ports(Some(10), Some(20));
+        let stage = Stage::Iir(iir_stage);
+
+        assert_eq!(
+            stage.ins(),
+            alloc::vec![PortBinding::new(BindingId::new(10), 0)]
+        );
+        assert_eq!(
+            stage.outs(),
+            alloc::vec![PortBinding::new(BindingId::new(20), 1)]
+        );
+    }
+
+    #[test]
     fn state_space_stage_binds_physical_one_port_state_map() {
         let reactive_one_ports = alloc::vec![
             OnePort::new(
@@ -604,6 +630,37 @@ mod tests {
             .physical_one_ports
             .iter()
             .all(|one_port| matches!(one_port.spec.kind, OnePortKind::Capacitor(_))));
+    }
+
+    #[test]
+    fn state_space_stage_exposes_declarative_route_bindings() {
+        let ss = StateSpaceData {
+            x: alloc::vec![0.0],
+            a_matrix: alloc::vec![0.5],
+            b_vector: alloc::vec![1.0],
+            c_vector: alloc::vec![1.0],
+            n_states: 1,
+            reactive_one_ports: alloc::vec![],
+            vs_idx: 0,
+            output_pos: Some(0),
+            output_neg: None,
+            sample_rate: 48_000.0,
+            d_feedthrough: 0.0,
+            prev_output: 0.0,
+            variable_resistors: alloc::vec![],
+        };
+        let mut ss_stage = StateSpaceStage::new(ss, 9.0);
+        ss_stage.bind_ports(Some(11), Some(21));
+        let stage = Stage::StateSpace(ss_stage);
+
+        assert_eq!(
+            stage.ins(),
+            alloc::vec![PortBinding::new(BindingId::new(11), 0)]
+        );
+        assert_eq!(
+            stage.outs(),
+            alloc::vec![PortBinding::new(BindingId::new(21), 1)]
+        );
     }
 
     #[test]

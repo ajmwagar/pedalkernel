@@ -266,6 +266,32 @@ fn goldenrod_disable_iir_compiles_without_iir_stages() {
 }
 
 #[test]
+fn goldenrod_iir_stages_expose_graph_route_bindings() {
+    let compiled = load_goldenrod_with_options(CompileOptions {
+        skip_k_tables: true,
+        ..Default::default()
+    });
+    let mut iir_count = 0;
+    for stage in &compiled.stages {
+        if let super::compiled::Stage::Iir(iir) = stage {
+            iir_count += 1;
+            assert!(
+                !iir.ins().is_empty(),
+                "compiled IIR stage should expose graph input binding"
+            );
+            assert!(
+                !iir.outs().is_empty(),
+                "compiled IIR stage should expose graph output binding"
+            );
+        }
+    }
+    assert!(
+        iir_count > 0,
+        "Goldenrod should compile at least one IIR stage"
+    );
+}
+
+#[test]
 fn goldenrod_disable_iir_gain_changes_output() {
     let mut low_gain = load_goldenrod_with_options(CompileOptions {
         disable_iir: true,

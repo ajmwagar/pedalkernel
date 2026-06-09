@@ -22,6 +22,13 @@ struct FeedbackParams {
     c_shunt: [f64; 2],
 }
 
+pub(in crate::compiler) struct BuiltIir {
+    pub data: IirData,
+    pub reactive_one_ports: Vec<MnaOnePort>,
+    pub input_node_id: Option<usize>,
+    pub output_node_id: Option<usize>,
+}
+
 fn iir_coeffs_are_stable_and_finite(b: &[f64], a: &[f64]) -> bool {
     if b.is_empty()
         || a.len() < 2
@@ -51,8 +58,10 @@ pub(in crate::compiler) fn build_iir_stage(
     pendant_trees: &[(DynNode, NodeId)],
     graph: &CircuitGraph,
     sample_rate: f64,
-) -> Result<(IirData, Vec<MnaOnePort>), String> {
+) -> Result<BuiltIir, String> {
     let built = build_mna(edge_indices, pendant_trees, graph, sample_rate)?;
+    let input_node_id = built.injection_node_id();
+    let output_node_id = built.output_node_id();
     let mna = built.mna;
     let reactive_one_ports = built.reactive_one_ports;
     let vs_idx = built.vs_idx;
@@ -65,10 +74,12 @@ pub(in crate::compiler) fn build_iir_stage(
         let dc_gain = mna.dc_gain(vs_idx, out_mna);
         #[cfg(test)]
         eprintln!("IIR dc_gain={dc_gain:.4} vs_idx={vs_idx} out_mna={out_mna:?}");
-        return Ok((
-            IirData::new(vec![dc_gain, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate),
+        return Ok(BuiltIir {
+            data: IirData::new(vec![dc_gain, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate),
             reactive_one_ports,
-        ));
+            input_node_id,
+            output_node_id,
+        });
     }
 
     // ── Build IIR biquad ─────────────────────────────────────────
@@ -91,7 +102,12 @@ pub(in crate::compiler) fn build_iir_stage(
                 iir.r_series_product = params.r_series[0] * params.r_series[1];
                 iir.c_shunt_product = params.c_shunt[0] * params.c_shunt[1];
             }
-            return Ok((iir, reactive_one_ports));
+            return Ok(BuiltIir {
+                data: iir,
+                reactive_one_ports,
+                input_node_id,
+                output_node_id,
+            });
         }
         #[cfg(test)]
         eprintln!("IIR: rejected unstable/non-finite direct coeffs b={b_coeffs:?} a={a_coeffs:?}");
@@ -124,7 +140,12 @@ pub(in crate::compiler) fn build_iir_stage(
             let b = vec![b0, b1];
             let a = vec![1.0, -a_val];
             if iir_coeffs_are_stable_and_finite(&b, &a) {
-                return Ok((IirData::new(b, a, sample_rate), reactive_one_ports));
+                return Ok(BuiltIir {
+                    data: IirData::new(b, a, sample_rate),
+                    reactive_one_ports,
+                    input_node_id,
+                    output_node_id,
+                });
             }
         } else {
             let a11 = a_d[0];
@@ -157,7 +178,12 @@ pub(in crate::compiler) fn build_iir_stage(
             let b = vec![b0, b1, b2];
             let a = vec![1.0, da1, da2];
             if iir_coeffs_are_stable_and_finite(&b, &a) {
-                return Ok((IirData::new(b, a, sample_rate), reactive_one_ports));
+                return Ok(BuiltIir {
+                    data: IirData::new(b, a, sample_rate),
+                    reactive_one_ports,
+                    input_node_id,
+                    output_node_id,
+                });
             }
         }
     }

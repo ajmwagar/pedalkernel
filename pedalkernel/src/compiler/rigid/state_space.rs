@@ -93,6 +93,9 @@ pub(in crate::compiler) fn build_state_space_stage(
         });
     }
 
+    let input_node_id = built.injection_node_id();
+    let output_node_id = built.output_node_id();
+
     let ss = StateSpaceData {
         x: vec![0.0; n_states],
         a_matrix: a_d,
@@ -110,6 +113,7 @@ pub(in crate::compiler) fn build_state_space_stage(
     };
 
     let mut stage = StateSpaceStage::new(ss, supply_voltage);
+    stage.bind_ports(input_node_id, output_node_id);
     stage.pot_bindings = pot_bindings;
     if !stage.pot_bindings.is_empty() {
         stage.recompute_mna = Some(built.mna);

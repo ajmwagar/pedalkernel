@@ -739,14 +739,16 @@ pub(super) fn build_rigid_from_group_with_hints(
             return Ok(BuiltStage::Iir(IirStage::new(iir)));
         }
 
-        if let Ok((iir_data, reactive_one_ports)) =
+        if let Ok(built_iir) =
             iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate)
         {
             // Validate: check for degenerate transfer function (all-zero numerator)
+            let iir_data = built_iir.data;
             let has_signal = iir_data.b_coeffs.iter().any(|&b| b.abs() > 1e-15);
             if has_signal {
                 let mut stage = IirStage::new(iir_data);
-                stage.bind_physical_one_ports(&reactive_one_ports);
+                stage.bind_physical_one_ports(&built_iir.reactive_one_ports);
+                stage.bind_ports(built_iir.input_node_id, built_iir.output_node_id);
                 let mut fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
                 // Patch RailSaturation with bias-derived v_max or supply voltage.
                 // NonIdealFx uses symmetric v_max; OpAmpRoot gets asymmetric rails.

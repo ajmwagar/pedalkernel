@@ -21,6 +21,18 @@ pub(super) struct BuiltMna {
     pub output_mna: Option<usize>,
 }
 
+impl BuiltMna {
+    pub(super) fn injection_node_id(&self) -> Option<usize> {
+        self.injection_mna
+            .and_then(|idx| self.node_set.get(idx).copied())
+    }
+
+    pub(super) fn output_node_id(&self) -> Option<usize> {
+        self.output_mna
+            .and_then(|idx| self.node_set.get(idx).copied())
+    }
+}
+
 /// Build an MNA system from a set of edges.
 ///
 /// Handles:

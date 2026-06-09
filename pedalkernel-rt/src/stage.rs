@@ -4471,6 +4471,12 @@ pub struct IirStage {
     pub runtime_state: RuntimeState,
     /// Explicit mapping from physical one-port state to transformed IIR state.
     pub state_map: IirStateMap,
+    /// Declarative graph input binding for shared stage routing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub input_binding: Option<PortBinding>,
+    /// Declarative graph output binding for shared stage routing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub output_binding: Option<PortBinding>,
     /// Precomputed biquad lookup table (compile-time sweeps over pot positions).
     /// When present, `set_pot` interpolates from this instead of the DC gain formula.
     #[cfg(feature = "biquad-table")]
@@ -4507,6 +4513,8 @@ impl IirStage {
             pot_bindings: Vec::new(),
             runtime_state: RuntimeState::new(),
             state_map: IirStateMap::empty(transformed_state_count),
+            input_binding: None,
+            output_binding: None,
             #[cfg(feature = "biquad-table")]
             biquad_table: None,
             sample_rate,
@@ -4545,6 +4553,19 @@ impl IirStage {
 
     pub fn one_port_states_mut(&mut self) -> &mut [OnePortState] {
         &mut self.runtime_state.states
+    }
+
+    pub fn bind_ports(&mut self, input_node_id: Option<usize>, output_node_id: Option<usize>) {
+        self.input_binding = input_node_id.map(|node| PortBinding::new(BindingId::new(node), 0));
+        self.output_binding = output_node_id.map(|node| PortBinding::new(BindingId::new(node), 1));
+    }
+
+    pub fn ins(&self) -> Vec<PortBinding> {
+        self.input_binding.into_iter().collect()
+    }
+
+    pub fn outs(&self) -> Vec<PortBinding> {
+        self.output_binding.into_iter().collect()
     }
 
     /// Configure NonIdealFx post-processing from component declarations.
@@ -5057,6 +5078,12 @@ pub struct StateSpaceStage {
     /// Explicit mapping from physical one-port state to the MNA state vector.
     #[cfg_attr(feature = "serde", serde(default))]
     pub state_map: StateSpaceStateMap,
+    /// Declarative graph input binding for shared stage routing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub input_binding: Option<PortBinding>,
+    /// Declarative graph output binding for shared stage routing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub output_binding: Option<PortBinding>,
 }
 
 #[derive(Debug, Clone)]
@@ -5093,6 +5120,8 @@ impl StateSpaceStage {
             prev_input: 0.0,
             runtime_state: RuntimeState::new(),
             state_map: StateSpaceStateMap::empty(n),
+            input_binding: None,
+            output_binding: None,
         };
         stage.bind_physical_one_ports();
         stage
@@ -5124,6 +5153,19 @@ impl StateSpaceStage {
 
     pub fn one_port_states_mut(&mut self) -> &mut [OnePortState] {
         &mut self.runtime_state.states
+    }
+
+    pub fn bind_ports(&mut self, input_node_id: Option<usize>, output_node_id: Option<usize>) {
+        self.input_binding = input_node_id.map(|node| PortBinding::new(BindingId::new(node), 0));
+        self.output_binding = output_node_id.map(|node| PortBinding::new(BindingId::new(node), 1));
+    }
+
+    pub fn ins(&self) -> Vec<PortBinding> {
+        self.input_binding.into_iter().collect()
+    }
+
+    pub fn outs(&self) -> Vec<PortBinding> {
+        self.output_binding.into_iter().collect()
     }
 
     /// Recompute cached v_rail after supply voltage change or deserialization.
