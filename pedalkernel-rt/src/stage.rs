@@ -2330,7 +2330,14 @@ impl WdfStage {
             // For feedback_opamp stages: V_out = V_diode because the diode
             // is across the feedback path (V_out - V_neg) and V_neg ≈ 0
             // (virtual ground). The diode clamps V_out to ±Vf.
-            let out = (a_root + b_tree) / 2.0;
+            let out = match root {
+                RootKind::DiodePair(_)
+                | RootKind::SingleDiode(_)
+                | RootKind::ExplicitDiodePair(_)
+                | RootKind::ExplicitSingleDiode(_)
+                | RootKind::Zener(_) => -(a_root + b_tree) / 2.0,
+                _ => (a_root + b_tree) / 2.0,
+            };
             out
         });
 

@@ -8,6 +8,7 @@ pedal "Diode Clipper No Cap" {
     in -> R1.a
     R1.b -> D1.a, RL.a
     D1.b -> gnd
-    RL.b -> out
+    RL.b -> gnd
+    R1.b -> out
   }
 }
