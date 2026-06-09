@@ -66,6 +66,13 @@ pub(super) fn build_mna(
         let e = &graph.edges[eidx];
         add_node(e.node_a);
         add_node(e.node_b);
+        if graph.effective_edge_kind(eidx) == EdgeKind::Vccs {
+            let comp = &graph.components[e.comp_idx];
+            let out_key = format!("{}.out", comp.id);
+            if let Some(&out_node) = graph.node_names.get(&out_key) {
+                add_node(out_node);
+            }
+        }
     }
     for (_, attach) in pendant_trees {
         add_node(*attach);
@@ -208,7 +215,16 @@ pub(super) fn build_mna(
                 };
                 comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
             }
-            _ => {} // Skip NL, Vccs, Behavioral
+            EdgeKind::Vccs => {
+                let pin_fn = |pin: &str| -> Option<usize> {
+                    let key = format!("{}.{}", comp.id, pin);
+                    let node = graph.node_names.get(&key)?;
+                    node_to_mna(*node)
+                };
+                let gm = linear_ota_transconductance(comp.kind.op_amp_type());
+                mna.stamp_vccs(pin_fn("out"), None, pin_fn("pos"), pin_fn("neg"), gm);
+            }
+            _ => {} // Skip NL, Behavioral
         }
     }
 
@@ -267,6 +283,13 @@ pub(super) fn build_mna(
         injection_mna,
         output_mna,
     })
+}
+
+fn linear_ota_transconductance(op_type: Option<crate::dsl::OpAmpType>) -> f64 {
+    match op_type {
+        Some(crate::dsl::OpAmpType::Ca3080) => 0.002,
+        _ => 0.0,
+    }
 }
 
 fn nearest_stage_input_node(node_set: &[NodeId], graph: &CircuitGraph) -> Option<NodeId> {
