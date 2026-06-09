@@ -237,9 +237,15 @@ VIN v_in 0 PWL({pwl_data})
     fn generate_pwl_inline(&self, signal: &[f64]) -> String {
         let dt = self.config.timestep();
 
-        // Decimate signal for PWL to keep netlist manageable
-        // ngspice will interpolate between points
-        let decimate_factor = 10.max(signal.len() / 10000);
+        // Keep normal validation signals sample-exact. Decimating a sine or
+        // sweep changes the stimulus seen by SPICE, which then shows up as a
+        // false component mismatch against the WDF path. Very long stress
+        // signals are still decimated to keep generated netlists practical.
+        let decimate_factor = if signal.len() <= 100_000 {
+            1
+        } else {
+            signal.len().div_ceil(100_000)
+        };
 
         let mut pwl_points = Vec::new();
         for (i, &sample) in signal.iter().enumerate().step_by(decimate_factor) {
@@ -392,5 +398,19 @@ mod tests {
 
         assert!((runner.interpolate(&data, 0.5) - 5.0).abs() < 1e-10);
         assert!((runner.interpolate(&data, 1.5) - 15.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pwl_generation_keeps_short_signals_sample_exact() {
+        let runner = SpiceRunner::new(SpiceConfig::default());
+        let signal: Vec<f64> = (0..12).map(|i| i as f64).collect();
+
+        let pwl = runner.generate_pwl_inline(&signal);
+        let pairs = pwl.split_whitespace().collect::<Vec<_>>();
+
+        assert_eq!(pairs.len(), signal.len() * 2);
+        assert_eq!(pairs[1], "0.000000000e0");
+        assert_eq!(pairs[3], "1.000000000e0");
+        assert_eq!(pairs[23], "1.100000000e1");
     }
 }

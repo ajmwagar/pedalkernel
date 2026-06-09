@@ -144,6 +144,7 @@ fn product_controls_bind_to_runtime_stages() {
                 Stage::StateSpace(_) => "StateSpace",
                 Stage::BlackFeedback(_) => "BlackFeedback",
                 Stage::Blockwise(_) => "BKM",
+                Stage::KMethod { .. } => "KMethod",
                 Stage::SerialDelayedFeedback(_) => "SerialDelayedFeedback",
             })
             .collect::<Vec<_>>();

@@ -401,8 +401,13 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
             let contents = std::fs::read_to_string(&circuit_path)?;
             let pedal_def = pedalkernel::dsl::parse_pedal_file(&contents)
                 .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
-            let mut pedal = pedalkernel::compiler::compile_pedal(&pedal_def, sample_rate)
-                .map_err(|e| anyhow::anyhow!("Compile error: {}", e))?;
+            let options = pedalkernel::compiler::CompileOptions {
+                oversampling: pedalkernel::oversampling::OversamplingFactor::X1,
+                ..pedalkernel::compiler::CompileOptions::default()
+            };
+            let mut pedal =
+                pedalkernel::compiler::compile_pedal_with_options(&pedal_def, sample_rate, options)
+                    .map_err(|e| anyhow::anyhow!("Compile error: {}", e))?;
 
             for signal_config in &test_case.signals {
                 let label = signal_config.label();
