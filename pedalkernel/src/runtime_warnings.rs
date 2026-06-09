@@ -187,7 +187,9 @@ impl WarningCollector {
 
     /// Drain all buffered warnings in insertion order, clearing the buffer.
     fn drain(&mut self) -> Vec<RuntimeWarning> {
-        let result = if self.buffer.len() < RING_BUFFER_CAPACITY || self.total_count <= RING_BUFFER_CAPACITY {
+        let result = if self.buffer.len() < RING_BUFFER_CAPACITY
+            || self.total_count <= RING_BUFFER_CAPACITY
+        {
             // Buffer hasn't wrapped yet — drain in order
             self.buffer.drain(..).collect()
         } else {

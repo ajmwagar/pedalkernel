@@ -27,11 +27,17 @@ pub struct Npn {
 impl Component for Npn {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "NPN transistor" }
+    fn type_tag(&self) -> &'static str {
+        "NPN transistor"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -41,7 +47,10 @@ impl Component for Npn {
     }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::ActiveEdge { pin_a: "collector", pin_b: "emitter" }
+        GraphRole::ActiveEdge {
+            pin_a: "collector",
+            pin_b: "emitter",
+        }
     }
 
     fn stamp_mna(
@@ -56,7 +65,12 @@ impl Component for Npn {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "collector", pin_b: "emitter", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "collector",
+            pin_b: "emitter",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -80,7 +94,12 @@ impl Component for Npn {
             .copied()
             .unwrap_or(node_b);
         Some((
-            NonlinearKind::BjtNpn { model_name: self.model.clone(), base_node, collector_node, emitter_node },
+            NonlinearKind::BjtNpn {
+                model_name: self.model.clone(),
+                base_node,
+                collector_node,
+                emitter_node,
+            },
             vec![node_a, node_b],
         ))
     }
@@ -89,11 +108,19 @@ impl Component for Npn {
         ("Device:Q_NPN_BCE", "Q")
     }
 
-    fn symbol_name(&self) -> &'static str { "npn_bjt" }
-    fn layout_class(&self) -> &'static str { "npn" }
+    fn symbol_name(&self) -> &'static str {
+        "npn_bjt"
+    }
+    fn layout_class(&self) -> &'static str {
+        "npn"
+    }
 
     fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
-        vec![("base", "collector"), ("collector", "emitter"), ("base", "emitter")]
+        vec![
+            ("base", "collector"),
+            ("collector", "emitter"),
+            ("base", "emitter"),
+        ]
     }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
@@ -105,9 +132,15 @@ impl Component for Npn {
         }
     }
 
-    fn is_bjt(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
-    fn model_name(&self) -> Option<&str> { Some(&self.model) }
+    fn is_bjt(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -122,11 +155,17 @@ pub struct Pnp {
 impl Component for Pnp {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "PNP transistor" }
+    fn type_tag(&self) -> &'static str {
+        "PNP transistor"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -136,7 +175,10 @@ impl Component for Pnp {
     }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::ActiveEdge { pin_a: "collector", pin_b: "emitter" }
+        GraphRole::ActiveEdge {
+            pin_a: "collector",
+            pin_b: "emitter",
+        }
     }
 
     fn stamp_mna(
@@ -151,7 +193,12 @@ impl Component for Pnp {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "collector", pin_b: "emitter", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "collector",
+            pin_b: "emitter",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -175,7 +222,12 @@ impl Component for Pnp {
             .copied()
             .unwrap_or(node_b);
         Some((
-            NonlinearKind::BjtPnp { model_name: self.model.clone(), base_node, collector_node, emitter_node },
+            NonlinearKind::BjtPnp {
+                model_name: self.model.clone(),
+                base_node,
+                collector_node,
+                emitter_node,
+            },
             vec![node_a, node_b],
         ))
     }
@@ -184,11 +236,19 @@ impl Component for Pnp {
         ("Device:Q_PNP_BCE", "Q")
     }
 
-    fn symbol_name(&self) -> &'static str { "pnp_bjt" }
-    fn layout_class(&self) -> &'static str { "pnp" }
+    fn symbol_name(&self) -> &'static str {
+        "pnp_bjt"
+    }
+    fn layout_class(&self) -> &'static str {
+        "pnp"
+    }
 
     fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
-        vec![("base", "collector"), ("collector", "emitter"), ("base", "emitter")]
+        vec![
+            ("base", "collector"),
+            ("collector", "emitter"),
+            ("base", "emitter"),
+        ]
     }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
@@ -200,9 +260,15 @@ impl Component for Pnp {
         }
     }
 
-    fn is_bjt(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
-    fn model_name(&self) -> Option<&str> { Some(&self.model) }
+    fn is_bjt(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -217,11 +283,17 @@ pub struct NJfet {
 impl Component for NJfet {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "N-channel JFET" }
+    fn type_tag(&self) -> &'static str {
+        "N-channel JFET"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -230,10 +302,15 @@ impl Component for NJfet {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["vgs", "gate"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["vgs", "gate"]
+    }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "drain", pin_b: "source" }
+        GraphRole::Edge {
+            pin_a: "drain",
+            pin_b: "source",
+        }
     }
 
     fn stamp_mna(
@@ -249,18 +326,33 @@ impl Component for NJfet {
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         let model = JfetModel::by_name(&self.model);
-        Some(DynNode::JfetVrNode(comp_id.to_string(), JfetVariableResistor::new(model)))
+        Some(DynNode::JfetVrNode(
+            comp_id.to_string(),
+            JfetVariableResistor::new(model),
+        ))
     }
 
-    fn is_variable(&self) -> bool { true }
+    fn is_variable(&self) -> bool {
+        true
+    }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "drain",
+            pin_b: "source",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn resolve_edges(&self, ctx: &ResolveContext) -> Option<Vec<ComponentEdge>> {
         if ctx.control_pin_is_modulated {
-            Some(vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Linear, port_group: None }])
+            Some(vec![ComponentEdge {
+                pin_a: "drain",
+                pin_b: "source",
+                kind: EdgeKind::Linear,
+                port_group: None,
+            }])
         } else {
             None
         }
@@ -276,7 +368,10 @@ impl Component for NJfet {
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
         let jn = if node_b == gnd_node { _node_a } else { node_b };
         Some((
-            NonlinearKind::Jfet { model_name: self.model.clone(), is_n_channel: true },
+            NonlinearKind::Jfet {
+                model_name: self.model.clone(),
+                is_n_channel: true,
+            },
             vec![jn],
         ))
     }
@@ -296,8 +391,12 @@ impl Component for NJfet {
         ("Device:Q_NJFET_DGS", "J")
     }
 
-    fn symbol_name(&self) -> &'static str { "njfet" }
-    fn layout_class(&self) -> &'static str { "njfet" }
+    fn symbol_name(&self) -> &'static str {
+        "njfet"
+    }
+    fn layout_class(&self) -> &'static str {
+        "njfet"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -308,9 +407,15 @@ impl Component for NJfet {
         }
     }
 
-    fn is_jfet(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
-    fn model_name(&self) -> Option<&str> { Some(&self.model) }
+    fn is_jfet(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -325,11 +430,17 @@ pub struct PJfet {
 impl Component for PJfet {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "P-channel JFET" }
+    fn type_tag(&self) -> &'static str {
+        "P-channel JFET"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -338,10 +449,15 @@ impl Component for PJfet {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["vgs", "gate"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["vgs", "gate"]
+    }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "drain", pin_b: "source" }
+        GraphRole::Edge {
+            pin_a: "drain",
+            pin_b: "source",
+        }
     }
 
     fn stamp_mna(
@@ -357,18 +473,33 @@ impl Component for PJfet {
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         let model = JfetModel::by_name(&self.model);
-        Some(DynNode::JfetVrNode(comp_id.to_string(), JfetVariableResistor::new(model)))
+        Some(DynNode::JfetVrNode(
+            comp_id.to_string(),
+            JfetVariableResistor::new(model),
+        ))
     }
 
-    fn is_variable(&self) -> bool { true }
+    fn is_variable(&self) -> bool {
+        true
+    }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "drain",
+            pin_b: "source",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn resolve_edges(&self, ctx: &ResolveContext) -> Option<Vec<ComponentEdge>> {
         if ctx.control_pin_is_modulated {
-            Some(vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Linear, port_group: None }])
+            Some(vec![ComponentEdge {
+                pin_a: "drain",
+                pin_b: "source",
+                kind: EdgeKind::Linear,
+                port_group: None,
+            }])
         } else {
             None
         }
@@ -384,7 +515,10 @@ impl Component for PJfet {
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
         let jn = if node_b == gnd_node { _node_a } else { node_b };
         Some((
-            NonlinearKind::Jfet { model_name: self.model.clone(), is_n_channel: false },
+            NonlinearKind::Jfet {
+                model_name: self.model.clone(),
+                is_n_channel: false,
+            },
             vec![jn],
         ))
     }
@@ -404,8 +538,12 @@ impl Component for PJfet {
         ("Device:Q_PJFET_DGS", "J")
     }
 
-    fn symbol_name(&self) -> &'static str { "pjfet" }
-    fn layout_class(&self) -> &'static str { "pjfet" }
+    fn symbol_name(&self) -> &'static str {
+        "pjfet"
+    }
+    fn layout_class(&self) -> &'static str {
+        "pjfet"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -416,9 +554,15 @@ impl Component for PJfet {
         }
     }
 
-    fn is_jfet(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
-    fn model_name(&self) -> Option<&str> { Some(&self.model) }
+    fn is_jfet(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -433,11 +577,17 @@ pub struct Nmos {
 impl Component for Nmos {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "N-channel MOSFET" }
+    fn type_tag(&self) -> &'static str {
+        "N-channel MOSFET"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -446,10 +596,15 @@ impl Component for Nmos {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["vgs", "gate"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["vgs", "gate"]
+    }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "drain", pin_b: "source" }
+        GraphRole::Edge {
+            pin_a: "drain",
+            pin_b: "source",
+        }
     }
 
     fn stamp_mna(
@@ -464,7 +619,12 @@ impl Component for Nmos {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "drain",
+            pin_b: "source",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -477,7 +637,10 @@ impl Component for Nmos {
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
         let jn = if node_b == gnd_node { _node_a } else { node_b };
         Some((
-            NonlinearKind::Mosfet { mosfet_type: self.mosfet_type, is_n_channel: true },
+            NonlinearKind::Mosfet {
+                mosfet_type: self.mosfet_type,
+                is_n_channel: true,
+            },
             vec![jn],
         ))
     }
@@ -497,8 +660,12 @@ impl Component for Nmos {
         ("Device:Q_NMOS_DGS", "Q")
     }
 
-    fn symbol_name(&self) -> &'static str { "nmos" }
-    fn layout_class(&self) -> &'static str { "nmos" }
+    fn symbol_name(&self) -> &'static str {
+        "nmos"
+    }
+    fn layout_class(&self) -> &'static str {
+        "nmos"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -509,8 +676,12 @@ impl Component for Nmos {
         }
     }
 
-    fn is_mosfet(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
+    fn is_mosfet(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -525,11 +696,17 @@ pub struct Pmos {
 impl Component for Pmos {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "P-channel MOSFET" }
+    fn type_tag(&self) -> &'static str {
+        "P-channel MOSFET"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -538,10 +715,15 @@ impl Component for Pmos {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["vgs", "gate"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["vgs", "gate"]
+    }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "drain", pin_b: "source" }
+        GraphRole::Edge {
+            pin_a: "drain",
+            pin_b: "source",
+        }
     }
 
     fn stamp_mna(
@@ -556,7 +738,12 @@ impl Component for Pmos {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "drain", pin_b: "source", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "drain",
+            pin_b: "source",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -569,7 +756,10 @@ impl Component for Pmos {
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
         let jn = if node_b == gnd_node { _node_a } else { node_b };
         Some((
-            NonlinearKind::Mosfet { mosfet_type: self.mosfet_type, is_n_channel: false },
+            NonlinearKind::Mosfet {
+                mosfet_type: self.mosfet_type,
+                is_n_channel: false,
+            },
             vec![jn],
         ))
     }
@@ -589,8 +779,12 @@ impl Component for Pmos {
         ("Device:Q_PMOS_DGS", "Q")
     }
 
-    fn symbol_name(&self) -> &'static str { "pmos" }
-    fn layout_class(&self) -> &'static str { "pmos" }
+    fn symbol_name(&self) -> &'static str {
+        "pmos"
+    }
+    fn layout_class(&self) -> &'static str {
+        "pmos"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -601,6 +795,10 @@ impl Component for Pmos {
         }
     }
 
-    fn is_mosfet(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
+    fn is_mosfet(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
 }

@@ -140,7 +140,10 @@ fn solver_convergence_across_impedance_and_drive() {
                 let a = drive * (2.0 * std::f64::consts::PI * 1000.0 * t).sin();
                 let b = root.process(a, rp);
                 let v = 0.5 * (a + b);
-                assert!(v.is_finite(), "Solver diverged at Rp={rp}, drive={drive}, i={i}");
+                assert!(
+                    v.is_finite(),
+                    "Solver diverged at Rp={rp}, drive={drive}, i={i}"
+                );
                 if let Some(prev) = last_v {
                     max_jump = max_jump.max((v - prev).abs());
                 }

@@ -4,7 +4,9 @@ use pedalkernel::elements::{reset_solver_stats, solver_stats_snapshot};
 use pedalkernel::PedalProcessor;
 
 fn main() {
-    let pedal_name = std::env::args().nth(1).unwrap_or_else(|| "screamer".to_string());
+    let pedal_name = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "screamer".to_string());
     let path = format!(
         "{}/src/pedalkernel/pedalkernel-pro/pedals/legends/{pedal_name}.pedal",
         env!("HOME")

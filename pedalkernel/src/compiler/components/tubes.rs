@@ -24,11 +24,17 @@ pub struct Triode {
 impl Component for Triode {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "triode" }
+    fn type_tag(&self) -> &'static str {
+        "triode"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -37,7 +43,9 @@ impl Component for Triode {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["vgk"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["vgk"]
+    }
 
     fn graph_role(&self) -> GraphRole {
         GraphRole::CoupledEdge {
@@ -59,7 +67,12 @@ impl Component for Triode {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "plate", pin_b: "cathode", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "plate",
+            pin_b: "cathode",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -99,8 +112,12 @@ impl Component for Triode {
         ("Valve:Triode", "V")
     }
 
-    fn symbol_name(&self) -> &'static str { "triode" }
-    fn layout_class(&self) -> &'static str { "triode" }
+    fn symbol_name(&self) -> &'static str {
+        "triode"
+    }
+    fn layout_class(&self) -> &'static str {
+        "triode"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -111,9 +128,15 @@ impl Component for Triode {
         }
     }
 
-    fn is_tube(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
-    fn model_name(&self) -> Option<&str> { Some(&self.model) }
+    fn is_tube(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -128,11 +151,17 @@ pub struct Pentode {
 impl Component for Pentode {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "pentode" }
+    fn type_tag(&self) -> &'static str {
+        "pentode"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -141,7 +170,9 @@ impl Component for Pentode {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["vg1k"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["vg1k"]
+    }
 
     fn graph_role(&self) -> GraphRole {
         GraphRole::CoupledEdge {
@@ -163,7 +194,12 @@ impl Component for Pentode {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "plate", pin_b: "cathode", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "plate",
+            pin_b: "cathode",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -174,7 +210,8 @@ impl Component for Pentode {
         _gnd_node: NodeId,
         node_names: &HashMap<String, NodeId>,
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
-        let grid_node = node_names.get(&format!("{comp_id}.grid", ))
+        let grid_node = node_names
+            .get(&format!("{comp_id}.grid",))
             .or_else(|| node_names.get(&format!("{comp_id}.g1")))
             .copied();
         Some((
@@ -203,8 +240,12 @@ impl Component for Pentode {
         ("Valve:Triode", "V")
     }
 
-    fn symbol_name(&self) -> &'static str { "pentode" }
-    fn layout_class(&self) -> &'static str { "pentode" }
+    fn symbol_name(&self) -> &'static str {
+        "pentode"
+    }
+    fn layout_class(&self) -> &'static str {
+        "pentode"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -216,9 +257,15 @@ impl Component for Pentode {
         }
     }
 
-    fn is_tube(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
-    fn model_name(&self) -> Option<&str> { Some(&self.model) }
+    fn is_tube(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -233,11 +280,17 @@ pub struct VariMu {
 impl Component for VariMu {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "variable-mu triode" }
+    fn type_tag(&self) -> &'static str {
+        "variable-mu triode"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
-    fn is_nonlinear(&self) -> bool { true }
+    fn is_nonlinear(&self) -> bool {
+        true
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -246,7 +299,9 @@ impl Component for VariMu {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["vgk"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["vgk"]
+    }
 
     fn graph_role(&self) -> GraphRole {
         GraphRole::CoupledEdge {
@@ -268,7 +323,12 @@ impl Component for VariMu {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "plate", pin_b: "cathode", kind: EdgeKind::Nonlinear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "plate",
+            pin_b: "cathode",
+            kind: EdgeKind::Nonlinear,
+            port_group: None,
+        }]
     }
 
     fn classify_nonlinear(
@@ -308,8 +368,12 @@ impl Component for VariMu {
         ("Valve:Triode", "V")
     }
 
-    fn symbol_name(&self) -> &'static str { "triode" }
-    fn layout_class(&self) -> &'static str { "vari_mu" }
+    fn symbol_name(&self) -> &'static str {
+        "triode"
+    }
+    fn layout_class(&self) -> &'static str {
+        "vari_mu"
+    }
 
     fn pin_direction(&self, pin: &str) -> PinDirection {
         match pin {
@@ -320,7 +384,13 @@ impl Component for VariMu {
         }
     }
 
-    fn is_tube(&self) -> bool { true }
-    fn is_gain_device(&self) -> bool { true }
-    fn model_name(&self) -> Option<&str> { Some(&self.model) }
+    fn is_tube(&self) -> bool {
+        true
+    }
+    fn is_gain_device(&self) -> bool {
+        true
+    }
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model)
+    }
 }

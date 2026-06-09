@@ -57,10 +57,8 @@ pub(super) fn detect_bias_pots(
         }
 
         // Collect emitter nodes for this cluster.
-        let emitter_nodes: HashSet<NodeId> = members
-            .iter()
-            .map(|&m| bjt_emitter_nodes[m])
-            .collect();
+        let emitter_nodes: HashSet<NodeId> =
+            members.iter().map(|&m| bjt_emitter_nodes[m]).collect();
 
         // Scan passive edges for this cluster's multi-NL plan.
         let passive_edges = &all_passive_edge_sets[cluster_idx];

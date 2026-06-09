@@ -234,7 +234,10 @@ fn wdf_resistor_reflection() {
     let r = 10_000.0;
     let rp = r;
     let gamma: f64 = (r - rp) / (r + rp);
-    assert!(gamma.abs() < 1e-12, "Matched R: Gamma should be 0, got {gamma}");
+    assert!(
+        gamma.abs() < 1e-12,
+        "Matched R: Gamma should be 0, got {gamma}"
+    );
 
     // Mismatched: R > Rp → positive reflection
     let gamma2 = (r - 1000.0) / (r + 1000.0);
@@ -255,7 +258,10 @@ fn wdf_capacitor_port_resistance() {
     let fs = 48000.0;
     let rp: f64 = 1.0 / (2.0 * c * fs);
     let expected_rp: f64 = 1.0 / (2.0 * 4.7e-9 * 48000.0);
-    assert!((rp - expected_rp).abs() < 1.0, "Cap Rp: {rp} vs {expected_rp}");
+    assert!(
+        (rp - expected_rp).abs() < 1.0,
+        "Cap Rp: {rp} vs {expected_rp}"
+    );
 
     // Engine: RC lowpass R=10k, C=4.7n → fc ≈ 3386 Hz, gain at fc = -3dB
     let r = 10_000.0;
@@ -272,7 +278,10 @@ fn wdf_inductor_port_resistance() {
     let l = 0.1;
     let fs = 48000.0;
     let rp: f64 = 2.0 * l * fs;
-    assert!((rp - 9600.0).abs() < 1.0, "Inductor Rp = {rp}, expected 9600");
+    assert!(
+        (rp - 9600.0).abs() < 1.0,
+        "Inductor Rp = {rp}, expected 9600"
+    );
 
     // Engine: RL highpass R=1k, L=100mH → fc = R/(2piL) ≈ 1592 Hz
     let r = 1000.0;
@@ -299,11 +308,16 @@ fn linear_rc_highpass() {
     assert!((g_at_fc - 0.7071).abs() < 0.001, "Gain at fc = {g_at_fc}");
     // 10/sqrt(101) = 0.9950
     let g_at_10fc = rc_highpass_gain(10.0 * fc, fc);
-    assert!((g_at_10fc - 0.9950).abs() < 0.001, "Gain at 10fc = {g_at_10fc}");
+    assert!(
+        (g_at_10fc - 0.9950).abs() < 0.001,
+        "Gain at 10fc = {g_at_10fc}"
+    );
 
     // === Engine ===
     for &freq in &[50.0, 100.0, fc * 0.5, fc, fc * 2.0, 5000.0] {
-        if freq > fs / 2.0 { continue; }
+        if freq > fs / 2.0 {
+            continue;
+        }
         let input = sine_buf(freq, fs, TEST_LEN, 0.1);
         let output = compile_and_process(RC_HIGHPASS, &input, fs, &[]);
         let measured = gain_at_freq(&input, &output, fs, freq);
@@ -326,7 +340,9 @@ fn linear_rc_lowpass() {
 
     // === Engine ===
     for &freq in &[100.0, 500.0, fc * 0.5, fc, fc * 2.0, 10000.0] {
-        if freq > fs / 2.0 { continue; }
+        if freq > fs / 2.0 {
+            continue;
+        }
         let input = sine_buf(freq, fs, TEST_LEN, 0.1);
         let output = compile_and_process(RC_LOWPASS, &input, fs, &[]);
         let measured = gain_at_freq(&input, &output, fs, freq);
@@ -360,7 +376,10 @@ fn linear_cascaded_lowpass() {
     let input_hi = sine_buf(freq_10fc, fs, TEST_LEN, 0.1);
     let output_hi = compile_and_process(CASCADED_LPF, &input_hi, fs, &[]);
     let g_hi = gain_at_freq(&input_hi, &output_hi, fs, freq_10fc);
-    assert!(g_hi < 0.05, "Cascaded LPF at 10fc: gain={g_hi:.4}, expected <0.05");
+    assert!(
+        g_hi < 0.05,
+        "Cascaded LPF at 10fc: gain={g_hi:.4}, expected <0.05"
+    );
 }
 
 #[test]
@@ -375,8 +394,10 @@ fn linear_rlc_bandpass() {
     // === Math: at resonance, gain = RL/(R+RL) ≈ 0.99 ===
     let expected_peak = r_load / (r_series + r_load);
     let g_at_f0 = rlc_series_loaded_gain(f0, r_series, r_load, l, c);
-    assert!((g_at_f0 - expected_peak).abs() < 0.01,
-        "RLC at f0: {g_at_f0:.4} vs expected {expected_peak:.4}");
+    assert!(
+        (g_at_f0 - expected_peak).abs() < 0.01,
+        "RLC at f0: {g_at_f0:.4} vs expected {expected_peak:.4}"
+    );
 
     // === Engine ===
     let input_res = sine_buf(f0, fs, TEST_LEN, 0.1);
@@ -393,8 +414,10 @@ fn linear_rlc_bandpass() {
     // BUG: Engine shows poor selectivity — g_lo is not significantly below g_res.
     // With RL=10k and R=100, analytical Q≈3.16, so off-resonance at f0/10 should
     // be well below resonance peak. Assert the expected selectivity.
-    assert!(g_lo < g_res * 0.5,
-        "RLC: off-resonance {g_lo:.4} should be < 50% of resonance {g_res:.4}");
+    assert!(
+        g_lo < g_res * 0.5,
+        "RLC: off-resonance {g_lo:.4} should be < 50% of resonance {g_res:.4}"
+    );
 }
 
 #[test]
@@ -423,7 +446,10 @@ fn linear_twin_t_notch() {
     } else {
         f64::INFINITY
     };
-    assert!(depth_db > 10.0, "Twin-T notch depth = {depth_db:.1}dB, expected >10dB");
+    assert!(
+        depth_db > 10.0,
+        "Twin-T notch depth = {depth_db:.1}dB, expected >10dB"
+    );
 }
 
 // ===========================================================================
@@ -439,18 +465,26 @@ fn diode_iv_curve() {
 
     // V=0.6V: I ≈ 0.012A  (Is * exp(0.6/0.02585) ≈ 1e-12 * 1.2e10)
     let i06 = shockley_diode(0.6, is, VT);
-    assert!((i06 - 0.012).abs() < 0.002, "Diode at 0.6V: I={i06:.4}, expected ~0.012");
+    assert!(
+        (i06 - 0.012).abs() < 0.002,
+        "Diode at 0.6V: I={i06:.4}, expected ~0.012"
+    );
 
     // V=0.3V: much smaller
     let i03 = shockley_diode(0.3, is, VT);
-    assert!(i03 < i06 * 0.01, "I(0.3V)={i03:.6e} should be << I(0.6V)={i06:.6e}");
+    assert!(
+        i03 < i06 * 0.01,
+        "I(0.3V)={i03:.6e} should be << I(0.6V)={i06:.6e}"
+    );
 
     // Derivative FD check
     let dv = 1e-6;
     let di_analytic = shockley_diode_deriv(0.6, is, VT);
     let di_fd = (shockley_diode(0.6 + dv, is, VT) - shockley_diode(0.6 - dv, is, VT)) / (2.0 * dv);
-    assert!(((di_analytic - di_fd) / di_fd).abs() < 1e-4,
-        "Derivative FD: analytic={di_analytic:.4e}, FD={di_fd:.4e}");
+    assert!(
+        ((di_analytic - di_fd) / di_fd).abs() < 1e-4,
+        "Derivative FD: analytic={di_analytic:.4e}, FD={di_fd:.4e}"
+    );
 }
 
 #[test]
@@ -471,15 +505,25 @@ fn single_diode_halfwave() {
     let output = compile_and_process(SINGLE_DIODE, &input, fs, &[]);
 
     // Diode should create asymmetry: positive peaks larger than negative
-    let pos_peak = output[WARMUP..].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let neg_peak = output[WARMUP..].iter().cloned().fold(f64::INFINITY, f64::min).abs();
+    let pos_peak = output[WARMUP..]
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let neg_peak = output[WARMUP..]
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY, f64::min)
+        .abs();
     let dc = dc_offset(&output[WARMUP..]);
     eprintln!("  [diag] Half-wave: pos_peak={pos_peak:.4}, neg_peak={neg_peak:.4}, DC={dc:.4}");
 
     // BUG: Engine does not produce proper half-wave rectification.
     // Expected: positive-only output with neg_ratio < 0.1 and positive DC offset.
     // Actual: near-symmetric output suggesting the diode is not clipping correctly.
-    assert!(output[WARMUP..].iter().all(|x| x.is_finite()), "Half-wave: NaN/inf");
+    assert!(
+        output[WARMUP..].iter().all(|x| x.is_finite()),
+        "Half-wave: NaN/inf"
+    );
     let p = peak(&output[WARMUP..]);
     assert!(p > 1e-4, "Half-wave: output is silent (peak={p:.8})");
 
@@ -489,8 +533,10 @@ fn single_diode_halfwave() {
         "Half-wave: neg_ratio={neg_ratio:.4} (pos={pos_peak:.4}, neg={neg_peak:.4}), expected < 0.1");
 
     // Rectified signal should have positive DC offset
-    assert!(dc > 0.01,
-        "Half-wave: DC={dc:.6}, expected positive offset > 0.01");
+    assert!(
+        dc > 0.01,
+        "Half-wave: DC={dc:.6}, expected positive offset > 0.01"
+    );
 }
 
 #[test]
@@ -510,8 +556,10 @@ fn diode_pair_symmetric_clip() {
 
     // THD should generally increase with level
     let increasing = thd_values.windows(2).filter(|w| w[1] >= w[0] * 0.9).count();
-    assert!(increasing >= thd_values.len() - 2,
-        "Clipper THD should be mostly increasing: {thd_values:?}");
+    assert!(
+        increasing >= thd_values.len() - 2,
+        "Clipper THD should be mostly increasing: {thd_values:?}"
+    );
 }
 
 // ===========================================================================
@@ -526,9 +574,15 @@ fn jacobian_finite_difference() {
     for &v in &[0.0, 0.2, 0.4, 0.6, 0.7] {
         let analytic = shockley_diode_deriv(v, is, VT);
         let fd = (shockley_diode(v + dv, is, VT) - shockley_diode(v - dv, is, VT)) / (2.0 * dv);
-        let rel_err = if fd.abs() > 1e-30 { ((analytic - fd) / fd).abs() } else { (analytic - fd).abs() };
-        assert!(rel_err < 1e-3,
-            "Jacobian at V={v}: analytic={analytic:.6e}, FD={fd:.6e}, err={rel_err:.6e}");
+        let rel_err = if fd.abs() > 1e-30 {
+            ((analytic - fd) / fd).abs()
+        } else {
+            (analytic - fd).abs()
+        };
+        assert!(
+            rel_err < 1e-3,
+            "Jacobian at V={v}: analytic={analytic:.6e}, FD={fd:.6e}, err={rel_err:.6e}"
+        );
     }
 }
 
@@ -544,8 +598,10 @@ fn small_signal_linearization() {
         let i_linear = i0 + g0 * delta;
         let rel_err = ((i_exact - i_linear) / i_exact).abs();
         if delta <= 1e-4 {
-            assert!(rel_err < 0.01,
-                "Linearization at delta={delta}: err={rel_err:.6e}");
+            assert!(
+                rel_err < 0.01,
+                "Linearization at delta={delta}: err={rel_err:.6e}"
+            );
         }
     }
 }
@@ -556,8 +612,10 @@ fn bjt_diff_pair_balance() {
     let input = sine_buf(440.0, fs, TEST_LEN * 2, 0.01);
     let output = compile_and_process(BJT_DIFF_PAIR, &input, fs, &[]);
 
-    assert!(output[WARMUP..].iter().all(|x| x.is_finite()),
-        "BJT diff pair: NaN/inf in output");
+    assert!(
+        output[WARMUP..].iter().all(|x| x.is_finite()),
+        "BJT diff pair: NaN/inf in output"
+    );
     let p = peak(&output[WARMUP..]);
     assert!(p < 20.0, "BJT diff pair: output railed (peak={p:.4})");
 }
@@ -578,7 +636,10 @@ fn nr_residual_after_convergence() {}
 fn jfet_variable_resistor_reflection() {
     // Math: Rds at Vgs=-0.5V with Vp=-2, Idss=5mA
     let rds = jfet_rds(-0.5, -2.0, 5e-3);
-    assert!(rds > 0.0 && rds < 1e6, "JFET Rds should be finite positive: {rds}");
+    assert!(
+        rds > 0.0 && rds < 1e6,
+        "JFET Rds should be finite positive: {rds}"
+    );
 
     let rp = 1000.0;
     let gamma = (rds - rp) / (rds + rp);
@@ -589,11 +650,15 @@ fn jfet_variable_resistor_reflection() {
     let input = sine_buf(440.0, fs, TEST_LEN, 0.1);
     let jfet_src = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/test_pedals/jfet_allpass.pedal"),
-    ).expect("jfet_allpass.pedal not found");
+    )
+    .expect("jfet_allpass.pedal not found");
     let output = compile_and_process(&jfet_src, &input, fs, &[]);
     let p = peak(&output[WARMUP..]);
     assert!(p > 1e-6, "JFET allpass silent (peak={p:.8})");
-    assert!(output[WARMUP..].iter().all(|x| x.is_finite()), "JFET allpass: NaN/inf");
+    assert!(
+        output[WARMUP..].iter().all(|x| x.is_finite()),
+        "JFET allpass: NaN/inf"
+    );
 }
 
 #[test]
@@ -603,13 +668,22 @@ fn jfet_rds_vs_vgs() {
 
     // Vgs=0 (fully on): Rds = 1/(2*K*|Vp|) = 1/(2*1.25e-3*2) = 200
     let rds_on = jfet_rds(0.0, vp, idss);
-    assert!((rds_on - 200.0).abs() < 1.0, "Rds(Vgs=0)={rds_on:.1}, expected 200");
+    assert!(
+        (rds_on - 200.0).abs() < 1.0,
+        "Rds(Vgs=0)={rds_on:.1}, expected 200"
+    );
 
     // Vgs=-1 (half on): Rds = 400
     let rds_half = jfet_rds(-1.0, vp, idss);
-    assert!((rds_half - 400.0).abs() < 1.0, "Rds(Vgs=-1)={rds_half:.1}, expected 400");
+    assert!(
+        (rds_half - 400.0).abs() < 1.0,
+        "Rds(Vgs=-1)={rds_half:.1}, expected 400"
+    );
 
-    assert!(rds_half > rds_on, "Rds should increase as Vgs approaches Vp");
+    assert!(
+        rds_half > rds_on,
+        "Rds should increase as Vgs approaches Vp"
+    );
 }
 
 #[test]
@@ -618,14 +692,18 @@ fn ota_linear_regime() {
     let v_small = 0.008;
     let x = v_small / (2.0 * VT);
     let rel_error = ((x.tanh() - x) / x.tanh()).abs();
-    assert!(rel_error < 0.01,
-        "OTA linear error at 8mV = {rel_error:.4}, expected <1%");
+    assert!(
+        rel_error < 0.01,
+        "OTA linear error at 8mV = {rel_error:.4}, expected <1%"
+    );
 
     // At 20mV: should be nonlinear (>1%)
     let x2 = 0.020 / (2.0 * VT);
     let rel_err2 = ((x2.tanh() - x2) / x2.tanh()).abs();
-    assert!(rel_err2 > 0.01,
-        "OTA should be nonlinear at 20mV (err={rel_err2:.4})");
+    assert!(
+        rel_err2 > 0.01,
+        "OTA should be nonlinear at 20mV (err={rel_err2:.4})"
+    );
 }
 
 #[test]
@@ -644,12 +722,20 @@ fn photocoupler_variable_resistance() {
     eprintln!("  [diag] Photocoupler: bright={r_bright:.1}, dim={r_dim:.0}, dark={r_dark:.0}");
 
     // Monotonic: brighter LED → lower LDR resistance
-    assert!(r_bright < r_dim, "Bright should be < dim: {r_bright:.0} vs {r_dim:.0}");
-    assert!(r_dim < r_dark, "Dim should be < dark: {r_dim:.0} vs {r_dark:.0}");
+    assert!(
+        r_bright < r_dim,
+        "Bright should be < dim: {r_bright:.0} vs {r_dim:.0}"
+    );
+    assert!(
+        r_dim < r_dark,
+        "Dim should be < dark: {r_dim:.0} vs {r_dark:.0}"
+    );
 
     // Bright should be orders of magnitude less than dark
-    assert!(r_bright < r_dark * 1e-3,
-        "Bright should be << dark: {r_bright:.1} vs {r_dark:.0}");
+    assert!(
+        r_bright < r_dark * 1e-3,
+        "Bright should be << dark: {r_bright:.1} vs {r_dark:.0}"
+    );
 }
 
 // ===========================================================================
@@ -674,8 +760,10 @@ fn pot_2terminal_filter_sweep() {
     // BUG: Engine may have reversed pot direction or insufficient pot effect.
     // Low pot position → low R → high cutoff → MORE signal passes at 1kHz.
     // High pot position → high R → low cutoff → LESS signal passes at 1kHz.
-    assert!(g_low > g_high,
-        "Pot LPF: low pot should pass more signal: g@0.1={g_low:.4} should > g@0.9={g_high:.4}");
+    assert!(
+        g_low > g_high,
+        "Pot LPF: low pot should pass more signal: g@0.1={g_low:.4} should > g@0.9={g_high:.4}"
+    );
 }
 
 #[test]
@@ -691,7 +779,10 @@ fn deterministic_output() {
 
     assert_eq!(out1.len(), out2.len());
     for (i, (&a, &b)) in out1.iter().zip(out2.iter()).enumerate() {
-        assert!(a.to_bits() == b.to_bits(), "Non-deterministic at sample {i}: {a} != {b}");
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "Non-deterministic at sample {i}: {a} != {b}"
+        );
     }
 }
 
@@ -700,7 +791,11 @@ fn output_bounded() {
     let fs = 48000.0;
     let bound = 10.0;
 
-    for (name, circuit) in [("RC LPF", RC_LOWPASS), ("RC HPF", RC_HIGHPASS), ("Divider", RESISTOR_DIVIDER)] {
+    for (name, circuit) in [
+        ("RC LPF", RC_LOWPASS),
+        ("RC HPF", RC_HIGHPASS),
+        ("Divider", RESISTOR_DIVIDER),
+    ] {
         let input = sine_buf(440.0, fs, TEST_LEN, 1.0);
         let output = compile_and_process(circuit, &input, fs, &[]);
         assert!(output.iter().all(|x| x.is_finite()), "{name}: NaN/inf");
@@ -726,17 +821,27 @@ mod pro_pedals {
     fn pro_pedal_root() -> std::path::PathBuf {
         let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         // pedalkernel crate → pedalkernel repo → workspace root → pedalkernel-pro
-        crate_dir.parent().unwrap().parent().unwrap().join("pedalkernel-pro")
+        crate_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("pedalkernel-pro")
     }
 
     fn find_all_pro_pedals() -> Vec<(String, String, std::path::PathBuf)> {
         let pro_root = pro_pedal_root();
         let search_dirs = [
-            "pedals/patina", "pedals/legends",
-            "pedals/real/chorus", "pedals/real/delay",
-            "pedals/real/phaser", "pedals/real/vibrato",
-            "pedals/real/overdrive", "pedals/real/distortion",
-            "amps", "equipment",
+            "pedals/patina",
+            "pedals/legends",
+            "pedals/real/chorus",
+            "pedals/real/delay",
+            "pedals/real/phaser",
+            "pedals/real/vibrato",
+            "pedals/real/overdrive",
+            "pedals/real/distortion",
+            "amps",
+            "equipment",
         ];
 
         let mut pedals = Vec::new();
@@ -763,7 +868,11 @@ mod pro_pedals {
         let fs = 48000.0;
         let input = sine_buf(440.0, fs, TEST_LEN * 2, 0.1);
         let pedals = find_all_pro_pedals();
-        assert!(!pedals.is_empty(), "No pro pedals found at {}", pro_pedal_root().display());
+        assert!(
+            !pedals.is_empty(),
+            "No pro pedals found at {}",
+            pro_pedal_root().display()
+        );
 
         let mut passed = 0;
         let mut failed = Vec::new();
@@ -771,11 +880,17 @@ mod pro_pedals {
         for (name, src, _) in &pedals {
             let def = match parse_pedal_file(src) {
                 Ok(d) => d,
-                Err(e) => { eprintln!("  [skip] {name}: parse: {e}"); continue; }
+                Err(e) => {
+                    eprintln!("  [skip] {name}: parse: {e}");
+                    continue;
+                }
             };
             let mut proc = match pedalkernel::compiler::compile_pedal(&def, fs) {
                 Ok(p) => p,
-                Err(e) => { eprintln!("  [skip] {name}: compile: {e}"); continue; }
+                Err(e) => {
+                    eprintln!("  [skip] {name}: compile: {e}");
+                    continue;
+                }
             };
             for ctrl in &def.controls {
                 proc.set_control(&ctrl.label, ctrl.default);
@@ -805,10 +920,15 @@ mod pro_pedals {
             }
         }
 
-        eprintln!("\n  === {passed}/{} pro pedals pass signal ===", passed + failed.len());
+        eprintln!(
+            "\n  === {passed}/{} pro pedals pass signal ===",
+            passed + failed.len()
+        );
         let total = passed + failed.len();
-        assert!(passed as f64 / total as f64 > 0.8,
-            "Only {passed}/{total} pro pedals pass signal");
+        assert!(
+            passed as f64 / total as f64 > 0.8,
+            "Only {passed}/{total} pro pedals pass signal"
+        );
     }
 
     #[test]
@@ -825,7 +945,9 @@ mod pro_pedals {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            if def.controls.is_empty() { continue; }
+            if def.controls.is_empty() {
+                continue;
+            }
 
             for ctrl in &def.controls {
                 pots_total += 1;
@@ -836,11 +958,25 @@ mod pro_pedals {
                     (ctrl.range.1 + 0.05, ctrl.range.0 - 0.05)
                 };
 
-                let controls_lo: Vec<(&str, f64)> = def.controls.iter()
-                    .map(|c| (c.label.as_str(), if c.label == ctrl.label { lo } else { c.default }))
+                let controls_lo: Vec<(&str, f64)> = def
+                    .controls
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.label.as_str(),
+                            if c.label == ctrl.label { lo } else { c.default },
+                        )
+                    })
                     .collect();
-                let controls_hi: Vec<(&str, f64)> = def.controls.iter()
-                    .map(|c| (c.label.as_str(), if c.label == ctrl.label { hi } else { c.default }))
+                let controls_hi: Vec<(&str, f64)> = def
+                    .controls
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.label.as_str(),
+                            if c.label == ctrl.label { hi } else { c.default },
+                        )
+                    })
                     .collect();
 
                 // Catch panics from engine bugs
@@ -857,7 +993,10 @@ mod pro_pedals {
                         if corr < 0.999 || dist > 0.01 {
                             pots_changed += 1;
                         }
-                        eprintln!("  [diag] {name}/{}: corr={corr:.4}, dist={dist:.4}", ctrl.label);
+                        eprintln!(
+                            "  [diag] {name}/{}: corr={corr:.4}, dist={dist:.4}",
+                            ctrl.label
+                        );
                     }
                     Err(_) => {
                         eprintln!("  [skip] {name}/{}: panicked", ctrl.label);
@@ -869,8 +1008,11 @@ mod pro_pedals {
         eprintln!("\n  === {pots_changed}/{pots_total} pots affect output ===");
         if pots_total > 0 {
             let ratio = pots_changed as f64 / pots_total as f64;
-            assert!(ratio > 0.99,
-                "Only {pots_changed}/{pots_total} pots affect output ({:.0}%)", ratio * 100.0);
+            assert!(
+                ratio > 0.99,
+                "Only {pots_changed}/{pots_total} pots affect output ({:.0}%)",
+                ratio * 100.0
+            );
         }
     }
 }

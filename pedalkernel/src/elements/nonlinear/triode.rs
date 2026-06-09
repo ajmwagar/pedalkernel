@@ -261,7 +261,10 @@ impl WdfRoot for TriodeRoot {
         let root = *self;
         let v_max = self.v_max;
         let cold = a * 0.5;
-        let v0 = if self.prev_v != 0.0 && (self.prev_v - cold).abs() < v_max && self.prev_v.abs() < v_max {
+        let v0 = if self.prev_v != 0.0
+            && (self.prev_v - cold).abs() < v_max
+            && self.prev_v.abs() < v_max
+        {
             self.prev_v
         } else {
             cold

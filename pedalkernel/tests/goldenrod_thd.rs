@@ -1,7 +1,8 @@
 use pedalkernel::PedalProcessor;
 use std::f64::consts::PI;
 
-const GOLDENROD: &str = include_str!("/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/legends/goldenrod.pedal");
+const GOLDENROD: &str =
+    include_str!("/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/legends/goldenrod.pedal");
 
 #[test]
 fn goldenrod_gain_affects_harmonics() {
@@ -40,7 +41,9 @@ fn goldenrod_gain_affects_harmonics() {
         eprint!("Gain={:.2}: ", gain);
         for h in 1..=8 {
             let bin = fundamental_bin * h;
-            if bin >= n_samples / 2 { break; }
+            if bin >= n_samples / 2 {
+                break;
+            }
 
             let mut re = 0.0;
             let mut im = 0.0;
@@ -77,7 +80,9 @@ fn goldenrod_gain_affects_harmonics() {
     eprintln!("\n--- Engine pot state at Gain=1.0 ---");
     let mut engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
     engine.set_control("Gain", 1.0);
-    for _ in 0..1024 { engine.process(0.0); }
+    for _ in 0..1024 {
+        engine.process(0.0);
+    }
     for (label, target, smoothed) in engine.control_debug_info() {
         eprintln!("  {}: target={:.4} val={:.4}", label, target, smoothed);
     }
@@ -104,7 +109,10 @@ fn goldenrod_gain_affects_harmonics() {
             min_val = min_val.min(y);
             max_val = max_val.max(y);
         }
-        eprintln!("Gain={:.1}: peak={:.4} min={:.4} max={:.4}", gain, peak, min_val, max_val);
+        eprintln!(
+            "Gain={:.1}: peak={:.4} min={:.4} max={:.4}",
+            gain, peak, min_val, max_val
+        );
     }
 
     // Check opamp gain at different pot settings
@@ -112,10 +120,14 @@ fn goldenrod_gain_affects_harmonics() {
     for gain_knob in [0.0, 0.5, 1.0] {
         let mut engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
         engine.set_control("Gain", gain_knob);
-        for _ in 0..512 { engine.process(0.0); }
+        for _ in 0..512 {
+            engine.process(0.0);
+        }
         for (si, g, pot_id) in engine.opamp_debug_info() {
-            eprintln!("  gain_knob={:.1} stage[{}]: opamp_gain={:.2} feedback_pot={:?}",
-                gain_knob, si, g, pot_id);
+            eprintln!(
+                "  gain_knob={:.1} stage[{}]: opamp_gain={:.2} feedback_pot={:?}",
+                gain_knob, si, g, pot_id
+            );
         }
     }
 
@@ -124,7 +136,10 @@ fn goldenrod_gain_affects_harmonics() {
     {
         let engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
         for (i, n_nl, s_adapted, comp, port_r) in engine.multi_nl_debug_info() {
-            eprintln!("  mnl[{}]: n_nl={} compensation={:.4} s_nl_adapted={:.6?} port_R={:.1?}", i, n_nl, comp, s_adapted, port_r);
+            eprintln!(
+                "  mnl[{}]: n_nl={} compensation={:.4} s_nl_adapted={:.6?} port_R={:.1?}",
+                i, n_nl, comp, s_adapted, port_r
+            );
         }
     }
 
@@ -151,17 +166,31 @@ fn goldenrod_gain_affects_harmonics() {
         let mut harm_pow = 0.0;
         for h in 1..=8 {
             let b = bin * h;
-            if b >= n_samples / 2 { break; }
+            if b >= n_samples / 2 {
+                break;
+            }
             let (mut re, mut im) = (0.0, 0.0);
             for (i, &s) in out.iter().enumerate() {
                 let a = 2.0 * PI * b as f64 * i as f64 / n_samples as f64;
-                re += s * a.cos(); im += s * a.sin();
+                re += s * a.cos();
+                im += s * a.sin();
             }
-            let mag = (re*re + im*im).sqrt() / n_samples as f64 * 2.0;
-            if h == 1 { h1_pow = mag*mag; } else { harm_pow += mag*mag; }
+            let mag = (re * re + im * im).sqrt() / n_samples as f64 * 2.0;
+            if h == 1 {
+                h1_pow = mag * mag;
+            } else {
+                harm_pow += mag * mag;
+            }
         }
-        let thd = if h1_pow > 0.0 { (harm_pow/h1_pow).sqrt()*100.0 } else { 0.0 };
-        eprintln!("amp={:.2}: rms={:.4e} peak={:.4e} THD={:.1}%", amp, rms, peak, thd);
+        let thd = if h1_pow > 0.0 {
+            (harm_pow / h1_pow).sqrt() * 100.0
+        } else {
+            0.0
+        };
+        eprintln!(
+            "amp={:.2}: rms={:.4e} peak={:.4e} THD={:.1}%",
+            amp, rms, peak, thd
+        );
     }
 
     // Check v_prev (NR converged voltage) at diode junction
@@ -187,7 +216,9 @@ fn goldenrod_gain_affects_harmonics() {
     eprintln!("\n--- Engine pot state at Gain=0.0 ---");
     let mut engine2 = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
     engine2.set_control("Gain", 0.0);
-    for _ in 0..1024 { engine2.process(0.0); }
+    for _ in 0..1024 {
+        engine2.process(0.0);
+    }
     for (label, target, smoothed) in engine2.control_debug_info() {
         eprintln!("  {}: target={:.4} val={:.4}", label, target, smoothed);
     }
@@ -195,11 +226,15 @@ fn goldenrod_gain_affects_harmonics() {
     // THD should increase with gain
     let thd_low = thd_values[0];
     let thd_high = thd_values[4];
-    eprintln!("\nTHD at gain=0: {:.1}%, THD at gain=1: {:.1}%", thd_low, thd_high);
+    eprintln!(
+        "\nTHD at gain=0: {:.1}%, THD at gain=1: {:.1}%",
+        thd_low, thd_high
+    );
     assert!(
         thd_high > thd_low * 1.5,
         "Gain pot should increase THD: low={:.1}%, high={:.1}%",
-        thd_low, thd_high
+        thd_low,
+        thd_high
     );
 }
 
@@ -234,7 +269,10 @@ fn goldenrod_fft_spectrum() {
         let fundamental_bin = (freq * n_samples as f64 / sr).round() as usize;
         let max_harmonic = (sr / 2.0 / freq).floor() as usize;
 
-        eprintln!("\n=== Gain={:.1} — Harmonic spectrum (440Hz fundamental) ===", gain);
+        eprintln!(
+            "\n=== Gain={:.1} — Harmonic spectrum (440Hz fundamental) ===",
+            gain
+        );
         eprintln!("{:<6} {:<10} {:<10} {:<10}", "H#", "Freq(Hz)", "Mag", "dB");
 
         let mut noise_floor = 0.0f64;
@@ -244,7 +282,9 @@ fn goldenrod_fft_spectrum() {
 
         for h in 1..=max_harmonic.min(20) {
             let bin = fundamental_bin * h;
-            if bin >= n_samples / 2 { break; }
+            if bin >= n_samples / 2 {
+                break;
+            }
 
             let mut re = 0.0;
             let mut im = 0.0;
@@ -254,7 +294,11 @@ fn goldenrod_fft_spectrum() {
                 im += s * angle.sin();
             }
             let mag = (re * re + im * im).sqrt() / n_samples as f64 * 2.0;
-            let db = if mag > 1e-12 { 20.0 * (mag).log10() } else { -240.0 };
+            let db = if mag > 1e-12 {
+                20.0 * (mag).log10()
+            } else {
+                -240.0
+            };
 
             if h == 1 {
                 fundamental_mag = mag;
@@ -263,22 +307,36 @@ fn goldenrod_fft_spectrum() {
             }
 
             // Count harmonics above -60dB relative to fundamental
-            let rel_db = if fundamental_mag > 1e-12 { 20.0 * (mag / fundamental_mag).log10() } else { -240.0 };
+            let rel_db = if fundamental_mag > 1e-12 {
+                20.0 * (mag / fundamental_mag).log10()
+            } else {
+                -240.0
+            };
             if h > 1 && rel_db > -60.0 {
                 harmonics_above_noise += 1;
             }
 
             if mag > 1e-6 {
-                eprintln!("{:<6} {:<10.0} {:<10.4e} {:<10.1}", 
-                    format!("H{}", h), h as f64 * freq, mag, db);
+                eprintln!(
+                    "{:<6} {:<10.0} {:<10.4e} {:<10.1}",
+                    format!("H{}", h),
+                    h as f64 * freq,
+                    mag,
+                    db
+                );
             }
         }
 
         let thd = if fundamental_mag > 0.0 {
             (total_harmonic_power / (fundamental_mag * fundamental_mag)).sqrt() * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
-        eprintln!("--- Summary: {} harmonics above -60dB, THD={:.1}% ---", harmonics_above_noise, thd);
+        eprintln!(
+            "--- Summary: {} harmonics above -60dB, THD={:.1}% ---",
+            harmonics_above_noise, thd
+        );
     }
 }
 
@@ -290,7 +348,10 @@ fn goldenrod_gain_at_different_input_levels() {
     let n_samples = 4096;
 
     eprintln!("\n=== Input level vs Gain pot THD response ===");
-    eprintln!("{:<12} {:<12} {:<12} {:<10}", "Input(dBFS)", "Gain=0 THD", "Gain=1 THD", "Ratio");
+    eprintln!(
+        "{:<12} {:<12} {:<12} {:<10}",
+        "Input(dBFS)", "Gain=0 THD", "Gain=1 THD", "Ratio"
+    );
 
     for db in [-40.0, -30.0, -20.0, -12.0, -6.0, 0.0] {
         let amplitude = 10.0_f64.powf(db / 20.0);
@@ -314,22 +375,40 @@ fn goldenrod_gain_at_different_input_levels() {
             let mut harm_pow = 0.0;
             for h in 1..=8 {
                 let b = bin * h;
-                if b >= n_samples / 2 { break; }
+                if b >= n_samples / 2 {
+                    break;
+                }
                 let (mut re, mut im) = (0.0, 0.0);
                 for (i, &s) in output.iter().enumerate() {
                     let a = 2.0 * PI * b as f64 * i as f64 / n_samples as f64;
-                    re += s * a.cos(); im += s * a.sin();
+                    re += s * a.cos();
+                    im += s * a.sin();
                 }
-                let mag = (re*re + im*im).sqrt() / n_samples as f64 * 2.0;
-                if h == 1 { h1_pow = mag*mag; } else { harm_pow += mag*mag; }
+                let mag = (re * re + im * im).sqrt() / n_samples as f64 * 2.0;
+                if h == 1 {
+                    h1_pow = mag * mag;
+                } else {
+                    harm_pow += mag * mag;
+                }
             }
-            if h1_pow > 0.0 { (harm_pow/h1_pow).sqrt()*100.0 } else { 0.0 }
+            if h1_pow > 0.0 {
+                (harm_pow / h1_pow).sqrt() * 100.0
+            } else {
+                0.0
+            }
         };
 
         let thd_low = thd_at(0.0);
         let thd_high = thd_at(1.0);
-        let ratio = if thd_low > 0.1 { thd_high / thd_low } else { f64::INFINITY };
-        eprintln!("{:<12.0} {:<12.1}% {:<12.1}% {:<10.1}x", db, thd_low, thd_high, ratio);
+        let ratio = if thd_low > 0.1 {
+            thd_high / thd_low
+        } else {
+            f64::INFINITY
+        };
+        eprintln!(
+            "{:<12.0} {:<12.1}% {:<12.1}% {:<10.1}x",
+            db, thd_low, thd_high, ratio
+        );
     }
 }
 
@@ -364,26 +443,44 @@ fn goldenrod_calibrated_pre_gain() {
         let mut harm_pow = 0.0;
         for h in 1..=8 {
             let b = bin * h;
-            if b >= n_samples / 2 { break; }
+            if b >= n_samples / 2 {
+                break;
+            }
             let (mut re, mut im) = (0.0, 0.0);
             for (i, &s) in output.iter().enumerate() {
                 let a = 2.0 * PI * b as f64 * i as f64 / n_samples as f64;
-                re += s * a.cos(); im += s * a.sin();
+                re += s * a.cos();
+                im += s * a.sin();
             }
-            let mag = (re*re + im*im).sqrt() / n_samples as f64 * 2.0;
-            if h == 1 { h1_pow = mag*mag; } else { harm_pow += mag*mag; }
+            let mag = (re * re + im * im).sqrt() / n_samples as f64 * 2.0;
+            if h == 1 {
+                h1_pow = mag * mag;
+            } else {
+                harm_pow += mag * mag;
+            }
         }
-        if h1_pow > 0.0 { (harm_pow/h1_pow).sqrt()*100.0 } else { 0.0 }
+        if h1_pow > 0.0 {
+            (harm_pow / h1_pow).sqrt() * 100.0
+        } else {
+            0.0
+        }
     };
 
     let thd_low = thd_at(0.0);
     let thd_high = thd_at(1.0);
-    eprintln!("Calibrated @ 0dBFS: Gain=0 THD={:.1}%, Gain=1 THD={:.1}%, ratio={:.1}x",
-        thd_low, thd_high, thd_high / thd_low.max(0.1));
+    eprintln!(
+        "Calibrated @ 0dBFS: Gain=0 THD={:.1}%, Gain=1 THD={:.1}%, ratio={:.1}x",
+        thd_low,
+        thd_high,
+        thd_high / thd_low.max(0.1)
+    );
 
-    assert!(thd_high > thd_low * 2.0,
+    assert!(
+        thd_high > thd_low * 2.0,
         "After calibration, gain pot should still affect THD at 0dBFS: low={:.1}% high={:.1}%",
-        thd_low, thd_high);
+        thd_low,
+        thd_high
+    );
 }
 
 #[test]
@@ -391,21 +488,25 @@ fn goldenrod_treble_topology_debug() {
     let src = GOLDENROD;
     let pedal = pedalkernel::dsl::parse_pedal_file(src).expect("parse");
     let sr = 48000.0;
-    
+
     // Compile and check what opamp stages were created
     let engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
-    
+
     eprintln!("=== Opamp stages ===");
     for (si, g, pot_id) in engine.opamp_debug_info() {
         eprintln!("  stage[{}]: gain={:.2} feedback_pot={:?}", si, g, pot_id);
     }
-    
+
     // The treble pot should be a feedback pot on one of the stages
-    let has_treble = engine.opamp_debug_info().iter().any(|(_, _, pot)| {
-        pot.as_ref().map_or(false, |p| p.contains("Treble"))
-    });
+    let has_treble = engine
+        .opamp_debug_info()
+        .iter()
+        .any(|(_, _, pot)| pot.as_ref().map_or(false, |p| p.contains("Treble")));
     eprintln!("Has Treble feedback pot: {}", has_treble);
-    assert!(has_treble, "Treble pot should be detected as a feedback pot on U4's stage");
+    assert!(
+        has_treble,
+        "Treble pot should be detected as a feedback pot on U4's stage"
+    );
 }
 
 #[test]
@@ -437,10 +538,18 @@ fn goldenrod_treble_changes_spectrum() {
     let dark = rms_at(0.0);
     let bright = rms_at(1.0);
     let ratio_db = 20.0 * (bright / dark).log10();
-    eprintln!("Treble sweep at 10kHz: dark={:.6}, bright={:.6}, ratio={:.3}x, dB={:.2}",
-        dark, bright, bright / dark, ratio_db);
-    assert!(ratio_db.abs() > 1.0,
-        "Treble should affect 10kHz by ≥1dB, got {:.2}dB", ratio_db);
+    eprintln!(
+        "Treble sweep at 10kHz: dark={:.6}, bright={:.6}, ratio={:.3}x, dB={:.2}",
+        dark,
+        bright,
+        bright / dark,
+        ratio_db
+    );
+    assert!(
+        ratio_db.abs() > 1.0,
+        "Treble should affect 10kHz by ≥1dB, got {:.2}dB",
+        ratio_db
+    );
 }
 
 #[test]
@@ -448,14 +557,23 @@ fn goldenrod_tone_iir_unit_test() {
     // Directly test ToneFeedback IIR with known parameters
     // Klon: rf=1.8k, ri=1.8k, c_tone=3.9nF, r_shelf=4.7k, max_pot_r=10k
     use pedalkernel::compiler::stage_test_helpers::ToneFeedback;
-    
+
     let sr = 48000.0;
     let freq = 10000.0;
     let n = 4096;
-    
+
     for pot_pos in [0.0, 0.5, 1.0] {
-        let mut tf = ToneFeedback::new(1800.0, 1800.0, 3.9e-9, 4700.0, 10000.0, "Treble".into(), sr, pot_pos);
-        
+        let mut tf = ToneFeedback::new(
+            1800.0,
+            1800.0,
+            3.9e-9,
+            4700.0,
+            10000.0,
+            "Treble".into(),
+            sr,
+            pot_pos,
+        );
+
         // Warm up
         for i in 0..1024 {
             let x = 0.1 * (2.0 * PI * freq * i as f64 / sr).sin();
@@ -469,7 +587,9 @@ fn goldenrod_tone_iir_unit_test() {
             sum_sq += y * y;
         }
         let rms = (sum_sq / n as f64).sqrt();
-        eprintln!("ToneFeedback pot={:.1}: rms={:.6} b0={:.6} b1={:.6} a1={:.6} dc_gain={:.6}", 
-            pot_pos, rms, tf.b0, tf.b1, tf.a1, tf.dc_gain);
+        eprintln!(
+            "ToneFeedback pot={:.1}: rms={:.6} b0={:.6} b1={:.6} a1={:.6} dc_gain={:.6}",
+            pot_pos, rms, tf.b0, tf.b1, tf.a1, tf.dc_gain
+        );
     }
 }

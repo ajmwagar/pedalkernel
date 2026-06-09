@@ -181,16 +181,14 @@ impl LayoutGraph {
 
     /// Check if a node is an active device (tube, transistor, op-amp).
     pub fn is_active_device(&self, node_id: usize) -> bool {
-        self.node_kind(node_id).map_or(false, |k| {
-            k.is_gain_device() || k.op_amp_type().is_some()
-        })
+        self.node_kind(node_id)
+            .map_or(false, |k| k.is_gain_device() || k.op_amp_type().is_some())
     }
 
     /// Check if a component is a simple passive (R, C, L — not pot/transformer).
     pub fn is_passive(&self, node_id: usize) -> bool {
-        self.node_kind(node_id).map_or(false, |k| {
-            k.is_simple_passive() && !k.is_pot()
-        })
+        self.node_kind(node_id)
+            .map_or(false, |k| k.is_simple_passive() && !k.is_pot())
     }
 }
 
@@ -485,7 +483,9 @@ mod tests {
                 },
                 ComponentDef {
                     id: "C1".into(),
-                    kind: Box::new(Capacitor { config: CapConfig::new(100e-9) }),
+                    kind: Box::new(Capacitor {
+                        config: CapConfig::new(100e-9),
+                    }),
                 },
             ],
             nets: vec![
@@ -540,7 +540,9 @@ mod tests {
 
     #[test]
     fn pin_direction_triode() {
-        let triode = Triode { model: "12AX7".into() };
+        let triode = Triode {
+            model: "12AX7".into(),
+        };
         assert_eq!(triode.pin_direction("grid"), PinDirection::Input);
         assert_eq!(triode.pin_direction("plate"), PinDirection::Output);
         assert_eq!(triode.pin_direction("cathode"), PinDirection::Down);
@@ -548,7 +550,9 @@ mod tests {
 
     #[test]
     fn pin_direction_opamp() {
-        let opamp = OpAmp { op_type: OpAmpType::Jrc4558 };
+        let opamp = OpAmp {
+            op_type: OpAmpType::Jrc4558,
+        };
         assert_eq!(opamp.pin_direction("pos"), PinDirection::Input);
         assert_eq!(opamp.pin_direction("out"), PinDirection::Output);
     }

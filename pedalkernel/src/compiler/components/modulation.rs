@@ -26,9 +26,13 @@ pub struct Lfo {
 impl Component for Lfo {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "LFO" }
+    fn type_tag(&self) -> &'static str {
+        "LFO"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -78,17 +82,31 @@ impl Component for Lfo {
 
     fn controls(&self) -> Vec<ControlParam> {
         vec![
-            ControlParam { name: "rate", kind: ControlParamKind::LfoRate },
-            ControlParam { name: "depth", kind: ControlParamKind::LfoDepth },
+            ControlParam {
+                name: "rate",
+                kind: ControlParamKind::LfoRate,
+            },
+            ControlParam {
+                name: "depth",
+                kind: ControlParamKind::LfoDepth,
+            },
         ]
     }
 
-    fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "LFO") }
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        ("", "LFO")
+    }
 
-    fn symbol_name(&self) -> &'static str { "lfo" }
-    fn layout_class(&self) -> &'static str { "lfo" }
+    fn symbol_name(&self) -> &'static str {
+        "lfo"
+    }
+    fn layout_class(&self) -> &'static str {
+        "lfo"
+    }
 
-    fn is_modulation_source(&self) -> bool { true }
+    fn is_modulation_source(&self) -> bool {
+        true
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -107,9 +125,13 @@ pub struct EnvelopeFollower {
 impl Component for EnvelopeFollower {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "envelope follower" }
+    fn type_tag(&self) -> &'static str {
+        "envelope follower"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -152,12 +174,20 @@ impl Component for EnvelopeFollower {
         w
     }
 
-    fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "ENV") }
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        ("", "ENV")
+    }
 
-    fn symbol_name(&self) -> &'static str { "envelope" }
-    fn layout_class(&self) -> &'static str { "envelope" }
+    fn symbol_name(&self) -> &'static str {
+        "envelope"
+    }
+    fn layout_class(&self) -> &'static str {
+        "envelope"
+    }
 
-    fn is_modulation_source(&self) -> bool { true }
+    fn is_modulation_source(&self) -> bool {
+        true
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -172,9 +202,13 @@ pub struct PhotocouplerComp {
 impl Component for PhotocouplerComp {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "photocoupler" }
+    fn type_tag(&self) -> &'static str {
+        "photocoupler"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -183,10 +217,15 @@ impl Component for PhotocouplerComp {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["led"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["led"]
+    }
 
     fn graph_role(&self) -> GraphRole {
-        GraphRole::Edge { pin_a: "a", pin_b: "b" }
+        GraphRole::Edge {
+            pin_a: "a",
+            pin_b: "b",
+        }
     }
 
     fn stamp_mna(
@@ -207,13 +246,23 @@ impl Component for PhotocouplerComp {
             PhotocouplerType::Nsl32 => PhotocouplerModel::nsl32(),
             PhotocouplerType::T4b => PhotocouplerModel::t4b(),
         };
-        Some(DynNode::PhotocouplerNode(comp_id.to_string(), PhotocouplerElem::new(model, sample_rate)))
+        Some(DynNode::PhotocouplerNode(
+            comp_id.to_string(),
+            PhotocouplerElem::new(model, sample_rate),
+        ))
     }
 
-    fn is_variable(&self) -> bool { true }
+    fn is_variable(&self) -> bool {
+        true
+    }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "a", pin_b: "b", kind: EdgeKind::Linear, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "a",
+            pin_b: "b",
+            kind: EdgeKind::Linear,
+            port_group: None,
+        }]
     }
 
     fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
@@ -227,8 +276,14 @@ impl Component for PhotocouplerComp {
         }
     }
 
-    fn footprint_ref(&self) -> (&'static str, &'static str) { ("Isolator:PC817", "OC") }
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        ("Isolator:PC817", "OC")
+    }
 
-    fn symbol_name(&self) -> &'static str { "photocoupler" }
-    fn layout_class(&self) -> &'static str { "photocoupler" }
+    fn symbol_name(&self) -> &'static str {
+        "photocoupler"
+    }
+    fn layout_class(&self) -> &'static str {
+        "photocoupler"
+    }
 }

@@ -231,9 +231,8 @@ fn check_pin_validity(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
     // Modulation target pins are valid on specific component types even though
     // they're not circuit pins (they're resolved during binding, not graph building).
-    let is_valid_modulation_pin = |kind: &dyn Component, pin: &str| -> bool {
-        kind.modulation_pins().contains(&pin)
-    };
+    let is_valid_modulation_pin =
+        |kind: &dyn Component, pin: &str| -> bool { kind.modulation_pins().contains(&pin) };
 
     let check_pin = |pin: &Pin, w: &mut Vec<PedalWarning>| {
         if let Pin::ComponentPin { component, pin } = pin {
@@ -279,11 +278,7 @@ fn check_transformer_pins(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     let transformers: HashMap<&str, &TransformerConfig> = pedal
         .components
         .iter()
-        .filter_map(|c| {
-            c.kind
-                .transformer_config()
-                .map(|cfg| (c.id.as_str(), cfg))
-        })
+        .filter_map(|c| c.kind.transformer_config().map(|cfg| (c.id.as_str(), cfg)))
         .collect();
 
     if transformers.is_empty() {
@@ -296,7 +291,14 @@ fn check_transformer_pins(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
     // Pins that require a tertiary winding.
     const TERTIARY_PINS: &[&str] = &[
-        "e", "f", "tertiary.a", "tertiary.b", "ter.a", "ter.b", "ter_a", "ter_b",
+        "e",
+        "f",
+        "tertiary.a",
+        "tertiary.b",
+        "ter.a",
+        "ter.b",
+        "ter_a",
+        "ter_b",
     ];
 
     let check_pin = |pin: &Pin, w: &mut Vec<PedalWarning>| {
@@ -306,7 +308,10 @@ fn check_transformer_pins(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 
                 // Center-tap on primary
                 if PRIMARY_CT_PINS.contains(&pin_str)
-                    && !matches!(cfg.primary_type, WindingType::CenterTap | WindingType::PushPull)
+                    && !matches!(
+                        cfg.primary_type,
+                        WindingType::CenterTap | WindingType::PushPull
+                    )
                 {
                     w.push(PedalWarning {
                         severity: Severity::Error,
@@ -315,15 +320,17 @@ fn check_transformer_pins(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                             "'{}.{}' requires a center-tap or push-pull primary, \
                              but {} has a standard primary winding. \
                              Use transformer({}, {}, ct_primary) to add a center tap.",
-                            component, pin, component,
-                            cfg.turns_ratio, cfg.primary_inductance,
+                            component, pin, component, cfg.turns_ratio, cfg.primary_inductance,
                         ),
                     });
                 }
 
                 // Center-tap on secondary
                 if SECONDARY_CT_PINS.contains(&pin_str)
-                    && !matches!(cfg.secondary_type, WindingType::CenterTap | WindingType::PushPull)
+                    && !matches!(
+                        cfg.secondary_type,
+                        WindingType::CenterTap | WindingType::PushPull
+                    )
                 {
                     w.push(PedalWarning {
                         severity: Severity::Error,
@@ -332,8 +339,7 @@ fn check_transformer_pins(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                             "'{}.{}' requires a center-tap secondary, \
                              but {} has a standard secondary winding. \
                              Use transformer({}, {}, ct_secondary) to add a center tap.",
-                            component, pin, component,
-                            cfg.turns_ratio, cfg.primary_inductance,
+                            component, pin, component, cfg.turns_ratio, cfg.primary_inductance,
                         ),
                     });
                 }
@@ -347,8 +353,7 @@ fn check_transformer_pins(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                             "'{}.{}' references a tertiary winding, \
                              but {} is a 2-winding transformer. \
                              Add a tertiary turns ratio: transformer({}, {}, tertiary=N)",
-                            component, pin, component,
-                            cfg.turns_ratio, cfg.primary_inductance,
+                            component, pin, component, cfg.turns_ratio, cfg.primary_inductance,
                         ),
                     });
                 }
@@ -425,10 +430,7 @@ fn check_orphaned_components(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
 fn check_signal_path(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
     // Synths (circuits with VCOs) generate their own signal — they don't need
     // an in → out path since audio originates from the oscillator.
-    let is_synth = pedal
-        .components
-        .iter()
-        .any(|c| c.kind.type_tag() == "VCO");
+    let is_synth = pedal.components.iter().any(|c| c.kind.type_tag() == "VCO");
     if is_synth {
         return;
     }
@@ -524,10 +526,7 @@ fn check_controls(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                 code: "unusual-control-target",
                 message: format!(
                     "{} entry '{}' targets '{}' which is a {:?} — expected a pot or switch",
-                    section,
-                    ctrl.label,
-                    ctrl.component,
-                    tag
+                    section, ctrl.label, ctrl.component, tag
                 ),
             });
         }
@@ -664,11 +663,9 @@ fn check_modulation_targets(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
                                 // probably intended a modulation binding.
                                 let tag = target_kind.type_tag();
                                 let target_is_pot = tag == "potentiometer";
-                                let target_is_passive = matches!(tag, "resistor" | "capacitor" | "inductor");
-                                if !target_is_pot
-                                    && !target_is_passive
-                                    && tag != "LFO"
-                                {
+                                let target_is_passive =
+                                    matches!(tag, "resistor" | "capacitor" | "inductor");
+                                if !target_is_pot && !target_is_passive && tag != "LFO" {
                                     // Connecting a modulation source to a non-passive, non-pot
                                     // component's generic pin is suspicious
                                     w.push(PedalWarning {
@@ -952,40 +949,37 @@ fn check_model_names(pedal: &PedalDef, w: &mut Vec<PedalWarning>) {
             None => continue,
         };
 
-        let (kind_label, lookup, all_names): (
-            &str,
-            fn(&str) -> bool,
-            fn() -> Vec<&'static str>,
-        ) = if kind.is_bjt() {
-            (
-                "BJT",
-                |n| models::bjt_by_name(n).is_some(),
-                models::bjt_model_names,
-            )
-        } else if kind.is_jfet() {
-            (
-                "JFET",
-                |n| models::jfet_by_name(n).is_some(),
-                models::jfet_model_names,
-            )
-        } else if kind.is_tube() {
-            // Distinguish pentode vs triode/varimu for the correct model registry
-            if kind.type_tag() == "pentode" {
+        let (kind_label, lookup, all_names): (&str, fn(&str) -> bool, fn() -> Vec<&'static str>) =
+            if kind.is_bjt() {
                 (
-                    "pentode",
-                    |n| models::pentode_by_name(n).is_some(),
-                    models::pentode_model_names,
+                    "BJT",
+                    |n| models::bjt_by_name(n).is_some(),
+                    models::bjt_model_names,
                 )
+            } else if kind.is_jfet() {
+                (
+                    "JFET",
+                    |n| models::jfet_by_name(n).is_some(),
+                    models::jfet_model_names,
+                )
+            } else if kind.is_tube() {
+                // Distinguish pentode vs triode/varimu for the correct model registry
+                if kind.type_tag() == "pentode" {
+                    (
+                        "pentode",
+                        |n| models::pentode_by_name(n).is_some(),
+                        models::pentode_model_names,
+                    )
+                } else {
+                    (
+                        "triode",
+                        |n| models::triode_by_name(n).is_some(),
+                        models::triode_model_names,
+                    )
+                }
             } else {
-                (
-                    "triode",
-                    |n| models::triode_by_name(n).is_some(),
-                    models::triode_model_names,
-                )
-            }
-        } else {
-            continue;
-        };
+                continue;
+            };
 
         if !lookup(name) {
             let available = all_names();
@@ -1209,7 +1203,9 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "C1".to_string(),
-            kind: Box::new(Capacitor { config: CapConfig::new(100.0) }), // 100 F!
+            kind: Box::new(Capacitor {
+                config: CapConfig::new(100.0),
+            }), // 100 F!
         });
         // Wire it in
         pedal.nets.push(NetDef {
@@ -1327,7 +1323,10 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Vol".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1352,11 +1351,18 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "LFO1".to_string(),
-            kind: Box::new(Lfo { waveform: LfoWaveformDsl::Triangle, timing_r: 150_000.0, timing_c: 1e-6 }),
+            kind: Box::new(Lfo {
+                waveform: LfoWaveformDsl::Triangle,
+                timing_r: 150_000.0,
+                timing_c: 1e-6,
+            }),
         });
         pedal.components.push(ComponentDef {
             id: "Depth".to_string(),
-            kind: Box::new(Potentiometer { max_r: 50_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 50_000.0,
+                taper: PotTaper::B,
+            }),
         });
         // LFO1.out -> Depth.a — this is a passive connection, not a modulation target
         // The compiler silently skips it at line 1409
@@ -1383,7 +1389,11 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "LFO1".to_string(),
-            kind: Box::new(Lfo { waveform: LfoWaveformDsl::Sine, timing_r: 100_000.0, timing_c: 1e-6 }),
+            kind: Box::new(Lfo {
+                waveform: LfoWaveformDsl::Sine,
+                timing_r: 100_000.0,
+                timing_c: 1e-6,
+            }),
         });
         // LFO1.out -> R1.vgs — resistors don't have vgs
         pedal.nets.push(NetDef {
@@ -1409,11 +1419,17 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "LFO1".to_string(),
-            kind: Box::new(Lfo { waveform: LfoWaveformDsl::Triangle, timing_r: 1_000_000.0, timing_c: 220e-9 }),
+            kind: Box::new(Lfo {
+                waveform: LfoWaveformDsl::Triangle,
+                timing_r: 1_000_000.0,
+                timing_c: 220e-9,
+            }),
         });
         pedal.components.push(ComponentDef {
             id: "J1".to_string(),
-            kind: Box::new(NJfet { model: "2N5952".to_string() }),
+            kind: Box::new(NJfet {
+                model: "2N5952".to_string(),
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1457,11 +1473,18 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "LFO1".to_string(),
-            kind: Box::new(Lfo { waveform: LfoWaveformDsl::Triangle, timing_r: 150_000.0, timing_c: 1e-6 }),
+            kind: Box::new(Lfo {
+                waveform: LfoWaveformDsl::Triangle,
+                timing_r: 150_000.0,
+                timing_c: 1e-6,
+            }),
         });
         pedal.components.push(ComponentDef {
             id: "Depth".to_string(),
-            kind: Box::new(Potentiometer { max_r: 50_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 50_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1490,11 +1513,17 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "P1".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.components.push(ComponentDef {
             id: "P2".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1637,7 +1666,9 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Q1".to_string(),
-            kind: Box::new(Npn { model: "2N3904".to_string() }),
+            kind: Box::new(Npn {
+                model: "2N3904".to_string(),
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1673,7 +1704,9 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Q1".to_string(),
-            kind: Box::new(Npn { model: "2N3904X".to_string() }),
+            kind: Box::new(Npn {
+                model: "2N3904X".to_string(),
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1716,7 +1749,9 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "V1".to_string(),
-            kind: Box::new(Triode { model: "12AX7".to_string() }),
+            kind: Box::new(Triode {
+                model: "12AX7".to_string(),
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1745,7 +1780,9 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "J1".to_string(),
-            kind: Box::new(NJfet { model: "NOTREAL".to_string() }),
+            kind: Box::new(NJfet {
+                model: "NOTREAL".to_string(),
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1773,7 +1810,9 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "V1".to_string(),
-            kind: Box::new(Pentode { model: "FAKETUBE".to_string() }),
+            kind: Box::new(Pentode {
+                model: "FAKETUBE".to_string(),
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1821,11 +1860,17 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "Gain_A".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.components.push(ComponentDef {
             id: "Gain_B".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         // Wire pots into the circuit
         pedal.nets.push(NetDef {
@@ -1870,7 +1915,10 @@ mod tests {
             .insert("Gain_B".to_string(), "NONEXISTENT".to_string());
         pedal.components.push(ComponentDef {
             id: "Gain_B".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1890,7 +1938,10 @@ mod tests {
         pedal.mirrors.insert("P1".to_string(), "R1".to_string());
         pedal.components.push(ComponentDef {
             id: "P1".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1909,7 +1960,10 @@ mod tests {
         // Add a third pot that mirrors Gain_B (which itself mirrors Gain_A)
         pedal.components.push(ComponentDef {
             id: "Gain_C".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {
@@ -1945,11 +1999,17 @@ mod tests {
         let mut pedal = minimal_pedal();
         pedal.components.push(ComponentDef {
             id: "P_A".to_string(),
-            kind: Box::new(Potentiometer { max_r: 100_000.0, taper: PotTaper::B }),
+            kind: Box::new(Potentiometer {
+                max_r: 100_000.0,
+                taper: PotTaper::B,
+            }),
         });
         pedal.components.push(ComponentDef {
             id: "P_B".to_string(),
-            kind: Box::new(Potentiometer { max_r: 50_000.0, taper: PotTaper::B }), // different!
+            kind: Box::new(Potentiometer {
+                max_r: 50_000.0,
+                taper: PotTaper::B,
+            }), // different!
         });
         pedal.nets.push(NetDef {
             from: Pin::ComponentPin {

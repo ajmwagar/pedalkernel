@@ -26,10 +26,7 @@ pub enum StampResult {
     /// Stamped conductance directly into G matrix (resistors, tempcos, switched resistors).
     Stamped,
     /// Produces a reactive WDF port (capacitor, inductor, switched cap/inductor).
-    Reactive {
-        dyn_node: DynNode,
-        rp: f64,
-    },
+    Reactive { dyn_node: DynNode, rp: f64 },
     /// Produces a pot entry for dynamic recomputation.
     Pot {
         dyn_node: DynNode,
@@ -229,17 +226,25 @@ pub trait Component: std::fmt::Debug {
     fn is_passive(&self) -> bool;
 
     /// Whether this component is a nonlinear element (needs NR solver).
-    fn is_nonlinear(&self) -> bool { false }
+    fn is_nonlinear(&self) -> bool {
+        false
+    }
 
     /// Whether this component is an active IC (counted toward `num_active`).
-    fn is_active_ic(&self) -> bool { false }
+    fn is_active_ic(&self) -> bool {
+        false
+    }
 
     /// Whether this component is a control-only element (no circuit pins).
-    fn is_control_only(&self) -> bool { false }
+    fn is_control_only(&self) -> bool {
+        false
+    }
 
     /// Whether this component's edge impedance changes at runtime.
     /// Stages containing variable edges need scattering matrix recomputation.
-    fn is_variable(&self) -> bool { false }
+    fn is_variable(&self) -> bool {
+        false
+    }
 
     // ── Pin Interface ─────────────────────────────────────────────────────
 
@@ -247,7 +252,9 @@ pub trait Component: std::fmt::Debug {
     fn pin_config(&self) -> PinConfig;
 
     /// Extra pins that are valid as modulation targets but may not be in `pin_config`.
-    fn modulation_pins(&self) -> &'static [&'static str] { &[] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     // ── Graph Building ────────────────────────────────────────────────────
 
@@ -258,7 +265,9 @@ pub trait Component: std::fmt::Debug {
     ///
     /// Returns empty for Virtual/ActiveIc components (no WDF topology participation).
     /// The planner uses these edges to group components into stages by EdgeKind.
-    fn edges(&self) -> Vec<ComponentEdge> { vec![] }
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![]
+    }
 
     /// Internal signal-path adjacencies: pin pairs that signal can traverse through.
     ///
@@ -283,7 +292,9 @@ pub trait Component: std::fmt::Debug {
     ///
     /// Used by the layout engine to determine directed graph edges.
     /// Default: `Bidirectional` for all pins.
-    fn pin_direction(&self, _pin: &str) -> PinDirection { PinDirection::Bidirectional }
+    fn pin_direction(&self, _pin: &str) -> PinDirection {
+        PinDirection::Bidirectional
+    }
 
     /// Context-dependent resolution: if this component's behavior depends on
     /// how it's wired, return a new edge list reflecting the resolved role.
@@ -318,18 +329,28 @@ pub trait Component: std::fmt::Debug {
 
     /// Create a WDF leaf node for this component.
     /// Returns `None` for non-leaf components (diodes, virtual elements, etc.).
-    fn make_leaf(&self, _comp_id: &str, _sample_rate: f64) -> Option<DynNode> { None }
+    fn make_leaf(&self, _comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+        None
+    }
 
     // ── Value Access ──────────────────────────────────────────────────────
 
-    fn resistance(&self) -> Option<f64> { None }
-    fn capacitance(&self) -> Option<f64> { None }
-    fn inductance(&self) -> Option<f64> { None }
+    fn resistance(&self) -> Option<f64> {
+        None
+    }
+    fn capacitance(&self) -> Option<f64> {
+        None
+    }
+    fn inductance(&self) -> Option<f64> {
+        None
+    }
 
     // ── Validation ────────────────────────────────────────────────────────
 
     /// Check for suspicious or invalid component values.
-    fn validate_values(&self, _comp_id: &str) -> Vec<(Severity, String)> { vec![] }
+    fn validate_values(&self, _comp_id: &str) -> Vec<(Severity, String)> {
+        vec![]
+    }
 
     // ── Classification (detailed) ────────────────────────────────────────
 
@@ -358,13 +379,17 @@ pub trait Component: std::fmt::Debug {
     ///
     /// The compiler matches `ControlDef.property` against each param's `name`
     /// to determine the control target without heuristic net scanning.
-    fn controls(&self) -> Vec<ControlParam> { vec![] }
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![]
+    }
 
     /// If this component can be a modulation sink (LFO/envelope target),
     /// return the sink description for the given pin.
     ///
     /// Called during LFO/envelope binding to determine bias and range.
-    fn modulation_sink(&self, _pin: &str) -> Option<ModulationSink> { None }
+    fn modulation_sink(&self, _pin: &str) -> Option<ModulationSink> {
+        None
+    }
 
     // ── Hardware ──────────────────────────────────────────────────────────
 
@@ -374,42 +399,80 @@ pub trait Component: std::fmt::Debug {
     // ── Classification (family booleans) ─────────────────────────────────
     // Default: false. Override in concrete structs that belong to each family.
 
-    fn is_modulation_source(&self) -> bool { false }
-    fn is_bjt(&self) -> bool { false }
-    fn is_jfet(&self) -> bool { false }
-    fn is_mosfet(&self) -> bool { false }
-    fn is_tube(&self) -> bool { false }
-    fn is_transformer(&self) -> bool { false }
-    fn is_pot(&self) -> bool { false }
-    fn is_diode_family(&self) -> bool { false }
-    fn is_trigger(&self) -> bool { false }
+    fn is_modulation_source(&self) -> bool {
+        false
+    }
+    fn is_bjt(&self) -> bool {
+        false
+    }
+    fn is_jfet(&self) -> bool {
+        false
+    }
+    fn is_mosfet(&self) -> bool {
+        false
+    }
+    fn is_tube(&self) -> bool {
+        false
+    }
+    fn is_transformer(&self) -> bool {
+        false
+    }
+    fn is_pot(&self) -> bool {
+        false
+    }
+    fn is_diode_family(&self) -> bool {
+        false
+    }
+    fn is_trigger(&self) -> bool {
+        false
+    }
 
     // ── Composite classification ─────────────────────────────────────────
 
     /// Passive two-terminal element (R, C, L, etc.) — excludes transformers and pots.
-    fn is_simple_passive(&self) -> bool { self.is_passive() && !self.is_transformer() }
+    fn is_simple_passive(&self) -> bool {
+        self.is_passive() && !self.is_transformer()
+    }
 
     /// Amplifying device: tube, BJT, JFET, MOSFET.
-    fn is_gain_device(&self) -> bool { false }
+    fn is_gain_device(&self) -> bool {
+        false
+    }
 
     // ── Accessor methods (defaults return None) ──────────────────────────
 
-    fn model_name(&self) -> Option<&str> { None }
-    fn op_amp_type(&self) -> Option<crate::dsl::OpAmpType> { None }
-    fn pot_taper(&self) -> Option<crate::dsl::PotTaper> { None }
-    fn diode_type(&self) -> Option<crate::dsl::DiodeType> { None }
-    fn transformer_config(&self) -> Option<&crate::dsl::TransformerConfig> { None }
+    fn model_name(&self) -> Option<&str> {
+        None
+    }
+    fn op_amp_type(&self) -> Option<crate::dsl::OpAmpType> {
+        None
+    }
+    fn pot_taper(&self) -> Option<crate::dsl::PotTaper> {
+        None
+    }
+    fn diode_type(&self) -> Option<crate::dsl::DiodeType> {
+        None
+    }
+    fn transformer_config(&self) -> Option<&crate::dsl::TransformerConfig> {
+        None
+    }
 
     // ── Layout methods (defaults use type_tag) ──────────────────────────
 
     /// Symbol identifier for layout rendering (e.g., "resistor", "triode", "opamp").
-    fn symbol_name(&self) -> &'static str { self.type_tag() }
+    fn symbol_name(&self) -> &'static str {
+        self.type_tag()
+    }
 
     /// Layout class identifier for placement grouping (e.g., "resistor", "npn", "opamp").
-    fn layout_class(&self) -> &'static str { self.type_tag() }
+    fn layout_class(&self) -> &'static str {
+        self.type_tag()
+    }
 
     /// Human-readable display value for labels (e.g., "4.7kΩ", "100nF").
-    fn display_value(&self) -> Option<String> { None }
+    fn display_value(&self) -> Option<String> {
+        None
+    }
 }
 
 // ── Trait-object blanket impls ────────────────────────────────────────────
@@ -449,7 +512,9 @@ mod tests {
         let r1: Box<dyn Component> = Box::new(Resistor { value: 1000.0 });
         let r2: Box<dyn Component> = Box::new(Resistor { value: 1000.0 });
         let r3: Box<dyn Component> = Box::new(Resistor { value: 2200.0 });
-        let c1: Box<dyn Component> = Box::new(Capacitor { config: CapConfig::new(100e-9) });
+        let c1: Box<dyn Component> = Box::new(Capacitor {
+            config: CapConfig::new(100e-9),
+        });
         assert!(r1.dyn_eq(r2.as_ref()));
         assert!(!r1.dyn_eq(r3.as_ref()));
         assert!(!r1.dyn_eq(c1.as_ref()));
@@ -481,7 +546,9 @@ mod tests {
 
     #[test]
     fn edges_reactive_capacitor() {
-        let c = Capacitor { config: CapConfig::new(100e-9) };
+        let c = Capacitor {
+            config: CapConfig::new(100e-9),
+        };
         let edges = c.edges();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].kind, EdgeKind::Reactive);
@@ -489,7 +556,9 @@ mod tests {
 
     #[test]
     fn edges_nonlinear_diode() {
-        let d = Diode { diode_type: crate::dsl::DiodeType::Silicon };
+        let d = Diode {
+            diode_type: crate::dsl::DiodeType::Silicon,
+        };
         let edges = d.edges();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].kind, EdgeKind::Nonlinear);
@@ -497,7 +566,9 @@ mod tests {
 
     #[test]
     fn edges_nonlinear_bjt() {
-        let q = Npn { model: "2N3904".into() };
+        let q = Npn {
+            model: "2N3904".into(),
+        };
         let edges = q.edges();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].kind, EdgeKind::Nonlinear);
@@ -507,7 +578,9 @@ mod tests {
 
     #[test]
     fn edges_nonlinear_triode() {
-        let v = Triode { model: "12AX7".into() };
+        let v = Triode {
+            model: "12AX7".into(),
+        };
         let edges = v.edges();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].kind, EdgeKind::Nonlinear);
@@ -516,7 +589,9 @@ mod tests {
 
     #[test]
     fn edges_behavioral_bbd() {
-        let b = Bbd { bbd_type: crate::dsl::BbdType::Mn3207 };
+        let b = Bbd {
+            bbd_type: crate::dsl::BbdType::Mn3207,
+        };
         let edges = b.edges();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].kind, EdgeKind::Behavioral);
@@ -524,19 +599,27 @@ mod tests {
 
     #[test]
     fn edges_virtual_lfo_empty() {
-        let l = Lfo { waveform: crate::dsl::LfoWaveformDsl::Triangle, timing_r: 100_000.0, timing_c: 1e-6 };
+        let l = Lfo {
+            waveform: crate::dsl::LfoWaveformDsl::Triangle,
+            timing_r: 100_000.0,
+            timing_c: 1e-6,
+        };
         assert!(l.edges().is_empty());
     }
 
     #[test]
     fn edges_active_ic_opamp_empty() {
-        let o = OpAmp { op_type: crate::dsl::OpAmpType::Tl072 };
+        let o = OpAmp {
+            op_type: crate::dsl::OpAmpType::Tl072,
+        };
         assert!(o.edges().is_empty());
     }
 
     #[test]
     fn edges_ota_nonlinear() {
-        let ota = OpAmp { op_type: crate::dsl::OpAmpType::Ca3080 };
+        let ota = OpAmp {
+            op_type: crate::dsl::OpAmpType::Ca3080,
+        };
         let edges = ota.edges();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].kind, EdgeKind::Nonlinear);
@@ -545,11 +628,16 @@ mod tests {
 
     #[test]
     fn resolve_jfet_to_linear_when_modulated() {
-        let j = NJfet { model: "2N5457".into() };
+        let j = NJfet {
+            model: "2N5457".into(),
+        };
         // Default: nonlinear
         assert_eq!(j.edges()[0].kind, EdgeKind::Nonlinear);
         // Modulated gate: resolves to linear (variable resistor)
-        let ctx = ResolveContext { control_pin_is_modulated: true, wiper_connected: false };
+        let ctx = ResolveContext {
+            control_pin_is_modulated: true,
+            wiper_connected: false,
+        };
         let resolved = j.resolve_edges(&ctx).unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].kind, EdgeKind::Linear);
@@ -558,18 +646,28 @@ mod tests {
 
     #[test]
     fn resolve_jfet_no_change_without_modulation() {
-        let j = PJfet { model: "2N5460".into() };
-        let ctx = ResolveContext { control_pin_is_modulated: false, wiper_connected: false };
+        let j = PJfet {
+            model: "2N5460".into(),
+        };
+        let ctx = ResolveContext {
+            control_pin_is_modulated: false,
+            wiper_connected: false,
+        };
         assert!(j.resolve_edges(&ctx).is_none());
     }
 
     #[test]
     fn resolve_ota_to_vccs_when_modulated() {
-        let ota = OpAmp { op_type: crate::dsl::OpAmpType::Ca3080 };
+        let ota = OpAmp {
+            op_type: crate::dsl::OpAmpType::Ca3080,
+        };
         // Default: nonlinear
         assert_eq!(ota.edges()[0].kind, EdgeKind::Nonlinear);
         // Modulated Iabc: resolves to VCCS
-        let ctx = ResolveContext { control_pin_is_modulated: true, wiper_connected: false };
+        let ctx = ResolveContext {
+            control_pin_is_modulated: true,
+            wiper_connected: false,
+        };
         let resolved = ota.resolve_edges(&ctx).unwrap();
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].kind, EdgeKind::Vccs);
@@ -577,8 +675,13 @@ mod tests {
 
     #[test]
     fn resolve_regular_opamp_unchanged() {
-        let op = OpAmp { op_type: crate::dsl::OpAmpType::Tl072 };
-        let ctx = ResolveContext { control_pin_is_modulated: true, wiper_connected: false };
+        let op = OpAmp {
+            op_type: crate::dsl::OpAmpType::Tl072,
+        };
+        let ctx = ResolveContext {
+            control_pin_is_modulated: true,
+            wiper_connected: false,
+        };
         // Regular opamps don't resolve (no modulation pins)
         assert!(op.resolve_edges(&ctx).is_none());
     }

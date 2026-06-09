@@ -146,12 +146,7 @@ impl OtaRoot {
     /// - Effectively off: Iabc < 1µA
     /// - Overbiased: Iabc > 1mA
     #[cfg(feature = "runtime-warnings")]
-    pub fn check_operating_region(
-        &self,
-        v_port: f64,
-        comp_id: &str,
-        sample_index: u64,
-    ) {
+    pub fn check_operating_region(&self, v_port: f64, comp_id: &str, sample_index: u64) {
         use crate::runtime_warnings::{emit_warning, Severity, WarningKind};
 
         let vdiff = v_port.abs();

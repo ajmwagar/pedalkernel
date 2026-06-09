@@ -578,25 +578,35 @@ fn full_5e3_with_pentode_push_pull() {
     for c in &def.components {
         eprintln!("  {} -> {}", c.id, c.kind.type_tag());
     }
-    assert_eq!(def.components.len(), 37, "full 5E3 should have 37 components");
-    
-    let compiled = pedalkernel::compiler::compile_pedal(&def, 48000.0)
-        .expect("compile full 5E3");
+    assert_eq!(
+        def.components.len(),
+        37,
+        "full 5E3 should have 37 components"
+    );
+
+    let compiled = pedalkernel::compiler::compile_pedal(&def, 48000.0).expect("compile full 5E3");
     eprintln!("Compiled: {}", compiled.debug_dump());
-    
+
     // Process audio and check for sustained output
     let mut engine = compiled;
     engine.set_control("Bright Volume", 0.5);
     engine.set_control("Normal Volume", 0.0);
     engine.set_control("Tone", 0.6);
-    
+
     let input = sine(440.0, 0.5, SAMPLE_RATE);
     let output: Vec<f64> = input.iter().map(|&x| engine.process(x)).collect();
-    
+
     // Check sustained output (not just startup transient)
     let late_rms = rms(&output[20000..]);
-    eprintln!("Late RMS (after 20k samples): {:.4e} ({:.1} dB)", late_rms, 20.0 * late_rms.log10());
-    assert!(late_rms > 1e-6, "Full 5E3 should sustain output, got RMS={late_rms:.4e}");
+    eprintln!(
+        "Late RMS (after 20k samples): {:.4e} ({:.1} dB)",
+        late_rms,
+        20.0 * late_rms.log10()
+    );
+    assert!(
+        late_rms > 1e-6,
+        "Full 5E3 should sustain output, got RMS={late_rms:.4e}"
+    );
 }
 
 #[test]
@@ -605,13 +615,14 @@ fn full_5e3_debug_signal_flow() {
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("examples/amps/tweed_deluxe_5e3_full.pedal"),
-    ).expect("read full 5E3");
+    )
+    .expect("read full 5E3");
     let def = pedalkernel::dsl::parse_pedal_file(&src).expect("parse");
     let mut engine = pedalkernel::compiler::compile_pedal(&def, 48000.0).expect("compile");
     engine.set_control("Bright Volume", 0.5);
     engine.set_control("Normal Volume", 0.0);
     engine.set_control("Tone", 0.6);
-    
+
     // Process 500 samples and track output
     let mut peak = 0.0f64;
     for i in 0..500 {
@@ -630,21 +641,24 @@ fn triode_push_pull_sustained_output() {
     use pedalkernel::PedalProcessor;
     // Bassman 5F6A (has triode push-pull)
     let src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/amps/bassman_5f6a.pedal"),
-    ).expect("read bassman");
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/amps/bassman_5f6a.pedal"),
+    )
+    .expect("read bassman");
     let def = pedalkernel::dsl::parse_pedal_file(&src).expect("parse");
     let mut engine = pedalkernel::compiler::compile_pedal(&def, 48000.0).expect("compile");
     engine.set_control("Volume", 0.6);
     engine.set_control("Treble", 0.6);
     engine.set_control("Mid", 0.5);
     engine.set_control("Bass", 0.5);
-    
+
     let input = sine(440.0, 0.5, SAMPLE_RATE);
     let output: Vec<f64> = input.iter().map(|&x| engine.process(x)).collect();
-    
+
     let late_rms = rms(&output[20000..]);
     let peak_val = peak(&output);
-    eprintln!("Bassman peak: {peak_val:.4e}, late RMS: {late_rms:.4e} ({:.1} dB)", 20.0 * late_rms.log10());
+    eprintln!(
+        "Bassman peak: {peak_val:.4e}, late RMS: {late_rms:.4e} ({:.1} dB)",
+        20.0 * late_rms.log10()
+    );
     // Don't assert - just diagnostic
 }

@@ -412,7 +412,8 @@ impl WdfRoot for DiodePairRoot {
             });
             self.prev_v = (a + b) * 0.5;
             #[cfg(feature = "fault-injection")]
-            if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity) {
+            if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity)
+            {
                 return b + 0.01;
             }
             return b;
@@ -446,11 +447,13 @@ impl WdfRoot for DiodePairRoot {
         // b = 2*v_total - a = 2*(v_junction + i*Rs) - a = b_eff + 2*i*Rs
         let b = b_eff + 2.0 * i * rs;
         #[cfg(feature = "fault-injection")]
-        let b = if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity) {
-            b + 0.01
-        } else {
-            b
-        };
+        let b =
+            if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity)
+            {
+                b + 0.01
+            } else {
+                b
+            };
         b
     }
 }
@@ -573,11 +576,13 @@ impl NlDeviceIv for DiodePairRoot {
         let ev_neg = (-x).exp();
         let i = is * (ev_pos - ev_neg);
         #[cfg(feature = "fault-injection")]
-        let i = if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity) {
-            i + 1e-3
-        } else {
-            i
-        };
+        let i =
+            if crate::fault_injection::is_active(crate::fault_injection::Fault::WrongDiodePolarity)
+            {
+                i + 1e-3
+            } else {
+                i
+            };
         let di = is * (ev_pos + ev_neg) / nvt;
         (i, di)
     }

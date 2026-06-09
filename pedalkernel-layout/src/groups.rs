@@ -112,9 +112,10 @@ fn detect_gain_stages(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<Fu
             continue;
         }
 
-        let is_gain_device = node.comp.as_ref().map_or(false, |c| {
-            c.kind.is_gain_device()
-        });
+        let is_gain_device = node
+            .comp
+            .as_ref()
+            .map_or(false, |c| c.kind.is_gain_device());
 
         if !is_gain_device {
             continue;
@@ -165,16 +166,17 @@ fn detect_gain_stages(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<Fu
         }
 
         let device_name = &node.comp_id;
-        let kind_name = node.comp.as_ref().map_or("Gain", |c| {
-            match c.kind.layout_class() {
+        let kind_name = node
+            .comp
+            .as_ref()
+            .map_or("Gain", |c| match c.kind.layout_class() {
                 "triode" | "vari_mu" => "Triode",
                 "pentode" => "Pentode",
                 "npn" | "pnp" => "BJT",
                 "njfet" | "pjfet" => "JFET",
                 "nmos" | "pmos" => "MOSFET",
                 _ => "Gain",
-            }
-        });
+            });
 
         groups.push(FunctionalGroup {
             name: format!("gain_stage_{stage_num}"),
@@ -202,9 +204,10 @@ fn detect_opamp_stages(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<F
             continue;
         }
 
-        let is_opamp = node.comp.as_ref().map_or(false, |c| {
-            c.kind.op_amp_type().is_some()
-        });
+        let is_opamp = node
+            .comp
+            .as_ref()
+            .map_or(false, |c| c.kind.op_amp_type().is_some());
 
         if !is_opamp {
             continue;
@@ -220,9 +223,9 @@ fn detect_opamp_stages(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<F
                 continue;
             }
             // Include passives and diodes in the feedback network
-            let is_feedback_component = graph.node_kind(nid).map_or(false, |k| {
-                k.is_simple_passive() || k.is_diode_family()
-            });
+            let is_feedback_component = graph
+                .node_kind(nid)
+                .map_or(false, |k| k.is_simple_passive() || k.is_diode_family());
             if is_feedback_component {
                 members.push(nid);
             }
@@ -257,8 +260,7 @@ fn detect_push_pull(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<Func
         .nodes
         .iter()
         .filter(|n| {
-            !assigned.contains(&n.id)
-                && n.comp.as_ref().map_or(false, |c| c.kind.is_transformer())
+            !assigned.contains(&n.id) && n.comp.as_ref().map_or(false, |c| c.kind.is_transformer())
         })
         .map(|n| n.id)
         .collect();
@@ -272,7 +274,9 @@ fn detect_push_pull(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<Func
             .iter()
             .filter(|&&nid| {
                 !assigned.contains(&nid)
-                    && graph.node_kind(nid).map_or(false, |k| k.layout_class() == "pentode")
+                    && graph
+                        .node_kind(nid)
+                        .map_or(false, |k| k.layout_class() == "pentode")
             })
             .copied()
             .collect();
@@ -315,10 +319,7 @@ fn detect_tone_stacks(graph: &LayoutGraph, assigned: &BTreeSet<usize>) -> Vec<Fu
     let unassigned_pots: Vec<usize> = graph
         .nodes
         .iter()
-        .filter(|n| {
-            !assigned.contains(&n.id)
-                && n.comp.as_ref().map_or(false, |c| c.kind.is_pot())
-        })
+        .filter(|n| !assigned.contains(&n.id) && n.comp.as_ref().map_or(false, |c| c.kind.is_pot()))
         .map(|n| n.id)
         .collect();
 
@@ -491,7 +492,9 @@ mod tests {
             components: vec![
                 ComponentDef {
                     id: "C1".into(),
-                    kind: Box::new(Capacitor { config: CapConfig::new(100e-9) }),
+                    kind: Box::new(Capacitor {
+                        config: CapConfig::new(100e-9),
+                    }),
                 },
                 ComponentDef {
                     id: "R1".into(),
@@ -499,7 +502,9 @@ mod tests {
                 },
                 ComponentDef {
                     id: "V1".into(),
-                    kind: Box::new(Triode { model: "12AX7".into() }),
+                    kind: Box::new(Triode {
+                        model: "12AX7".into(),
+                    }),
                 },
                 ComponentDef {
                     id: "R2".into(),
@@ -511,7 +516,9 @@ mod tests {
                 },
                 ComponentDef {
                     id: "C2".into(),
-                    kind: Box::new(Capacitor { config: CapConfig::new(25e-6) }),
+                    kind: Box::new(Capacitor {
+                        config: CapConfig::new(25e-6),
+                    }),
                 },
             ],
             nets: vec![

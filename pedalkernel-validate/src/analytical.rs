@@ -121,7 +121,12 @@ pub fn rc_highpass_impulse_response(
 ///
 /// Uses bilinear transform for exact discrete-time response.
 /// H(s) = sRC / (1 + sRC)
-pub fn rc_highpass_filter(signal: &[f64], r_ohms: f64, c_farads: f64, sample_rate: f64) -> Vec<f64> {
+pub fn rc_highpass_filter(
+    signal: &[f64],
+    r_ohms: f64,
+    c_farads: f64,
+    sample_rate: f64,
+) -> Vec<f64> {
     let tau = r_ohms * c_farads;
     let dt = 1.0 / sample_rate;
 
@@ -509,18 +514,10 @@ mod tests {
 
         // Use second half to avoid transients
         let half = n / 2;
-        let rms_res: f64 = (output_res[half..]
-            .iter()
-            .map(|x| x * x)
-            .sum::<f64>()
-            / (n - half) as f64)
-            .sqrt();
-        let rms_low: f64 = (output_low[half..]
-            .iter()
-            .map(|x| x * x)
-            .sum::<f64>()
-            / (n - half) as f64)
-            .sqrt();
+        let rms_res: f64 =
+            (output_res[half..].iter().map(|x| x * x).sum::<f64>() / (n - half) as f64).sqrt();
+        let rms_low: f64 =
+            (output_low[half..].iter().map(|x| x * x).sum::<f64>() / (n - half) as f64).sqrt();
 
         assert!(
             rms_res > rms_low * 1.5,
@@ -555,18 +552,10 @@ mod tests {
 
         // Use second half
         let half = n / 2;
-        let rms_notch: f64 = (output_notch[half..]
-            .iter()
-            .map(|x| x * x)
-            .sum::<f64>()
-            / (n - half) as f64)
-            .sqrt();
-        let rms_pass: f64 = (output_pass[half..]
-            .iter()
-            .map(|x| x * x)
-            .sum::<f64>()
-            / (n - half) as f64)
-            .sqrt();
+        let rms_notch: f64 =
+            (output_notch[half..].iter().map(|x| x * x).sum::<f64>() / (n - half) as f64).sqrt();
+        let rms_pass: f64 =
+            (output_pass[half..].iter().map(|x| x * x).sum::<f64>() / (n - half) as f64).sqrt();
 
         // At the notch, output should be much smaller
         assert!(
