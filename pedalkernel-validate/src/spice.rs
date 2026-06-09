@@ -144,6 +144,11 @@ impl SpiceRunner {
         let duration = input.len() as f64 / self.config.internal_rate();
         let netlist =
             self.generate_netlist(circuit_path, input, duration, output_node, &output_path)?;
+        let sample_time_offset = if single_sample_impulse(input).is_some() {
+            0.5 * self.config.timestep()
+        } else {
+            0.0
+        };
 
         std::fs::write(&netlist_path, &netlist)?;
 
@@ -170,7 +175,7 @@ impl SpiceRunner {
 
         // Parse output and resample
         let raw_output = self.parse_wrdata_output(&output_path)?;
-        let resampled = self.resample_and_decimate(&raw_output, duration);
+        let resampled = self.resample_and_decimate(&raw_output, duration, sample_time_offset);
 
         Ok(resampled)
     }
@@ -237,6 +242,10 @@ VIN v_in 0 PWL({pwl_data})
     fn generate_pwl_inline(&self, signal: &[f64]) -> String {
         let dt = self.config.timestep();
 
+        if let Some(amplitude) = single_sample_impulse(signal) {
+            return generate_sample_hold_impulse_pwl(amplitude, signal.len(), dt);
+        }
+
         // Keep shorter validation signals sample-exact. Very long signals are
         // decimated to keep generated netlists practical, but the final sample
         // below is always emitted so PWL does not hold a stale decimated value
@@ -298,7 +307,12 @@ VIN v_in 0 PWL({pwl_data})
     ///
     /// Returns samples at the full internal rate (sample_rate × oversample)
     /// to match the WDF runner's output rate for sample-by-sample comparison.
-    fn resample_and_decimate(&self, raw_data: &[(f64, f64)], duration: f64) -> Vec<f64> {
+    fn resample_and_decimate(
+        &self,
+        raw_data: &[(f64, f64)],
+        duration: f64,
+        time_offset: f64,
+    ) -> Vec<f64> {
         let internal_rate = self.config.internal_rate();
         let n_internal = (duration * internal_rate) as usize;
 
@@ -306,7 +320,7 @@ VIN v_in 0 PWL({pwl_data})
         let mut uniform_output = Vec::with_capacity(n_internal);
 
         for i in 0..n_internal {
-            let t = i as f64 / internal_rate;
+            let t = i as f64 / internal_rate + time_offset;
             let v = self.interpolate(raw_data, t);
             uniform_output.push(v);
         }
@@ -349,6 +363,36 @@ VIN v_in 0 PWL({pwl_data})
     pub fn config(&self) -> &SpiceConfig {
         &self.config
     }
+}
+
+fn single_sample_impulse(signal: &[f64]) -> Option<f64> {
+    let (&first, rest) = signal.split_first()?;
+    if first == 0.0 {
+        return None;
+    }
+
+    if rest.iter().all(|&sample| sample == 0.0) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn generate_sample_hold_impulse_pwl(amplitude: f64, len: usize, dt: f64) -> String {
+    let end_time = len.saturating_sub(1) as f64 * dt;
+    let drop_time = dt;
+
+    let mut pwl_points = vec![
+        format!("{:.9e} {:.9e}", 0.0, amplitude),
+        format!("{:.9e} {:.9e}", drop_time, amplitude),
+        format!("{:.9e} {:.9e}", drop_time, 0.0),
+    ];
+
+    if end_time > drop_time {
+        pwl_points.push(format!("{:.9e} {:.9e}", end_time, 0.0));
+    }
+
+    pwl_points.join(" ")
 }
 
 /// Generate golden references for a test circuit.
@@ -436,5 +480,22 @@ mod tests {
         assert_eq!(values[values.len() - 3], 383_996.0);
         assert_eq!(values[values.len() - 2], 383_998.0);
         assert_eq!(values[values.len() - 1], 383_999.0);
+    }
+
+    #[test]
+    fn pwl_generation_uses_sample_hold_for_impulses() {
+        let runner = SpiceRunner::new(SpiceConfig::default());
+        let mut signal = vec![0.0; 8];
+        signal[0] = 2.0;
+
+        let pwl = runner.generate_pwl_inline(&signal);
+        let pairs = pwl.split_whitespace().collect::<Vec<_>>();
+
+        assert_eq!(pairs.len(), 8);
+        assert_eq!(pairs[1], "2.000000000e0");
+        assert_eq!(pairs[3], "2.000000000e0");
+        assert_eq!(pairs[5], "0.000000000e0");
+        assert_eq!(pairs[6], "1.822916667e-5");
+        assert_eq!(pairs[7], "0.000000000e0");
     }
 }
