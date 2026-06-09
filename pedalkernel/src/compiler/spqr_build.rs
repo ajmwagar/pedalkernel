@@ -399,10 +399,13 @@ pub fn compile_via_spqr_with_options(
         // nonlinear modulator groups that do not reach the output also bypass:
         // they are solved for their local operating point but must not become
         // an independent serial audio stage.
-        let is_bypass = matches!(
+        let has_signal_transformer =
+            group_has_signal_transformer_boundary(group, &graph, graph.in_node, graph.out_node);
+        let is_bypass = (matches!(
             group_bias[gi],
             super::bias_analysis::GroupBiasKind::StaticBias { .. }
-        ) || is_nonlinear_modulator_group(group, &graph);
+        ) || is_nonlinear_modulator_group(group, &graph))
+            && !has_signal_transformer;
 
         #[cfg(test)]
         {
@@ -1945,10 +1948,14 @@ fn build_passive_rtype_stage(
         }
     }
 
+    let transformer_voltage_gain = passive_transformer_voltage_gain(input_node, output_node, graph);
     let output_mna = node_to_mna(output_node, &nodes);
     let (scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
-    let (extraction_coeffs, extraction_vs) =
+    let (extraction_coeffs, mut extraction_vs) =
         mna.derive_extraction_coeffs(&ports, 0, output_mna, None);
+    if let Some(gain) = transformer_voltage_gain {
+        extraction_vs = gain;
+    }
 
     if scattering.iter().any(|v| !v.is_finite())
         || vs_injection.iter().any(|v| !v.is_finite())
@@ -1986,6 +1993,46 @@ fn build_passive_rtype_stage(
     );
     wdf.output_probe = None;
     Some(wdf)
+}
+
+fn passive_transformer_voltage_gain(
+    input_node: NodeId,
+    output_node: NodeId,
+    graph: &CircuitGraph,
+) -> Option<f64> {
+    let input = graph.transformer_info.get(&input_node)?;
+    let output = graph.transformer_info.get(&output_node)?;
+    if input.comp_idx != output.comp_idx || input.is_secondary == output.is_secondary {
+        return None;
+    }
+
+    let n = input.turns_ratio;
+    if !(n.is_finite() && n > 0.0) {
+        return None;
+    }
+
+    if input.is_secondary && !output.is_secondary {
+        Some(n)
+    } else {
+        Some(1.0 / n)
+    }
+}
+
+fn group_has_signal_transformer_boundary(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+    input_node: NodeId,
+    output_node: NodeId,
+) -> bool {
+    if passive_transformer_voltage_gain(input_node, output_node, graph).is_none() {
+        return false;
+    }
+
+    group.all_edges().iter().any(|&eidx| {
+        graph.components[graph.edges[eidx].comp_idx]
+            .kind
+            .is_transformer()
+    })
 }
 
 fn pot_edge_is_aw_half_for_build(
