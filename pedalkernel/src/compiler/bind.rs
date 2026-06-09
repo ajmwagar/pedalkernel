@@ -209,6 +209,13 @@ fn resolve_pot_target(
     eprintln!(
         "WARNING: pot '{pot_id}' not bound to any audio stage — control will have no effect"
     );
+    eprintln!("[bind-debug] pot '{pot_id}' stages={}", stages.len());
+    for (si, stage) in stages.iter().enumerate() {
+        let has = stage.has_pot(pot_id);
+        let has_aw = stage.has_pot(&format!("{pot_id}__aw"));
+        let has_wb = stage.has_pot(&format!("{pot_id}__wb"));
+        eprintln!("[bind-debug]   stage[{si}] has={has} has_aw={has_aw} has_wb={has_wb}");
+    }
     (ControlTarget::PotInStage(0), false)
 }
 

@@ -783,7 +783,11 @@ impl CircuitGraph {
                     if dir == super::component::PinDirection::Output {
                         let key = format!("{}.{}", comp.id, pin_name);
                         if let Some(&raw_id) = pin_ids.get(&key) {
-                            output_pin_nodes.insert(uf.find(raw_id));
+                            let resolved = uf.find(raw_id);
+                            eprintln!("[graph-debug] output_pin_node: comp={} pin={} raw={} resolved={}", comp.id, pin_name, raw_id, resolved);
+                            output_pin_nodes.insert(resolved);
+                        } else {
+                            eprintln!("[graph-debug] output_pin_node: comp={} pin={} NOT IN pin_ids", comp.id, pin_name);
                         }
                     }
                     // Transistor input pins (gate/base) — NOT opamp inputs.

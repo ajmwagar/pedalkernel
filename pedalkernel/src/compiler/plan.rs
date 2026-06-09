@@ -1227,6 +1227,62 @@ fn plan_one_junction(
         &output_barriers,
     );
 
+    // Prune opamp-input feeding subtrees from the passive edge list.
+    // See collect_passive_edges_from_nodes_with_extra_barriers for details.
+    let junction_nodes_set: HashSet<NodeId> = [junction].iter().copied().collect();
+    let mut junction_passives = {
+        // Step 1: drop direct edges to opamp input barriers.
+        let mut edges = junction_passives;
+        edges.retain(|&eidx| {
+            let e = &graph.edges[eidx];
+            let a_is_input_barrier =
+                opamp_input_nodes.contains(&e.node_a) && e.node_a != junction;
+            let b_is_input_barrier =
+                opamp_input_nodes.contains(&e.node_b) && e.node_b != junction;
+            !a_is_input_barrier && !b_is_input_barrier
+        });
+        edges
+    };
+    // Step 2: iteratively prune dead-end nodes.
+    {
+        let global_nodes_set: HashSet<NodeId> = {
+            let mut g = graph.supply_nodes.clone();
+            g.insert(graph.gnd_node);
+            g.insert(graph.vcc_node);
+            g
+        };
+        let is_anchored = |n: NodeId| -> bool {
+            junction_nodes_set.contains(&n) || graph.output_pin_nodes.contains(&n)
+        };
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut non_global_degree: HashMap<NodeId, usize> = HashMap::new();
+            for &eidx in &junction_passives {
+                let e = &graph.edges[eidx];
+                for &n in &[e.node_a, e.node_b] {
+                    if !global_nodes_set.contains(&n) {
+                        *non_global_degree.entry(n).or_insert(0) += 1;
+                    }
+                }
+            }
+            let before_len = junction_passives.len();
+            junction_passives.retain(|&eidx| {
+                let e = &graph.edges[eidx];
+                let a_non_global = !global_nodes_set.contains(&e.node_a);
+                let b_non_global = !global_nodes_set.contains(&e.node_b);
+                let a_is_leaf = a_non_global && !is_anchored(e.node_a)
+                    && non_global_degree.get(&e.node_a).copied().unwrap_or(0) == 1;
+                let b_is_leaf = b_non_global && !is_anchored(e.node_b)
+                    && non_global_degree.get(&e.node_b).copied().unwrap_or(0) == 1;
+                !a_is_leaf && !b_is_leaf
+            });
+            if junction_passives.len() < before_len {
+                changed = true;
+            }
+        }
+    }
+
     if is_jfet {
         // JFET: check for source follower (junction connects to out_node).
         let junction_to_output: Vec<usize> = graph
@@ -2834,6 +2890,56 @@ fn collect_passive_edges_from_nodes(
         );
         extend_dedup(&mut all_passive_edges, &edges);
     }
+    // Prune the "opamp-input feeding subtree" — same algorithm used in
+    // collect_passive_edges_from_nodes_with_extra_barriers.  See that
+    // function for a detailed explanation.
+    //
+    // Step 1: drop direct edges to opamp input barriers.
+    all_passive_edges.retain(|&eidx| {
+        let e = &graph.edges[eidx];
+        let a_is_input_barrier =
+            opamp_input_nodes.contains(&e.node_a) && !junction_nodes.contains(&e.node_a);
+        let b_is_input_barrier =
+            opamp_input_nodes.contains(&e.node_b) && !junction_nodes.contains(&e.node_b);
+        !a_is_input_barrier && !b_is_input_barrier
+    });
+    // Step 2: iteratively prune dead-end nodes.
+    let global_nodes_set: HashSet<NodeId> = {
+        let mut g = graph.supply_nodes.clone();
+        g.insert(graph.gnd_node);
+        g.insert(graph.vcc_node);
+        g
+    };
+    let is_anchored = |n: NodeId| -> bool {
+        junction_nodes.contains(&n) || graph.output_pin_nodes.contains(&n)
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut non_global_degree: HashMap<NodeId, usize> = HashMap::new();
+        for &eidx in &all_passive_edges {
+            let e = &graph.edges[eidx];
+            for &n in &[e.node_a, e.node_b] {
+                if !global_nodes_set.contains(&n) {
+                    *non_global_degree.entry(n).or_insert(0) += 1;
+                }
+            }
+        }
+        let before_len = all_passive_edges.len();
+        all_passive_edges.retain(|&eidx| {
+            let e = &graph.edges[eidx];
+            let a_non_global = !global_nodes_set.contains(&e.node_a);
+            let b_non_global = !global_nodes_set.contains(&e.node_b);
+            let a_is_leaf = a_non_global && !is_anchored(e.node_a)
+                && non_global_degree.get(&e.node_a).copied().unwrap_or(0) == 1;
+            let b_is_leaf = b_non_global && !is_anchored(e.node_b)
+                && non_global_degree.get(&e.node_b).copied().unwrap_or(0) == 1;
+            !a_is_leaf && !b_is_leaf
+        });
+        if all_passive_edges.len() < before_len {
+            changed = true;
+        }
+    }
     let xfmr_inject =
         find_secondary_side_transformers(&all_passive_edges, graph, pp_transformer_edges);
     extend_dedup(&mut all_passive_edges, &xfmr_inject);
@@ -2888,6 +2994,74 @@ fn collect_passive_edges_from_nodes_with_extra_barriers(
             &output_barriers,
         );
         extend_dedup(&mut all_passive_edges, &edges);
+    }
+    // Prune the "opamp-input feeding subtree": edges that ultimately only
+    // connect toward an opamp input pin (a separate active stage boundary)
+    // with no path back to the NL junction nodes except through gnd/supply.
+    //
+    // These edges create dangling or ineffective nodes in the multi-NL MNA
+    // because the opamp is NOT in this stage.  Removing them allows the
+    // feedforward PassiveRType builder to model them correctly instead.
+    //
+    // Algorithm: iteratively remove edges whose non-junction-node endpoint
+    // is "isolated toward opamp inputs" — meaning it has no other edges in
+    // `all_passive_edges` that would connect it to a non-global node other
+    // than through edges we are about to drop.
+    //
+    // Step 1: drop direct edges to opamp input barriers.
+    all_passive_edges.retain(|&eidx| {
+        let e = &graph.edges[eidx];
+        let a_is_input_barrier =
+            extra_barriers.contains(&e.node_a) && !junction_nodes.contains(&e.node_a);
+        let b_is_input_barrier =
+            extra_barriers.contains(&e.node_b) && !junction_nodes.contains(&e.node_b);
+        !a_is_input_barrier && !b_is_input_barrier
+    });
+    // Step 2: iteratively prune "dead-end" nodes whose only surviving
+    // connections are to gnd/supply or to junction_nodes that appear only
+    // as the start of the original BFS (i.e., no productive return path).
+    // We stop when no more edges are pruned.
+    let global_nodes_set: HashSet<NodeId> = {
+        let mut g = graph.supply_nodes.clone();
+        g.insert(graph.gnd_node);
+        g.insert(graph.vcc_node);
+        g
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        // Count surviving connections per non-global node, counting junction_nodes as "anchors".
+        let mut non_global_degree: HashMap<NodeId, usize> = HashMap::new();
+        for &eidx in &all_passive_edges {
+            let e = &graph.edges[eidx];
+            for &n in &[e.node_a, e.node_b] {
+                if !global_nodes_set.contains(&n) {
+                    *non_global_degree.entry(n).or_insert(0) += 1;
+                }
+            }
+        }
+        // A node is "anchored" if it is in junction_nodes or if it's an output_pin
+        // (opamp output — a signal source that legitimately drives into the stage).
+        // Anchored nodes are not pruned even if they have low degree.
+        let is_anchored = |n: NodeId| -> bool {
+            junction_nodes.contains(&n) || graph.output_pin_nodes.contains(&n)
+        };
+        // Remove edges where one endpoint is a "leaf" (non-global, non-anchored,
+        // degree == 1) — it has no productive path back into the circuit.
+        let before_len = all_passive_edges.len();
+        all_passive_edges.retain(|&eidx| {
+            let e = &graph.edges[eidx];
+            let a_non_global = !global_nodes_set.contains(&e.node_a);
+            let b_non_global = !global_nodes_set.contains(&e.node_b);
+            let a_is_leaf = a_non_global && !is_anchored(e.node_a)
+                && non_global_degree.get(&e.node_a).copied().unwrap_or(0) == 1;
+            let b_is_leaf = b_non_global && !is_anchored(e.node_b)
+                && non_global_degree.get(&e.node_b).copied().unwrap_or(0) == 1;
+            !a_is_leaf && !b_is_leaf
+        });
+        if all_passive_edges.len() < before_len {
+            changed = true;
+        }
     }
     let xfmr_inject =
         find_secondary_side_transformers(&all_passive_edges, graph, pp_transformer_edges);

@@ -763,6 +763,11 @@ fn build_feedforward_stages(
         .map(|(eidx, _)| eidx)
         .collect();
 
+    eprintln!("[ff-debug] unclaimed={} edges, output_pin_nodes={:?}", unclaimed.len(), graph.output_pin_nodes);
+    for &eidx in &unclaimed {
+        let e = &graph.edges[eidx];
+        eprintln!("[ff-debug]   edge[{eidx}] comp={}", graph.components[e.comp_idx].id);
+    }
     if unclaimed.is_empty() {
         return Vec::new();
     }
@@ -821,8 +826,10 @@ fn build_feedforward_stages(
             e.node_a
         };
         let root = find(&mut parent, root_node);
+        eprintln!("[ff-debug] edge {} node_a={} node_b={} root_node={} root={}", graph.components[e.comp_idx].id, e.node_a, e.node_b, root_node, root);
         components.entry(root).or_default().push(eidx);
     }
+    eprintln!("[ff-debug] total components={}", components.len());
 
     // ── Step 3: Identify boundary nodes for each component ───────────
     // Boundary nodes are nodes that also touch a claimed edge, or are
@@ -867,7 +874,6 @@ fn build_feedforward_stages(
     let mut result = Vec::new();
 
     for edges in components.values() {
-        #[cfg(test)]
         {
             let edge_names: Vec<String> = edges
                 .iter()
@@ -890,12 +896,21 @@ fn build_feedforward_stages(
             .filter(|n| boundary_nodes_set.contains(n))
             .collect();
 
+        {
+            let edge_names: Vec<String> = edges.iter().map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone()).collect();
+            eprintln!("[ff-debug] component {:?} subgraph_nodes={:?} boundary={:?}", edge_names, subgraph_nodes, boundary);
+        }
+
         // Skip subgraphs with fewer than 2 boundary nodes (dangling/bias)
         if boundary.len() < 2 {
+            let edge_names: Vec<String> = edges.iter().map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone()).collect();
+            eprintln!("[ff-debug] SKIP (boundary<2) edges={edge_names:?} boundary={boundary:?}");
             continue;
         }
         // Skip subgraphs where ALL boundary nodes are global (bias networks)
         if boundary.iter().all(|n| global_nodes.contains(n)) {
+            let edge_names: Vec<String> = edges.iter().map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone()).collect();
+            eprintln!("[ff-debug] SKIP (all-global) edges={edge_names:?} boundary={boundary:?}");
             continue;
         }
 
@@ -908,6 +923,16 @@ fn build_feedforward_stages(
         // Find best injection candidate: active output pin with largest
         // dist_from_in (deepest in signal chain = latest active stage before
         // this passive section).
+        {
+            let edge_names: Vec<String> = edges.iter().map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone()).collect();
+            eprintln!("[ff-debug] output_pin_check boundary={:?} output_pin_nodes contains: {:?}", boundary, boundary.iter().filter(|n| graph.output_pin_nodes.contains(n)).collect::<Vec<_>>());
+            for &n in &boundary {
+                let d = classified.dist_from_in.get(&n).copied();
+                eprintln!("[ff-debug]   node={n} dist_from_in={d:?}");
+            }
+            let _ = edge_names;
+        }
+        let mut used_active_tiebreaker = false;
         let mut best_active_inj: Option<(NodeId, usize)> = None;
         for &node in &boundary {
             if graph.output_pin_nodes.contains(&node) {
@@ -938,6 +963,7 @@ fn build_feedforward_stages(
                         .get(&node)
                         .copied()
                         .unwrap_or(usize::MAX);
+                    eprintln!("[ff-debug] output candidate node={node} d={}", if d == usize::MAX { "MAX".to_string() } else { d.to_string() });
                     match best {
                         None => best = Some((node, d)),
                         Some((_, pd)) if d > pd => best = Some((node, d)),
@@ -947,9 +973,14 @@ fn build_feedforward_stages(
                         _ => {}
                     }
                 }
+                eprintln!("[ff-debug] best_output={:?}", best);
                 match best {
                     Some((n, _)) => output_node = n,
-                    None => continue,
+                    None => {
+                        let edge_names: Vec<String> = edges.iter().map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone()).collect();
+                        eprintln!("[ff-debug] SKIP (no-output) edges={edge_names:?}");
+                        continue;
+                    }
                 }
             }
         } else {
@@ -1014,6 +1045,72 @@ fn build_feedforward_stages(
                         out = node;
                     }
                 }
+                // Tiebreaker: when inj==out (equal dist_from_in for both boundary
+                // nodes), use active-edge connectivity to distinguish direction.
+                // A node that connects to an active-device input (its active-edge
+                // neighbor has larger dist_from_in) is the passive network's OUTPUT —
+                // signal flows from the passive network into the active device there.
+                // The other node is the injection (upstream, driven by a prior stage).
+                //
+                // Example: SD-1 Tone stack: node_37 (Tone.a, dist=4) and node_40
+                // (wiper=U2.pos, dist=4) tie. U2's active edge is 40→48 (dist[48]=5).
+                // Node 40 connects "deeper" via active edge → it is the output.
+                // Node 37 is the injection from U1's output through R_t1.
+                if inj == out {
+                    // Build adjacency map from active edges only.
+                    let active_adj: HashMap<NodeId, Vec<NodeId>> = {
+                        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+                        for &eidx in &graph.active_edge_indices {
+                            let e = &graph.edges[eidx];
+                            adj.entry(e.node_a).or_default().push(e.node_b);
+                            adj.entry(e.node_b).or_default().push(e.node_a);
+                        }
+                        adj
+                    };
+                    // For each signal boundary node, compute its maximum active-edge
+                    // neighbor dist_from_in.  The node whose active neighbor is
+                    // deeper in the circuit (larger dist) is the passive OUTPUT.
+                    let active_out_score = |n: NodeId| -> usize {
+                        active_adj
+                            .get(&n)
+                            .map(|neighbors| {
+                                neighbors
+                                    .iter()
+                                    .map(|nb| classified.dist_from_in.get(nb).copied().unwrap_or(0))
+                                    .max()
+                                    .unwrap_or(0)
+                            })
+                            .unwrap_or(0)
+                    };
+                    let score_inj = active_out_score(inj);
+                    let score_out = active_out_score(out); // same node as inj here
+                    // Try all signal_boundary candidates for output role.
+                    let mut best_out_score = 0usize;
+                    let mut best_out_node = inj; // fallback
+                    for &n in &signal_boundary {
+                        let s = active_out_score(n);
+                        if s > best_out_score {
+                            best_out_score = s;
+                            best_out_node = n;
+                        }
+                    }
+                    let _ = (score_inj, score_out); // suppress unused warnings
+                    if best_out_score > 0 {
+                        out = best_out_node;
+                        used_active_tiebreaker = true;
+                        // Pick the non-output node with smallest dist as injection.
+                        let inj_candidates: Vec<NodeId> = signal_boundary
+                            .iter()
+                            .copied()
+                            .filter(|&n| n != out)
+                            .collect();
+                        if let Some(&best_inj) = inj_candidates.iter().min_by_key(|&&n| {
+                            classified.dist_from_in.get(&n).copied().unwrap_or(usize::MAX)
+                        }) {
+                            inj = best_inj;
+                        }
+                    }
+                }
                 injection_node = inj;
                 output_node = out;
             }
@@ -1027,6 +1124,8 @@ fn build_feedforward_stages(
 
         // injection and output must differ
         if injection_node == output_node {
+            let edge_names: Vec<String> = edges.iter().map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone()).collect();
+            eprintln!("[ff-debug] SKIP (inj==out) edges={edge_names:?} inj={injection_node} out={output_node}");
             continue;
         }
 
@@ -1044,6 +1143,7 @@ fn build_feedforward_stages(
             }
         };
 
+        eprintln!("[ff-debug] trying component with {} edges, inj={injection_node} out={output_node}, boundary_count={}", edges.len(), boundary.len());
         let mut stage = match super::graph::graph_reduce(
             edges,
             &[],
@@ -1054,7 +1154,7 @@ fn build_feedforward_stages(
             remap,
             Some(output_node),
         ) {
-            Ok((tree, output_probe)) => WdfStage {
+            Ok((tree, output_probe)) => { eprintln!("[ff-debug] graph_reduce succeeded"); WdfStage {
                 tree,
                 root: RootKind::VoltageSourceDriver,
                 compensation: 1.0,
@@ -1092,9 +1192,10 @@ fn build_feedforward_stages(
 
                 opamp_recompute: None,
                 opamp_input_child_idx: None,
-            },
-            Err(_) => {
+            }},
+            Err(e) => {
                 // SP reduction failed → fall back to PassiveRType MNA
+                eprintln!("[ff-debug] graph_reduce failed: {e}");
                 match build_orphan_output_mna_stage(
                     graph,
                     edges,
@@ -1103,18 +1204,50 @@ fn build_feedforward_stages(
                     1e9,
                     sample_rate,
                 ) {
-                    Some(s) => s,
-                    None => continue,
+                    Some(s) => { eprintln!("[ff-debug] built orphan MNA stage"); s }
+                    None => { eprintln!("[ff-debug] orphan MNA stage failed, skipping"); continue }
                 }
             }
         };
-        // If the stage terminates at the circuit output, it should be in the
-        // serial chain (not feedforward) so pots like Volume/Output actually
-        // control the signal level.
-        stage.is_feedforward = output_node != graph.out_node;
+        // Determine if this passive stage is in the serial signal chain or
+        // is a true parallel (additive) feedforward blend.
+        //
+        // A stage is SERIAL when its output_node is either:
+        //   1. The circuit output node (e.g., Level → out) — always serial, or
+        //   2. An active-device input node identified via the active-edge
+        //      tiebreaker (e.g., SD-1 Tone → U2.pos). This path type means
+        //      the passive network IS the serial path into the next active stage.
+        //      Making it additive would add the filtered signal ON TOP of the
+        //      main signal instead of replacing it with the filtered version.
+        //
+        // A stage is truly feedforward (additive blend) when it runs PARALLEL
+        // to the main serial chain (e.g., Klon clean blend path, Goldenrod
+        // R_tone_in which feeds additively into U4.neg).
+        //
+        // We apply the serial override ONLY when the injection/output were
+        // resolved via the active-edge tiebreaker (used_active_tiebreaker=true),
+        // which fires when both boundary nodes had equal dist_from_in and one
+        // connects deeper into the circuit via an active device. Stages whose
+        // injection was found through output_pin_nodes keep their original
+        // is_feedforward logic to avoid breaking existing circuits.
+        let output_leads_into_active = used_active_tiebreaker && graph.active_edge_indices.iter().any(|&eidx| {
+            let ae = &graph.edges[eidx];
+            let other = if ae.node_a == output_node {
+                ae.node_b
+            } else if ae.node_b == output_node {
+                ae.node_a
+            } else {
+                return false;
+            };
+            let d_out = classified.dist_from_in.get(&output_node).copied().unwrap_or(0);
+            let d_other = classified.dist_from_in.get(&other).copied().unwrap_or(0);
+            d_other > d_out
+        });
+        stage.is_feedforward = output_node != graph.out_node && !output_leads_into_active;
         stage.injection_node_id = injection_node;
         stage.output_node_id = output_node;
         stage.signal_flow_distance = injection_dist.saturating_add(1);
+        eprintln!("[ff-debug] pushing feedforward stage, ff={}, result.len()={}", stage.is_feedforward, result.len() + 1);
         result.push(stage);
     }
 
@@ -2427,6 +2560,7 @@ pub fn compile_pedal_with_options(
     let (sidechains, sidechain_comp_ids) =
         super::bind::build_sidechains(pedal, &graph, sample_rate);
 
+    eprintln!("[bind-pre] stages.len()={} multi_nl={}", stages.len(), multi_nl_stages.len());
     let (controls, bbd_mix_pot_id) = super::bind::build_controls(
         pedal,
         &stages,

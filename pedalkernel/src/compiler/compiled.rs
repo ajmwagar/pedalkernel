@@ -1123,6 +1123,11 @@ impl CompiledPedal {
                             }
                             stage.recompute_all();
                             stage.flush_passive_rtype_recompute();
+                            // Recompute opamp adaptor scattering when a pot in the
+                            // feedback network changes (e.g. tone pots wired into an
+                            // inverting opamp's Zf path). Without this the scattering
+                            // matrix keeps the port impedances from compile time.
+                            stage.flush_opamp_adaptor_recompute();
                         }
                         self.notify_stage_pot_changed(stage_idx);
                         if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
@@ -1349,6 +1354,11 @@ impl CompiledPedal {
                             }
                             stage.recompute_all();
                             stage.flush_passive_rtype_recompute();
+                            // Recompute opamp adaptor scattering when a pot in the
+                            // feedback network changes (e.g. tone pots wired into an
+                            // inverting opamp's Zf path). Without this the scattering
+                            // matrix keeps the port impedances from compile time.
+                            stage.flush_opamp_adaptor_recompute();
                         }
                         // Also update the same pot in other WDF stages where it
                         // may appear (e.g., opamp feedback pot also in diode stage).
@@ -1368,6 +1378,7 @@ impl CompiledPedal {
                             if changed {
                                 stage.recompute_all();
                                 stage.flush_passive_rtype_recompute();
+                                stage.flush_opamp_adaptor_recompute();
                             }
                         }
                         // Component-driven updates: OpAmpRoot gain, BBD mix.
