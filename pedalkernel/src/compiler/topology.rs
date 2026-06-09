@@ -804,19 +804,38 @@ impl<'a> TopologyContext<'a> {
         barriers.remove(&end);
 
         // BFS forward.
+        // Track BFS distance from start so we can exclude backward edges
+        // (e.g., R5.b_node → R5 → node28, where R5.b_node was reached FROM node28)
+        // from parent_edges. Without this, the backward BFS collects downstream
+        // components that belong to the output chain, not the feedback path.
         let mut visited: HashSet<usize> = HashSet::new();
+        let mut bfs_dist: HashMap<usize, usize> = HashMap::new();
         let mut parent_edges: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
         let mut queue = VecDeque::new();
         visited.insert(start);
+        bfs_dist.insert(start, 0);
         queue.push_back(start);
         while let Some(node) = queue.pop_front() {
+            let node_dist = bfs_dist.get(&node).copied().unwrap_or(0);
             if let Some(neighbors) = passive_adj.get(&node) {
                 for (next, comp_id) in neighbors {
-                    parent_edges
-                        .entry(*next)
-                        .or_default()
-                        .push((node, comp_id.clone()));
+                    let next_dist = bfs_dist.get(next).copied();
+                    // Only record parent_edges for tree-edges (first visit) and
+                    // same-level cross-edges. Exclude backward edges where next
+                    // was already visited at a SMALLER distance than node —
+                    // those are "upstream" nodes that came before node in BFS.
+                    let include_edge = match next_dist {
+                        None => true, // first visit: always include
+                        Some(d) => d >= node_dist, // same level or forward cross-edge
+                    };
+                    if include_edge {
+                        parent_edges
+                            .entry(*next)
+                            .or_default()
+                            .push((node, comp_id.clone()));
+                    }
                     if visited.insert(*next) {
+                        bfs_dist.insert(*next, node_dist + 1);
                         if *next != end && !barriers.contains(next) {
                             queue.push_back(*next);
                         }
@@ -955,6 +974,12 @@ fn classify_opamp(
     // Need Rf (feedback resistor from neg to out) for remaining topologies.
     let (rf, _rf_comps, rf_pot) = ctx.find_resistive_path(neg_node, out_node)?;
     let all_fb_comps = ctx.collect_passive_comps_between(neg_node, out_node);
+    #[cfg(test)]
+    {
+        let mut sorted = all_fb_comps.clone();
+        sorted.sort();
+        eprintln!("[topology-debug] {} collect_passive_comps_between neg={} out={}: {:?}", comp_id, neg_node, out_node, sorted);
+    }
 
     // ── Bridged-T resonator detection ────────────────────────────────────
     // Must check BEFORE Inverting/NonInverting because C1 from neg→gnd

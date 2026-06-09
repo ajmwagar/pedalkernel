@@ -283,7 +283,7 @@ fn bridged_t_impulse_response_shape() {
 /// the large circuit without crashing or producing NaN.
 #[test]
 fn sine_drum_full_compiles_and_produces_output() {
-    let src = include_str!("../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal");
+    let src = include_str!("../../../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal");
     let pedal = parse_pedal_file(src).expect("parse sine_drum");
     let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile sine_drum");
 
@@ -301,7 +301,7 @@ fn sine_drum_full_compiles_and_produces_output() {
 /// Diagnostic: compare spectral content of sine_drum C3 vs expected 130 Hz.
 #[test]
 fn sine_drum_spectral_analysis() {
-    let src = include_str!("../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal");
+    let src = include_str!("../../../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal");
     let pedal = parse_pedal_file(src).expect("parse sine_drum");
     let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile sine_drum");
 

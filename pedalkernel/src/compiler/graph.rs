@@ -2035,21 +2035,36 @@ impl CircuitGraph {
                 barriers.remove(&end);
 
                 // BFS forward from start, stopping at barriers and not expanding past end.
+                // Track BFS distance to avoid recording backward edges (where a downstream
+                // node points back to an upstream one — creating false parent links that
+                // cause the backward BFS to over-collect output-chain components).
                 let mut visited: HashSet<usize> = HashSet::new();
+                let mut bfs_dist: HashMap<usize, usize> = HashMap::new();
                 let mut parent_edges: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
                 let mut queue = VecDeque::new();
                 visited.insert(start);
+                bfs_dist.insert(start, 0);
                 queue.push_back(start);
                 while let Some(node) = queue.pop_front() {
+                    let node_dist = bfs_dist.get(&node).copied().unwrap_or(0);
                     if let Some(neighbors) = passive_adj.get(&node) {
                         for (next, comp_id) in neighbors {
-                            parent_edges
-                                .entry(*next)
-                                .or_default()
-                                .push((node, comp_id.clone()));
+                            let next_dist = bfs_dist.get(next).copied();
+                            // Only record tree-edges and same-level cross-edges.
+                            // Skip backward edges (next already visited at smaller dist).
+                            let include_edge = match next_dist {
+                                None => true,
+                                Some(d) => d >= node_dist,
+                            };
+                            if include_edge {
+                                parent_edges
+                                    .entry(*next)
+                                    .or_default()
+                                    .push((node, comp_id.clone()));
+                            }
                             if visited.insert(*next) {
-                                // Don't expand past end node or through barrier nodes,
-                                // but DO record the edge to collect the component.
+                                bfs_dist.insert(*next, node_dist + 1);
+                                // Don't expand past end node or through barrier nodes.
                                 if *next != end && !barriers.contains(next) {
                                     queue.push_back(*next);
                                 }
@@ -2169,6 +2184,8 @@ impl CircuitGraph {
                     // to collect the complete feedback network for edge exclusion.
                     let no_extra = HashSet::new();
                     let all_fb_comps = collect_feedback_comps(neg_node, out_node, &no_extra);
+                    #[cfg(test)]
+                    eprintln!("[graph-debug] {} all_fb_comps neg={} out={}: {:?}", comp.id, neg_node, out_node, all_fb_comps);
 
                     // ── Bridged-T resonator detection ────────────────────
                     // Must check BEFORE Inverting/NonInverting classification because

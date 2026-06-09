@@ -1598,118 +1598,151 @@ pub fn compile_pedal_with_options(
     // ══ Pass 1: Element classification ════════════════════════════════
     let classified = super::classify::classify_circuit(&graph, pedal);
 
-    // ══ Pass 1.5 + 2 removed (nullor refactor) ═════════════════════════
-    // Op-amp topology classification and feedback analysis are gone.
-    // All op-amps are absorbed into R-type adaptors via VCVS stamps.
-    // See Phase 1–6 commits on refactor/opamp-nullor.
+    // ══ Pass 1.5: Component self-classification ═══════════════════════
+    let (topology_classified, topology_classified_ids) =
+        super::topology::classify_topologies(pedal, sample_rate);
 
-    // ── Short unity-gain opamp pos→out in the graph ────────────────────
+    // ══ Pass 2: Op-amp analysis ═══════════════════════════════════════
+    let opamp_analysis = super::opamp_analysis::analyze_opamps(
+        &graph,
+        pedal,
+        &topology_classified,
+        &topology_classified_ids,
+    );
+
     // ── Unity-gain buffer pos→out merge ────────────────────────────────
-    // Unity-gain buffers (neg==out) are transparent wires. In circuits
-    // with NL elements (Klon, TS808), merge pos→out so NL plans see the
-    // merged topology and collect output-tail edges through the buffer.
-    //
-    // In pure-linear circuits (standalone unity buffer), do NOT merge —
-    // the synthetic plan picks up both sides and the VCVS stamp provides
-    // the current sourcing that a passive wire can't.
-    // Only merge unity buffers whose pos is in the SIGNAL path (reachable
-    // from graph.in_node via passive edges). Buffers whose pos is on a
-    // bias network (vref divider, gate bias) must NOT be merged — they'd
-    // collapse bias nodes into the signal output. This distinguishes:
-    //   Klon U1/U3 (pos on signal path) → merge ✓
-    //   JFET allpass U1 (pos on vref) → don't merge ✗
-    let has_nl_elements = !classified.nonlinear_elements.is_empty();
-    if has_nl_elements {
-        // Quick BFS from in_node through passive edges to find signal-path nodes.
-        let active_set: HashSet<usize> = graph.active_edge_indices.iter().copied().collect();
-        let mut signal_reachable: HashSet<super::graph::NodeId> = HashSet::new();
-        signal_reachable.insert(graph.in_node);
-        let mut frontier = vec![graph.in_node];
-        while let Some(n) = frontier.pop() {
-            for (eidx, e) in graph.edges.iter().enumerate() {
-                if active_set.contains(&eidx) {
-                    continue;
-                }
-                if !graph.components[e.comp_idx].kind.is_passive() {
-                    continue;
-                }
-                let other = if e.node_a == n {
-                    e.node_b
-                } else if e.node_b == n {
-                    e.node_a
-                } else {
-                    continue;
-                };
-                if signal_reachable.insert(other) {
-                    frontier.push(other);
-                }
-            }
-        }
-        for rec in &graph.nullor_pins {
-            if rec.neg_node == rec.out_node {
-                let pos = rec.pos_node;
-                let out = rec.out_node;
-                if pos == out {
-                    continue;
-                }
-                // Only merge if pos is on the signal path.
-                if !signal_reachable.contains(&pos) {
-                    continue;
-                }
+    for info in &opamp_analysis.feedback_loops {
+        if matches!(
+            info.feedback_kind,
+            super::graph::OpAmpFeedbackKind::UnityGain
+        ) {
+            let pos = info.pos_node;
+            let out = info.out_node;
+            if pos != out {
                 for edge in &mut graph.edges {
-                    if edge.node_a == pos {
-                        edge.node_a = out;
-                    }
-                    if edge.node_b == pos {
-                        edge.node_b = out;
-                    }
+                    if edge.node_a == pos { edge.node_a = out; }
+                    if edge.node_b == pos { edge.node_b = out; }
                 }
-                if graph.output_pin_nodes.remove(&pos) {
-                    graph.output_pin_nodes.insert(out);
-                }
-                if graph.in_node == pos {
-                    graph.in_node = out;
-                }
-                if graph.out_node == pos {
-                    graph.out_node = out;
-                }
-            }
-        }
-        for rec in &mut graph.nullor_pins {
-            if rec.neg_node == rec.out_node && rec.pos_node != rec.out_node {
-                // Check if this rec was actually merged (pos changed).
-                // Simple: if pos isn't in any edge, it was merged.
-                let pos_still_exists = graph
-                    .edges
-                    .iter()
-                    .any(|e| e.node_a == rec.pos_node || e.node_b == rec.pos_node);
-                if !pos_still_exists {
-                    rec.pos_node = rec.out_node;
-                }
+                if graph.output_pin_nodes.remove(&pos) { graph.output_pin_nodes.insert(out); }
+                if graph.in_node == pos { graph.in_node = out; }
+                if graph.out_node == pos { graph.out_node = out; }
             }
         }
     }
 
+    let nl_junction_nodes: HashSet<super::graph::NodeId> = classified
+        .nonlinear_elements
+        .iter()
+        .flat_map(|e| e.junction_nodes.iter().copied())
+        .collect();
+
+    let skip_feedback_tree_opamps: HashSet<String> = opamp_analysis
+        .feedback_loops
+        .iter()
+        .filter(|info| {
+            if info.has_feedback_diode() { return true; }
+            if nl_junction_nodes.contains(&info.neg_node)
+                || nl_junction_nodes.contains(&info.out_node)
+            {
+                return true;
+            }
+            let is_global = |n: super::graph::NodeId| {
+                n == graph.gnd_node || n == graph.vcc_node
+                    || n == graph.in_node || n == graph.out_node
+            };
+            graph.edges.iter().enumerate().any(|(idx, e)| {
+                if classified.all_nonlinear_edge_indices.contains(&idx)
+                    || graph.active_edge_indices.contains(&idx) { return false; }
+                let at_opamp_pin = |n: super::graph::NodeId| n == info.neg_node || n == info.out_node;
+                (at_opamp_pin(e.node_a) && nl_junction_nodes.contains(&e.node_b) && !is_global(e.node_b))
+                || (at_opamp_pin(e.node_b) && nl_junction_nodes.contains(&e.node_a) && !is_global(e.node_a))
+            })
+        })
+        .map(|info| info.comp_id.clone())
+        .collect();
+
+    // Build op-amp feedback stages.
     let mut stages: Vec<WdfStage> = Vec::new();
-    let mut claimed_edges: HashSet<usize> = HashSet::new();
-    // Op-amp stages are now compiled via the nullor/VCVS path in build_rtype_stage.
-    let opamp_stages: Vec<super::compiled::OpAmpStage> = Vec::new();
+    let (mut opamp_feedback_stages, diode_paired_opamps, opamp_consumed_edges) =
+        super::opamp_analysis::build_opamp_feedback_stages(
+            &opamp_analysis,
+            pedal,
+            &graph,
+            stages.len(),
+            sample_rate,
+            oversampling,
+            &skip_feedback_tree_opamps,
+            &nl_junction_nodes,
+        );
+    let mut claimed_edges: HashSet<usize> = opamp_consumed_edges;
+    for stage in &mut opamp_feedback_stages {
+        stage.apply_oversampling_rate(sample_rate);
+    }
+    stages.extend(opamp_feedback_stages);
+
+    // Set output_node_id/injection_node_id on opamp feedback stages.
+    {
+        let mut stage_idx = 0;
+        for info in &opamp_analysis.feedback_loops {
+            match &info.feedback_kind {
+                super::graph::OpAmpFeedbackKind::UnityGain
+                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. }
+                | super::graph::OpAmpFeedbackKind::Allpass { .. } => continue,
+                super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
+                    if skip_feedback_tree_opamps.contains(&info.comp_id)
+                        && (feedback_diode.is_some()
+                            || nl_junction_nodes.contains(&info.out_node)) => { continue; }
+                _ => {}
+            }
+            if stage_idx < stages.len() {
+                stages[stage_idx].output_node_id = info.out_node;
+                stages[stage_idx].injection_node_id = info.neg_node;
+            }
+            stage_idx += 1;
+        }
+    }
+
+    // Build standalone op-amp stages (no feedback).
+    let opamp_stages = super::opamp_analysis::build_standalone_opamp_stages(
+        pedal,
+        &opamp_analysis.feedback_opamp_ids,
+        sample_rate,
+    );
 
     // ══ Pass 3: Stage planning ════════════════════════════════════════
-    // Detect modulation-controlled elements before planning.
     let envelope_controlled_otas = detect_envelope_controlled_otas(pedal);
 
-    // Op-amp BFS barriers: these were populated from opamp_analysis (now deleted).
-    // The nullor path handles op-amps directly via stamp_vcvs; BFS barriers
-    // are no longer needed for op-amp feedback networks.
-    let opamp_input_nodes: HashSet<super::graph::NodeId> = HashSet::new();
+    let opamp_input_nodes: HashSet<super::graph::NodeId> = opamp_analysis
+        .feedback_loops
+        .iter()
+        .filter(|info| {
+            !info.has_feedback_diode()
+                && !matches!(info.feedback_kind, super::graph::OpAmpFeedbackKind::UnityGain)
+        })
+        .flat_map(|info| [info.neg_node, info.pos_node])
+        .collect();
+
     let feedback_diode_neg_map: HashMap<super::graph::NodeId, super::graph::NodeId> =
-        HashMap::new();
+        diode_paired_opamps
+            .iter()
+            .map(|dp| (dp.out_node, dp.neg_node))
+            .collect();
+
+    #[cfg(test)]
+    {
+        eprintln!("[compile-debug] claimed_edges before plan_stages: count={}", claimed_edges.len());
+        let mut claimed_names: Vec<String> = claimed_edges.iter().map(|&eidx| {
+            graph.components[graph.edges[eidx].comp_idx].id.clone()
+        }).collect();
+        claimed_names.sort();
+        eprintln!("[compile-debug] claimed: {:?}", claimed_names);
+        eprintln!("[compile-debug] opamp_input_nodes: {:?}", opamp_input_nodes);
+    }
 
     let (
         stage_plans,
         push_pull_plans,
-        mut multi_nl_plans,
+        multi_nl_plans,
         pp_transformer_edges,
         _bjt_bias_analysis,
         node_island_depths,
@@ -1723,140 +1756,49 @@ pub fn compile_pedal_with_options(
         &feedback_diode_neg_map,
     );
 
-    // ══ Synthesize op-amp-only plans (Phase 3c) ═══════════════════════════
-    // For every op-amp whose pins are NOT already covered by an existing
-    // multi_nl plan, generate a synthetic plan that carries a nullor VCVS
-    // stamp. This allows pure-linear op-amp circuits (unity buffer,
-    // inverting x10, integrator, …) to flow through `build_rtype_stage`
-    // and produce R-type stages via the unified nullor path.
+    // Set signal_flow_distance on opamp feedback stages.
     {
-        // Nodes already covered by existing multi_nl plans.
-        let mut covered_nodes: HashSet<super::graph::NodeId> = HashSet::new();
-        for p in &multi_nl_plans {
-            for &(pos, neg) in &p.nl_terminals {
-                covered_nodes.insert(pos);
-                covered_nodes.insert(neg);
+        let mut stage_idx = 0;
+        for info in &opamp_analysis.feedback_loops {
+            match &info.feedback_kind {
+                super::graph::OpAmpFeedbackKind::UnityGain
+                | super::graph::OpAmpFeedbackKind::AllpassJfet { .. }
+                | super::graph::OpAmpFeedbackKind::Allpass { .. } => continue,
+                super::graph::OpAmpFeedbackKind::Inverting { feedback_diode, .. }
+                    if skip_feedback_tree_opamps.contains(&info.comp_id)
+                        && (feedback_diode.is_some()
+                            || nl_junction_nodes.contains(&info.out_node)) => { continue; }
+                _ => {}
             }
-            for &eidx in &p.passive_edge_indices {
-                let e = &graph.edges[eidx];
-                covered_nodes.insert(e.node_a);
-                covered_nodes.insert(e.node_b);
-            }
-        }
-        for rec in &graph.nullor_pins {
-            // Skip op-amps whose OUTPUT node is already covered by an
-            // existing plan — they'll pick up the VCVS stamp via
-            // in_stage_nullors in build_rtype_stage. If the output node
-            // is NOT covered, the op-amp needs its own synthetic plan
-            // (even if input pins are in another plan, e.g. Klon U3
-            // whose pos is in the D1 plan but out connects to R11/Output).
-            let out_covered = covered_nodes.contains(&rec.out_node);
-            eprintln!(
-                "[nullor-check] opamp={} pos={} neg={} out={} out_covered={}",
-                graph.components[rec.comp_idx].id,
-                rec.pos_node,
-                rec.neg_node,
-                rec.out_node,
-                out_covered
-            );
-            if out_covered {
-                continue;
-            }
-            // Gather all unclaimed passive edges that touch any of this
-            // op-amp's pins transitively (simple BFS through passive edges).
-            let mut pin_nodes: HashSet<super::graph::NodeId> =
-                [rec.pos_node, rec.neg_node, rec.out_node]
-                    .iter()
+            if stage_idx < stages.len() {
+                stages[stage_idx].signal_flow_distance = node_island_depths
+                    .get(&info.neg_node)
+                    .or_else(|| node_island_depths.get(&info.out_node))
                     .copied()
-                    .collect();
-            // BFS seeds from the op-amp's 3 pins ONLY — do NOT add
-            // graph.in_node or graph.out_node. Adding global I/O nodes
-            // causes greedy BFS to claim edges belonging to other op-amps
-            // (e.g., Klon U1 grabbing R11/Output from U3's territory).
-            // The in/out connection happens via stage chaining instead.
-
-            // Collect unclaimed passive edges between these nodes and
-            // expand the node set by BFS through passive connectivity.
-            let mut frontier: Vec<super::graph::NodeId> = pin_nodes.iter().copied().collect();
-            let mut passive_edges: Vec<usize> = Vec::new();
-            let mut seen_edges: HashSet<usize> = HashSet::new();
-            while let Some(n) = frontier.pop() {
-                for (eidx, e) in graph.edges.iter().enumerate() {
-                    if seen_edges.contains(&eidx) || claimed_edges.contains(&eidx) {
-                        continue;
-                    }
-                    if graph.active_edge_indices.contains(&eidx) {
-                        continue; // skip virtual active-bridge edges
-                    }
-                    if e.node_a != n && e.node_b != n {
-                        continue;
-                    }
-                    // Skip non-passive edges.
-                    let comp = &graph.components[e.comp_idx];
-                    if !comp.kind.is_passive() {
-                        continue;
-                    }
-                    seen_edges.insert(eidx);
-                    passive_edges.push(eidx);
-                    // Expand frontier through the other endpoint.
-                    let other = if e.node_a == n { e.node_b } else { e.node_a };
-                    if pin_nodes.insert(other) {
-                        frontier.push(other);
-                    }
-                }
+                    .unwrap_or_else(|| {
+                        classified.dist_from_in.get(&info.neg_node).copied().unwrap_or(0)
+                    });
             }
-
-            // Build a synthetic plan. injection_node = graph.in_node,
-            // output_node = graph.out_node (typical for single-stage
-            // op-amp pedals).
-            if !passive_edges.is_empty() {
-                // Mark these edges as claimed so other plan passes don't
-                // re-claim them.
-                for &eidx in &passive_edges {
-                    claimed_edges.insert(eidx);
-                }
-                eprintln!(
-                    "[synthetic-nullor-plan] opamp={} pins=({},{},{}) edges={}",
-                    graph.components[rec.comp_idx].id,
-                    rec.pos_node,
-                    rec.neg_node,
-                    rec.out_node,
-                    passive_edges.len()
-                );
-                multi_nl_plans.push(super::plan::MultiNlPlan {
-                    nl_element_indices: Vec::new(),
-                    output_element_idx: 0, // unused when n_nl == 0
-                    passive_edge_indices: passive_edges,
-                    injection_node: graph.in_node,
-                    nl_terminals: Vec::new(),
-                    compensation: 1.0,
-                    output_node: Some(graph.out_node),
-                    ota_vccs: Vec::new(),
-                    signal_chain_depth: Some(0),
-                    nullor_comp_indices: vec![rec.comp_idx],
-                });
-            }
+            stage_idx += 1;
         }
     }
 
     // ══ Pass 4: Tree building ═════════════════════════════════════════
-    // Detect JFETs that are LFO-controlled so they use variable-resistance mode
-    // instead of full nonlinear NR solving.
     let lfo_controlled_jfets = detect_lfo_controlled_jfets(pedal);
 
-    // Build nonlinear WDF stages from plans.
-    // Triode plans that fail SP reduction fall back to single-NL MNA stages.
     let (nonlinear_stages, triode_fallback_stages, fallback_claimed_edges) =
         super::build::build_stages(
             &stage_plans,
             &classified,
             &graph,
+            &opamp_analysis,
             sample_rate,
             oversampling,
             &pp_transformer_edges,
             &lfo_controlled_jfets,
             supply_voltage,
             &node_island_depths,
+            &diode_paired_opamps,
         );
     stages.extend(nonlinear_stages);
 
@@ -1879,6 +1821,7 @@ pub fn compile_pedal_with_options(
         sample_rate,
         oversampling,
         supply_voltage,
+        &diode_paired_opamps,
     );
 
     // Add triode fallback stages (SP-failed triodes built as single-NL MNA).
@@ -1910,6 +1853,34 @@ pub fn compile_pedal_with_options(
         claimed_edges.extend(classified.sidechain_edge_set.iter().copied());
         claimed_edges.extend(orphan_output_edges.iter().copied());
         claimed_edges.extend(fallback_claimed_edges.iter().copied());
+
+
+        // Claim opamp input passives (coupling caps, bias resistors at
+        // pos/neg pins). Only for non-inverting opamps where pos is the
+        // signal input — inverting opamps have pos at AC ground (Vref),
+        // and BFS from Vref would over-claim tone/volume sections.
+        let mut input_bfs_barriers = graph.output_pin_nodes.clone();
+        for &ag_node in &graph.ac_ground_nodes {
+            input_bfs_barriers.insert(ag_node);
+        }
+        for info in &opamp_analysis.feedback_loops {
+            let skip = matches!(
+                info.feedback_kind,
+                super::graph::OpAmpFeedbackKind::Inverting { .. }
+                    | super::graph::OpAmpFeedbackKind::UnityGain
+            );
+            if skip { continue; }
+            let input_passives = graph.bfs_passive_edges(
+                info.pos_node,
+                &classified.all_nonlinear_edge_indices,
+                &graph.active_edge_indices,
+                false,
+                true,
+                &pp_transformer_edges,
+                &input_bfs_barriers,
+            );
+            claimed_edges.extend(input_passives.iter().copied());
+        }
 
         let feedforward_stages =
             build_feedforward_stages(&graph, &classified, &claimed_edges, sample_rate);

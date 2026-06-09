@@ -1111,6 +1111,18 @@ pub(super) fn plan_stages(
         }
     }
 
+    #[cfg(test)]
+    {
+        for plan in &plans {
+            let elem = &classified.nonlinear_elements[plan.element_idx];
+            let comp_id = &graph.components[graph.edges[elem.edge_idx].comp_idx].id;
+            let passive_names: Vec<String> = plan.passive_idxs.iter().map(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id.clone()
+            }).collect();
+            eprintln!("[plan-debug] StagePlan for {} junction={}: passive_idxs={:?}", comp_id, elem.junction_nodes[0], passive_names);
+        }
+    }
+
     (
         plans,
         push_pull_plans,
@@ -1357,6 +1369,26 @@ fn plan_one_junction(
         // Simple 1-junction: diode, MOSFET, zener, OTA.
         // Multi-hop BFS already collected the full passive network above
         // (feedback + input coupling + output tone/volume).
+        #[cfg(test)]
+        {
+            let comp_id = &graph.components[graph.edges[elem.edge_idx].comp_idx].id;
+            let jp_names: Vec<String> = junction_passives.iter().map(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx].id.clone()
+            }).collect();
+            eprintln!("[plan-diode-debug] comp={} junction={} barrier_count={} barriers={:?} excluded_count={} junction_passives={:?}", comp_id, junction, output_barriers.len(), output_barriers.iter().collect::<Vec<_>>(), excluded.len(), jp_names);
+            // Debug: find edges adjacent to junction
+            for (eidx, e) in graph.edges.iter().enumerate() {
+                if e.node_a == junction || e.node_b == junction {
+                    let other = if e.node_a == junction { e.node_b } else { e.node_a };
+                    let cid = &graph.components[e.comp_idx].id;
+                    let is_excl = excluded.contains(&eidx);
+                    let is_nl = classified.all_nonlinear_edge_indices.contains(&eidx);
+                    let is_active = graph.active_edge_indices.contains(&eidx);
+                    let is_barrier = output_barriers.contains(&other);
+                    eprintln!("  adj edge[{}] {} ({}->{}) excl={} nl={} active={} other_is_barrier={}", eidx, cid, e.node_a, e.node_b, is_excl, is_nl, is_active, is_barrier);
+                }
+            }
+        }
         if junction_passives.is_empty() {
             return None;
         }
