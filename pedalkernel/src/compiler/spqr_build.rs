@@ -2065,10 +2065,11 @@ fn build_passive_rtype_stage(
                 };
                 let s1 = node_to_mna(sec_pos_node, &nodes);
                 let s2 = node_to_mna(sec_neg_node, &nodes);
+                let resolved_cfg = crate::model_lookup::transformer_config_from_dsl(cfg);
                 let dynamic = stamp_linear_transformer_skeleton(
                     &mut mna,
                     &comp.id,
-                    cfg,
+                    &resolved_cfg,
                     n1,
                     n2,
                     s1,

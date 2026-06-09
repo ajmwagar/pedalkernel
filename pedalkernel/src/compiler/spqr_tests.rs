@@ -930,6 +930,49 @@ fn spqr_t_junction_produces_audio_as_stage() {
     );
 }
 
+#[test]
+fn model_backed_transformer_compiles_and_steps_down() {
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "test" { supply 9V
+            components {
+                T1: transformer(10:1, JT11P1)
+                R_load: resistor(1k)
+            }
+            nets {
+                in -> T1.a
+                T1.b -> gnd
+                T1.c -> out, R_load.a
+                T1.d -> gnd
+                R_load.b -> gnd
+            }
+            controls {}
+        }"#,
+    )
+    .expect("parse");
+
+    let mut compiled = super::spqr_build::compile_via_spqr(&pedal, 48000.0).expect("compile");
+
+    let mut max_out = 0.0f64;
+    let mut min_out = 0.0f64;
+    for s in 0..4800 {
+        let input = (2.0 * std::f64::consts::PI * 1000.0 * s as f64 / 48000.0).sin();
+        let output = compiled.process(input);
+        if s > 2400 {
+            max_out = max_out.max(output);
+            min_out = min_out.min(output);
+        }
+    }
+
+    let gain = (max_out - min_out) / 2.0;
+    assert!(
+        (0.07..0.12).contains(&gain),
+        "10:1 model-backed transformer gain should be near 0.1x, got {gain:.4}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Pendant → stage pipeline: SPQR tree with pendants must produce
 // PassiveWdf stages (not Rigid → IIR with b=[0,0,0])

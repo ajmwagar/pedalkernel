@@ -669,6 +669,9 @@ pub enum WindingType {
 /// - Parasitic elements (DCR, capacitance) for accurate HF response
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformerConfig {
+    /// Optional model-library name. When present, library values seed the
+    /// electrical/core fields and explicit DSL fields override them.
+    pub model: Option<String>,
     /// Turns ratio (primary:secondary). 1.0 = 1:1, 10.0 = 10:1 step-down
     pub turns_ratio: f64,
     /// Primary winding inductance in Henries
@@ -704,6 +707,7 @@ impl Default for TransformerConfig {
         Self {
             turns_ratio: 1.0,
             primary_inductance: 1.0,
+            model: None,
             primary_type: WindingType::Standard,
             secondary_type: WindingType::Standard,
             primary_dcr: 0.0,
@@ -725,6 +729,17 @@ impl TransformerConfig {
         Self {
             turns_ratio,
             primary_inductance,
+            ..Default::default()
+        }
+    }
+
+    /// Create a transformer backed by an embedded model-library entry.
+    pub fn with_model(turns_ratio: f64, model: String) -> Self {
+        Self {
+            turns_ratio,
+            primary_inductance: 0.0,
+            coupling: 0.0,
+            model: Some(model),
             ..Default::default()
         }
     }
@@ -1598,16 +1613,18 @@ fn winding_modifier_primary(input: &str) -> IResult<&str, WindingType> {
     value(WindingType::CenterTap, tag("ct_primary"))(input)
 }
 
-/// `transformer(10:1, 2H)` — basic transformer
+/// `transformer(10:1, JT11P1)` — model-backed transformer
+/// `transformer(10:1, 2H)` — explicit generic transformer
 /// `transformer(1:4, 2H, 75, 200p)` — with positional DCR and parasitic cap
 /// `transformer(1:1, 4H, ct)` — center-tapped secondary
 /// `transformer(1:1, 4H, pp, ct)` — push-pull primary, center-tapped secondary
 /// `transformer(10:1, 10H, 150, 300p, ct_primary)` — center-tapped primary
 /// `transformer(10:1, 2H, dcr=75, Cp=200p)` — with named parasitics
+/// `transformer(10:1, JT11P1, Lm=8H, Rc=250k)` — model-backed with overrides
 /// `transformer(10:1, 2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k)` — linear T model
 ///
-/// Positional syntax: transformer(ratio, inductance [, dcr] [, cap] [, winding_mod])
-/// Named syntax: transformer(ratio, inductance [, dcr=val] [, Cp=val] [, k=val] [, Llp=val] [, Lls=val] [, Lm=val] [, Rc=val])
+/// Positional syntax: transformer(ratio, model|inductance [, dcr] [, cap] [, winding_mod])
+/// Named syntax: transformer(ratio, model|inductance [, dcr=val] [, Cp=val] [, k=val] [, Lp=val] [, Llp=val] [, Lls=val] [, Lm=val] [, Rc=val])
 fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("transformer")(input)?;
     let (input, _) = char('(')(input)?;
@@ -1626,12 +1643,16 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = char(',')(input)?;
     let (input, _) = ws_comments(input)?;
 
-    // Parse primary inductance
-    let (input, inductance) = eng_value(input)?;
+    // Parse either model name or explicit primary inductance.
+    let (input, mut config) = if let Ok((input, inductance)) = eng_value(input) {
+        (input, TransformerConfig::new(ratio, inductance))
+    } else {
+        let (input, model) = model_name_str(input)?;
+        (input, TransformerConfig::with_model(ratio, model))
+    };
     let (input, _) = ws_comments(input)?;
 
     // Parse optional modifiers and named parameters
-    let mut config = TransformerConfig::new(ratio, inductance);
     let mut positional_count = 0; // Track positional numeric args after inductance
 
     // Try to parse additional comma-separated options
@@ -1712,6 +1733,8 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
                 tag("lls"),
                 tag("Lm"),
                 tag("lm"),
+                tag("Lp"),
+                tag("lp"),
                 tag("Rc"),
                 tag("rc"),
             ))(remaining)
@@ -1724,6 +1747,7 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
                     "Llp" | "llp" => config.primary_leakage = Some(value),
                     "Lls" | "lls" => config.secondary_leakage = Some(value),
                     "Lm" | "lm" => config.magnetizing_inductance = Some(value),
+                    "Lp" | "lp" => config.primary_inductance = value,
                     "Rc" | "rc" => config.core_loss_resistance = Some(value),
                     _ => unreachable!(),
                 }
@@ -4652,10 +4676,21 @@ synth "CV Test" {
         let (_, (c, _)) = component_def("T1: transformer(10:1, 2H)").unwrap();
         assert_eq!(c.id, "T1");
         let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert_eq!(cfg.model, None);
         assert!((cfg.turns_ratio - 10.0).abs() < 1e-6);
         assert!((cfg.primary_inductance - 2.0).abs() < 1e-6);
         assert_eq!(cfg.primary_type, WindingType::Standard);
         assert_eq!(cfg.secondary_type, WindingType::Standard);
+    }
+
+    #[test]
+    fn parse_transformer_with_model_name() {
+        let (_, (c, _)) = component_def("T1: transformer(10:1, JT11P1)").unwrap();
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert_eq!(cfg.model.as_deref(), Some("JT11P1"));
+        assert!((cfg.turns_ratio - 10.0).abs() < 1e-6);
+        assert_eq!(cfg.primary_inductance, 0.0);
+        assert_eq!(cfg.coupling, 0.0);
     }
 
     #[test]
@@ -4682,10 +4717,13 @@ synth "CV Test" {
 
     #[test]
     fn parse_transformer_with_linear_model_fields() {
-        let (_, (c, _)) =
-            component_def("T4: transformer(10:1, 2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k)")
-                .unwrap();
+        let (_, (c, _)) = component_def(
+            "T4: transformer(10:1, JT11P1, Lp=2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k)",
+        )
+        .unwrap();
         let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert_eq!(cfg.model.as_deref(), Some("JT11P1"));
+        assert!((cfg.primary_inductance - 2.0).abs() < 1e-9);
         assert!((cfg.primary_leakage.unwrap() - 20e-3).abs() < 1e-9);
         assert!((cfg.secondary_leakage.unwrap() - 200e-6).abs() < 1e-12);
         assert!((cfg.magnetizing_inductance.unwrap() - 1.98).abs() < 1e-9);

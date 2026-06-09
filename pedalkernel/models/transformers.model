@@ -1,0 +1,14 @@
+# Compact audio transformer model registry for PedalKernel.
+#
+# These are behavioral scalar models for the realtime WDF/MNA transformer path,
+# not full vendor SPICE subcircuits. Units:
+#   LP/LM/LLP/LLS = H, RP/RS/RC = Ohm, CP/CW = F, K = coupling coefficient.
+# Geometry/core fields are carried for Phase 2/4 nonlinear-core work:
+#   N1/N2 = turns, AE = m^2, LE/GAP = m, MS/A/ALPHA/JA_K/C = Jiles-Atherton,
+#   HC/BR/BS = datasheet hysteresis hints.
+
+.TRANSFORMER GENERIC_600_600 LP=1 K=0.995 RP=50 RS=50 LLP=5m LLS=5m LM=995m RC=200k CP=50p N1=1 N2=1
+.TRANSFORMER GENERIC_10K_10K LP=10 K=0.995 RP=500 RS=500 LLP=50m LLS=50m LM=9.95 RC=1MEG CP=75p N1=1 N2=1
+.TRANSFORMER JT11P1 LP=2 K=0.99 RP=75 RS=75 LLP=20m LLS=20m LM=1.98 RC=500k CP=200p N1=1 N2=1
+.TRANSFORMER JT10KB-D LP=10 K=0.995 RP=600 RS=150 LLP=50m LLS=12.5m LM=9.95 RC=1MEG CP=100p N1=2 N2=1
+.TRANSFORMER A262A2E LP=30 K=0.998 RP=1200 RS=300 LLP=60m LLS=15m LM=29.94 RC=2MEG CP=120p N1=2 N2=1

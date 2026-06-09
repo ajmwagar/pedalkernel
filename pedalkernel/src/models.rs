@@ -23,6 +23,7 @@ static LED_MODELS_SRC: &str = include_str!("../models/leds.model");
 static SCHOTTKY_MODELS_SRC: &str = include_str!("../models/schottky.model");
 static ZENER_MODELS_SRC: &str = include_str!("../models/zeners.model");
 static OPAMP_MODELS_SRC: &str = include_str!("../models/opamps.model");
+static TRANSFORMER_MODELS_SRC: &str = include_str!("../models/transformers.model");
 
 // ---------------------------------------------------------------------------
 // Parsed model registry (lazy-initialized)
@@ -63,6 +64,10 @@ pub static ZENER_MODELS: LazyLock<HashMap<String, ShockleyDiodeModel>> =
 /// All op-amp and OTA models parsed from the embedded opamps.model file.
 pub static OPAMP_MODELS: LazyLock<HashMap<String, SpiceOpAmpModel>> =
     LazyLock::new(|| parse_opamp_models(OPAMP_MODELS_SRC));
+
+/// All transformer models parsed from the embedded transformers.model file.
+pub static TRANSFORMER_MODELS: LazyLock<HashMap<String, SpiceTransformerModel>> =
+    LazyLock::new(|| parse_transformer_models(TRANSFORMER_MODELS_SRC));
 
 // ---------------------------------------------------------------------------
 // Parsed SPICE BJT model
@@ -347,6 +352,79 @@ pub struct SpiceOpAmpModel {
     pub ota_r_load: f64,
 }
 
+// ---------------------------------------------------------------------------
+// Parsed transformer model
+// ---------------------------------------------------------------------------
+
+/// Compact behavioral audio transformer parameters.
+///
+/// Format:
+/// `.TRANSFORMER <name> LP= K= RP= RS= LLP= LLS= LM= RC= CP= N1= N2= ...`
+#[derive(Debug, Clone)]
+pub struct SpiceTransformerModel {
+    pub name: String,
+
+    // Linear electrical skeleton.
+    pub primary_inductance: f64,
+    pub coupling: f64,
+    pub primary_dcr: f64,
+    pub secondary_dcr: f64,
+    pub primary_leakage: f64,
+    pub secondary_leakage: f64,
+    pub magnetizing_inductance: f64,
+    pub core_loss_resistance: f64,
+    pub capacitance: f64,
+
+    // Geometry metadata for nonlinear core work.
+    pub primary_turns: f64,
+    pub secondary_turns: f64,
+    pub core_area: f64,
+    pub magnetic_path_length: f64,
+    pub gap_length: f64,
+
+    // Native Jiles-Atherton parameters.
+    pub ja_ms: f64,
+    pub ja_a: f64,
+    pub ja_alpha: f64,
+    pub ja_k: f64,
+    pub ja_c: f64,
+
+    // Datasheet hysteresis hints.
+    pub hc: f64,
+    pub br: f64,
+    pub bs: f64,
+}
+
+impl SpiceTransformerModel {
+    fn defaults(name: &str) -> Self {
+        Self {
+            name: name.to_uppercase(),
+            primary_inductance: 1.0,
+            coupling: 0.99,
+            primary_dcr: 0.0,
+            secondary_dcr: 0.0,
+            primary_leakage: 0.01,
+            secondary_leakage: 0.01,
+            magnetizing_inductance: 0.99,
+            core_loss_resistance: 0.0,
+            capacitance: 0.0,
+            primary_turns: 1.0,
+            secondary_turns: 1.0,
+            core_area: 0.0,
+            magnetic_path_length: 0.0,
+            gap_length: 0.0,
+            ja_ms: 0.0,
+            ja_a: 0.0,
+            ja_alpha: 0.0,
+            ja_k: 0.0,
+            ja_c: 0.0,
+            hc: 0.0,
+            br: 0.0,
+            bs: 0.0,
+        }
+    }
+}
+
 impl SpiceOpAmpModel {
     fn defaults(name: &str, is_ota: bool) -> Self {
         Self {
@@ -390,6 +468,7 @@ impl_named_model!(
     SpiceTriodeModel,
     SpicePentodeModel,
     SpiceOpAmpModel,
+    SpiceTransformerModel,
 );
 
 // ---------------------------------------------------------------------------
@@ -827,6 +906,50 @@ fn parse_opamp_model_line(line: &str) -> Option<SpiceOpAmpModel> {
 }
 
 // ---------------------------------------------------------------------------
+// Transformer model parser
+// ---------------------------------------------------------------------------
+
+/// Parse all `.TRANSFORMER` entries from a model file string.
+fn parse_transformer_models(src: &str) -> HashMap<String, SpiceTransformerModel> {
+    parse_model_registry(src, parse_transformer_model_line)
+}
+
+/// Parse a single `.TRANSFORMER <name> ...` line.
+fn parse_transformer_model_line(line: &str) -> Option<SpiceTransformerModel> {
+    let rest = strip_directive(line, ".TRANSFORMER")?;
+    let (name, params) = rest.split_once(|c: char| c.is_whitespace())?;
+    let mut model = SpiceTransformerModel::defaults(name);
+
+    for_each_param(params, |key, val| match key {
+        "LP" | "LPRI" | "PRIMARY_INDUCTANCE" => model.primary_inductance = val,
+        "K" | "COUPLING" => model.coupling = val,
+        "RP" | "RPRI" | "PRIMARY_DCR" => model.primary_dcr = val,
+        "RS" | "RSEC" | "SECONDARY_DCR" => model.secondary_dcr = val,
+        "LLP" | "PRIMARY_LEAKAGE" => model.primary_leakage = val,
+        "LLS" | "SECONDARY_LEAKAGE" => model.secondary_leakage = val,
+        "LM" | "MAGNETIZING_INDUCTANCE" => model.magnetizing_inductance = val,
+        "RC" | "CORE_LOSS" | "CORE_LOSS_RESISTANCE" => model.core_loss_resistance = val,
+        "CP" | "CW" | "CAPACITANCE" | "INTERWINDING_CAPACITANCE" => model.capacitance = val,
+        "N1" | "NP" | "PRIMARY_TURNS" => model.primary_turns = val,
+        "N2" | "NS" | "SECONDARY_TURNS" => model.secondary_turns = val,
+        "AE" | "CORE_AREA" => model.core_area = val,
+        "LE" | "MAGNETIC_PATH_LENGTH" => model.magnetic_path_length = val,
+        "GAP" | "LG" | "GAP_LENGTH" => model.gap_length = val,
+        "MS" | "JA_MS" => model.ja_ms = val,
+        "A" | "JA_A" => model.ja_a = val,
+        "ALPHA" | "JA_ALPHA" => model.ja_alpha = val,
+        "JA_K" | "KJA" => model.ja_k = val,
+        "C" | "JA_C" => model.ja_c = val,
+        "HC" => model.hc = val,
+        "BR" => model.br = val,
+        "BS" => model.bs = val,
+        _ => {}
+    });
+
+    Some(model)
+}
+
+// ---------------------------------------------------------------------------
 // Public lookup API
 // ---------------------------------------------------------------------------
 
@@ -942,6 +1065,16 @@ pub fn opamp_by_name(name: &str) -> Option<&'static SpiceOpAmpModel> {
 /// List all available op-amp and OTA model names.
 pub fn opamp_model_names() -> Vec<&'static str> {
     model_names(&OPAMP_MODELS)
+}
+
+/// Look up a transformer model by name (case-insensitive).
+pub fn transformer_by_name(name: &str) -> Option<&'static SpiceTransformerModel> {
+    lookup_model(&TRANSFORMER_MODELS, name)
+}
+
+/// List all available transformer model names.
+pub fn transformer_model_names() -> Vec<&'static str> {
+    model_names(&TRANSFORMER_MODELS)
 }
 
 /// Look up any diode-type model by name across all registries.
@@ -1346,6 +1479,45 @@ mod tests {
         assert!(opamp_by_name("tl072").is_some());
         assert!(opamp_by_name("jrc4558").is_some());
         assert!(opamp_by_name("ca3080").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Transformer tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_transformer_directive_line() {
+        let line = ".TRANSFORMER TEST LP=2 K=0.99 RP=75 RS=50 LLP=20m LLS=200u LM=1.98 RC=500k CP=200p N1=10 N2=1";
+        let model = parse_transformer_model_line(line).unwrap();
+        assert_eq!(model.name, "TEST");
+        assert!((model.primary_inductance - 2.0).abs() < 1e-12);
+        assert!((model.coupling - 0.99).abs() < 1e-12);
+        assert!((model.primary_dcr - 75.0).abs() < 1e-12);
+        assert!((model.secondary_dcr - 50.0).abs() < 1e-12);
+        assert!((model.primary_leakage - 20e-3).abs() < 1e-15);
+        assert!((model.secondary_leakage - 200e-6).abs() < 1e-18);
+        assert!((model.magnetizing_inductance - 1.98).abs() < 1e-12);
+        assert!((model.core_loss_resistance - 500_000.0).abs() < 1e-6);
+        assert!((model.capacitance - 200e-12).abs() < 1e-21);
+        assert!((model.primary_turns - 10.0).abs() < 1e-12);
+        assert!((model.secondary_turns - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn transformer_embedded_models_load() {
+        for name in &["GENERIC_600_600", "JT11P1", "JT10KB-D", "A262A2E"] {
+            assert!(
+                transformer_by_name(name).is_some(),
+                "Transformer model '{}' not found in embedded transformers.model",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn transformer_case_insensitive_lookup() {
+        assert!(transformer_by_name("jt11p1").is_some());
+        assert!(transformer_by_name("JT11P1").is_some());
     }
 
     // -----------------------------------------------------------------------

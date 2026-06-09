@@ -5,9 +5,11 @@
 //! look up models by name from pedalkernel's embedded model DB and convert them
 //! to the runtime types.
 
+use crate::dsl::TransformerConfig;
 use crate::models::{
-    bjt_by_name, jfet_by_name, opamp_by_name, pentode_by_name, triode_by_name, SpiceBjtModel,
-    SpiceJfetModel, SpiceOpAmpModel, SpicePentodeModel, SpiceTriodeModel,
+    bjt_by_name, jfet_by_name, opamp_by_name, pentode_by_name, transformer_by_name, triode_by_name,
+    SpiceBjtModel, SpiceJfetModel, SpiceOpAmpModel, SpicePentodeModel, SpiceTransformerModel,
+    SpiceTriodeModel,
 };
 use pedalkernel_rt::elements::nonlinear::{
     GummelPoonModel, JfetModel, OpAmpModel, PentodeModel, TriodeModel,
@@ -196,5 +198,103 @@ fn opamp_type_model_name(ot: &crate::dsl::OpAmpType) -> &'static str {
         OpAmpType::Ne5532 => "NE5532",
         OpAmpType::Op07 => "OP07",
         OpAmpType::Ca3080 => "CA3080",
+    }
+}
+
+// ── Transformer ─────────────────────────────────────────────────────────
+
+/// Resolve a DSL transformer instance against the embedded model registry.
+///
+/// Explicit scalar fields on `cfg` override model-library defaults. The
+/// current DSL cannot distinguish explicit default zeros for DCR/Cp from
+/// unspecified values, so zero-valued DCR/Cp intentionally remain explicit
+/// only for generic `transformer(ratio, Lp, ...)` instances; model-backed
+/// instances inherit model DCR/Cp unless a non-zero override is present.
+pub fn transformer_config_from_dsl(cfg: &TransformerConfig) -> TransformerConfig {
+    let Some(model_name) = cfg.model.as_deref() else {
+        return cfg.clone();
+    };
+
+    let model = transformer_by_name(model_name)
+        .unwrap_or_else(|| panic!("Unknown transformer model: '{model_name}'"));
+    let mut resolved = transformer_config_from_model(model, cfg.turns_ratio);
+
+    resolved.primary_type = cfg.primary_type;
+    resolved.secondary_type = cfg.secondary_type;
+    resolved.tertiary_turns_ratio = cfg.tertiary_turns_ratio;
+
+    // Instance overrides.
+    if cfg.primary_inductance > 0.0 {
+        resolved.primary_inductance = cfg.primary_inductance;
+    }
+    if cfg.primary_dcr > 0.0 {
+        resolved.primary_dcr = cfg.primary_dcr;
+    }
+    if cfg.secondary_dcr > 0.0 {
+        resolved.secondary_dcr = cfg.secondary_dcr;
+    }
+    if cfg.capacitance > 0.0 {
+        resolved.capacitance = cfg.capacitance;
+    }
+    if cfg.coupling > 0.0 {
+        resolved.coupling = cfg.coupling;
+    }
+    if cfg.primary_leakage.is_some() {
+        resolved.primary_leakage = cfg.primary_leakage;
+    }
+    if cfg.secondary_leakage.is_some() {
+        resolved.secondary_leakage = cfg.secondary_leakage;
+    }
+    if cfg.magnetizing_inductance.is_some() {
+        resolved.magnetizing_inductance = cfg.magnetizing_inductance;
+    }
+    if cfg.core_loss_resistance.is_some() {
+        resolved.core_loss_resistance = cfg.core_loss_resistance;
+    }
+
+    resolved.model = Some(model.name.clone());
+    resolved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transformer_model_values_merge_with_overrides() {
+        let mut cfg = TransformerConfig::with_model(10.0, "JT11P1".to_string());
+        cfg.magnetizing_inductance = Some(8.0);
+        cfg.core_loss_resistance = Some(250_000.0);
+        cfg.capacitance = 100e-12;
+
+        let resolved = transformer_config_from_dsl(&cfg);
+        assert_eq!(resolved.model.as_deref(), Some("JT11P1"));
+        assert!((resolved.turns_ratio - 10.0).abs() < 1e-12);
+        assert!((resolved.primary_inductance - 2.0).abs() < 1e-12);
+        assert!((resolved.primary_dcr - 75.0).abs() < 1e-12);
+        assert!((resolved.magnetizing_inductance.unwrap() - 8.0).abs() < 1e-12);
+        assert!((resolved.core_loss_resistance.unwrap() - 250_000.0).abs() < 1e-6);
+        assert!((resolved.capacitance - 100e-12).abs() < 1e-21);
+    }
+}
+
+fn transformer_config_from_model(
+    model: &SpiceTransformerModel,
+    turns_ratio: f64,
+) -> TransformerConfig {
+    TransformerConfig {
+        model: Some(model.name.clone()),
+        turns_ratio,
+        primary_inductance: model.primary_inductance,
+        primary_dcr: model.primary_dcr,
+        secondary_dcr: model.secondary_dcr,
+        capacitance: model.capacitance,
+        coupling: model.coupling,
+        primary_leakage: Some(model.primary_leakage),
+        secondary_leakage: Some(model.secondary_leakage),
+        magnetizing_inductance: Some(model.magnetizing_inductance),
+        core_loss_resistance: (model.core_loss_resistance > 0.0)
+            .then_some(model.core_loss_resistance),
+        ..Default::default()
     }
 }

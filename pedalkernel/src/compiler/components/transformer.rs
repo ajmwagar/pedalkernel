@@ -84,15 +84,16 @@ impl Component for TransformerComp {
     }
 
     fn make_leaf(&self, _comp_id: &str, sample_rate: f64) -> Option<DynNode> {
-        let l_primary = self.config.primary_inductance;
-        let n = self.config.turns_ratio;
+        let config = crate::model_lookup::transformer_config_from_dsl(&self.config);
+        let l_primary = config.primary_inductance;
+        let n = config.turns_ratio;
         let l_secondary = l_primary / (n * n);
         let secondary = Box::new(DynNode::Inductor(
             None,
             l_secondary,
             2.0 * sample_rate * l_secondary,
         ));
-        if let Some(n_tertiary) = self.config.tertiary_turns_ratio {
+        if let Some(n_tertiary) = config.tertiary_turns_ratio {
             let l_tertiary = l_primary / (n_tertiary * n_tertiary);
             let tertiary = Box::new(DynNode::Inductor(
                 None,
