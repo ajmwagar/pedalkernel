@@ -560,7 +560,6 @@ pub fn compile_via_spqr_with_options(
                             let mut ri_pot_id: Option<String> = None;
                             let mut ri_pot_max_r = 0.0f64;
                             let mut ri_pot_taper = crate::dsl::PotTaper::B;
-                            let mut ri_pot_initial_r = 0.0f64;
                             let mut visited = std::collections::HashSet::new();
                             let mut frontier = vec![neg];
                             visited.insert(neg);
@@ -587,8 +586,7 @@ pub fn compile_via_spqr_with_options(
                                                 .kind
                                                 .pot_taper()
                                                 .unwrap_or(crate::dsl::PotTaper::B);
-                                            ri_pot_initial_r = max_r * 0.5; // default position
-                                            ri_fixed += ri_pot_initial_r; // add initial pot R to total
+                                            ri_fixed += max_r * 0.5; // default position
                                             visited.insert(other);
                                             if !is_gnd(other) {
                                                 frontier.push(other);
@@ -2664,18 +2662,10 @@ pub(super) fn compute_group_terminals(
 
     // Collect all nodes touched by this group's edges
     let mut group_nodes: HashSet<NodeId> = HashSet::new();
-    let mut touches_gnd = false;
     for &eidx in group_edges {
         let e = &graph.edges[eidx];
         group_nodes.insert(e.node_a);
         group_nodes.insert(e.node_b);
-        if e.node_a == graph.gnd_node
-            || e.node_b == graph.gnd_node
-            || graph.ac_ground_nodes.contains(&e.node_a)
-            || graph.ac_ground_nodes.contains(&e.node_b)
-        {
-            touches_gnd = true;
-        }
     }
 
     // Terminals = nodes in this group that are also global terminals

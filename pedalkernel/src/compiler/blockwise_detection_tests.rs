@@ -588,7 +588,7 @@ fn diode_cascade_with_pots_is_blockwise() {
         eprintln!(
             "  Blockwise: {} blocks, {} coupling",
             p.num_blocks(),
-            p.coupling_edges.len()
+            p.coupling.len()
         );
         for (i, b) in p.blocks.iter().enumerate() {
             eprintln!(
@@ -826,7 +826,7 @@ fn diode_cascade_2_is_blockwise_decomposable() {
         eprintln!(
             "  Blockwise: {} blocks, {} coupling",
             p.num_blocks(),
-            p.coupling_edges.len()
+            p.coupling.len()
         );
         for (i, b) in p.blocks.iter().enumerate() {
             eprintln!(
@@ -1791,7 +1791,7 @@ fn analyze_blockwise_coupling_is_sparse() {
         .iter()
         .map(|b| b.nl_edges.len() + b.reactive_edges.len() + b.linear_edges.len())
         .sum();
-    let coupling_count = plan.coupling_edges.len();
+    let coupling_count = plan.coupling.len();
 
     eprintln!("  Block edges: {total_block_edges}, coupling edges: {coupling_count}");
     assert!(
@@ -1801,26 +1801,26 @@ fn analyze_blockwise_coupling_is_sparse() {
 }
 
 #[test]
-fn analyze_blockwise_exposes_typed_coupling_network() {
+fn analyze_blockwise_exposes_canonical_coupling_network() {
     let (graph, edges) = make_graph_all(BJT_LADDER_4);
     let plan = blockwise::analyze_blockwise(&edges, &graph).expect("Should decompose");
 
-    let typed_edges = plan.coupling.edge_indices();
-    assert_eq!(
-        typed_edges, plan.coupling_edges,
-        "typed coupling network must mirror legacy coupling edge list while callers migrate"
+    assert!(
+        !plan.coupling.is_empty(),
+        "coupling network should own the residual ladder connections"
     );
     assert_eq!(
         plan.coupling.boundary_nodes.len(),
         plan.port_nodes.len(),
-        "coupling boundary nodes should be the typed form of plan port nodes"
+        "coupling boundary nodes should match plan port nodes"
     );
     assert!(
         plan.coupling
             .edges
             .iter()
-            .all(|edge| plan.coupling_edges.contains(&edge.edge_idx)),
-        "every typed coupling edge must refer to an analyzed residual edge"
+            .all(|edge| graph.effective_edge_kind(edge.edge_idx)
+                != super::component::EdgeKind::Nonlinear),
+        "coupling network must not own nonlinear device edges"
     );
 }
 
@@ -1930,7 +1930,7 @@ fn ladder_feedback_path_is_coupling() {
     eprintln!(
         "  Feedback ladder: {} blocks, {} coupling edges",
         plan.num_blocks(),
-        plan.coupling_edges.len()
+        plan.coupling.len()
     );
     for (i, b) in plan.blocks.iter().enumerate() {
         eprintln!(
@@ -1955,7 +1955,7 @@ fn ladder_feedback_path_is_coupling() {
     assert!(fb_edge.is_some(), "R_fb should exist");
     let fb_eidx = *fb_edge.unwrap();
     assert!(
-        plan.coupling_edges.contains(&fb_eidx),
+        plan.coupling.contains_edge(fb_eidx),
         "R_fb (feedback resistor) should be coupling, not in any block"
     );
 
@@ -2083,7 +2083,7 @@ fn blocks_are_repeatable_units() {
     eprintln!(
         "  {} blocks, {} coupling",
         plan.num_blocks(),
-        plan.coupling_edges.len()
+        plan.coupling.len()
     );
     for (i, block) in plan.blocks.iter().enumerate() {
         let edge_names: Vec<&str> = block
@@ -2094,9 +2094,9 @@ fn blocks_are_repeatable_units() {
         eprintln!("    block {i}: {:?}", edge_names);
     }
     let coupling_names: Vec<&str> = plan
-        .coupling_edges
-        .iter()
-        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .coupling
+        .iter_edge_indices()
+        .map(|eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
         .collect();
     eprintln!("    coupling: {:?}", coupling_names);
 
@@ -2143,9 +2143,9 @@ fn contextual_edges_are_coupling() {
     let plan = plan.unwrap();
 
     let coupling_names: Vec<&str> = plan
-        .coupling_edges
-        .iter()
-        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+        .coupling
+        .iter_edge_indices()
+        .map(|eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
         .collect();
 
     // All R_bias should be coupling
@@ -2247,7 +2247,7 @@ fn spqr_decompose_with_ports_2stage_terminates() {
             eprintln!(
                 "  blockwise: {} blocks, {} coupling",
                 plan.num_blocks(),
-                plan.coupling_edges.len()
+                plan.coupling.len()
             );
         }
     }
@@ -2296,7 +2296,7 @@ fn spqr_decompose_with_ports_4stage_terminates() {
             eprintln!(
                 "  blockwise: {} blocks, {} coupling",
                 plan.num_blocks(),
-                plan.coupling_edges.len()
+                plan.coupling.len()
             );
             assert_eq!(
                 plan.num_blocks(),
@@ -2390,7 +2390,8 @@ fn blockwise_coupling_spqr_terminates() {
 
         eprintln!(
             "  coupling edges: {:?}",
-            plan.coupling_edges
+            plan.coupling
+                .edge_indices()
                 .iter()
                 .map(|&ei| format!(
                     "{}({}→{})",
@@ -2402,13 +2403,16 @@ fn blockwise_coupling_spqr_terminates() {
         );
 
         let terminals = vec![graph.in_node, graph.out_node];
-        let coupling_terminals =
-            super::spqr_build::compute_group_terminals(&plan.coupling_edges, &graph, &terminals);
+        let coupling_terminals = super::spqr_build::compute_group_terminals(
+            &plan.coupling.edge_indices(),
+            &graph,
+            &terminals,
+        );
         eprintln!("  coupling terminals: {coupling_terminals:?}");
 
         // This is the call that might hang in release mode
         let tree = spqr_decompose(
-            &plan.coupling_edges,
+            &plan.coupling.edge_indices(),
             &coupling_terminals,
             &graph,
             graph.gnd_node,
@@ -2758,14 +2762,14 @@ fn coupling_scattering_includes_vcc_supply() {
 
     // Check: does the coupling scattering have a VCC VS port?
     // The coupling edges include R_bias1..4 which connect VCC to sub-stage ports.
-    let has_bias_edge = plan.coupling_edges.iter().any(|&eidx| {
+    let has_bias_edge = plan.coupling.iter_edge_indices().any(|eidx| {
         let comp = &graph.components[graph.edges[eidx].comp_idx];
         comp.id.contains("R_bias")
     });
     assert!(has_bias_edge, "Coupling should include R_bias edges");
 
     // Check: do any coupling edges touch VCC?
-    let vcc_in_coupling = plan.coupling_edges.iter().any(|&eidx| {
+    let vcc_in_coupling = plan.coupling.iter_edge_indices().any(|eidx| {
         let e = &graph.edges[eidx];
         e.node_a == graph.vcc_node || e.node_b == graph.vcc_node
     });

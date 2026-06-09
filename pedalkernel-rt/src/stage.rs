@@ -1846,7 +1846,7 @@ impl WdfStage {
                 (input * compensation, 0.0)
             };
 
-            let mut output = adaptor.process(v_plus, v_in);
+            let output = adaptor.process(v_plus, v_in);
 
             // DC block
             if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.dc_block {
@@ -1929,7 +1929,7 @@ impl WdfStage {
             }
 
             // Output = voltage at adapted port (out→gnd = V_out)
-            let mut output = (a_adapted + b_adapted) / 2.0;
+            let output = (a_adapted + b_adapted) / 2.0;
 
             // DC block (IIR highpass: y[n] = b0*(x[n]-x[n-1]) + a1*y[n-1])
             if let Some((a1, b0, ref mut y_prev, ref mut x_prev)) = self.dc_block {
@@ -3741,8 +3741,8 @@ impl PushPullStage {
 // ═══════════════════════════════════════════════════════════════════════════
 
 use crate::elements::nonlinear::solver::{
-    multi_port_nr_solve, multi_port_nr_solve_grouped, multi_port_nr_solve_grouped_into,
-    multi_port_nr_solve_into, NlDeviceGroupIv, NlDeviceIv,
+    multi_port_nr_solve_grouped, multi_port_nr_solve_grouped_into, multi_port_nr_solve_into,
+    NlDeviceGroupIv, NlDeviceIv,
 };
 use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 
@@ -3775,7 +3775,7 @@ impl NlDeviceKind {
         &mut self,
         input: crate::Wave,
         compensation: crate::Wave,
-        bias_offset: crate::Wave,
+        _bias_offset: crate::Wave,
     ) {
         match self {
             NlDeviceKind::Triode(t) => {

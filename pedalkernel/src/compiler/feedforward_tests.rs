@@ -354,16 +354,14 @@ fn feedforward_stage_ordering() {
 
     // Find feedforward stage index and flow distance
     let mut ff_idx = None;
-    let mut ff_dist = 0;
     for (i, stage) in compiled.stages.iter().enumerate() {
         if let super::compiled::Stage::Wdf(w) = stage {
             if w.is_feedforward {
                 ff_idx = Some(i);
-                ff_dist = w.signal_flow_distance;
                 #[cfg(debug_assertions)]
                 eprintln!(
-                    "Feedforward at index {i}, dist={ff_dist}, label={}",
-                    w.debug_label
+                    "Feedforward at index {i}, dist={}, label={}",
+                    w.signal_flow_distance, w.debug_label
                 );
             }
         }

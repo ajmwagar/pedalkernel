@@ -1379,7 +1379,7 @@ fn tb303_bkm_vco_drive_is_external_coupling_port() {
                 .then_some(bi)
         })
         .collect();
-    let coupling_ids = edge_ids(&plan.coupling_edges);
+    let coupling_ids = edge_ids(&plan.coupling.edge_indices());
 
     assert!(
         local_r_vco_blocks.is_empty(),
@@ -1927,7 +1927,7 @@ fn tb303_filter_has_4_blockwise_blocks() {
         eprintln!(
             "  Blockwise: {} blocks, {} coupling edges",
             plan.num_blocks(),
-            plan.coupling_edges.len()
+            plan.coupling.len()
         );
         for (i, block) in plan.blocks.iter().enumerate() {
             let edge_names: Vec<&str> = block
@@ -1944,9 +1944,9 @@ fn tb303_filter_has_4_blockwise_blocks() {
             );
         }
         let coupling_names: Vec<&str> = plan
-            .coupling_edges
-            .iter()
-            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+            .coupling
+            .iter_edge_indices()
+            .map(|eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
             .collect();
         eprintln!("    coupling: {:?}", coupling_names);
 
@@ -3175,12 +3175,12 @@ fn tb303_coupling_scattering_wellformed() {
         .expect("blockwise decomposition should succeed for TB303");
 
     assert!(
-        !plan.coupling_edges.is_empty(),
+        !plan.coupling.is_empty(),
         "TB303 ladder must have coupling edges connecting the 4 blocks"
     );
     eprintln!(
         "  coupling: {} edges, {} blocks",
-        plan.coupling_edges.len(),
+        plan.coupling.len(),
         plan.num_blocks()
     );
 
@@ -3197,7 +3197,7 @@ fn tb303_coupling_scattering_wellformed() {
     };
 
     let mut coupling_nodes: Vec<usize> = Vec::new();
-    for &eidx in &plan.coupling_edges {
+    for eidx in plan.coupling.iter_edge_indices() {
         let e = &graph.edges[eidx];
         for &n in &[e.node_a, e.node_b] {
             if !excluded.contains(&n) && !coupling_nodes.contains(&n) {
@@ -3218,7 +3218,7 @@ fn tb303_coupling_scattering_wellformed() {
     let mut mna = pedalkernel_rt::tree::MnaSystem::new(num_nodes, 0);
 
     // Stamp each coupling resistor.
-    for &eidx in &plan.coupling_edges {
+    for eidx in plan.coupling.iter_edge_indices() {
         let e = &graph.edges[eidx];
         let comp = &graph.components[e.comp_idx];
         let r = comp.kind.resistance().unwrap_or(10_000.0); // default if not a pure resistor
@@ -5822,7 +5822,7 @@ fn tb303_each_block_has_unique_coupling_port() {
         r
     };
     let mut coupling_nodes: Vec<usize> = Vec::new();
-    for &eidx in &plan.coupling_edges {
+    for eidx in plan.coupling.iter_edge_indices() {
         let e = &graph.edges[eidx];
         if !rails.contains(&e.node_a) && !coupling_nodes.contains(&e.node_a) {
             coupling_nodes.push(e.node_a);
@@ -5841,7 +5841,8 @@ fn tb303_each_block_has_unique_coupling_port() {
             .iter()
             .filter(|pn| coupling_nodes.contains(pn))
             .max_by_key(|&&pn| {
-                plan.coupling_edges
+                plan.coupling
+                    .edge_indices()
                     .iter()
                     .filter(|&&eidx| {
                         let e = &graph.edges[eidx];

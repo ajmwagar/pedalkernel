@@ -2929,7 +2929,6 @@ impl PedalProcessor for CompiledPedal {
             let abs_sagged = sagged_voltage.abs();
             let opamp_v_max = (abs_sagged / 2.0 - saturation_margin).max(1.0);
             let tube_v_max = abs_sagged;
-            let bjt_v_max = abs_sagged;
             for stage in &mut self.opamp_stages {
                 stage.opamp.set_v_max(opamp_v_max);
             }
@@ -3560,12 +3559,12 @@ impl PedalProcessor for CompiledPedal {
 
         // Process sidechains: tap the audio output and compute CV for next sample.
         // The 1-sample delay is inherent and correct for discrete-time feedback.
-        for (i, sc) in self.sidechains.iter_mut().enumerate() {
+        for (_i, sc) in self.sidechains.iter_mut().enumerate() {
             let cv = sc.process(signal);
             #[cfg(feature = "debug-trace")]
             if trace_on {
                 std::eprintln!(
-                    "  [SC {i}] tap={signal:.6e} cv_out={cv:.6e} cv_prev={:.6e}",
+                    "  [SC {_i}] tap={signal:.6e} cv_out={cv:.6e} cv_prev={:.6e}",
                     sc.cv_delayed
                 );
             }

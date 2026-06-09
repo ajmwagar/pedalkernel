@@ -1384,8 +1384,8 @@ impl MnaSystem {
     pub fn build_iir(
         &self,
         reactive_one_ports: &[MnaOnePort],
-        vs_idx: usize,
-        output_pos: Option<usize>,
+        _vs_idx: usize,
+        _output_pos: Option<usize>,
         _output_neg: Option<usize>,
         sample_rate: crate::Wave,
         // Feedback info for oscillator IIR: (Rf, R_crit, f0_hz)

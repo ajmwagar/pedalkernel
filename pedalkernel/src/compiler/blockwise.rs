@@ -160,20 +160,24 @@ impl CouplingNetwork {
         true
     }
 
-    fn contains_edge(&self, edge_idx: usize) -> bool {
+    pub(super) fn contains_edge(&self, edge_idx: usize) -> bool {
         self.edges.iter().any(|edge| edge.edge_idx == edge_idx)
     }
 
-    fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.edges.is_empty()
     }
 
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.edges.len()
     }
 
     pub(super) fn edge_indices(&self) -> Vec<usize> {
         self.edges.iter().map(|edge| edge.edge_idx).collect()
+    }
+
+    pub(super) fn iter_edge_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.edges.iter().map(|edge| edge.edge_idx)
     }
 }
 
@@ -406,11 +410,6 @@ pub struct BlockwisePlan {
     pub blocks: Vec<Block>,
     /// Typed residual coupling network.
     pub(super) coupling: CouplingNetwork,
-    /// Coupling edges — the residual connecting blocks.
-    ///
-    /// Kept as a compatibility mirror for existing structural tests and call
-    /// sites while lowering moves to `coupling`.
-    pub coupling_edges: Vec<usize>,
     /// Port nodes shared between blocks and coupling network.
     pub port_nodes: Vec<NodeId>,
 }
@@ -421,11 +420,7 @@ impl BlockwisePlan {
     }
 
     fn add_coupling_edge(&mut self, edge_idx: usize, role: CouplingEdgeRole) -> bool {
-        let added = self.coupling.push_edge(edge_idx, role);
-        if added && !self.coupling_edges.contains(&edge_idx) {
-            self.coupling_edges.push(edge_idx);
-        }
-        added
+        self.coupling.push_edge(edge_idx, role)
     }
 }
 
@@ -1567,9 +1562,9 @@ fn validate_plan(plan: &BlockwisePlan, graph: &CircuitGraph) -> bool {
         .iter()
         .any(|block| !block.reactive_edges.is_empty())
         || plan
-            .coupling_edges
-            .iter()
-            .any(|&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Reactive);
+            .coupling
+            .iter_edge_indices()
+            .any(|eidx| graph.effective_edge_kind(eidx) == EdgeKind::Reactive);
     if !has_reactive_state {
         return false;
     }
@@ -1579,7 +1574,7 @@ fn validate_plan(plan: &BlockwisePlan, graph: &CircuitGraph) -> bool {
         }
     }
     // Coupling must not contain NL
-    for &eidx in &plan.coupling_edges {
+    for eidx in plan.coupling.iter_edge_indices() {
         if graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear {
             return false;
         }
@@ -2068,7 +2063,6 @@ pub(super) fn analyze_blockwise(
     let plan = BlockwisePlan {
         blocks,
         coupling,
-        coupling_edges,
         port_nodes: all_port_nodes,
     };
 
@@ -2176,7 +2170,7 @@ pub(super) fn try_build_blockwise(
                 next_path.push(eidx);
                 if early_block_boundary_nodes.contains(&next) {
                     for path_eidx in next_path {
-                        if !plan.coupling_edges.contains(&path_eidx)
+                        if !plan.coupling.contains_edge(path_eidx)
                             && !early_extra_coupling.contains(&path_eidx)
                         {
                             early_extra_coupling.push(path_eidx);
