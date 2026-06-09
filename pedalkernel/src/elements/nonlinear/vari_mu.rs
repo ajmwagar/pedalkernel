@@ -253,7 +253,7 @@ impl VariMuTriodeRoot {
         let d = ia * (m.p2 / vak - m.p7 * exp_term / exp_sum);
 
         // Ensure positive derivative (physical: more plate voltage → more current)
-        
+
         d.max(LEAKAGE_CONDUCTANCE) * self.parallel_count as f64
     }
 }

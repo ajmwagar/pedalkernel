@@ -320,8 +320,8 @@ fn big_muff_sustain_control_affects_output() {
 fn fuzz_face_ac128_model_params() {
     use pedalkernel::elements::GummelPoonModel;
 
-    let gp = GummelPoonModel::try_by_name("ac128")
-        .expect("AC128 model should exist in SPICE library");
+    let gp =
+        GummelPoonModel::try_by_name("ac128").expect("AC128 model should exist in SPICE library");
 
     eprintln!("=== AC128 Gummel-Poon Model ===");
     eprintln!("IS  = {:.4e} A", gp.is);
@@ -375,10 +375,10 @@ fn fuzz_face_ac128_model_params() {
 fn fuzz_face_solver_iterates() {
     use pedalkernel::compiler::compile_pedal;
     use pedalkernel::dsl::parse_pedal_file;
-    use pedalkernel::PedalProcessor;
     use pedalkernel::elements::{
-        enable_solver_trace, disable_solver_trace, reset_solver_stats, solver_stats_snapshot,
+        disable_solver_trace, enable_solver_trace, reset_solver_stats, solver_stats_snapshot,
     };
+    use pedalkernel::PedalProcessor;
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples/pedals/fuzz/fuzz_face.pedal");
@@ -410,7 +410,10 @@ fn fuzz_face_solver_iterates() {
     eprintln!("=== NR Solver Stats (256 samples, 440Hz @ 0.5 amp) ===");
     eprintln!("  solves: {}", stats.solves);
     eprintln!("  total_iterations: {}", stats.total_iterations);
-    eprintln!("  avg_iterations: {:.2}", stats.total_iterations as f64 / stats.solves.max(1) as f64);
+    eprintln!(
+        "  avg_iterations: {:.2}",
+        stats.total_iterations as f64 / stats.solves.max(1) as f64
+    );
     eprintln!("  max_iterations: {}", stats.max_iterations);
     eprintln!("  max_residual: {:.4e}", stats.max_residual);
     eprintln!("  clamp_hits: {}", stats.clamp_hits);
@@ -439,9 +442,17 @@ fn fuzz_face_solver_iterates() {
     if !trace.is_empty() {
         let mid = trace.len() / 2;
         let entry = &trace[mid];
-        eprintln!("  Trace[{}]: iters={}, residual={:.4e}, v={:?}",
-            mid, entry.iterations, entry.residual,
-            entry.v_solution.iter().map(|v| format!("{:.4}", v)).collect::<Vec<_>>());
+        eprintln!(
+            "  Trace[{}]: iters={}, residual={:.4e}, v={:?}",
+            mid,
+            entry.iterations,
+            entry.residual,
+            entry
+                .v_solution
+                .iter()
+                .map(|v| format!("{:.4}", v))
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -452,7 +463,10 @@ fn fuzz_face_amplitude_sweep_clipping() {
     let db_levels = [-40.0, -30.0, -20.0, -12.0, -6.0, 0.0];
 
     eprintln!("=== Fuzz Face Amplitude Sweep (Fuzz=0.8) ===");
-    eprintln!("{:<10} {:>10} {:>10} {:>8} {:>8} {:>8}", "Input_dB", "RMS_in", "RMS_out", "Gain_dB", "THD", "Crest");
+    eprintln!(
+        "{:<10} {:>10} {:>10} {:>8} {:>8} {:>8}",
+        "Input_dB", "RMS_in", "RMS_out", "Gain_dB", "THD", "Crest"
+    );
 
     let mut thd_values = Vec::new();
 
@@ -480,7 +494,10 @@ fn fuzz_face_amplitude_sweep_clipping() {
         let t = thd(steady, SAMPLE_RATE, freq);
         let cf = crest_factor(steady);
 
-        eprintln!("{:<10.0} {:>10.4e} {:>10.4e} {:>8.1} {:>8.4} {:>8.3}", db, rms_in, rms_out, gain_db, t, cf);
+        eprintln!(
+            "{:<10.0} {:>10.4e} {:>10.4e} {:>8.1} {:>8.4} {:>8.3}",
+            db, rms_in, rms_out, gain_db, t, cf
+        );
         thd_values.push(t);
     }
 
@@ -488,7 +505,10 @@ fn fuzz_face_amplitude_sweep_clipping() {
     // A working fuzz should have THD > 0.5 (50% harmonics) at full input.
     let thd_quiet = thd_values[0];
     let thd_loud = thd_values[thd_values.len() - 1];
-    eprintln!("\n  THD at -40dB: {:.4}, THD at 0dB: {:.4}", thd_quiet, thd_loud);
+    eprintln!(
+        "\n  THD at -40dB: {:.4}, THD at 0dB: {:.4}",
+        thd_quiet, thd_loud
+    );
 
     assert!(
         thd_loud > 0.3,
@@ -500,7 +520,8 @@ fn fuzz_face_amplitude_sweep_clipping() {
     assert!(
         thd_loud > thd_quiet * 1.5,
         "THD should increase with input: quiet={:.4}, loud={:.4}",
-        thd_quiet, thd_loud
+        thd_quiet,
+        thd_loud
     );
 }
 
@@ -563,11 +584,15 @@ fn fuzz_face_fuzz_sweep_thd() {
     let thd_min_fuzz = thd_values[0];
     let thd_max_fuzz = thd_values[thd_values.len() - 1];
 
-    eprintln!("\n  Fuzz=0: THD={:.4}, Fuzz=1: THD={:.4}", thd_min_fuzz, thd_max_fuzz);
+    eprintln!(
+        "\n  Fuzz=0: THD={:.4}, Fuzz=1: THD={:.4}",
+        thd_min_fuzz, thd_max_fuzz
+    );
 
     assert!(
         thd_max_fuzz > thd_min_fuzz,
         "Max fuzz THD ({:.4}) should exceed min fuzz THD ({:.4})",
-        thd_max_fuzz, thd_min_fuzz
+        thd_max_fuzz,
+        thd_min_fuzz
     );
 }

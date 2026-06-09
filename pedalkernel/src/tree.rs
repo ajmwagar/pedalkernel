@@ -68,7 +68,9 @@ impl SeriesAdaptor {
         let sum = self.b1 + self.b2 + a3;
         let a1 = self.b1 - self.gamma * sum;
         #[cfg(feature = "fault-injection")]
-        let a1 = if crate::fault_injection::is_active(crate::fault_injection::Fault::CorruptScattering) {
+        let a1 = if crate::fault_injection::is_active(
+            crate::fault_injection::Fault::CorruptScattering,
+        ) {
             a1 + 1e-3
         } else {
             a1
@@ -370,7 +372,8 @@ impl RTypeAdaptor {
         let n = self.num_ports;
         let mut sum_power = 0.0;
         for j in 0..(n - 1) {
-            sum_power += self.power_scattering[(n - 1) * n + j] * b_children[j] * self.inv_sqrt_r[j];
+            sum_power +=
+                self.power_scattering[(n - 1) * n + j] * b_children[j] * self.inv_sqrt_r[j];
         }
         sum_power * self.sqrt_r[n - 1]
     }
@@ -389,7 +392,8 @@ impl RTypeAdaptor {
         for i in 0..(n - 1) {
             let mut sum_power = self.power_scattering[i * n + n - 1] * b_parent_power;
             for j in 0..(n - 1) {
-                sum_power += self.power_scattering[i * n + j] * self.b_children[j] * self.inv_sqrt_r[j];
+                sum_power +=
+                    self.power_scattering[i * n + j] * self.b_children[j] * self.inv_sqrt_r[j];
             }
             a_children[i] = sum_power * self.sqrt_r[i];
         }
@@ -1396,7 +1400,11 @@ impl ScatteringInterpolationTable {
         let mut prev_g = initial_g;
 
         for i in 0..k {
-            let t = if k > 1 { i as f64 / (k - 1) as f64 } else { 0.5 };
+            let t = if k > 1 {
+                i as f64 / (k - 1) as f64
+            } else {
+                0.5
+            };
             let r = (log_min + t * (log_max - log_min)).exp();
             let g = 1.0 / r;
 

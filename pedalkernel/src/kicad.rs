@@ -20,11 +20,17 @@ fn value_str(kind: &dyn Component) -> String {
         return format!(
             "R_switched_{}-{}",
             format_eng(
-                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap(),
                 "Ω"
             ),
             format_eng(
-                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap(),
                 "Ω"
             )
         );
@@ -37,11 +43,17 @@ fn value_str(kind: &dyn Component) -> String {
         return format!(
             "C_switched_{}-{}",
             format_eng(
-                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap(),
                 "F"
             ),
             format_eng(
-                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap(),
                 "F"
             )
         );
@@ -54,11 +66,17 @@ fn value_str(kind: &dyn Component) -> String {
         return format!(
             "L_switched_{}-{}",
             format_eng(
-                *values.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap(),
                 "H"
             ),
             format_eng(
-                *values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap(),
+                *values
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .unwrap(),
                 "H"
             )
         );
@@ -485,11 +503,15 @@ mod tests {
                 },
                 ComponentDef {
                     id: "C1".into(),
-                    kind: Box::new(Capacitor { config: CapConfig::new(220e-9) }),
+                    kind: Box::new(Capacitor {
+                        config: CapConfig::new(220e-9),
+                    }),
                 },
                 ComponentDef {
                     id: "D1".into(),
-                    kind: Box::new(DiodePair { diode_type: DiodeType::Silicon }),
+                    kind: Box::new(DiodePair {
+                        diode_type: DiodeType::Silicon,
+                    }),
                 },
             ],
             nets: vec![

@@ -12,14 +12,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
-use crate::elements::*;
 use crate::elements::FeedbackConfig;
+use crate::elements::*;
 
 use super::components::PhotocouplerComp;
 use super::dyn_node::DynNode;
-use super::graph::{
-    CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind,
-};
+use super::graph::{CircuitGraph, NodeId, OpAmpFeedbackInfo, OpAmpFeedbackKind};
 use super::stage::{ToneFeedback, WdfStage};
 
 /// Result of op-amp analysis.
@@ -51,10 +49,8 @@ pub(super) fn analyze_opamps(
     let mut merged = pre_classified.to_vec();
     merged.append(&mut feedback_loops);
 
-    let feedback_opamp_ids: HashSet<String> = merged
-        .iter()
-        .map(|info| info.comp_id.clone())
-        .collect();
+    let feedback_opamp_ids: HashSet<String> =
+        merged.iter().map(|info| info.comp_id.clone()).collect();
 
     let unity_gain_opamp_ids: HashSet<String> = merged
         .iter()
@@ -147,12 +143,7 @@ pub(super) fn build_opamp_feedback_stages(
                 // used for audio — it only holds pot state.
                 let initial_pot_pos = 0.5;
                 let taper = lookup_pot_taper(pedal, pot_id);
-                let pot_node = DynNode::Pot(
-                    pot_id.clone(),
-                    *max_pot_r,
-                    initial_pot_pos,
-                    taper,
-                );
+                let pot_node = DynNode::Pot(pot_id.clone(), *max_pot_r, initial_pot_pos, taper);
                 let vs = DynNode::VoltageSource(0.0, 10_000.0);
                 let tree = DynNode::Series(Box::new(vs), Box::new(pot_node));
 
@@ -214,9 +205,8 @@ pub(super) fn build_opamp_feedback_stages(
                 let v_max = (default_supply / 2.0 - 1.5).max(0.5);
                 root.set_v_max(v_max);
 
-                let res_fb = super::stage::ResonatorFeedback::new(
-                    *r1, *r2, *c1, *c2, *rf, sample_rate,
-                );
+                let res_fb =
+                    super::stage::ResonatorFeedback::new(*r1, *r2, *c1, *c2, *rf, sample_rate);
 
                 // Minimal tree — the IIR bypasses WDF output, so the tree
                 // is only needed for pot state tracking (none for bridged-T).
@@ -336,15 +326,14 @@ pub(super) fn build_opamp_feedback_stages(
                     };
                     root.set_soft_clip(diode_vf);
                 }
-                let (tree, fb_pot_from_tree) =
-                    if skip_tree {
-                        (None, None)
-                    } else {
-                        match build_feedback_tree(info, graph, pedal, sample_rate) {
-                            Some((t, pot_id)) => (Some(t), pot_id),
-                            None => (None, None),
-                        }
-                    };
+                let (tree, fb_pot_from_tree) = if skip_tree {
+                    (None, None)
+                } else {
+                    match build_feedback_tree(info, graph, pedal, sample_rate) {
+                        Some((t, pot_id)) => (Some(t), pot_id),
+                        None => (None, None),
+                    }
+                };
                 // Track whether graph_reduce built the tree (has reactive elements).
                 // If so, skip balance_vs_impedance — the VS must stay low-Rp so
                 // the capacitor's frequency-dependent scattering isn't swamped.
@@ -354,25 +343,18 @@ pub(super) fn build_opamp_feedback_stages(
                     _ => {
                         // Fallback: existing bare VS + optional pot(s)
                         let vs = DynNode::VoltageSource(0.0, 10_000.0);
-                        let mut tree = if let Some((
-                            pot_id,
-                            max_pot_r,
-                            _fixed_series_r,
-                            _parallel_fixed_r,
-                        )) = rf_pot
-                        {
-                            let taper = lookup_pot_taper(pedal, pot_id);
-                            let initial_pos = 0.5;
-                            let pot = DynNode::Pot(
-                                pot_id.clone(),
-                                *max_pot_r,
-                                initial_pos,
-                                taper,
-                            );
-                            DynNode::Series(Box::new(vs), Box::new(pot))
-                        } else {
-                            vs
-                        };
+                        let mut tree =
+                            if let Some((pot_id, max_pot_r, _fixed_series_r, _parallel_fixed_r)) =
+                                rf_pot
+                            {
+                                let taper = lookup_pot_taper(pedal, pot_id);
+                                let initial_pos = 0.5;
+                                let pot =
+                                    DynNode::Pot(pot_id.clone(), *max_pot_r, initial_pos, taper);
+                                DynNode::Series(Box::new(vs), Box::new(pot))
+                            } else {
+                                vs
+                            };
                         let mut fb_pot = rf_pot.as_ref().map(|(id, ..)| id.clone());
 
                         // Also add ri_pot to tree so pot binding and
@@ -380,12 +362,7 @@ pub(super) fn build_opamp_feedback_stages(
                         if let Some((pot_id, max_pot_r, _fixed_series_r)) = ri_pot {
                             let taper = lookup_pot_taper(pedal, pot_id);
                             let initial_pos = 0.5;
-                            let pot = DynNode::Pot(
-                                pot_id.clone(),
-                                *max_pot_r,
-                                initial_pos,
-                                taper,
-                            );
+                            let pot = DynNode::Pot(pot_id.clone(), *max_pot_r, initial_pos, taper);
                             tree = DynNode::Series(Box::new(tree), Box::new(pot));
                             if fb_pot.is_none() {
                                 fb_pot = Some(pot_id.clone());
@@ -411,7 +388,7 @@ pub(super) fn build_opamp_feedback_stages(
                     allpass_feedback: None,
                     allpass_direct: None,
                     dc_block: None,
-                grid_dc_blocker: None,
+                    grid_dc_blocker: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
                     signal_flow_distance: 0,
@@ -440,7 +417,9 @@ pub(super) fn build_opamp_feedback_stages(
                     for pc_id in &info.input_photocoupler_ids {
                         // Find the photocoupler component to get its model.
                         if let Some(pc_comp) = pedal.components.iter().find(|c| c.id == *pc_id) {
-                            if let Some(pc_type) = pc_comp.kind.as_any().downcast_ref::<PhotocouplerComp>() {
+                            if let Some(pc_type) =
+                                pc_comp.kind.as_any().downcast_ref::<PhotocouplerComp>()
+                            {
                                 use crate::dsl::PhotocouplerType;
                                 let model = match pc_type.coupler_type {
                                     PhotocouplerType::Vtl5c3 => PhotocouplerModel::vtl5c3(),
@@ -448,12 +427,14 @@ pub(super) fn build_opamp_feedback_stages(
                                     PhotocouplerType::Nsl32 => PhotocouplerModel::nsl32(),
                                     PhotocouplerType::T4b => PhotocouplerModel::t4b(),
                                 };
-                                stage.input_photocouplers.push(super::stage::InputPhotocoupler {
-                                    comp_id: pc_id.clone(),
-                                    element: Photocoupler::new(model, sample_rate),
-                                    fixed_series_r: info.input_fixed_r,
-                                    dc_rf: *rf,
-                                });
+                                stage
+                                    .input_photocouplers
+                                    .push(super::stage::InputPhotocoupler {
+                                        comp_id: pc_id.clone(),
+                                        element: Photocoupler::new(model, sample_rate),
+                                        fixed_series_r: info.input_fixed_r,
+                                        dc_rf: *rf,
+                                    });
                             }
                         }
                     }
@@ -466,7 +447,13 @@ pub(super) fn build_opamp_feedback_stages(
                 }
                 stages.push(stage);
             }
-            OpAmpFeedbackKind::NonInverting { rf, ri, feedback_diode, rf_pot, ri_pot } => {
+            OpAmpFeedbackKind::NonInverting {
+                rf,
+                ri,
+                feedback_diode,
+                rf_pot,
+                ri_pot,
+            } => {
                 let mut feedback_pot_id = None;
 
                 #[cfg(test)]
@@ -536,15 +523,14 @@ pub(super) fn build_opamp_feedback_stages(
                     };
                     root.set_soft_clip(diode_vf);
                 }
-                let (tree, fb_pot_from_tree) =
-                    if skip_tree {
-                        (None, None)
-                    } else {
-                        match build_feedback_tree(info, graph, pedal, sample_rate) {
-                            Some((t, pot_id)) => (Some(t), pot_id),
-                            None => (None, None),
-                        }
-                    };
+                let (tree, fb_pot_from_tree) = if skip_tree {
+                    (None, None)
+                } else {
+                    match build_feedback_tree(info, graph, pedal, sample_rate) {
+                        Some((t, pot_id)) => (Some(t), pot_id),
+                        None => (None, None),
+                    }
+                };
                 let has_complex_fb_tree = tree.is_some();
                 let (tree, fb_pot_from_tree) = match (tree, fb_pot_from_tree) {
                     (Some(t), pot_id) => (t, pot_id),
@@ -552,25 +538,18 @@ pub(super) fn build_opamp_feedback_stages(
                         // Fallback: existing bare VS + optional pot
                         let vs = DynNode::VoltageSource(0.0, 10_000.0);
                         let active_pot = rf_pot.as_ref().or(ri_pot.as_ref());
-                        let tree = if let Some((
-                            pot_id,
-                            max_pot_r,
-                            _fixed_series_r,
-                            _parallel_fixed_r,
-                        )) = active_pot
-                        {
-                            let taper = lookup_pot_taper(pedal, pot_id);
-                            let initial_pos = 0.5;
-                            let pot = DynNode::Pot(
-                                pot_id.clone(),
-                                *max_pot_r,
-                                initial_pos,
-                                taper,
-                            );
-                            DynNode::Series(Box::new(vs), Box::new(pot))
-                        } else {
-                            vs
-                        };
+                        let tree =
+                            if let Some((pot_id, max_pot_r, _fixed_series_r, _parallel_fixed_r)) =
+                                active_pot
+                            {
+                                let taper = lookup_pot_taper(pedal, pot_id);
+                                let initial_pos = 0.5;
+                                let pot =
+                                    DynNode::Pot(pot_id.clone(), *max_pot_r, initial_pos, taper);
+                                DynNode::Series(Box::new(vs), Box::new(pot))
+                            } else {
+                                vs
+                            };
                         let pot_id = rf_pot
                             .as_ref()
                             .or(ri_pot.as_ref())
@@ -594,7 +573,7 @@ pub(super) fn build_opamp_feedback_stages(
                     allpass_feedback: None,
                     allpass_direct: None,
                     dc_block: None,
-                grid_dc_blocker: None,
+                    grid_dc_blocker: None,
                     is_source_follower: false,
                     prev_source_voltage: 0.0,
                     signal_flow_distance: 0,
@@ -682,15 +661,10 @@ pub(super) fn build_allpass_queue(
     let mut map = HashMap::new();
     for info in &analysis.feedback_loops {
         if let OpAmpFeedbackKind::Allpass {
-            ref jfet_id,
-            cap,
-            ..
+            ref jfet_id, cap, ..
         } = info.feedback_kind
         {
-            map.insert(jfet_id.clone(), AllpassPairing {
-                cap,
-                sample_rate,
-            });
+            map.insert(jfet_id.clone(), AllpassPairing { cap, sample_rate });
         }
     }
     map
@@ -730,7 +704,11 @@ fn build_feedback_tree(
 ) -> Option<(DynNode, Option<String>)> {
     if info.feedback_comp_ids.len() <= 1 {
         #[cfg(test)]
-        eprintln!("[BUILD_FB_TREE] {} skipped: only {} feedback comps", info.comp_id, info.feedback_comp_ids.len());
+        eprintln!(
+            "[BUILD_FB_TREE] {} skipped: only {} feedback comps",
+            info.comp_id,
+            info.feedback_comp_ids.len()
+        );
         return None; // Single resistor — use existing simple path
     }
 
@@ -745,12 +723,21 @@ fn build_feedback_tree(
         .collect();
 
     #[cfg(test)]
-    eprintln!("[BUILD_FB_TREE] {} feedback_comp_ids={:?} feedback_set={:?} feedback_edges={}",
-        info.comp_id, info.feedback_comp_ids, feedback_set, feedback_edges.len());
+    eprintln!(
+        "[BUILD_FB_TREE] {} feedback_comp_ids={:?} feedback_set={:?} feedback_edges={}",
+        info.comp_id,
+        info.feedback_comp_ids,
+        feedback_set,
+        feedback_edges.len()
+    );
 
     if feedback_edges.len() < 2 {
         #[cfg(test)]
-        eprintln!("[BUILD_FB_TREE] {} skipped: only {} feedback edges", info.comp_id, feedback_edges.len());
+        eprintln!(
+            "[BUILD_FB_TREE] {} skipped: only {} feedback edges",
+            info.comp_id,
+            feedback_edges.len()
+        );
         return None;
     }
 
@@ -778,7 +765,10 @@ fn build_feedback_tree(
     border_nodes.dedup();
 
     #[cfg(test)]
-    eprintln!("[BUILD_FB_TREE] {} border_nodes={:?} (need exactly 2)", info.comp_id, border_nodes);
+    eprintln!(
+        "[BUILD_FB_TREE] {} border_nodes={:?} (need exactly 2)",
+        info.comp_id, border_nodes
+    );
 
     if border_nodes.len() != 2 {
         return None; // Not a clean 2-terminal feedback network
@@ -792,10 +782,17 @@ fn build_feedback_tree(
     let terminals = vec![border_nodes[0], border_nodes[1]];
 
     let fb_tree = super::graph::graph_reduce(
-        &feedback_edges, &extra, &terminals,
-        graph, sample_rate, &std::collections::HashMap::new(), |n| n,
+        &feedback_edges,
+        &extra,
+        &terminals,
+        graph,
+        sample_rate,
+        &std::collections::HashMap::new(),
+        |n| n,
         None,
-    ).ok()?.0;
+    )
+    .ok()?
+    .0;
 
     // Wrap in Series(VS, feedback_tree) — VS drives the feedback impedance
     let vs = DynNode::VoltageSource(0.0, 1.0);

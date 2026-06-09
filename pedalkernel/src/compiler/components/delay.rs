@@ -22,9 +22,13 @@ pub struct Bbd {
 impl Component for Bbd {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "BBD delay" }
+    fn type_tag(&self) -> &'static str {
+        "BBD delay"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -33,7 +37,9 @@ impl Component for Bbd {
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["clock"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["clock"]
+    }
 
     fn graph_role(&self) -> GraphRole {
         GraphRole::Virtual
@@ -51,13 +57,24 @@ impl Component for Bbd {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "input", pin_b: "output", kind: EdgeKind::Behavioral, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "input",
+            pin_b: "output",
+            kind: EdgeKind::Behavioral,
+            port_group: None,
+        }]
     }
 
     fn controls(&self) -> Vec<ControlParam> {
         vec![
-            ControlParam { name: "clock", kind: ControlParamKind::BbdClockRate },
-            ControlParam { name: "feedback", kind: ControlParamKind::BbdFeedback },
+            ControlParam {
+                name: "clock",
+                kind: ControlParamKind::BbdClockRate,
+            },
+            ControlParam {
+                name: "feedback",
+                kind: ControlParamKind::BbdFeedback,
+            },
         ]
     }
 
@@ -80,11 +97,20 @@ impl Component for Bbd {
         }
     }
 
-    fn symbol_name(&self) -> &'static str { "ic_chip" }
-    fn layout_class(&self) -> &'static str { "bbd" }
+    fn symbol_name(&self) -> &'static str {
+        "ic_chip"
+    }
+    fn layout_class(&self) -> &'static str {
+        "bbd"
+    }
 
     fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
-        vec![("in", "out"), ("input", "output"), ("in", "input"), ("out", "output")]
+        vec![
+            ("in", "out"),
+            ("input", "output"),
+            ("in", "input"),
+            ("out", "output"),
+        ]
     }
 }
 
@@ -103,21 +129,33 @@ pub struct DelayLineComp {
 impl Component for DelayLineComp {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "delay line" }
+    fn type_tag(&self) -> &'static str {
+        "delay line"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
             valid_pins: &[
-                "input", "in", "output", "out",
-                "rate", "speed_mod", "delay_time", "feedback",
+                "input",
+                "in",
+                "output",
+                "out",
+                "rate",
+                "speed_mod",
+                "delay_time",
+                "feedback",
             ],
             aliases: &[("in", "input"), ("out", "output")],
         }
     }
 
-    fn modulation_pins(&self) -> &'static [&'static str] { &["speed_mod", "delay_time"] }
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["speed_mod", "delay_time"]
+    }
 
     fn graph_role(&self) -> GraphRole {
         GraphRole::Virtual
@@ -135,13 +173,24 @@ impl Component for DelayLineComp {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge { pin_a: "input", pin_b: "output", kind: EdgeKind::Behavioral, port_group: None }]
+        vec![ComponentEdge {
+            pin_a: "input",
+            pin_b: "output",
+            kind: EdgeKind::Behavioral,
+            port_group: None,
+        }]
     }
 
     fn controls(&self) -> Vec<ControlParam> {
         vec![
-            ControlParam { name: "delay_time", kind: ControlParamKind::DelayTime },
-            ControlParam { name: "feedback", kind: ControlParamKind::DelayFeedback },
+            ControlParam {
+                name: "delay_time",
+                kind: ControlParamKind::DelayTime,
+            },
+            ControlParam {
+                name: "feedback",
+                kind: ControlParamKind::DelayFeedback,
+            },
         ]
     }
 
@@ -161,13 +210,24 @@ impl Component for DelayLineComp {
         }
     }
 
-    fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "DL") }
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        ("", "DL")
+    }
 
-    fn symbol_name(&self) -> &'static str { "delay" }
-    fn layout_class(&self) -> &'static str { "delay" }
+    fn symbol_name(&self) -> &'static str {
+        "delay"
+    }
+    fn layout_class(&self) -> &'static str {
+        "delay"
+    }
 
     fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
-        vec![("in", "out"), ("input", "output"), ("in", "input"), ("out", "output")]
+        vec![
+            ("in", "out"),
+            ("input", "output"),
+            ("in", "input"),
+            ("out", "output"),
+        ]
     }
 }
 
@@ -184,9 +244,13 @@ pub struct Tap {
 impl Component for Tap {
     impl_component_dyn!();
 
-    fn type_tag(&self) -> &'static str { "tap" }
+    fn type_tag(&self) -> &'static str {
+        "tap"
+    }
 
-    fn is_passive(&self) -> bool { false }
+    fn is_passive(&self) -> bool {
+        false
+    }
 
     fn pin_config(&self) -> PinConfig {
         PinConfig {
@@ -210,8 +274,14 @@ impl Component for Tap {
         StampResult::Skip
     }
 
-    fn footprint_ref(&self) -> (&'static str, &'static str) { ("", "TAP") }
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        ("", "TAP")
+    }
 
-    fn symbol_name(&self) -> &'static str { "tap" }
-    fn layout_class(&self) -> &'static str { "tap" }
+    fn symbol_name(&self) -> &'static str {
+        "tap"
+    }
+    fn layout_class(&self) -> &'static str {
+        "tap"
+    }
 }

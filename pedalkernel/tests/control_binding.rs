@@ -883,8 +883,7 @@ fn rat_controls_bound() {
     );
     // Volume: should be PotInStage or PotInMultiNlStage
     assert!(
-        d.contains("Volume -> PotInStage(")
-            || d.contains("Volume -> PotInMultiNlStage("),
+        d.contains("Volume -> PotInStage(") || d.contains("Volume -> PotInMultiNlStage("),
         "RAT: Volume should bind to a stage target; controls:\n{d}"
     );
 }
@@ -949,18 +948,15 @@ pedal "RATKING" {
     let d = dump(&compiled);
 
     assert!(
-        d.contains("Distortion -> PotInStage(")
-            || d.contains("Distortion -> OpAmpGain {"),
+        d.contains("Distortion -> PotInStage(") || d.contains("Distortion -> OpAmpGain {"),
         "RATKING: Distortion should bind; controls:\n{d}"
     );
     assert!(
-        d.contains("Filter -> PotInStage(")
-            || d.contains("Filter -> PotInMultiNlStage("),
+        d.contains("Filter -> PotInStage(") || d.contains("Filter -> PotInMultiNlStage("),
         "RATKING: Filter should bind to a stage; controls:\n{d}"
     );
     assert!(
-        d.contains("Volume -> PotInStage(")
-            || d.contains("Volume -> PotInMultiNlStage("),
+        d.contains("Volume -> PotInStage(") || d.contains("Volume -> PotInMultiNlStage("),
         "RATKING: Volume should bind to a stage; controls:\n{d}"
     );
 }
@@ -972,14 +968,12 @@ fn klon_controls_bound() {
 
     // Gain: should be PotInStage (with OpAmpGain side-effect if in Rf path)
     assert!(
-        d.contains("Gain -> PotInStage(")
-            || d.contains("Gain -> PotInMultiNlStage("),
+        d.contains("Gain -> PotInStage(") || d.contains("Gain -> PotInMultiNlStage("),
         "Klon: Gain should bind to a stage target; controls:\n{d}"
     );
     // Treble: should be PotInStage
     assert!(
-        d.contains("Treble -> PotInStage(")
-            || d.contains("Treble -> PotInMultiNlStage("),
+        d.contains("Treble -> PotInStage(") || d.contains("Treble -> PotInMultiNlStage("),
         "Klon: Treble should bind to a stage target; controls:\n{d}"
     );
     // Output: should be PotInStage
@@ -1067,7 +1061,10 @@ fn trigger_input_parses_and_compiles() {
     "#;
     let compiled = compile_src(src);
     let d = dump(&compiled);
-    assert!(d.contains("Trigger"), "dump should contain Trigger control: {d}");
+    assert!(
+        d.contains("Trigger"),
+        "dump should contain Trigger control: {d}"
+    );
 }
 
 #[test]
@@ -1100,7 +1097,10 @@ fn trigger_produces_impulse_that_decays() {
     assert!(s0.abs() > 0.01, "trigger should produce signal, got {s0}");
     let s1 = compiled.process(0.0);
     // After impulse, should be decaying (or at least different from s0)
-    assert!(s1.abs() < s0.abs() || s1.abs() > 0.0, "should decay or ring, got s1={s1}");
+    assert!(
+        s1.abs() < s0.abs() || s1.abs() > 0.0,
+        "should decay or ring, got s1={s1}"
+    );
 }
 
 #[test]

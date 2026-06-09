@@ -667,7 +667,10 @@ fn bench_sample_rates(c: &mut Criterion) {
 fn bench_legends_sample(c: &mut Criterion) {
     let mut group = c.benchmark_group("legends_sample");
 
-    let legends_dir = concat!(env!("HOME"), "/src/pedalkernel/pedalkernel-pro/pedals/legends");
+    let legends_dir = concat!(
+        env!("HOME"),
+        "/src/pedalkernel/pedalkernel-pro/pedals/legends"
+    );
     let pedals = [
         ("muff", "muff.pedal"),
         ("screamer", "screamer.pedal"),
@@ -704,7 +707,10 @@ fn bench_legends_sample(c: &mut Criterion) {
 fn bench_legends_decay(c: &mut Criterion) {
     let mut group = c.benchmark_group("legends_decay");
 
-    let legends_dir = concat!(env!("HOME"), "/src/pedalkernel/pedalkernel-pro/pedals/legends");
+    let legends_dir = concat!(
+        env!("HOME"),
+        "/src/pedalkernel/pedalkernel-pro/pedals/legends"
+    );
     let pedals = [
         ("muff", "muff.pedal"),
         ("screamer", "screamer.pedal"),
@@ -740,7 +746,10 @@ fn bench_legends_block(c: &mut Criterion) {
     let mut group = c.benchmark_group("legends_block");
     group.measurement_time(Duration::from_secs(5));
 
-    let legends_dir = concat!(env!("HOME"), "/src/pedalkernel/pedalkernel-pro/pedals/legends");
+    let legends_dir = concat!(
+        env!("HOME"),
+        "/src/pedalkernel/pedalkernel-pro/pedals/legends"
+    );
     let pedals = [
         ("muff", "muff.pedal"),
         ("screamer", "screamer.pedal"),

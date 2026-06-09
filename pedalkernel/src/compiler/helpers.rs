@@ -66,9 +66,7 @@ pub(super) fn mosfet_model(mt: MosfetType, is_n_channel: bool) -> MosfetModel {
 pub(super) fn has_vs(node: &DynNode) -> bool {
     match node {
         DynNode::Leaf(leaf) if leaf.type_tag() == "voltage_source" => true,
-        DynNode::Binary { left, right, .. } => {
-            has_vs(left) || has_vs(right)
-        }
+        DynNode::Binary { left, right, .. } => has_vs(left) || has_vs(right),
         _ => false,
     }
 }
@@ -118,7 +116,12 @@ pub(super) fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
         DynNode::Leaf(leaf) if leaf.type_tag() == "voltage_source" => {
             leaf.set_resistance(target_rp.max(1.0));
         }
-        DynNode::Binary { kind: BinaryKind::Series, left, right, .. } => {
+        DynNode::Binary {
+            kind: BinaryKind::Series,
+            left,
+            right,
+            ..
+        } => {
             // Series(Vs_branch, other): set Vs rp so that series total ~ target.
             if has_vs(left) {
                 let other_rp = right.port_resistance();
@@ -130,7 +133,12 @@ pub(super) fn adjust_vs_branch_rp(branch: &mut DynNode, target_rp: f64) {
                 set_vs_rp(right, vs_target);
             }
         }
-        DynNode::Binary { kind: BinaryKind::Parallel, left, right, .. } => {
+        DynNode::Binary {
+            kind: BinaryKind::Parallel,
+            left,
+            right,
+            ..
+        } => {
             // Recurse -- the Vs is deeper.
             if has_vs(left) {
                 adjust_vs_branch_rp(left, target_rp);
@@ -192,9 +200,7 @@ pub(super) fn has_pot(node: &DynNode, comp_id: &str) -> bool {
                 None => false,
             }
         }
-        DynNode::Binary { left, right, .. } => {
-            has_pot(left, comp_id) || has_pot(right, comp_id)
-        }
+        DynNode::Binary { left, right, .. } => has_pot(left, comp_id) || has_pot(right, comp_id),
         DynNode::Transformer { secondary, .. } => has_pot(secondary, comp_id),
         DynNode::RType { children, .. } => children.iter().any(|c| has_pot(c, comp_id)),
         _ => false,

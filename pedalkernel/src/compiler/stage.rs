@@ -343,10 +343,19 @@ impl ToneFeedback {
         initial_pot_position: f64,
     ) -> Self {
         let mut fb = ToneFeedback {
-            r_fb, r_in, c_tone, r_shelf, max_pot_r, pot_id, sample_rate,
-            b0: 0.0, b1: 0.0, a1: 0.0,
+            r_fb,
+            r_in,
+            c_tone,
+            r_shelf,
+            max_pot_r,
+            pot_id,
+            sample_rate,
+            b0: 0.0,
+            b1: 0.0,
+            a1: 0.0,
             dc_gain: r_fb / r_in,
-            x_prev: 0.0, y_prev: 0.0,
+            x_prev: 0.0,
+            y_prev: 0.0,
         };
         fb.update_coefficients(initial_pot_position);
         fb
@@ -468,7 +477,8 @@ impl ResonatorFeedback {
     #[inline]
     pub(super) fn process(&mut self, input: f64) -> f64 {
         let y = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
-              - self.a1 * self.y1 - self.a2 * self.y2;
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = input;
         self.y2 = self.y1;
@@ -818,12 +828,8 @@ impl WdfStage {
                         j.process(b_tree, rp)
                     }
                 }
-                RootKind::JfetVr(j) => {
-                    j.process_root(b_tree, rp)
-                }
-                RootKind::Triode(t) => {
-                    t.process(b_tree, rp)
-                }
+                RootKind::JfetVr(j) => j.process_root(b_tree, rp),
+                RootKind::Triode(t) => t.process(b_tree, rp),
                 RootKind::VariMu(t) => t.process(b_tree, rp),
                 RootKind::Pentode(p) => p.process(b_tree, rp),
                 RootKind::Mosfet(m) => m.process(b_tree, rp),
@@ -935,8 +941,7 @@ impl WdfStage {
                     let vs_voltage = sample * compensation;
                     let n = *n_ports;
                     // 1. Collect reflected waves from children
-                    let b_children: Vec<f64> =
-                        children.iter_mut().map(|c| c.reflected()).collect();
+                    let b_children: Vec<f64> = children.iter_mut().map(|c| c.reflected()).collect();
                     // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
                     let mut a_children = vec![0.0; n];
                     for i in 0..n {
@@ -947,8 +952,7 @@ impl WdfStage {
                         a_children[i] = a_i;
                     }
                     // 3. Set incident waves on children
-                    for (child, &a_i) in children.iter_mut().zip(a_children.iter())
-                    {
+                    for (child, &a_i) in children.iter_mut().zip(a_children.iter()) {
                         child.set_incident(a_i);
                     }
                     // 4. Output voltage at probe port
@@ -1090,9 +1094,7 @@ impl WdfStage {
             } => {
                 *rp = 1.0 / (2.0 * effective_rate * *capacitance);
             }
-            RootKind::InductorRoot {
-                inductance, rp, ..
-            } => {
+            RootKind::InductorRoot { inductance, rp, .. } => {
                 *rp = 2.0 * effective_rate * *inductance;
             }
             RootKind::PassiveRType { .. } => {
@@ -1770,7 +1772,10 @@ impl PushPullStage {
             let a = self.push_root.process(b, rp);
             self.push_tree.set_incident(a);
             #[cfg(feature = "debug-trace")]
-            { push_b.set(b); push_a.set(a); }
+            {
+                push_b.set(b);
+                push_a.set(a);
+            }
             (a + b) / 2.0
         });
 
@@ -1802,7 +1807,11 @@ impl PushPullStage {
         // The push-pull stage generates DC from plate bias voltages;
         // the real output transformer provides AC coupling, so we model
         // that with a DC blocking filter.
-        let x0 = if raw_output.is_finite() { raw_output } else { 0.0 };
+        let x0 = if raw_output.is_finite() {
+            raw_output
+        } else {
+            0.0
+        };
         let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
         self.dc_blocker_x1 = x0;
         self.dc_blocker_y1 = if y0.is_finite() { y0 } else { 0.0 };
@@ -1852,7 +1861,11 @@ impl PushPullStage {
         let raw_output = diff / self.turns_ratio;
 
         // DC blocker
-        let x0 = if raw_output.is_finite() { raw_output } else { 0.0 };
+        let x0 = if raw_output.is_finite() {
+            raw_output
+        } else {
+            0.0
+        };
         let y0 = x0 - self.dc_blocker_x1 + 0.9995 * self.dc_blocker_y1;
         self.dc_blocker_x1 = x0;
         self.dc_blocker_y1 = if y0.is_finite() { y0 } else { 0.0 };
@@ -1952,7 +1965,11 @@ impl PushPullStage {
     }
 
     pub fn debug_dump(&self) -> String {
-        let mode = if self.push_adaptor.is_some() { "3-port" } else { "WDF" };
+        let mode = if self.push_adaptor.is_some() {
+            "3-port"
+        } else {
+            "WDF"
+        };
         format!(
             "PushPullStage(mode={}, ratio={:.1}:1, bias={:.1}V, push_par={}, pull_par={}, comp={:.4})\n  Push: rp={:.1}Ω, nodes={}\n  Pull: rp={:.1}Ω, nodes={}",
             mode,
@@ -2013,9 +2030,8 @@ impl PushPullStage {
 // ═══════════════════════════════════════════════════════════════════════════
 
 use crate::elements::nonlinear::solver::{
-    multi_port_nr_solve, multi_port_nr_solve_grouped,
-    multi_port_nr_solve_into, multi_port_nr_solve_grouped_into,
-    NlDeviceGroupIv, NlDeviceIv,
+    multi_port_nr_solve, multi_port_nr_solve_grouped, multi_port_nr_solve_grouped_into,
+    multi_port_nr_solve_into, NlDeviceGroupIv, NlDeviceIv,
 };
 use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 
@@ -2130,7 +2146,11 @@ impl NlDeviceGroupKind {
             NlDeviceGroupKind::TriodeThreePort(_) => "TriodeThreePort",
             NlDeviceGroupKind::PentodeThreePort(_) => "PentodeThreePort",
             NlDeviceGroupKind::BjtTwoPort(b) => {
-                if b.is_pnp { "BjtPnp2P" } else { "BjtNpn2P" }
+                if b.is_pnp {
+                    "BjtPnp2P"
+                } else {
+                    "BjtNpn2P"
+                }
             }
             NlDeviceGroupKind::SinglePort(d) => d.debug_name(),
         }
@@ -2205,11 +2225,7 @@ impl MultiNlScattering {
     /// `n_total` is inferred from the scattering matrix size, so extra ports
     /// (like VCC) are handled automatically — only the first `n_nl` rows and
     /// the NL, passive, and last (adapted) columns are extracted.
-    pub(super) fn from_full_matrix(
-        scattering: &[f64],
-        n_nl: usize,
-        n_passive: usize,
-    ) -> Self {
+    pub(super) fn from_full_matrix(scattering: &[f64], n_nl: usize, n_passive: usize) -> Self {
         let n_total = if scattering.is_empty() {
             n_nl + n_passive + 1
         } else {
@@ -2532,7 +2548,6 @@ impl MultiNlStage {
         self.iteration_budget_remaining = NR_ITERATION_BUDGET;
         let adaptive_x2 = self.adaptive_x2;
 
-
         // Linear extrapolation warm-start for NR solver (first sub-sample only).
         // v_prev holds v[n-1]; v_prev_2 holds v[n-2].
         // Extrapolated guess: v[n] ~= 2*v[n-1] - v[n-2].
@@ -2746,9 +2761,8 @@ impl MultiNlStage {
         // Update adaptive oversampling for next base sample:
         // If all sub-samples converged via frozen Newton (zero failures),
         // the signal is slowly varying → X2 NR rate suffices next sample.
-        self.adaptive_x2 = self.nr_workspace.frozen_failures == 0
-            && self.nr_workspace.has_cached_jac
-            && n_nl > 0;
+        self.adaptive_x2 =
+            self.nr_workspace.frozen_failures == 0 && self.nr_workspace.has_cached_jac && n_nl > 0;
 
         #[cfg(feature = "debug-trace")]
         if input.abs() > 1e-10 {
@@ -3143,7 +3157,8 @@ impl MultiNlStage {
                         for i in 0..n_nl.min(new_vs.len()) {
                             self.dc_bias[i] = new_vs[i] * self.supply_voltage;
                         }
-                        self.vcc_bias_all = new_vs.iter().map(|&k| k * self.supply_voltage).collect();
+                        self.vcc_bias_all =
+                            new_vs.iter().map(|&k| k * self.supply_voltage).collect();
                     }
 
                     // Rebuild port_resistances for RTypeAdaptor
@@ -3209,7 +3224,11 @@ impl MultiNlStage {
         let n_passive = self.passive_children.len();
         let use_vs = recompute.vs_source_index.is_some();
         let _has_vcc_vs = recompute.vcc_vs_index.is_some();
-        let n_total = if use_vs { n_nl + n_passive } else { n_nl + n_passive + 1 };
+        let n_total = if use_vs {
+            n_nl + n_passive
+        } else {
+            n_nl + n_passive + 1
+        };
 
         // Rebuild ports with current resistances (reactive elements only, no pots).
         let mut ports: Vec<WdfPort> = Vec::with_capacity(n_total);
@@ -3238,8 +3257,9 @@ impl MultiNlStage {
         if use_vs {
             // VS injection mode (OTA): derive scattering + injection vector (no adapted port).
             let vs_idx = recompute.vs_source_index.unwrap();
-            let (scattering, vs_inj) =
-                recompute.mna.derive_scattering_and_vs_injection(&ports, vs_idx);
+            let (scattering, vs_inj) = recompute
+                .mna
+                .derive_scattering_and_vs_injection(&ports, vs_idx);
 
             if scattering.iter().any(|&s| !s.is_finite()) {
                 return;
@@ -3252,8 +3272,9 @@ impl MultiNlStage {
 
             // Recompute extraction coefficients if used.
             if let Some((out_pos, out_neg)) = recompute.extract_output_nodes {
-                let (coeffs, vs_coeff) =
-                    recompute.mna.derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
+                let (coeffs, vs_coeff) = recompute
+                    .mna
+                    .derive_extraction_coeffs(&ports, vs_idx, out_pos, out_neg);
                 self.extract_coeffs = Some(coeffs);
                 self.extract_vs = vs_coeff;
             }
@@ -3269,8 +3290,9 @@ impl MultiNlStage {
 
             if let Some(vcc_idx) = recompute.vcc_vs_index {
                 // VCC as ideal VS: derive scattering + VCC injection vector
-                let (scattering, vcc_inj) =
-                    recompute.mna.derive_scattering_and_vs_injection(&ports, vcc_idx);
+                let (scattering, vcc_inj) = recompute
+                    .mna
+                    .derive_scattering_and_vs_injection(&ports, vcc_idx);
 
                 if scattering.iter().any(|&s| !s.is_finite()) {
                     return;

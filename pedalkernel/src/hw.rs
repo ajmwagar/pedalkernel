@@ -463,7 +463,8 @@ fn check_heuristic_voltage(
                 });
             }
         }
-    } else if kind.is_diode_family() && kind.diode_type() == Some(crate::dsl::DiodeType::Germanium) {
+    } else if kind.is_diode_family() && kind.diode_type() == Some(crate::dsl::DiodeType::Germanium)
+    {
         if voltage > 18.0 {
             warnings.push(VoltageWarning {
                 component_id: id.to_string(),
@@ -1608,7 +1609,10 @@ pub fn build_bom(pedal: &PedalDef, limits: Option<&HardwareLimits>) -> Vec<BomEn
                         let r_val = crate::kicad::format_eng(*v, "\u{2126}");
                         let (pn, desc) = find_closest(RESISTORS, *v)
                             .map(|(pn, desc)| (Some(pn.to_string()), desc.to_string()))
-                            .unwrap_or((None, format!("{r_val} Resistor (switched position {})", i + 1)));
+                            .unwrap_or((
+                                None,
+                                format!("{r_val} Resistor (switched position {})", i + 1),
+                            ));
                         BomEntry {
                             reference: format!("{}_{}", comp.id, i + 1),
                             display: "Resistor".into(),

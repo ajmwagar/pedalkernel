@@ -231,32 +231,63 @@ impl GummelPoonModel {
         let vbc_clamped = arg_vbc >= 40.0;
 
         // d(exp_vbe)/d(vbe) — zero if clamped (exp is flat at limit)
-        let dexp_vbe = if vbe_clamped { 0.0 } else { exp_vbe / (self.nf * self.vt) };
-        let dexp_vbc = if vbc_clamped { 0.0 } else { exp_vbc / (self.nr * self.vt) };
+        let dexp_vbe = if vbe_clamped {
+            0.0
+        } else {
+            exp_vbe / (self.nf * self.vt)
+        };
+        let dexp_vbc = if vbc_clamped {
+            0.0
+        } else {
+            exp_vbc / (self.nr * self.vt)
+        };
 
         // --- Base charge Qb and its derivatives ---
         // q1 = 1 + vbc/vaf + vbe/var
-        let q1 = 1.0
-            + if self.vaf.is_finite() { vbc / self.vaf } else { 0.0 }
-            + if self.var.is_finite() { vbe / self.var } else { 0.0 };
-        let dq1_dvbe = if self.var.is_finite() { 1.0 / self.var } else { 0.0 };
-        let dq1_dvbc = if self.vaf.is_finite() { 1.0 / self.vaf } else { 0.0 };
+        let q1 =
+            1.0 + if self.vaf.is_finite() {
+                vbc / self.vaf
+            } else {
+                0.0
+            } + if self.var.is_finite() {
+                vbe / self.var
+            } else {
+                0.0
+            };
+        let dq1_dvbe = if self.var.is_finite() {
+            1.0 / self.var
+        } else {
+            0.0
+        };
+        let dq1_dvbc = if self.vaf.is_finite() {
+            1.0 / self.vaf
+        } else {
+            0.0
+        };
 
         // q2 = IS*(exp_vbe-1)/ikf + IS*(exp_vbc-1)/ikr
         let q2_f = if self.ikf.is_finite() && self.ikf > 0.0 {
             self.is * (exp_vbe - 1.0) / self.ikf
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let q2_r = if self.ikr.is_finite() && self.ikr > 0.0 {
             self.is * (exp_vbc - 1.0) / self.ikr
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let q2 = q2_f + q2_r;
 
         let dq2_dvbe = if self.ikf.is_finite() && self.ikf > 0.0 {
             self.is * dexp_vbe / self.ikf
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let dq2_dvbc = if self.ikr.is_finite() && self.ikr > 0.0 {
             self.is * dexp_vbc / self.ikr
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         // qb = (q1/2) * (1 + sqrt(1 + 4*q2))
         let inner = (1.0 + 4.0 * q2).max(0.0);
@@ -264,8 +295,16 @@ impl GummelPoonModel {
         let qb = (q1 / 2.0) * (1.0 + sqrt_inner);
 
         // d(qb)/d(vbe) = (dq1/dvbe / 2) * (1 + sqrt_inner) + (q1/2) * (4 * dq2/dvbe) / (2 * sqrt_inner)
-        let dsqrt_dvbe = if sqrt_inner > 1e-30 { 2.0 * dq2_dvbe / sqrt_inner } else { 0.0 };
-        let dsqrt_dvbc = if sqrt_inner > 1e-30 { 2.0 * dq2_dvbc / sqrt_inner } else { 0.0 };
+        let dsqrt_dvbe = if sqrt_inner > 1e-30 {
+            2.0 * dq2_dvbe / sqrt_inner
+        } else {
+            0.0
+        };
+        let dsqrt_dvbc = if sqrt_inner > 1e-30 {
+            2.0 * dq2_dvbc / sqrt_inner
+        } else {
+            0.0
+        };
         let dqb_dvbe = (dq1_dvbe / 2.0) * (1.0 + sqrt_inner) + (q1 / 2.0) * dsqrt_dvbe;
         let dqb_dvbc = (dq1_dvbc / 2.0) * (1.0 + sqrt_inner) + (q1 / 2.0) * dsqrt_dvbc;
 
@@ -279,16 +318,24 @@ impl GummelPoonModel {
         let qb2 = qb * qb;
         let dicc_dvbe = if qb2 > 1e-60 {
             (self.is * dexp_vbe * qb - ef * dqb_dvbe) / qb2
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let dicc_dvbc = if qb2 > 1e-60 {
             -ef * dqb_dvbc / qb2
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let diec_dvbe = if qb2 > 1e-60 {
             -er * dqb_dvbe / qb2
-        } else { 0.0 };
+        } else {
+            0.0
+        };
         let diec_dvbc = if qb2 > 1e-60 {
             (self.is * dexp_vbc * qb - er * dqb_dvbc) / qb2
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         // ic = icc - iec/br
         let ic = icc - iec / self.br;
@@ -307,17 +354,33 @@ impl GummelPoonModel {
             let arg = (vbe / (self.ne * self.vt)).min(40.0);
             let e = arg.exp();
             let clamped = arg >= 40.0;
-            (self.ise * (e - 1.0),
-             if clamped { 0.0 } else { self.ise * e / (self.ne * self.vt) })
-        } else { (0.0, 0.0) };
+            (
+                self.ise * (e - 1.0),
+                if clamped {
+                    0.0
+                } else {
+                    self.ise * e / (self.ne * self.vt)
+                },
+            )
+        } else {
+            (0.0, 0.0)
+        };
 
         let (ib_leak_c, dleak_c_dvbc) = if self.isc > 0.0 {
             let arg = (vbc / (self.nc * self.vt)).min(40.0);
             let e = arg.exp();
             let clamped = arg >= 40.0;
-            (self.isc * (e - 1.0),
-             if clamped { 0.0 } else { self.isc * e / (self.nc * self.vt) })
-        } else { (0.0, 0.0) };
+            (
+                self.isc * (e - 1.0),
+                if clamped {
+                    0.0
+                } else {
+                    self.isc * e / (self.nc * self.vt)
+                },
+            )
+        } else {
+            (0.0, 0.0)
+        };
 
         let ib = ib_f + ib_r + ib_leak_e + ib_leak_c;
 
@@ -765,7 +828,11 @@ impl BjtTwoPort {
 
             for k in 0..4 {
                 let abs_err = (j_a[k] - j_n[k]).abs();
-                let rel_err = if j_n[k].abs() > 1e-15 { abs_err / j_n[k].abs() } else { abs_err };
+                let rel_err = if j_n[k].abs() > 1e-15 {
+                    abs_err / j_n[k].abs()
+                } else {
+                    abs_err
+                };
                 if rel_err > 0.05 && abs_err > 1e-10 {
                     return false;
                 }
@@ -881,9 +948,9 @@ impl NlDeviceGroupIv for BjtTwoPort {
             // ∂f/∂vbe = ∂f/∂vbe_direct + ∂f/∂vbc * dvbc_dvbe
             // ∂f/∂vce = ∂f/∂vbc * dvbc_dvce
             jacobian[0] = jac_be_bc[0] + jac_be_bc[1] * dvbc_dvbe; // ∂Ib/∂Vbe
-            jacobian[1] = jac_be_bc[1] * dvbc_dvce;                 // ∂Ib/∂Vce
+            jacobian[1] = jac_be_bc[1] * dvbc_dvce; // ∂Ib/∂Vce
             jacobian[2] = jac_be_bc[2] + jac_be_bc[3] * dvbc_dvbe; // ∂Ic/∂Vbe
-            jacobian[3] = jac_be_bc[3] * dvbc_dvce;                 // ∂Ic/∂Vce
+            jacobian[3] = jac_be_bc[3] * dvbc_dvce; // ∂Ic/∂Vce
         } else {
             // Parasitic path: fixed-point iteration for currents, then analytical
             // Jacobian at converged internal voltages with implicit differentiation
@@ -1278,13 +1345,13 @@ mod gummel_poon_tests {
     fn analytical_jacobian_matches_numerical_2n3904() {
         let model = GummelPoonModel::by_name("2N3904");
         let test_points = [
-            (0.0, 0.0),       // Zero bias
-            (0.6, -5.0),      // Forward active
-            (0.65, -10.0),    // Forward active, high Vce
-            (0.7, -2.0),      // Near saturation
-            (0.3, -1.0),      // Low forward bias
-            (0.0, -5.0),      // Cutoff
-            (0.5, 0.3),       // Near saturation (Vbc > 0)
+            (0.0, 0.0),    // Zero bias
+            (0.6, -5.0),   // Forward active
+            (0.65, -10.0), // Forward active, high Vce
+            (0.7, -2.0),   // Near saturation
+            (0.3, -1.0),   // Low forward bias
+            (0.0, -5.0),   // Cutoff
+            (0.5, 0.3),    // Near saturation (Vbc > 0)
         ];
 
         for (vbe, vbc) in test_points {
@@ -1303,11 +1370,18 @@ mod gummel_poon_tests {
             );
 
             // Jacobian entries must match within relative tolerance
-            for (i, name) in ["∂Ib/∂Vbe", "∂Ib/∂Vbc", "∂Ic/∂Vbe", "∂Ic/∂Vbc"].iter().enumerate() {
+            for (i, name) in ["∂Ib/∂Vbe", "∂Ib/∂Vbc", "∂Ic/∂Vbe", "∂Ic/∂Vbc"]
+                .iter()
+                .enumerate()
+            {
                 let a = jac_a[i];
                 let n = jac_n[i];
                 let abs_err = (a - n).abs();
-                let rel_err = if n.abs() > 1e-20 { abs_err / n.abs() } else { abs_err };
+                let rel_err = if n.abs() > 1e-20 {
+                    abs_err / n.abs()
+                } else {
+                    abs_err
+                };
                 assert!(
                     rel_err < 1e-4 || abs_err < 1e-15,
                     "Jacobian {name} mismatch at vbe={vbe}, vbc={vbc}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
@@ -1322,20 +1396,27 @@ mod gummel_poon_tests {
         let model = GummelPoonModel::by_name("AC128");
         let test_points = [
             (0.0, 0.0),
-            (0.2, -5.0),      // Ge turns on earlier
-            (0.3, -9.0),      // Forward active
-            (0.15, -1.0),     // Low bias
+            (0.2, -5.0),  // Ge turns on earlier
+            (0.3, -9.0),  // Forward active
+            (0.15, -1.0), // Low bias
         ];
 
         for (vbe, vbc) in test_points {
             let (_ic, _ib, jac_a) = model.currents_and_jacobian(vbe, vbc);
             let jac_n = numerical_jacobian(&model, vbe, vbc);
 
-            for (i, name) in ["∂Ib/∂Vbe", "∂Ib/∂Vbc", "∂Ic/∂Vbe", "∂Ic/∂Vbc"].iter().enumerate() {
+            for (i, name) in ["∂Ib/∂Vbe", "∂Ib/∂Vbc", "∂Ic/∂Vbe", "∂Ic/∂Vbc"]
+                .iter()
+                .enumerate()
+            {
                 let a = jac_a[i];
                 let n = jac_n[i];
                 let abs_err = (a - n).abs();
-                let rel_err = if n.abs() > 1e-20 { abs_err / n.abs() } else { abs_err };
+                let rel_err = if n.abs() > 1e-20 {
+                    abs_err / n.abs()
+                } else {
+                    abs_err
+                };
                 assert!(
                     rel_err < 1e-4 || abs_err < 1e-15,
                     "Jacobian {name} mismatch at vbe={vbe}, vbc={vbc}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
@@ -1357,10 +1438,10 @@ mod gummel_poon_tests {
         let bjt = BjtTwoPort::new(model);
 
         let test_points = [
-            [0.6, 5.0],     // Forward active (Vbe=0.6, Vce=5)
-            [0.65, 10.0],   // Higher Vce
-            [0.3, 1.0],     // Low bias
-            [0.0, 5.0],     // Cutoff
+            [0.6, 5.0],   // Forward active (Vbe=0.6, Vce=5)
+            [0.65, 10.0], // Higher Vce
+            [0.3, 1.0],   // Low bias
+            [0.0, 5.0],   // Cutoff
         ];
 
         for v in &test_points {
@@ -1391,7 +1472,11 @@ mod gummel_poon_tests {
                 let a = jac_a[i];
                 let n = jac_n[i];
                 let abs_err = (a - n).abs();
-                let rel_err = if n.abs() > 1e-20 { abs_err / n.abs() } else { abs_err };
+                let rel_err = if n.abs() > 1e-20 {
+                    abs_err / n.abs()
+                } else {
+                    abs_err
+                };
                 assert!(
                     rel_err < 1e-4 || abs_err < 1e-15,
                     "BjtTwoPort {name} mismatch at v={v:?}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
@@ -1405,15 +1490,13 @@ mod gummel_poon_tests {
     #[test]
     fn bjt_two_port_eval_analytical_with_parasitics() {
         let model = GummelPoonModel::by_name("2N3904");
-        assert!(model.rb + model.re + model.rc > 0.0, "2N3904 must have parasitics");
+        assert!(
+            model.rb + model.re + model.rc > 0.0,
+            "2N3904 must have parasitics"
+        );
         let bjt = BjtTwoPort::new(model);
 
-        let test_points = [
-            [0.6, 5.0],
-            [0.65, 10.0],
-            [0.3, 1.0],
-            [0.0, 5.0],
-        ];
+        let test_points = [[0.6, 5.0], [0.65, 10.0], [0.3, 1.0], [0.0, 5.0]];
 
         for v in &test_points {
             let mut currents_a = [0.0; 2];
@@ -1443,7 +1526,11 @@ mod gummel_poon_tests {
                 let a = jac_a[i];
                 let n = jac_n[i];
                 let abs_err = (a - n).abs();
-                let rel_err = if n.abs() > 1e-20 { abs_err / n.abs() } else { abs_err };
+                let rel_err = if n.abs() > 1e-20 {
+                    abs_err / n.abs()
+                } else {
+                    abs_err
+                };
                 assert!(
                     rel_err < 1e-3 || abs_err < 1e-12,
                     "Parasitic BjtTwoPort {name} mismatch at v={v:?}: analytical={a:.6e}, numerical={n:.6e}, rel_err={rel_err:.2e}"
@@ -1457,9 +1544,7 @@ mod gummel_poon_tests {
     /// grouped solver actually reduces iteration count.
     #[test]
     fn frozen_newton_reduces_iterations() {
-        use crate::elements::nonlinear::solver::{
-            multi_port_nr_solve_grouped_into, NrWorkspace,
-        };
+        use crate::elements::nonlinear::solver::{multi_port_nr_solve_grouped_into, NrWorkspace};
 
         let model = GummelPoonModel::by_name("2N3904");
         let bjt = BjtTwoPort::new(model);
@@ -1474,17 +1559,36 @@ mod gummel_poon_tests {
         let mut v_guess = [0.6, 5.0];
         let known_a = [1.0, 10.0];
         multi_port_nr_solve_grouped_into(
-            2, &s_nl, &known_a, &port_resistances, &groups, &offsets,
-            &mut v_guess, 24, 1e-6, &mut ws,
+            2,
+            &s_nl,
+            &known_a,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess,
+            24,
+            1e-6,
+            &mut ws,
         );
-        assert!(ws.has_cached_jac, "Cache should be populated after first solve");
+        assert!(
+            ws.has_cached_jac,
+            "Cache should be populated after first solve"
+        );
 
         // Second solve with slightly different input: should benefit from cache
         let mut v_guess2 = v_guess; // warm start from previous
         let known_a2 = [1.001, 10.001]; // tiny change
         multi_port_nr_solve_grouped_into(
-            2, &s_nl, &known_a2, &port_resistances, &groups, &offsets,
-            &mut v_guess2, 24, 1e-6, &mut ws,
+            2,
+            &s_nl,
+            &known_a2,
+            &port_resistances,
+            &groups,
+            &offsets,
+            &mut v_guess2,
+            24,
+            1e-6,
+            &mut ws,
         );
 
         // The second solve should produce valid results
@@ -1494,7 +1598,8 @@ mod gummel_poon_tests {
         assert!(
             (v_guess2[0] - v_guess[0]).abs() < 0.01,
             "Vbe should barely change: {} vs {}",
-            v_guess2[0], v_guess[0]
+            v_guess2[0],
+            v_guess[0]
         );
     }
 }

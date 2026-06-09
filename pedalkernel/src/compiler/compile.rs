@@ -11,19 +11,18 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::*;
-use crate::PedalProcessor;
 use crate::elements::{BbdDelayLine, BbdModel, SlewRateLimiter, TriodeModel};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::thermal::ThermalModel;
 use crate::tolerance::ToleranceEngine;
+use crate::PedalProcessor;
 
 use super::compiled::*;
 use super::component::Component;
 use super::components::{
     Bbd as BbdComp, Capacitor as CapacitorComp, DelayLineComp, Inductor as InductorComp,
-    Lfo as LfoComp, Pentode as PentodeComp, Potentiometer as PotComp,
-    Resistor as ResistorComp, Tap as TapComp, Triode as TriodeComp, Vca as VcaComp,
-    VariMu as VariMuComp, Vco as VcoComp,
+    Lfo as LfoComp, Pentode as PentodeComp, Potentiometer as PotComp, Resistor as ResistorComp,
+    Tap as TapComp, Triode as TriodeComp, VariMu as VariMuComp, Vca as VcaComp, Vco as VcoComp,
 };
 use super::dyn_node::DynNode;
 use super::graph::*;
@@ -209,9 +208,7 @@ fn build_passive_wdf_stage(
         .edges
         .iter()
         .enumerate()
-        .filter(|(_, e)| {
-            graph.components[e.comp_idx].kind.is_simple_passive()
-        })
+        .filter(|(_, e)| graph.components[e.comp_idx].kind.is_simple_passive())
         .map(|(i, _)| i)
         .collect();
 
@@ -220,12 +217,8 @@ fn build_passive_wdf_stage(
     }
 
     // Try output-rooted decomposition for simple 2-element circuits.
-    if let Some(stage) = build_output_rooted_stage(
-        graph,
-        &passive_edges,
-        sample_rate,
-        oversampling,
-    ) {
+    if let Some(stage) = build_output_rooted_stage(graph, &passive_edges, sample_rate, oversampling)
+    {
         return Some(stage);
     }
 
@@ -250,8 +243,13 @@ fn build_passive_wdf_stage(
     }];
     let terminals = vec![source_node, graph.gnd_node];
     match super::graph::graph_reduce(
-        &passive_edges, &extra, &terminals,
-        graph, sample_rate, &HashMap::new(), |n| n,
+        &passive_edges,
+        &extra,
+        &terminals,
+        graph,
+        sample_rate,
+        &HashMap::new(),
+        |n| n,
         None,
     ) {
         Ok((tree, _)) => {
@@ -298,7 +296,6 @@ fn build_passive_wdf_stage(
         }
     }
 }
-
 
 /// Build a WDF stage using the unified sp_decompose + MNA pipeline for
 /// non-series-parallel passive topologies.
@@ -475,7 +472,10 @@ fn build_passive_rtype_from_decomposed(
         let comp = &graph.components[e.comp_idx];
 
         use super::component::StampResult;
-        match comp.kind.stamp_mna(&comp.id, n1, n2, &mut mna, effective_rate) {
+        match comp
+            .kind
+            .stamp_mna(&comp.id, n1, n2, &mut mna, effective_rate)
+        {
             StampResult::Stamped => {}
             StampResult::Reactive { dyn_node, rp } => {
                 reactive_children.push(dyn_node);
@@ -579,8 +579,8 @@ fn build_passive_rtype_from_decomposed(
                 n1,
                 n2,
                 initial_g,
-                1.0,     // r_min: minimum pot resistance (clamped at 1Ω)
-                max_r,   // r_max: full pot resistance
+                1.0,   // r_min: minimum pot resistance (clamped at 1Ω)
+                max_r, // r_max: full pot resistance
                 &ports,
                 Some(0), // VS injection mode (VS index 0)
                 32,      // 32 log-spaced entries
@@ -613,7 +613,7 @@ fn build_passive_rtype_from_decomposed(
         allpass_feedback: None,
         allpass_direct: None,
         dc_block: None,
-                grid_dc_blocker: None,
+        grid_dc_blocker: None,
         is_source_follower: false,
         prev_source_voltage: 0.0,
         signal_flow_distance: 0,
@@ -860,10 +860,15 @@ fn build_feedforward_stages(
     boundary_nodes_set.insert(graph.gnd_node);
     boundary_nodes_set.insert(graph.vcc_node);
 
-    let global_nodes: HashSet<NodeId> = [graph.in_node, graph.out_node, graph.gnd_node, graph.vcc_node]
-        .iter()
-        .copied()
-        .collect();
+    let global_nodes: HashSet<NodeId> = [
+        graph.in_node,
+        graph.out_node,
+        graph.gnd_node,
+        graph.vcc_node,
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     let mut result = Vec::new();
 
@@ -923,12 +928,20 @@ fn build_feedforward_stages(
             } else {
                 let mut best: Option<(NodeId, usize)> = None;
                 for &node in &boundary {
-                    if node == inj_node { continue; }
-                    let d = classified.dist_from_in.get(&node).copied().unwrap_or(usize::MAX);
+                    if node == inj_node {
+                        continue;
+                    }
+                    let d = classified
+                        .dist_from_in
+                        .get(&node)
+                        .copied()
+                        .unwrap_or(usize::MAX);
                     match best {
                         None => best = Some((node, d)),
                         Some((_, pd)) if d > pd => best = Some((node, d)),
-                        Some((_, pd)) if d == pd && node == graph.out_node => best = Some((node, d)),
+                        Some((_, pd)) if d == pd && node == graph.out_node => {
+                            best = Some((node, d))
+                        }
                         _ => {}
                     }
                 }
@@ -967,15 +980,29 @@ fn build_feedforward_stages(
                 }
                 injection_node = *candidates
                     .iter()
-                    .min_by_key(|n| classified.dist_from_in.get(n).copied().unwrap_or(usize::MAX))
+                    .min_by_key(|n| {
+                        classified
+                            .dist_from_in
+                            .get(n)
+                            .copied()
+                            .unwrap_or(usize::MAX)
+                    })
                     .unwrap();
             } else {
                 let mut inj = signal_boundary[0];
-                let mut inj_d = classified.dist_from_in.get(&signal_boundary[0]).copied().unwrap_or(usize::MAX);
+                let mut inj_d = classified
+                    .dist_from_in
+                    .get(&signal_boundary[0])
+                    .copied()
+                    .unwrap_or(usize::MAX);
                 let mut out = signal_boundary[0];
                 let mut out_d = inj_d;
                 for &node in &signal_boundary[1..] {
-                    let d = classified.dist_from_in.get(&node).copied().unwrap_or(usize::MAX);
+                    let d = classified
+                        .dist_from_in
+                        .get(&node)
+                        .copied()
+                        .unwrap_or(usize::MAX);
                     if d < inj_d {
                         inj_d = d;
                         inj = node;
@@ -990,7 +1017,11 @@ fn build_feedforward_stages(
             }
         }
 
-        let injection_dist = classified.dist_from_in.get(&injection_node).copied().unwrap_or(1);
+        let injection_dist = classified
+            .dist_from_in
+            .get(&injection_node)
+            .copied()
+            .unwrap_or(1);
 
         // injection and output must differ
         if injection_node == output_node {
@@ -1004,53 +1035,65 @@ fn build_feedforward_stages(
         // artefacts and gives the exact voltage divider).
         let terminals = vec![injection_node, graph.gnd_node];
         let remap = |n: NodeId| -> NodeId {
-            if graph.supply_nodes.contains(&n) { graph.gnd_node } else { n }
+            if graph.supply_nodes.contains(&n) {
+                graph.gnd_node
+            } else {
+                n
+            }
         };
 
         let mut stage = match super::graph::graph_reduce(
-            edges, &[], &terminals,
-            graph, sample_rate, &HashMap::new(), remap,
+            edges,
+            &[],
+            &terminals,
+            graph,
+            sample_rate,
+            &HashMap::new(),
+            remap,
             Some(output_node),
         ) {
-            Ok((tree, output_probe)) => {
-                WdfStage {
-                    tree,
-                    root: RootKind::VoltageSourceDriver,
-                    compensation: 1.0,
-                    oversampler: Oversampler::new(OversamplingFactor::X1),
-                    base_diode_model: None,
-                    paired_opamp: None,
-                    allpass_feedback: None,
-                    allpass_direct: None,
-                    dc_block: None,
+            Ok((tree, output_probe)) => WdfStage {
+                tree,
+                root: RootKind::VoltageSourceDriver,
+                compensation: 1.0,
+                oversampler: Oversampler::new(OversamplingFactor::X1),
+                base_diode_model: None,
+                paired_opamp: None,
+                allpass_feedback: None,
+                allpass_direct: None,
+                dc_block: None,
                 grid_dc_blocker: None,
-                    is_source_follower: false,
-                    prev_source_voltage: 0.0,
-                    signal_flow_distance: 0,
-                    transformer_gain: 1.0,
-                    injection_node_id: injection_node,
-                    output_node_id: output_node,
-                    is_trigger_voice: false,
-                    voice_active: false,
-                    is_feedforward: true,
-                    sample_counter: 0,
-                    root_comp_id: String::new(),
-                    feedback_pot_id: None,
-                    output_probe,
-                    feedback_opamp: None,
-                    vcc_injection_coeff: 0.0,
-                    vcc_dc_ramp: 0,
-                    coupling_cap_id: None,
-                    tone_feedback: None,
-                    resonator_feedback: None,
-                    negate_vs: false,
-                    input_photocouplers: Vec::new(),
-                }
-            }
+                is_source_follower: false,
+                prev_source_voltage: 0.0,
+                signal_flow_distance: 0,
+                transformer_gain: 1.0,
+                injection_node_id: injection_node,
+                output_node_id: output_node,
+                is_trigger_voice: false,
+                voice_active: false,
+                is_feedforward: true,
+                sample_counter: 0,
+                root_comp_id: String::new(),
+                feedback_pot_id: None,
+                output_probe,
+                feedback_opamp: None,
+                vcc_injection_coeff: 0.0,
+                vcc_dc_ramp: 0,
+                coupling_cap_id: None,
+                tone_feedback: None,
+                resonator_feedback: None,
+                negate_vs: false,
+                input_photocouplers: Vec::new(),
+            },
             Err(_) => {
                 // SP reduction failed → fall back to PassiveRType MNA
                 match build_orphan_output_mna_stage(
-                    graph, edges, injection_node, output_node, 1e9, sample_rate,
+                    graph,
+                    edges,
+                    injection_node,
+                    output_node,
+                    1e9,
+                    sample_rate,
                 ) {
                     Some(s) => s,
                     None => continue,
@@ -1123,9 +1166,20 @@ fn build_output_rooted_stage(
                 || k.as_any().downcast_ref::<CapacitorComp>().is_some()
                 || k.as_any().downcast_ref::<InductorComp>().is_some()
         };
-        let has_resistor = source_comp.kind.as_any().downcast_ref::<ResistorComp>().is_some()
-            || load_comp.kind.as_any().downcast_ref::<ResistorComp>().is_some();
-        if !is_r_c_or_l(source_comp.kind.as_ref()) || !is_r_c_or_l(load_comp.kind.as_ref()) || !has_resistor {
+        let has_resistor = source_comp
+            .kind
+            .as_any()
+            .downcast_ref::<ResistorComp>()
+            .is_some()
+            || load_comp
+                .kind
+                .as_any()
+                .downcast_ref::<ResistorComp>()
+                .is_some();
+        if !is_r_c_or_l(source_comp.kind.as_ref())
+            || !is_r_c_or_l(load_comp.kind.as_ref())
+            || !has_resistor
+        {
             return None;
         }
     }
@@ -1149,7 +1203,7 @@ fn build_output_rooted_stage(
         allpass_feedback: None,
         allpass_direct: None,
         dc_block: None,
-                grid_dc_blocker: None,
+        grid_dc_blocker: None,
         is_source_follower: false,
         prev_source_voltage: 0.0,
         signal_flow_distance: 0,
@@ -1212,11 +1266,7 @@ impl Default for CompileOptions {
 /// - An audio-rate oscillator set to the base frequency
 /// - The default waveform output
 /// - The output node resolved from net connections (Option A: use target's node)
-fn build_vco_bindings(
-    pedal: &PedalDef,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-) -> Vec<VcoBinding> {
+fn build_vco_bindings(pedal: &PedalDef, graph: &CircuitGraph, sample_rate: f64) -> Vec<VcoBinding> {
     let mut vcos = Vec::new();
 
     for comp in &pedal.components {
@@ -1249,8 +1299,14 @@ fn build_vco_bindings(
                         }
                         // Resolve to the target's graph node
                         for to_pin in &net.to {
-                            if let Pin::ComponentPin { component: target_comp, pin: target_pin } = to_pin {
-                                if let Some(node) = resolve_pin_to_node(target_comp, target_pin, pedal, graph) {
+                            if let Pin::ComponentPin {
+                                component: target_comp,
+                                pin: target_pin,
+                            } = to_pin
+                            {
+                                if let Some(node) =
+                                    resolve_pin_to_node(target_comp, target_pin, pedal, graph)
+                                {
                                     output_node_id = node;
                                     break;
                                 }
@@ -1275,8 +1331,14 @@ fn build_vco_bindings(
                                 "pulse" => resolved_waveform = crate::elements::VcoWaveform::Pulse,
                                 "out" | "output" => {
                                     // Resolve the source end
-                                    if let Pin::ComponentPin { component: src_comp, pin: src_pin } = &net.from {
-                                        if let Some(node) = resolve_pin_to_node(src_comp, src_pin, pedal, graph) {
+                                    if let Pin::ComponentPin {
+                                        component: src_comp,
+                                        pin: src_pin,
+                                    } = &net.from
+                                    {
+                                        if let Some(node) =
+                                            resolve_pin_to_node(src_comp, src_pin, pedal, graph)
+                                        {
                                             output_node_id = node;
                                         }
                                     }
@@ -1326,10 +1388,10 @@ fn build_vca_bindings(
             let mut envelope = crate::elements::AdsrEnvelope::new(sample_rate);
             // Percussive defaults: fast attack, short decay, no sustain.
             // The envelope naturally shapes the hit without needing gate_off.
-            envelope.set_attack(0.001);  // 1ms
-            envelope.set_decay(0.15);    // 150ms
-            envelope.set_sustain(0.0);   // no sustain — percussive
-            envelope.set_release(0.05);  // 50ms
+            envelope.set_attack(0.001); // 1ms
+            envelope.set_decay(0.15); // 150ms
+            envelope.set_sustain(0.0); // no sustain — percussive
+            envelope.set_release(0.05); // 50ms
 
             let mut input_node_id = usize::MAX;
             let mut output_node_id = usize::MAX;
@@ -1343,8 +1405,17 @@ fn build_vca_bindings(
                         match pin.as_str() {
                             "out" | "output" => {
                                 for to_pin in &net.to {
-                                    if let Pin::ComponentPin { component: target_comp, pin: target_pin } = to_pin {
-                                        if let Some(node) = resolve_pin_to_node(target_comp, target_pin, pedal, graph) {
+                                    if let Pin::ComponentPin {
+                                        component: target_comp,
+                                        pin: target_pin,
+                                    } = to_pin
+                                    {
+                                        if let Some(node) = resolve_pin_to_node(
+                                            target_comp,
+                                            target_pin,
+                                            pedal,
+                                            graph,
+                                        ) {
                                             output_node_id = node;
                                             break;
                                         }
@@ -1366,23 +1437,40 @@ fn build_vca_bindings(
                         if component == &comp.id {
                             match pin.as_str() {
                                 "in" | "input" => {
-                                    if let Pin::ComponentPin { component: src_comp, pin: src_pin } = &net.from {
-                                        if let Some(node) = resolve_pin_to_node(src_comp, src_pin, pedal, graph) {
+                                    if let Pin::ComponentPin {
+                                        component: src_comp,
+                                        pin: src_pin,
+                                    } = &net.from
+                                    {
+                                        if let Some(node) =
+                                            resolve_pin_to_node(src_comp, src_pin, pedal, graph)
+                                        {
                                             input_node_id = node;
                                         }
                                     }
                                 }
                                 "out" | "output" => {
-                                    if let Pin::ComponentPin { component: src_comp, pin: src_pin } = &net.from {
-                                        if let Some(node) = resolve_pin_to_node(src_comp, src_pin, pedal, graph) {
+                                    if let Pin::ComponentPin {
+                                        component: src_comp,
+                                        pin: src_pin,
+                                    } = &net.from
+                                    {
+                                        if let Some(node) =
+                                            resolve_pin_to_node(src_comp, src_pin, pedal, graph)
+                                        {
                                             output_node_id = node;
                                         }
                                     }
                                 }
                                 "cv" => {
                                     // Check if CV is connected to a trigger_input
-                                    if let Pin::ComponentPin { component: src_comp, .. } = &net.from {
-                                        if let Some(&idx) = trigger_id_to_idx.get(src_comp.as_str()) {
+                                    if let Pin::ComponentPin {
+                                        component: src_comp,
+                                        ..
+                                    } = &net.from
+                                    {
+                                        if let Some(&idx) = trigger_id_to_idx.get(src_comp.as_str())
+                                        {
                                             trigger_idx = Some(idx);
                                         }
                                     }
@@ -1520,7 +1608,10 @@ pub fn compile_pedal_with_options(
 
     // ══ Pass 2: Op-amp analysis ═══════════════════════════════════════
     let opamp_analysis = super::opamp_analysis::analyze_opamps(
-        &graph, pedal, &topology_classified, &topology_classified_ids,
+        &graph,
+        pedal,
+        &topology_classified,
+        &topology_classified_ids,
     );
     let opamp_feedback_gain = 1.0_f64;
 
@@ -1567,8 +1658,10 @@ pub fn compile_pedal_with_options(
                 return true;
             }
             let is_global = |n: super::graph::NodeId| {
-                n == graph.gnd_node || n == graph.vcc_node
-                    || n == graph.in_node || n == graph.out_node
+                n == graph.gnd_node
+                    || n == graph.vcc_node
+                    || n == graph.in_node
+                    || n == graph.out_node
             };
             graph.edges.iter().enumerate().any(|(idx, e)| {
                 if classified.all_nonlinear_edge_indices.contains(&idx)
@@ -1576,13 +1669,14 @@ pub fn compile_pedal_with_options(
                 {
                     return false;
                 }
-                let at_opamp_pin = |n: super::graph::NodeId| {
-                    n == info.neg_node || n == info.out_node
-                };
-                (at_opamp_pin(e.node_a) && nl_junction_nodes.contains(&e.node_b)
+                let at_opamp_pin =
+                    |n: super::graph::NodeId| n == info.neg_node || n == info.out_node;
+                (at_opamp_pin(e.node_a)
+                    && nl_junction_nodes.contains(&e.node_b)
                     && !is_global(e.node_b))
-                || (at_opamp_pin(e.node_b) && nl_junction_nodes.contains(&e.node_a)
-                    && !is_global(e.node_a))
+                    || (at_opamp_pin(e.node_b)
+                        && nl_junction_nodes.contains(&e.node_a)
+                        && !is_global(e.node_a))
             })
         })
         .map(|info| info.comp_id.clone())
@@ -1591,16 +1685,17 @@ pub fn compile_pedal_with_options(
     // Build op-amp feedback stages (inverting, non-inverting).
     // Diode-paired opamps are returned separately for pairing with DiodePair stages.
     let mut stages: Vec<WdfStage> = Vec::new();
-    let (mut opamp_feedback_stages, diode_paired_opamps) = super::opamp_analysis::build_opamp_feedback_stages(
-        &opamp_analysis,
-        pedal,
-        &graph,
-        stages.len(),
-        sample_rate,
-        oversampling,
-        &skip_feedback_tree_opamps,
-        &nl_junction_nodes,
-    );
+    let (mut opamp_feedback_stages, diode_paired_opamps) =
+        super::opamp_analysis::build_opamp_feedback_stages(
+            &opamp_analysis,
+            pedal,
+            &graph,
+            stages.len(),
+            sample_rate,
+            oversampling,
+            &skip_feedback_tree_opamps,
+            &nl_junction_nodes,
+        );
     // Apply oversampling rate to opamp feedback stages.
     // The OpAmpRoot GBW filter and slew rate limiter are initialized at base_rate
     // but run inside the oversampler at effective_rate. Without this correction,
@@ -1692,8 +1787,20 @@ pub fn compile_pedal_with_options(
             .collect()
     };
 
-    let (stage_plans, push_pull_plans, multi_nl_plans, pp_transformer_edges, _bjt_bias_analysis, node_island_depths) =
-        super::plan::plan_stages(&classified, &graph, sample_rate, &envelope_controlled_otas, &opamp_feedback_edges);
+    let (
+        stage_plans,
+        push_pull_plans,
+        multi_nl_plans,
+        pp_transformer_edges,
+        _bjt_bias_analysis,
+        node_island_depths,
+    ) = super::plan::plan_stages(
+        &classified,
+        &graph,
+        sample_rate,
+        &envelope_controlled_otas,
+        &opamp_feedback_edges,
+    );
 
     // Now set signal_flow_distance on opamp feedback stages using island depths.
     // This must happen after plan_stages which computes node_island_depths.
@@ -1782,8 +1889,12 @@ pub fn compile_pedal_with_options(
     let mut orphan_output_edges: Vec<usize> = Vec::new();
     if !stages.is_empty() || !multi_nl_stages.is_empty() {
         let (orphan_stages, output_edges) = rescue_orphan_output_pots(
-            &graph, &classified, &stages, &multi_nl_stages,
-            sample_rate, oversampling,
+            &graph,
+            &classified,
+            &stages,
+            &multi_nl_stages,
+            sample_rate,
+            oversampling,
         );
         stages.extend(orphan_stages);
         orphan_output_edges = output_edges;
@@ -1838,12 +1949,8 @@ pub fn compile_pedal_with_options(
             claimed_edges.extend(input_passives.iter().copied());
         }
 
-        let feedforward_stages = build_feedforward_stages(
-            &graph,
-            &classified,
-            &claimed_edges,
-            sample_rate,
-        );
+        let feedforward_stages =
+            build_feedforward_stages(&graph, &classified, &claimed_edges, sample_rate);
         stages.extend(feedforward_stages);
     }
 
@@ -1873,9 +1980,7 @@ pub fn compile_pedal_with_options(
                 .edges
                 .iter()
                 .enumerate()
-                .filter(|(_, e)| {
-                    graph.components[e.comp_idx].kind.is_simple_passive()
-                })
+                .filter(|(_, e)| graph.components[e.comp_idx].kind.is_simple_passive())
                 .map(|(i, _)| i)
                 .collect();
 
@@ -1883,8 +1988,14 @@ pub fn compile_pedal_with_options(
             let mut passive_adj: HashMap<NodeId, Vec<(NodeId, usize)>> = HashMap::new();
             for &eidx in &all_passive_edges {
                 let e = &graph.edges[eidx];
-                passive_adj.entry(e.node_a).or_default().push((e.node_b, eidx));
-                passive_adj.entry(e.node_b).or_default().push((e.node_a, eidx));
+                passive_adj
+                    .entry(e.node_a)
+                    .or_default()
+                    .push((e.node_b, eidx));
+                passive_adj
+                    .entry(e.node_b)
+                    .or_default()
+                    .push((e.node_a, eidx));
             }
 
             // Distance-based voice assignment: each non-gnd node belongs to
@@ -1894,8 +2005,14 @@ pub fn compile_pedal_with_options(
             for &eidx in &all_passive_edges {
                 let e = &graph.edges[eidx];
                 if e.node_a != graph.gnd_node && e.node_b != graph.gnd_node {
-                    adj_no_gnd.entry(e.node_a).or_default().push((e.node_b, eidx));
-                    adj_no_gnd.entry(e.node_b).or_default().push((e.node_a, eidx));
+                    adj_no_gnd
+                        .entry(e.node_a)
+                        .or_default()
+                        .push((e.node_b, eidx));
+                    adj_no_gnd
+                        .entry(e.node_b)
+                        .or_default()
+                        .push((e.node_a, eidx));
                 }
             }
 
@@ -1912,7 +2029,9 @@ pub fn compile_pedal_with_options(
                     let d = dist[&node];
                     if let Some(neighbors) = adj_no_gnd.get(&node) {
                         for &(neighbor, _) in neighbors {
-                            if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(neighbor) {
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                dist.entry(neighbor)
+                            {
                                 e.insert(d + 1);
                                 queue.push_back(neighbor);
                             }
@@ -1928,8 +2047,7 @@ pub fn compile_pedal_with_options(
             }
 
             // Assign nodes to their closest trigger. Equidistant = shared.
-            let mut voice_nodes: Vec<HashSet<NodeId>> =
-                vec![HashSet::new(); num_triggers];
+            let mut voice_nodes: Vec<HashSet<NodeId>> = vec![HashSet::new(); num_triggers];
             let mut shared_nodes: HashSet<NodeId> = HashSet::new();
             for (node, dists) in &node_distances {
                 let min_d = *dists.iter().min().unwrap_or(&usize::MAX);
@@ -1950,40 +2068,32 @@ pub fn compile_pedal_with_options(
             }
 
             // Shared output edges: edges between shared nodes and/or output.
-            let all_voice_nodes: HashSet<NodeId> =
-                voice_nodes.iter().flatten().copied().collect();
+            let all_voice_nodes: HashSet<NodeId> = voice_nodes.iter().flatten().copied().collect();
             let mut shared_output_edges: HashSet<usize> = HashSet::new();
             for &eidx in &all_passive_edges {
                 let e = &graph.edges[eidx];
                 let a_shared = shared_nodes.contains(&e.node_a)
-                    || (!all_voice_nodes.contains(&e.node_a)
-                        && e.node_a != graph.gnd_node);
+                    || (!all_voice_nodes.contains(&e.node_a) && e.node_a != graph.gnd_node);
                 let b_shared = shared_nodes.contains(&e.node_b)
-                    || (!all_voice_nodes.contains(&e.node_b)
-                        && e.node_b != graph.gnd_node);
+                    || (!all_voice_nodes.contains(&e.node_b) && e.node_b != graph.gnd_node);
                 if a_shared && b_shared {
                     shared_output_edges.insert(eidx);
                 }
             }
 
-            for (voice_idx, (comp_id, trigger_node)) in
-                trigger_list.iter().enumerate()
-            {
+            for (voice_idx, (comp_id, trigger_node)) in trigger_list.iter().enumerate() {
                 // Voice edges: edges with at least one non-shared endpoint
                 // owned by this voice, plus shared output edges.
                 let voice_set = &voice_nodes[voice_idx];
                 let mut voice_edges: HashSet<usize> = HashSet::new();
                 for &eidx in &all_passive_edges {
                     let e = &graph.edges[eidx];
-                    if voice_set.contains(&e.node_a)
-                        || voice_set.contains(&e.node_b)
-                    {
+                    if voice_set.contains(&e.node_a) || voice_set.contains(&e.node_b) {
                         voice_edges.insert(eidx);
                     }
                 }
                 voice_edges.extend(&shared_output_edges);
-                let voice_passive_edges: Vec<usize> =
-                    voice_edges.into_iter().collect();
+                let voice_passive_edges: Vec<usize> = voice_edges.into_iter().collect();
 
                 let stage_idx = stages.len();
                 if let Some(mut voice_stage) = build_orphan_output_mna_stage(
@@ -1997,10 +2107,7 @@ pub fn compile_pedal_with_options(
                     voice_stage.injection_node_id = *trigger_node;
                     voice_stage.output_node_id = graph.out_node;
                     voice_stage.is_trigger_voice = true;
-                    trigger_stage_map.insert(
-                        comp_id.clone(),
-                        (stage_idx, *trigger_node),
-                    );
+                    trigger_stage_map.insert(comp_id.clone(), (stage_idx, *trigger_node));
                     stages.push(voice_stage);
                 }
             }
@@ -2033,14 +2140,8 @@ pub fn compile_pedal_with_options(
             HashMap::new();
         for e in &graph.edges {
             if graph.components[e.comp_idx].kind.is_simple_passive() {
-                passive_adj
-                    .entry(e.node_a)
-                    .or_default()
-                    .push(e.node_b);
-                passive_adj
-                    .entry(e.node_b)
-                    .or_default()
-                    .push(e.node_a);
+                passive_adj.entry(e.node_a).or_default().push(e.node_b);
+                passive_adj.entry(e.node_b).or_default().push(e.node_a);
             }
         }
 
@@ -2120,8 +2221,7 @@ pub fn compile_pedal_with_options(
                     .to
                     .iter()
                     .any(|p| pin_matches(p, &comp.id, "c") || pin_matches(p, &comp.id, "d"));
-                let has_output =
-                    is_output_pin(&net.from) || net.to.iter().any(&is_output_pin);
+                let has_output = is_output_pin(&net.from) || net.to.iter().any(&is_output_pin);
                 (has_secondary || has_secondary_to) && has_output
             });
             let input_to_primary = pedal.nets.iter().any(|net| {
@@ -2175,8 +2275,12 @@ pub fn compile_pedal_with_options(
         if let Some(dl_comp) = comp.kind.as_any().downcast_ref::<DelayLineComp>() {
             let idx = delay_lines.len();
             delay_id_to_idx.insert(comp.id.clone(), idx);
-            let mut dl =
-                crate::elements::DelayLine::new(dl_comp.min_delay, dl_comp.max_delay, sample_rate, dl_comp.interpolation);
+            let mut dl = crate::elements::DelayLine::new(
+                dl_comp.min_delay,
+                dl_comp.max_delay,
+                sample_rate,
+                dl_comp.interpolation,
+            );
             dl.set_medium(dl_comp.medium);
             delay_lines.push(DelayLineBinding {
                 delay_line: dl,
@@ -2277,7 +2381,11 @@ pub fn compile_pedal_with_options(
         .enumerate()
         .map(|(idx, c)| {
             trigger_id_to_idx.insert(c.id.clone(), idx);
-            let amplitude = pedal.supplies.first().map(|s| s.config.voltage).unwrap_or(9.0);
+            let amplitude = pedal
+                .supplies
+                .first()
+                .map(|s| s.config.voltage)
+                .unwrap_or(9.0);
             super::compiled::TriggerState::new(amplitude)
         })
         .collect();
@@ -2295,7 +2403,9 @@ pub fn compile_pedal_with_options(
         .midi_bindings
         .iter()
         .filter_map(|mb| {
-            trigger_id_to_idx.get(&mb.component).map(|&idx| (mb.note, idx))
+            trigger_id_to_idx
+                .get(&mb.component)
+                .map(|&idx| (mb.note, idx))
         })
         .collect();
 
@@ -2374,8 +2484,7 @@ pub fn compile_pedal_with_options(
         .filter_map(|(i, ctrl)| {
             if matches!(
                 ctrl.target,
-                ControlTarget::PotInStage(_)
-                    | ControlTarget::PotInMultiNlStage(_, _)
+                ControlTarget::PotInStage(_) | ControlTarget::PotInMultiNlStage(_, _)
             ) {
                 Some(SmoothedParam::new(0.5, i, sample_rate))
             } else {
@@ -2579,11 +2688,13 @@ pub fn compile_pedal_with_options(
             let mut m: std::collections::HashMap<String, Vec<super::compiled::MirrorPot>> =
                 std::collections::HashMap::new();
             for (mirrored, source) in &pedal.mirrors {
-                m.entry(source.clone()).or_default().push(super::compiled::MirrorPot {
-                    id: mirrored.clone(),
-                    id_aw: format!("{}__aw", mirrored),
-                    id_wb: format!("{}__wb", mirrored),
-                });
+                m.entry(source.clone())
+                    .or_default()
+                    .push(super::compiled::MirrorPot {
+                        id: mirrored.clone(),
+                        id_aw: format!("{}__aw", mirrored),
+                        id_wb: format!("{}__wb", mirrored),
+                    });
             }
             m
         },

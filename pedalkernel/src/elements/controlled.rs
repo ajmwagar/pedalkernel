@@ -3,8 +3,8 @@
 //! These elements have a resistance that varies based on an external
 //! control signal (LED drive current, gate-source voltage, etc.).
 
-use super::{ControlledResistance, WdfLeaf};
 use super::nonlinear::JfetModel;
+use super::{ControlledResistance, WdfLeaf};
 
 // ---------------------------------------------------------------------------
 // Photocoupler Model
@@ -384,7 +384,7 @@ impl JfetVariableResistor {
     #[inline]
     fn compute_rds(&self) -> f64 {
         let vp = self.model.vto; // Negative for N-channel
-        // Clamp ratio to avoid div-by-zero near pinch-off
+                                 // Clamp ratio to avoid div-by-zero near pinch-off
         let ratio = (self.vgs / vp).clamp(-0.95, 0.95);
         let denom = 1.0 - ratio;
         (self.rds_on / (denom * denom)).clamp(self.rds_on * 0.5, 10_000_000.0)

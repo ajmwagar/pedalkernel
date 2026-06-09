@@ -7,9 +7,8 @@
 //! - `RType` — N-port R-type adaptor (MNA-derived scattering)
 
 use super::wdf_leaf::{
-    WdfLeaf, WdfResistor, WdfCapacitor, WdfLeakyCapacitor, WdfInductor,
-    WdfVoltageSource, WdfPot, WdfPhotocoupler, WdfJfetVr, WdfSwitchedResistor,
-    WdfUnitDelay, leaf_matches_id,
+    leaf_matches_id, WdfCapacitor, WdfInductor, WdfJfetVr, WdfLeaf, WdfLeakyCapacitor,
+    WdfPhotocoupler, WdfPot, WdfResistor, WdfSwitchedResistor, WdfUnitDelay, WdfVoltageSource,
 };
 use crate::dsl::PotTaper;
 use crate::elements::{JfetVariableResistor, Photocoupler};
@@ -64,7 +63,15 @@ impl Clone for DynNode {
     fn clone(&self) -> Self {
         match self {
             Self::Leaf(leaf) => Self::Leaf(leaf.clone()),
-            Self::Binary { kind, left, right, rp, gamma, b1, b2 } => Self::Binary {
+            Self::Binary {
+                kind,
+                left,
+                right,
+                rp,
+                gamma,
+                b1,
+                b2,
+            } => Self::Binary {
                 kind: *kind,
                 left: left.clone(),
                 right: right.clone(),
@@ -73,7 +80,12 @@ impl Clone for DynNode {
                 b1: *b1,
                 b2: *b2,
             },
-            Self::Transformer { secondary, turns_ratio, rp, b_sec } => Self::Transformer {
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                rp,
+                b_sec,
+            } => Self::Transformer {
                 secondary: secondary.clone(),
                 turns_ratio: *turns_ratio,
                 rp: *rp,
@@ -94,61 +106,127 @@ impl Clone for DynNode {
 #[allow(non_snake_case)]
 impl DynNode {
     pub fn Resistor(comp_id: Option<String>, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfResistor { comp_id, rp, last_a: 0.0 }))
+        Self::Leaf(Box::new(WdfResistor {
+            comp_id,
+            rp,
+            last_a: 0.0,
+        }))
     }
 
     pub fn Capacitor(comp_id: Option<String>, capacitance: f64, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfCapacitor { comp_id, capacitance, rp, state: 0.0, last_b: 0.0 }))
+        Self::Leaf(Box::new(WdfCapacitor {
+            comp_id,
+            capacitance,
+            rp,
+            state: 0.0,
+            last_b: 0.0,
+        }))
     }
 
     pub fn LeakyCapacitor(
-        comp_id: Option<String>, capacitance: f64, rp: f64,
-        leakage_decay: f64, da_coef: Option<f64>, da_state: f64, da_rate: f64,
+        comp_id: Option<String>,
+        capacitance: f64,
+        rp: f64,
+        leakage_decay: f64,
+        da_coef: Option<f64>,
+        da_state: f64,
+        da_rate: f64,
     ) -> Self {
         Self::Leaf(Box::new(WdfLeakyCapacitor {
-            comp_id, capacitance, rp, state: 0.0,
-            leakage_decay, da_coef, da_state, da_rate,
+            comp_id,
+            capacitance,
+            rp,
+            state: 0.0,
+            leakage_decay,
+            da_coef,
+            da_state,
+            da_rate,
         }))
     }
 
     pub fn Inductor(comp_id: Option<String>, inductance: f64, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfInductor { comp_id, inductance, rp, state: 0.0 }))
+        Self::Leaf(Box::new(WdfInductor {
+            comp_id,
+            inductance,
+            rp,
+            state: 0.0,
+        }))
     }
 
     pub fn VoltageSource(voltage: f64, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfVoltageSource { voltage, rp, is_cathode_bias: false }))
+        Self::Leaf(Box::new(WdfVoltageSource {
+            voltage,
+            rp,
+            is_cathode_bias: false,
+        }))
     }
 
     pub fn CathodeBiasSource(voltage: f64, rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfVoltageSource { voltage, rp, is_cathode_bias: true }))
+        Self::Leaf(Box::new(WdfVoltageSource {
+            voltage,
+            rp,
+            is_cathode_bias: true,
+        }))
     }
 
     pub fn UnitDelay(rp: f64) -> Self {
-        Self::Leaf(Box::new(WdfUnitDelay { rp, state: 0.0, partner_state: 0.0 }))
+        Self::Leaf(Box::new(WdfUnitDelay {
+            rp,
+            state: 0.0,
+            partner_state: 0.0,
+        }))
     }
 
     pub fn Pot(comp_id: String, max_resistance: f64, position: f64, taper: PotTaper) -> Self {
         let tapered_pos = taper.apply(position);
         let rp = tapered_pos * max_resistance;
-        Self::Leaf(Box::new(WdfPot { comp_id, max_resistance, position, taper, rp, last_a: 0.0 }))
+        Self::Leaf(Box::new(WdfPot {
+            comp_id,
+            max_resistance,
+            position,
+            taper,
+            rp,
+            last_a: 0.0,
+        }))
     }
 
     pub fn PhotocouplerNode(comp_id: String, inner: Photocoupler) -> Self {
-        Self::Leaf(Box::new(WdfPhotocoupler { comp_id, inner, prev_resistance: 0.0 }))
+        Self::Leaf(Box::new(WdfPhotocoupler {
+            comp_id,
+            inner,
+            prev_resistance: 0.0,
+        }))
     }
 
     pub fn JfetVrNode(comp_id: String, inner: JfetVariableResistor) -> Self {
-        Self::Leaf(Box::new(WdfJfetVr { comp_id, inner, prev_rds: 0.0 }))
+        Self::Leaf(Box::new(WdfJfetVr {
+            comp_id,
+            inner,
+            prev_rds: 0.0,
+        }))
     }
 
     pub fn SwitchedResistor(
-        switch_id: String, path_index: usize, num_paths: usize,
-        r_active: f64, r_inactive: f64,
+        switch_id: String,
+        path_index: usize,
+        num_paths: usize,
+        r_active: f64,
+        r_inactive: f64,
     ) -> Self {
         let position = 0;
-        let rp = if path_index == position { r_active } else { r_inactive };
+        let rp = if path_index == position {
+            r_active
+        } else {
+            r_inactive
+        };
         Self::Leaf(Box::new(WdfSwitchedResistor {
-            switch_id, path_index, num_paths, r_active, r_inactive, position, rp,
+            switch_id,
+            path_index,
+            num_paths,
+            r_active,
+            r_inactive,
+            position,
+            rp,
             last_a: 0.0,
         }))
     }
@@ -158,7 +236,15 @@ impl DynNode {
         let r2 = right.port_resistance();
         let rp = r1 + r2;
         let gamma = if rp > 0.0 { r1 / rp } else { 0.5 };
-        Self::Binary { kind: BinaryKind::Series, left, right, rp, gamma, b1: 0.0, b2: 0.0 }
+        Self::Binary {
+            kind: BinaryKind::Series,
+            left,
+            right,
+            rp,
+            gamma,
+            b1: 0.0,
+            b2: 0.0,
+        }
     }
 
     pub fn Parallel(left: Box<DynNode>, right: Box<DynNode>) -> Self {
@@ -167,13 +253,26 @@ impl DynNode {
         let sum = r1 + r2;
         let rp = if sum > 0.0 { r1 * r2 / sum } else { 0.0 };
         let gamma = if sum > 0.0 { r2 / sum } else { 0.5 };
-        Self::Binary { kind: BinaryKind::Parallel, left, right, rp, gamma, b1: 0.0, b2: 0.0 }
+        Self::Binary {
+            kind: BinaryKind::Parallel,
+            left,
+            right,
+            rp,
+            gamma,
+            b1: 0.0,
+            b2: 0.0,
+        }
     }
 
     pub fn TransformerNode(secondary: Box<DynNode>, turns_ratio: f64) -> Self {
         let r_sec = secondary.port_resistance();
         let rp = turns_ratio * turns_ratio * r_sec;
-        Self::Transformer { secondary, turns_ratio, rp, b_sec: 0.0 }
+        Self::Transformer {
+            secondary,
+            turns_ratio,
+            rp,
+            b_sec: 0.0,
+        }
     }
 }
 
@@ -186,9 +285,7 @@ impl DynNode {
     pub fn find_leaf<T>(&self, f: &impl Fn(&dyn WdfLeaf) -> Option<T>) -> Option<T> {
         match self {
             Self::Leaf(leaf) => f(leaf.as_ref()),
-            Self::Binary { left, right, .. } => {
-                left.find_leaf(f).or_else(|| right.find_leaf(f))
-            }
+            Self::Binary { left, right, .. } => left.find_leaf(f).or_else(|| right.find_leaf(f)),
             Self::Transformer { secondary, .. } => secondary.find_leaf(f),
             Self::RType { children, .. } => children.iter().find_map(|c| c.find_leaf(f)),
         }
@@ -253,7 +350,13 @@ impl DynNode {
     /// the sign of the Thevenin voltage seen by the NL root.  When true,
     /// triode stages must negate VS so that `b_tree = 2*B+` (positive).
     pub fn is_series_root(&self) -> bool {
-        matches!(self, Self::Binary { kind: BinaryKind::Series, .. })
+        matches!(
+            self,
+            Self::Binary {
+                kind: BinaryKind::Series,
+                ..
+            }
+        )
     }
 
     /// Find a capacitor's voltage by component ID.
@@ -275,7 +378,15 @@ impl DynNode {
     pub fn reflected(&mut self) -> f64 {
         match self {
             Self::Leaf(leaf) => leaf.reflected(),
-            Self::Binary { kind, left, right, gamma, b1, b2, .. } => {
+            Self::Binary {
+                kind,
+                left,
+                right,
+                gamma,
+                b1,
+                b2,
+                ..
+            } => {
                 *b1 = left.reflected();
                 *b2 = right.reflected();
                 match kind {
@@ -283,7 +394,12 @@ impl DynNode {
                     BinaryKind::Parallel => *b1 + *gamma * (*b2 - *b1),
                 }
             }
-            Self::Transformer { secondary, turns_ratio, b_sec, .. } => {
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                b_sec,
+                ..
+            } => {
                 *b_sec = secondary.reflected();
                 *turns_ratio * *b_sec
             }
@@ -299,25 +415,35 @@ impl DynNode {
     pub fn set_incident(&mut self, a: f64) {
         match self {
             Self::Leaf(leaf) => leaf.set_incident(a),
-            Self::Binary { kind, left, right, gamma, b1, b2, .. } => {
-                match kind {
-                    BinaryKind::Series => {
-                        let sum = *b1 + *b2 + a;
-                        let a1 = *b1 - *gamma * sum;
-                        let a2 = *b2 - (1.0 - *gamma) * sum;
-                        left.set_incident(a1);
-                        right.set_incident(a2);
-                    }
-                    BinaryKind::Parallel => {
-                        let diff = *b2 - *b1;
-                        let a1 = a + *gamma * diff;
-                        let a2 = a - (1.0 - *gamma) * diff;
-                        left.set_incident(a1);
-                        right.set_incident(a2);
-                    }
+            Self::Binary {
+                kind,
+                left,
+                right,
+                gamma,
+                b1,
+                b2,
+                ..
+            } => match kind {
+                BinaryKind::Series => {
+                    let sum = *b1 + *b2 + a;
+                    let a1 = *b1 - *gamma * sum;
+                    let a2 = *b2 - (1.0 - *gamma) * sum;
+                    left.set_incident(a1);
+                    right.set_incident(a2);
                 }
-            }
-            Self::Transformer { secondary, turns_ratio, .. } => {
+                BinaryKind::Parallel => {
+                    let diff = *b2 - *b1;
+                    let a1 = a + *gamma * diff;
+                    let a2 = a - (1.0 - *gamma) * diff;
+                    left.set_incident(a1);
+                    right.set_incident(a2);
+                }
+            },
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                ..
+            } => {
                 let a_sec = a / *turns_ratio;
                 secondary.set_incident(a_sec);
             }
@@ -356,8 +482,7 @@ impl DynNode {
     pub fn set_capacitor(&mut self, target_id: &str, new_farads: f64, sample_rate: f64) -> bool {
         self.for_each_leaf_mut(&mut |leaf| {
             let tag = leaf.type_tag();
-            if leaf.comp_id() == Some(target_id)
-                && (tag == "capacitor" || tag == "leaky_capacitor")
+            if leaf.comp_id() == Some(target_id) && (tag == "capacitor" || tag == "leaky_capacitor")
             {
                 leaf.set_control(target_id, new_farads);
                 leaf.update_sample_rate(sample_rate);
@@ -465,7 +590,14 @@ impl DynNode {
     /// Recompute all adaptor coefficients bottom-up (call after pot changes).
     pub fn recompute(&mut self) {
         match self {
-            Self::Binary { kind, left, right, rp, gamma, .. } => {
+            Self::Binary {
+                kind,
+                left,
+                right,
+                rp,
+                gamma,
+                ..
+            } => {
                 left.recompute();
                 right.recompute();
                 let r1 = left.port_resistance();
@@ -486,12 +618,20 @@ impl DynNode {
                     }
                 }
             }
-            Self::Transformer { secondary, turns_ratio, rp, .. } => {
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                rp,
+                ..
+            } => {
                 secondary.recompute();
                 let r_sec = secondary.port_resistance();
                 *rp = *turns_ratio * *turns_ratio * r_sec;
             }
-            Self::RType { adaptor: _, children } => {
+            Self::RType {
+                adaptor: _,
+                children,
+            } => {
                 for child in children.iter_mut() {
                     child.recompute();
                 }
@@ -522,13 +662,21 @@ impl DynNode {
     pub fn reset(&mut self) {
         match self {
             Self::Leaf(leaf) => leaf.reset(),
-            Self::Binary { left, right, b1, b2, .. } => {
+            Self::Binary {
+                left,
+                right,
+                b1,
+                b2,
+                ..
+            } => {
                 *b1 = 0.0;
                 *b2 = 0.0;
                 left.reset();
                 right.reset();
             }
-            Self::Transformer { secondary, b_sec, .. } => {
+            Self::Transformer {
+                secondary, b_sec, ..
+            } => {
                 *b_sec = 0.0;
                 secondary.reset();
             }
@@ -556,7 +704,11 @@ impl DynNode {
     /// Compute output voltage for passive WDF stages using resistive termination.
     pub fn resistive_termination_voltage(&self, b_tree: f64) -> Option<f64> {
         match self {
-            Self::Binary { kind: BinaryKind::Parallel, left, .. } => {
+            Self::Binary {
+                kind: BinaryKind::Parallel,
+                left,
+                ..
+            } => {
                 if let Self::Leaf(leaf) = left.as_ref() {
                     if leaf.type_tag() == "resistor" || leaf.type_tag() == "pot" {
                         return Some(b_tree / 2.0);
@@ -564,7 +716,11 @@ impl DynNode {
                 }
                 None
             }
-            Self::Binary { kind: BinaryKind::Series, left, .. } => {
+            Self::Binary {
+                kind: BinaryKind::Series,
+                left,
+                ..
+            } => {
                 if let Self::Leaf(leaf) = left.as_ref() {
                     if leaf.type_tag() == "resistor" || leaf.type_tag() == "pot" {
                         return Some(b_tree / 2.0);
@@ -579,24 +735,31 @@ impl DynNode {
     /// Compute junction voltage for series filters.
     pub fn series_junction_voltage(&self, a_root: f64) -> Option<f64> {
         match self {
-            Self::Binary { kind: BinaryKind::Series, gamma, b1, b2, right, .. } => {
-                match right.as_ref() {
-                    Self::Leaf(leaf) => {
-                        let tag = leaf.type_tag();
-                        if tag == "resistor" || tag == "capacitor" || tag == "inductor" || tag == "pot" {
-                            let sum = *b1 + *b2 + a_root;
-                            let a2 = *b2 - (1.0 - *gamma) * sum;
-                            Some((a2 + *b2) / 2.0)
-                        } else {
-                            None
-                        }
+            Self::Binary {
+                kind: BinaryKind::Series,
+                gamma,
+                b1,
+                b2,
+                right,
+                ..
+            } => match right.as_ref() {
+                Self::Leaf(leaf) => {
+                    let tag = leaf.type_tag();
+                    if tag == "resistor" || tag == "capacitor" || tag == "inductor" || tag == "pot"
+                    {
+                        let sum = *b1 + *b2 + a_root;
+                        let a2 = *b2 - (1.0 - *gamma) * sum;
+                        Some((a2 + *b2) / 2.0)
+                    } else {
+                        None
                     }
-                    Self::Binary { kind: BinaryKind::Series, .. } => {
-                        right.series_junction_voltage(a_root)
-                    }
-                    _ => None,
                 }
-            }
+                Self::Binary {
+                    kind: BinaryKind::Series,
+                    ..
+                } => right.series_junction_voltage(a_root),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -604,7 +767,15 @@ impl DynNode {
     /// Extract junction voltage for short-circuit terminated passive filters.
     pub fn short_circuit_junction_voltage(&self, a_root: f64) -> Option<f64> {
         match self {
-            Self::Binary { kind: BinaryKind::Series, gamma, b1, b2, left, right, .. } => {
+            Self::Binary {
+                kind: BinaryKind::Series,
+                gamma,
+                b1,
+                b2,
+                left,
+                right,
+                ..
+            } => {
                 // Check for VS on left or right
                 let left_is_vs = matches!(left.as_ref(), Self::Leaf(l) if l.type_tag() == "voltage_source" || l.type_tag() == "cathode_bias_source");
                 let right_is_vs = matches!(right.as_ref(), Self::Leaf(l) if l.type_tag() == "voltage_source" || l.type_tag() == "cathode_bias_source");
@@ -650,14 +821,20 @@ impl DynNode {
                     None
                 }
             }
-            Self::Binary { kind: BinaryKind::Series, gamma, b1, b2, left, right, .. } => {
+            Self::Binary {
+                kind: BinaryKind::Series,
+                gamma,
+                b1,
+                b2,
+                left,
+                right,
+                ..
+            } => {
                 let sum = *b1 + *b2 + a_parent;
                 if right.is_load_element() {
                     let a2 = *b2 - (1.0 - *gamma) * sum;
                     Some((a2 + *b2) / 2.0)
-                } else if left.is_load_element()
-                    && matches!(right.as_ref(), Self::Binary { .. })
-                {
+                } else if left.is_load_element() && matches!(right.as_ref(), Self::Binary { .. }) {
                     let a2 = *b2 - (1.0 - *gamma) * sum;
                     right.extract_load_voltage(a2).or_else(|| {
                         let a1 = *b1 - *gamma * sum;
@@ -678,7 +855,15 @@ impl DynNode {
                     }
                 }
             }
-            Self::Binary { kind: BinaryKind::Parallel, gamma, b1, b2, left, right, .. } => {
+            Self::Binary {
+                kind: BinaryKind::Parallel,
+                gamma,
+                b1,
+                b2,
+                left,
+                right,
+                ..
+            } => {
                 if right.is_load_element() {
                     let sum = *b1 + *b2 + a_parent;
                     let a2 = *b2 - (1.0 - *gamma) * sum;
@@ -705,7 +890,9 @@ impl DynNode {
     pub fn has_reactive_elements(&self) -> bool {
         let mut found = false;
         self.for_each_leaf(&mut |leaf| {
-            if leaf.is_reactive() { found = true; }
+            if leaf.is_reactive() {
+                found = true;
+            }
         });
         found
     }
@@ -752,18 +939,32 @@ impl DynNode {
         let pad = "  ".repeat(indent);
         match self {
             Self::Leaf(leaf) => format!("{pad}{}", leaf.debug_info()),
-            Self::Binary { kind, left, right, rp, gamma, b1, b2 } => {
+            Self::Binary {
+                kind,
+                left,
+                right,
+                rp,
+                gamma,
+                b1,
+                b2,
+            } => {
                 let kind_str = match kind {
                     BinaryKind::Series => "Series",
                     BinaryKind::Parallel => "Parallel",
                 };
-                let mut s = format!("{pad}{kind_str}(Rp={rp:.1}Ω, γ={gamma:.6}, b1={b1:.6}, b2={b2:.6})\n");
+                let mut s =
+                    format!("{pad}{kind_str}(Rp={rp:.1}Ω, γ={gamma:.6}, b1={b1:.6}, b2={b2:.6})\n");
                 s.push_str(&left.debug_dump(indent + 1));
                 s.push('\n');
                 s.push_str(&right.debug_dump(indent + 1));
                 s
             }
-            Self::Transformer { secondary, turns_ratio, rp, .. } => {
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                rp,
+                ..
+            } => {
                 let mut s = format!("{pad}Transformer(n={turns_ratio:.3}, Rp={rp:.1}Ω)\n");
                 s.push_str(&secondary.debug_dump(indent + 1));
                 s
@@ -785,7 +986,8 @@ impl DynNode {
 
     /// Get the UnitDelay's outgoing state.
     pub fn get_unit_delay_state(&self) -> f64 {
-        self.find_leaf(&|leaf| leaf.unit_delay_state()).unwrap_or(0.0)
+        self.find_leaf(&|leaf| leaf.unit_delay_state())
+            .unwrap_or(0.0)
     }
 
     /// Set the UnitDelay's incoming partner state.
@@ -806,7 +1008,9 @@ impl DynNode {
             Self::Leaf(_) => 1,
             Self::Binary { left, right, .. } => 1 + left.node_count() + right.node_count(),
             Self::Transformer { secondary, .. } => 1 + secondary.node_count(),
-            Self::RType { children, .. } => 1 + children.iter().map(|c| c.node_count()).sum::<usize>(),
+            Self::RType { children, .. } => {
+                1 + children.iter().map(|c| c.node_count()).sum::<usize>()
+            }
         }
     }
 }

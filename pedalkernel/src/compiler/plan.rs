@@ -454,8 +454,7 @@ fn has_mutual_resistive_coupling(
             .collect();
         // Include base/grid node.
         match &seed.kind {
-            NonlinearKind::BjtNpn { base_node, .. }
-            | NonlinearKind::BjtPnp { base_node, .. } => {
+            NonlinearKind::BjtNpn { base_node, .. } | NonlinearKind::BjtPnp { base_node, .. } => {
                 if !is_hub(*base_node) {
                     nodes.insert(*base_node);
                 }
@@ -480,8 +479,7 @@ fn has_mutual_resistive_coupling(
             .filter(|n| !is_hub(*n))
             .collect();
         match &other.kind {
-            NonlinearKind::BjtNpn { base_node, .. }
-            | NonlinearKind::BjtPnp { base_node, .. } => {
+            NonlinearKind::BjtNpn { base_node, .. } | NonlinearKind::BjtPnp { base_node, .. } => {
                 if !is_hub(*base_node) {
                     nodes.insert(*base_node);
                 }
@@ -509,10 +507,16 @@ fn has_mutual_resistive_coupling(
     // output signal — they must be solved simultaneously for correct clipping behavior.
     if shared_nodes >= 1 {
         let is_bjt = |k: &NonlinearKind| {
-            matches!(k, NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. })
+            matches!(
+                k,
+                NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
+            )
         };
         let is_diode = |k: &NonlinearKind| {
-            matches!(k, NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_))
+            matches!(
+                k,
+                NonlinearKind::DiodePair(_) | NonlinearKind::SingleDiode(_)
+            )
         };
         if (is_bjt(&seed.kind) && is_diode(&other.kind))
             || (is_diode(&seed.kind) && is_bjt(&other.kind))
@@ -800,7 +804,8 @@ pub(super) fn plan_stages(
 ) {
     // ── Pre-compute reactive boundaries ────────────────────────────────
     let mut analysis = find_reactive_boundaries(graph, classified);
-    let (island_depths, node_island_depths) = compute_island_depths(&mut analysis, graph, classified);
+    let (island_depths, node_island_depths) =
+        compute_island_depths(&mut analysis, graph, classified);
     let boundary_edges = analysis.boundary_edges;
 
     // ── Step 1: Edge-based NL grouping ──────────────────────────────────
@@ -813,49 +818,55 @@ pub(super) fn plan_stages(
         .nonlinear_elements
         .iter()
         .enumerate()
-        .filter(|(_, e)| matches!(&e.kind, NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }))
+        .filter(|(_, e)| {
+            matches!(
+                &e.kind,
+                NonlinearKind::Triode { .. } | NonlinearKind::Pentode { .. }
+            )
+        })
         .collect();
 
     use super::graph::TriodeInfo;
     let triode_infos: Vec<(usize, TriodeInfo)> = triode_elements
         .iter()
-        .map(|(_, elem)| {
-            match &elem.kind {
-                NonlinearKind::Triode {
-                    model_name,
-                    plate_node,
-                    cathode_node,
-                    parallel_count,
-                    is_vari_mu,
-                    ..
-                } => (
-                    elem.edge_idx,
-                    TriodeInfo {
-                        model_name: model_name.clone(),
-                        plate_node: *plate_node,
-                        cathode_node: *cathode_node,
-                        junction_node: *cathode_node,
-                        ground_node: graph.gnd_node,
-                        parallel_count: *parallel_count,
-                        is_vari_mu: *is_vari_mu,
-                    },
-                ),
-                NonlinearKind::Pentode { model_name, plate_node, cathode_node, .. } => {
-                    (
-                        elem.edge_idx,
-                        TriodeInfo {
-                            model_name: model_name.clone(),
-                            plate_node: *plate_node,
-                            cathode_node: *cathode_node,
-                            junction_node: *cathode_node,
-                            ground_node: graph.gnd_node,
-                            parallel_count: 1,
-                            is_vari_mu: false,
-                        },
-                    )
-                }
-                _ => unreachable!(),
-            }
+        .map(|(_, elem)| match &elem.kind {
+            NonlinearKind::Triode {
+                model_name,
+                plate_node,
+                cathode_node,
+                parallel_count,
+                is_vari_mu,
+                ..
+            } => (
+                elem.edge_idx,
+                TriodeInfo {
+                    model_name: model_name.clone(),
+                    plate_node: *plate_node,
+                    cathode_node: *cathode_node,
+                    junction_node: *cathode_node,
+                    ground_node: graph.gnd_node,
+                    parallel_count: *parallel_count,
+                    is_vari_mu: *is_vari_mu,
+                },
+            ),
+            NonlinearKind::Pentode {
+                model_name,
+                plate_node,
+                cathode_node,
+                ..
+            } => (
+                elem.edge_idx,
+                TriodeInfo {
+                    model_name: model_name.clone(),
+                    plate_node: *plate_node,
+                    cathode_node: *cathode_node,
+                    junction_node: *cathode_node,
+                    ground_node: graph.gnd_node,
+                    parallel_count: 1,
+                    is_vari_mu: false,
+                },
+            ),
+            _ => unreachable!(),
         })
         .collect();
 
@@ -874,8 +885,7 @@ pub(super) fn plan_stages(
         .flat_map(|p| [p.push_triode_idx, p.pull_triode_idx])
         .collect();
 
-    let triode_to_classified: Vec<usize> =
-        triode_elements.iter().map(|(idx, _)| *idx).collect();
+    let triode_to_classified: Vec<usize> = triode_elements.iter().map(|(idx, _)| *idx).collect();
 
     let push_pull_plans: Vec<PushPullPlan> = push_pull_pairs
         .iter()
@@ -906,13 +916,14 @@ pub(super) fn plan_stages(
         .iter()
         .enumerate()
         .filter_map(|(idx, e)| match &e.kind {
-            NonlinearKind::BjtNpn { base_node, .. }
-            | NonlinearKind::BjtPnp { base_node, .. } => Some(BjtTerminals {
-                elem_idx: idx,
-                base_node: *base_node,
-                collector_node: e.junction_nodes[0],
-                emitter_node: e.junction_nodes[1],
-            }),
+            NonlinearKind::BjtNpn { base_node, .. } | NonlinearKind::BjtPnp { base_node, .. } => {
+                Some(BjtTerminals {
+                    elem_idx: idx,
+                    base_node: *base_node,
+                    collector_node: e.junction_nodes[0],
+                    emitter_node: e.junction_nodes[1],
+                })
+            }
             _ => None,
         })
         .collect();
@@ -955,9 +966,7 @@ pub(super) fn plan_stages(
             // Convert bjt_members to indices into bjt_terminals for bias detection.
             let member_indices: Vec<usize> = bjt_members
                 .iter()
-                .filter_map(|&elem_idx| {
-                    bjt_terminals.iter().position(|b| b.elem_idx == elem_idx)
-                })
+                .filter_map(|&elem_idx| bjt_terminals.iter().position(|b| b.elem_idx == elem_idx))
                 .collect();
 
             bjt_cluster_members.push(member_indices);
@@ -965,8 +974,7 @@ pub(super) fn plan_stages(
         }
     }
 
-    let bjt_emitter_nodes: Vec<NodeId> =
-        bjt_terminals.iter().map(|b| b.emitter_node).collect();
+    let bjt_emitter_nodes: Vec<NodeId> = bjt_terminals.iter().map(|b| b.emitter_node).collect();
     let bjt_bias_analysis = bjt_bias_analysis::detect_bias_pots(
         graph,
         &bjt_cluster_members,
@@ -1001,13 +1009,9 @@ pub(super) fn plan_stages(
             let elem = &classified.nonlinear_elements[elem_idx];
 
             // Check: VariMu 3-port upgrade (grid-side passives → MultiNlPlan).
-            if let Some(plan) = try_varimu_3port(
-                elem,
-                elem_idx,
-                classified,
-                graph,
-                &pp_transformer_edges,
-            ) {
+            if let Some(plan) =
+                try_varimu_3port(elem, elem_idx, classified, graph, &pp_transformer_edges)
+            {
                 multi_nl_plans.push(plan);
                 continue;
             }
@@ -1133,7 +1137,16 @@ fn plan_single_nl(
             boundary_edges,
         )
     } else {
-        plan_one_junction(elem, elem_idx, classified, graph, source_node_offset, pp_transformer_edges, boundary_edges, opamp_feedback_edges)
+        plan_one_junction(
+            elem,
+            elem_idx,
+            classified,
+            graph,
+            source_node_offset,
+            pp_transformer_edges,
+            boundary_edges,
+            opamp_feedback_edges,
+        )
     }
 }
 
@@ -1174,7 +1187,11 @@ fn plan_one_junction(
     // Without this, BFS stops at the other terminal (e.g. U2.out for a
     // feedback diode pair) and misses the output chain (tone/volume).
     let nl_edge = &graph.edges[elem.edge_idx];
-    let other_terminal = if nl_edge.node_a == junction { nl_edge.node_b } else { nl_edge.node_a };
+    let other_terminal = if nl_edge.node_a == junction {
+        nl_edge.node_b
+    } else {
+        nl_edge.node_a
+    };
     output_barriers.remove(&other_terminal);
 
     // Multi-hop BFS from junction through passive edges with output-pin
@@ -1257,12 +1274,8 @@ fn plan_one_junction(
         }
 
         let source_node = graph.edges.len() + source_node_offset;
-        let injection_node = find_injection_node(
-            &passive_idxs,
-            junction,
-            &classified.dist_from_in,
-            graph,
-        );
+        let injection_node =
+            find_injection_node(&passive_idxs, junction, &classified.dist_from_in, graph);
 
         Some(StagePlan {
             passive_idxs,
@@ -1396,8 +1409,18 @@ fn plan_two_junction(
     // cap, bias resistors, and everything reachable within this stage.
     // Output-pin barriers prevent BFS from crossing into other active stages.
     let base_passives = match &elem.kind {
-        NonlinearKind::BjtNpn { base_node, collector_node, emitter_node, .. }
-        | NonlinearKind::BjtPnp { base_node, collector_node, emitter_node, .. } => {
+        NonlinearKind::BjtNpn {
+            base_node,
+            collector_node,
+            emitter_node,
+            ..
+        }
+        | NonlinearKind::BjtPnp {
+            base_node,
+            collector_node,
+            emitter_node,
+            ..
+        } => {
             if *base_node != graph.gnd_node {
                 let exclude = classified.all_nonlinear_edge_indices.clone();
                 let mut base_barriers = graph.output_pin_nodes.clone();
@@ -1476,8 +1499,7 @@ fn plan_two_junction(
     let xfmr_inject = find_plate_transformers(&a_passives, node_a, graph);
     extend_dedup(&mut passive_idxs, &xfmr_inject);
     if !xfmr_inject.is_empty() {
-        let sec_inject =
-            find_secondary_side_transformers(&passive_idxs, graph, &HashSet::new());
+        let sec_inject = find_secondary_side_transformers(&passive_idxs, graph, &HashSet::new());
         extend_dedup(&mut passive_idxs, &sec_inject);
     }
 
@@ -1490,8 +1512,7 @@ fn plan_two_junction(
     // the injection node is the upstream side of the coupling cap — that's
     // where the inter-stage signal arrives.
     let boundary_injection = match &elem.kind {
-        NonlinearKind::BjtNpn { base_node, .. }
-        | NonlinearKind::BjtPnp { base_node, .. } => {
+        NonlinearKind::BjtNpn { base_node, .. } | NonlinearKind::BjtPnp { base_node, .. } => {
             boundary_edges.iter().find_map(|&eidx| {
                 let e = &graph.edges[eidx];
                 if e.node_a == *base_node {
@@ -1519,87 +1540,87 @@ fn plan_two_junction(
     });
 
     // ── Virtual edge + compensation ─────────────────────────────────────
-    let (virtual_edge, compensation, dc_block) = match &elem.kind {
-        NonlinearKind::Triode {
-            model_name,
-            is_vari_mu,
-            ..
-        } => {
-            let model = super::helpers::triode_model(model_name);
-            let comp = if *is_vari_mu { 0.35 } else { 1.0 };
-            let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
-                .or_else(|| {
-                    // Default DC blocker: ~20Hz at the given sample rate
-                    // Triode WDF stages output full plate voltage (DC + AC).
-                    // Without DC blocking, downstream stages receive ~200V DC
-                    // which overdrives the next tube's grid to saturation.
-                    let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
-                    let omega_tan = omega.tan();
-                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
-                    let b0 = 1.0 / (1.0 + omega_tan);
-                    Some((a1, b0, 0.0, 0.0))
-                });
-            (
-                Some(VirtualEdge {
-                    node_a,
-                    node_b,
-                    resistance: model.rp,
-                    name: "__triode_rp__",
-                }),
-                comp,
-                dc,
-            )
-        }
-        NonlinearKind::Pentode { model_name, .. } => {
-            let model = super::helpers::pentode_model(model_name);
-            let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
-                .or_else(|| {
-                    let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
-                    let omega_tan = omega.tan();
-                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
-                    let b0 = 1.0 / (1.0 + omega_tan);
-                    Some((a1, b0, 0.0, 0.0))
-                });
-            (
-                Some(VirtualEdge {
-                    node_a,
-                    node_b,
-                    resistance: model.rp,
-                    name: "__triode_rp__",
-                }),
-                1.0,
-                dc,
-            )
-        }
-        NonlinearKind::BjtNpn { model_name, .. }
-        | NonlinearKind::BjtPnp { model_name, .. } => {
-            let model = super::helpers::gummel_poon_model(model_name);
-            let r_ce = model.vaf * 1000.0; // Vaf / 1mA
-            // DC block: the two-domain model outputs Vce which includes the
-            // DC quiescent voltage.  A first-order IIR highpass (modeling the
-            // inter-stage coupling cap) strips the DC.
-            let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
-                .or_else(|| {
-                    // Default DC blocker: ~20Hz at the given sample rate
-                    let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
-                    let omega_tan = omega.tan();
-                    let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
-                    let b0 = 1.0 / (1.0 + omega_tan);
-                    Some((a1, b0, 0.0, 0.0))
-                });
-            (
-                Some(VirtualEdge {
-                    node_a,
-                    node_b,
-                    resistance: r_ce,
-                    name: "__bjt_rce__",
-                }),
-                1.0,
-                dc,
-            )
-        }
-        _ => (None, 1.0, None),
-    };
+    let (virtual_edge, compensation, dc_block) =
+        match &elem.kind {
+            NonlinearKind::Triode {
+                model_name,
+                is_vari_mu,
+                ..
+            } => {
+                let model = super::helpers::triode_model(model_name);
+                let comp = if *is_vari_mu { 0.35 } else { 1.0 };
+                let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
+                    .or_else(|| {
+                        // Default DC blocker: ~20Hz at the given sample rate
+                        // Triode WDF stages output full plate voltage (DC + AC).
+                        // Without DC blocking, downstream stages receive ~200V DC
+                        // which overdrives the next tube's grid to saturation.
+                        let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
+                        let omega_tan = omega.tan();
+                        let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+                        let b0 = 1.0 / (1.0 + omega_tan);
+                        Some((a1, b0, 0.0, 0.0))
+                    });
+                (
+                    Some(VirtualEdge {
+                        node_a,
+                        node_b,
+                        resistance: model.rp,
+                        name: "__triode_rp__",
+                    }),
+                    comp,
+                    dc,
+                )
+            }
+            NonlinearKind::Pentode { model_name, .. } => {
+                let model = super::helpers::pentode_model(model_name);
+                let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
+                    .or_else(|| {
+                        let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
+                        let omega_tan = omega.tan();
+                        let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+                        let b0 = 1.0 / (1.0 + omega_tan);
+                        Some((a1, b0, 0.0, 0.0))
+                    });
+                (
+                    Some(VirtualEdge {
+                        node_a,
+                        node_b,
+                        resistance: model.rp,
+                        name: "__triode_rp__",
+                    }),
+                    1.0,
+                    dc,
+                )
+            }
+            NonlinearKind::BjtNpn { model_name, .. } | NonlinearKind::BjtPnp { model_name, .. } => {
+                let model = super::helpers::gummel_poon_model(model_name);
+                let r_ce = model.vaf * 1000.0; // Vaf / 1mA
+                                               // DC block: the two-domain model outputs Vce which includes the
+                                               // DC quiescent voltage.  A first-order IIR highpass (modeling the
+                                               // inter-stage coupling cap) strips the DC.
+                let dc = compute_dc_block(&a_to_output, &output_passives, graph, sample_rate)
+                    .or_else(|| {
+                        // Default DC blocker: ~20Hz at the given sample rate
+                        let omega = (std::f64::consts::PI * 2.0 * 20.0) / sample_rate;
+                        let omega_tan = omega.tan();
+                        let a1 = (1.0 - omega_tan) / (1.0 + omega_tan);
+                        let b0 = 1.0 / (1.0 + omega_tan);
+                        Some((a1, b0, 0.0, 0.0))
+                    });
+                (
+                    Some(VirtualEdge {
+                        node_a,
+                        node_b,
+                        resistance: r_ce,
+                        name: "__bjt_rce__",
+                    }),
+                    1.0,
+                    dc,
+                )
+            }
+            _ => (None, 1.0, None),
+        };
 
     let source_node = graph.edges.len() + source_node_offset;
 
@@ -1614,8 +1635,7 @@ fn plan_two_junction(
     // eliminated as dead-ends during SP reduction, making rp insensitive to
     // collector load controls (Sustain pot, etc.).
     let (load_passive_idxs, load_terminals) = match &elem.kind {
-        NonlinearKind::BjtNpn { emitter_node, .. }
-        | NonlinearKind::BjtPnp { emitter_node, .. } => {
+        NonlinearKind::BjtNpn { emitter_node, .. } | NonlinearKind::BjtPnp { emitter_node, .. } => {
             // ALL BJTs get a load tree: collector passives + supply chain.
             // The load tree provides rp (collector load impedance) and b_load
             // (VCC Thevenin via +2*VCC superposition) for the two-domain NR solve.
@@ -1797,7 +1817,13 @@ fn plan_multi_nl_group(
     });
 
     if all_diodes {
-        return plan_diode_bridge(elem_indices, classified, graph, pp_transformer_edges, opamp_feedback_edges);
+        return plan_diode_bridge(
+            elem_indices,
+            classified,
+            graph,
+            pp_transformer_edges,
+            opamp_feedback_edges,
+        );
     }
 
     // Order by distance from input (signal-flow order).
@@ -1814,8 +1840,7 @@ fn plan_multi_nl_group(
             all_junction_nodes.insert(jn);
         }
         match &elem.kind {
-            NonlinearKind::BjtNpn { base_node, .. }
-            | NonlinearKind::BjtPnp { base_node, .. } => {
+            NonlinearKind::BjtNpn { base_node, .. } | NonlinearKind::BjtPnp { base_node, .. } => {
                 all_junction_nodes.insert(*base_node);
             }
             NonlinearKind::Triode {
@@ -1856,12 +1881,20 @@ fn plan_multi_nl_group(
             .iter()
             .map(|&eidx| {
                 let comp = &graph.components[graph.edges[eidx].comp_idx];
-                format!("{}({}→{})", comp.id, graph.edges[eidx].node_a, graph.edges[eidx].node_b)
+                format!(
+                    "{}({}→{})",
+                    comp.id, graph.edges[eidx].node_a, graph.edges[eidx].node_b
+                )
             })
             .collect();
-        let elem_names: Vec<String> = ordered.iter().map(|&idx| {
-            graph.components[graph.edges[classified.nonlinear_elements[idx].edge_idx].comp_idx].id.clone()
-        }).collect();
+        let elem_names: Vec<String> = ordered
+            .iter()
+            .map(|&idx| {
+                graph.components[graph.edges[classified.nonlinear_elements[idx].edge_idx].comp_idx]
+                    .id
+                    .clone()
+            })
+            .collect();
         eprintln!(
             "[plan-multi-nl] elems={:?} junctions={:?} passives={:?}",
             elem_names, jn_sorted, comp_names,
@@ -1876,8 +1909,9 @@ fn plan_multi_nl_group(
         // Get the first NL element's input terminal (base/grid).
         let first_elem = &classified.nonlinear_elements[ordered[0]];
         let input_terminal = match &first_elem.kind {
-            NonlinearKind::BjtNpn { base_node, .. }
-            | NonlinearKind::BjtPnp { base_node, .. } => Some(*base_node),
+            NonlinearKind::BjtNpn { base_node, .. } | NonlinearKind::BjtPnp { base_node, .. } => {
+                Some(*base_node)
+            }
             NonlinearKind::Triode {
                 grid_node: Some(gn),
                 ..
@@ -1887,10 +1921,13 @@ fn plan_multi_nl_group(
 
         // Check if any boundary edge connects to this input terminal.
         let boundary_at_input = input_terminal.and_then(|input_term| {
-            boundary_edges.iter().any(|&be| {
-                let be_edge = &graph.edges[be];
-                be_edge.node_a == input_term || be_edge.node_b == input_term
-            }).then_some(input_term)
+            boundary_edges
+                .iter()
+                .any(|&be| {
+                    let be_edge = &graph.edges[be];
+                    be_edge.node_a == input_term || be_edge.node_b == input_term
+                })
+                .then_some(input_term)
         });
 
         boundary_at_input.unwrap_or_else(|| {
@@ -1920,8 +1957,16 @@ fn plan_multi_nl_group(
             let elem = &classified.nonlinear_elements[idx];
             let edge = &graph.edges[elem.edge_idx];
             match &elem.kind {
-                NonlinearKind::BjtNpn { base_node, emitter_node, .. }
-                | NonlinearKind::BjtPnp { base_node, emitter_node, .. } => {
+                NonlinearKind::BjtNpn {
+                    base_node,
+                    emitter_node,
+                    ..
+                }
+                | NonlinearKind::BjtPnp {
+                    base_node,
+                    emitter_node,
+                    ..
+                } => {
                     // 2-port: port 0 = (base, emitter), port 1 = (collector, emitter)
                     let collector_node = if edge.node_a == *emitter_node {
                         edge.node_b
@@ -1956,9 +2001,14 @@ fn plan_multi_nl_group(
         .unwrap();
 
     if !boundary_edges.is_empty() {
-        let elem_names: Vec<String> = ordered.iter().map(|&idx| {
-            graph.components[graph.edges[classified.nonlinear_elements[idx].edge_idx].comp_idx].id.clone()
-        }).collect();
+        let elem_names: Vec<String> = ordered
+            .iter()
+            .map(|&idx| {
+                graph.components[graph.edges[classified.nonlinear_elements[idx].edge_idx].comp_idx]
+                    .id
+                    .clone()
+            })
+            .collect();
         eprintln!(
             "[plan-multi-nl] elems={:?} injection_node={} output_elem={}",
             elem_names, injection_node, output_element_idx,
@@ -1972,7 +2022,11 @@ fn plan_multi_nl_group(
         injection_node,
         nl_terminals,
         compensation: 1.0,
-        output_node: if !output_tail.is_empty() { Some(graph.out_node) } else { None },
+        output_node: if !output_tail.is_empty() {
+            Some(graph.out_node)
+        } else {
+            None
+        },
         ota_vccs: Vec::new(),
 
         signal_chain_depth: None,
@@ -2026,8 +2080,9 @@ fn try_varimu_3port(
     }
 
     // Collect all passive edges from grid + plate + cathode.
-    let junction_nodes: HashSet<NodeId> =
-        [*grid_node, *plate_node, *cathode_node].into_iter().collect();
+    let junction_nodes: HashSet<NodeId> = [*grid_node, *plate_node, *cathode_node]
+        .into_iter()
+        .collect();
     let all_passive_edges = collect_passive_edges_from_nodes(
         &junction_nodes,
         graph,
@@ -2038,8 +2093,9 @@ fn try_varimu_3port(
         &HashSet::new(),
     );
 
-    let exclude: HashSet<NodeId> =
-        [*plate_node, *cathode_node, *grid_node].into_iter().collect();
+    let exclude: HashSet<NodeId> = [*plate_node, *cathode_node, *grid_node]
+        .into_iter()
+        .collect();
     let injection_node = find_injection_node_multi_nl(
         &all_passive_edges,
         graph,
@@ -2087,10 +2143,18 @@ fn try_bjt_two_port(
     boundary_edges: &HashSet<usize>,
 ) -> Option<MultiNlPlan> {
     let (base_node, collector_node, emitter_node) = match &elem.kind {
-        NonlinearKind::BjtNpn { base_node, collector_node, emitter_node, .. }
-        | NonlinearKind::BjtPnp { base_node, collector_node, emitter_node, .. } => {
-            (*base_node, *collector_node, *emitter_node)
+        NonlinearKind::BjtNpn {
+            base_node,
+            collector_node,
+            emitter_node,
+            ..
         }
+        | NonlinearKind::BjtPnp {
+            base_node,
+            collector_node,
+            emitter_node,
+            ..
+        } => (*base_node, *collector_node, *emitter_node),
         _ => return None,
     };
 
@@ -2101,8 +2165,9 @@ fn try_bjt_two_port(
     // Collect all passive edges from all 3 BJT terminals (base, collector, emitter).
     // The MNA needs the full network — base bias resistors, coupling cap,
     // collector load to VCC, emitter bypass cap/resistor.
-    let junction_nodes: HashSet<NodeId> =
-        [base_node, collector_node, emitter_node].into_iter().collect();
+    let junction_nodes: HashSet<NodeId> = [base_node, collector_node, emitter_node]
+        .into_iter()
+        .collect();
     let mut all_passive_edges = collect_passive_edges_from_nodes(
         &junction_nodes,
         graph,
@@ -2156,8 +2221,9 @@ fn try_bjt_two_port(
         }
     }
 
-    let exclude: HashSet<NodeId> =
-        [base_node, collector_node, emitter_node].into_iter().collect();
+    let exclude: HashSet<NodeId> = [base_node, collector_node, emitter_node]
+        .into_iter()
+        .collect();
     // Pick the injection node closest to the circuit input.  boundary_injection
     // finds the external side of a coupling cap, but in single-BJT circuits
     // there may be boundary edges on both sides (input coupling cap AND output
@@ -2184,9 +2250,21 @@ fn try_bjt_two_port(
             if fb_is_hub {
                 bi
             } else {
-                let bi_dist = classified.dist_from_in.get(&bi).copied().unwrap_or(usize::MAX);
-                let fb_dist = classified.dist_from_in.get(&fallback_injection).copied().unwrap_or(usize::MAX);
-                if fb_dist < bi_dist { fallback_injection } else { bi }
+                let bi_dist = classified
+                    .dist_from_in
+                    .get(&bi)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                let fb_dist = classified
+                    .dist_from_in
+                    .get(&fallback_injection)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                if fb_dist < bi_dist {
+                    fallback_injection
+                } else {
+                    bi
+                }
             }
         }
         None => fallback_injection,
@@ -2248,8 +2326,7 @@ fn try_linearized_ota(
     let out_node = graph.node_names.get(&out_key).copied()?;
 
     // Collect passive edges from all 3 OTA nodes.
-    let junction_nodes: HashSet<NodeId> =
-        [pos_node, neg_node, out_node].into_iter().collect();
+    let junction_nodes: HashSet<NodeId> = [pos_node, neg_node, out_node].into_iter().collect();
     let all_passive_edges = collect_passive_edges_from_nodes(
         &junction_nodes,
         graph,
@@ -2330,9 +2407,7 @@ fn plan_diode_bridge(
     let non_diode_active_input_pins: HashSet<NodeId> = active_pin_nodes
         .iter()
         .copied()
-        .filter(|n| {
-            !all_diode_nodes.contains(n) && !graph.output_pin_nodes.contains(n)
-        })
+        .filter(|n| !all_diode_nodes.contains(n) && !graph.output_pin_nodes.contains(n))
         .collect();
 
     // BFS passive edges from ALL diode terminals, with skip_out_node=false
@@ -2497,7 +2572,12 @@ pub(super) fn plan_push_pull_half(
             };
             (*plate_node, *cathode_node, model.rp, comp, *grid_node)
         }
-        NonlinearKind::Pentode { model_name, plate_node, cathode_node, grid_node } => {
+        NonlinearKind::Pentode {
+            model_name,
+            plate_node,
+            cathode_node,
+            grid_node,
+        } => {
             let model = super::helpers::pentode_model(model_name);
             // Pentode rp is very high (52kΩ for 6V6GT) — a current-source
             // device. Using model.rp as virtual_rp makes the WDF tree's
@@ -2548,8 +2628,7 @@ pub(super) fn plan_push_pull_half(
         }
 
         // Find injection node, excluding plate/cathode.
-        let exclude: HashSet<NodeId> =
-            [plate_node, cathode_node].into_iter().collect();
+        let exclude: HashSet<NodeId> = [plate_node, cathode_node].into_iter().collect();
         let mut injection_node = find_injection_node_multi_nl(
             &passive_idxs,
             graph,
@@ -2584,10 +2663,7 @@ pub(super) fn plan_push_pull_half(
                 *degree.entry(e.node_b).or_insert(0) += 1;
             }
             for (&node, &deg) in &degree {
-                if deg == 1
-                    && node != plate_node
-                    && node != cathode_node
-                    && node != injection_node
+                if deg == 1 && node != plate_node && node != cathode_node && node != injection_node
                 {
                     ground_terminal = node;
                     break;
@@ -2618,7 +2694,10 @@ pub(super) fn plan_push_pull_half(
             load_terminals: None,
             grid_node,
             nl_terminals: if grid_node.is_some() {
-                vec![(grid_node.unwrap(), cathode_node), (plate_node, cathode_node)]
+                vec![
+                    (grid_node.unwrap(), cathode_node),
+                    (plate_node, cathode_node),
+                ]
             } else {
                 Vec::new()
             },
@@ -2853,12 +2932,17 @@ fn collect_supply_chain_edges(
 
     // Helper: count passive edges at a node (excluding NL, active, boundary).
     let passive_edge_count = |n: NodeId| -> usize {
-        graph.edges.iter().enumerate().filter(|(ei, ee)| {
-            (ee.node_a == n || ee.node_b == n)
-                && !nonlinear_indices.contains(ei)
-                && !active_indices.contains(ei)
-                && !boundary_edges.contains(ei)
-        }).count()
+        graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(ei, ee)| {
+                (ee.node_a == n || ee.node_b == n)
+                    && !nonlinear_indices.contains(ei)
+                    && !active_indices.contains(ei)
+                    && !boundary_edges.contains(ei)
+            })
+            .count()
     };
 
     while let Some(node) = queue.pop_front() {
@@ -3024,7 +3108,11 @@ fn collect_output_passive_tail(
         }
     }
 
-    if connects { collected } else { Vec::new() }
+    if connects {
+        collected
+    } else {
+        Vec::new()
+    }
 }
 
 /// Find transformer edges within 1 extra hop from plate passives.
@@ -3046,9 +3134,11 @@ fn find_plate_transformers(
                 continue;
             }
             if graph.components[edge.comp_idx].kind.is_transformer()
-                && !plate_passives.contains(&idx) && !result.contains(&idx) {
-                    result.push(idx);
-                }
+                && !plate_passives.contains(&idx)
+                && !result.contains(&idx)
+            {
+                result.push(idx);
+            }
         }
     }
     result
@@ -3094,10 +3184,7 @@ fn find_secondary_side_transformers(
 }
 
 /// Find the input transformer voltage gain for a push-pull pair.
-fn find_input_transformer_gain_pp(
-    graph: &CircuitGraph,
-    classified: &ClassifiedCircuit,
-) -> f64 {
+fn find_input_transformer_gain_pp(graph: &CircuitGraph, classified: &ClassifiedCircuit) -> f64 {
     let mut best_gain = None;
     let mut best_dist = usize::MAX;
 

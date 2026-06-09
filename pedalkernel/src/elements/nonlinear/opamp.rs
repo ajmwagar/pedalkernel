@@ -449,7 +449,9 @@ impl OpAmpRoot {
 
     /// Get the feedback pot component ID, if configured.
     pub fn feedback_pot_id(&self) -> Option<&str> {
-        self.feedback_config.as_ref().map(|c| c.pot_comp_id.as_str())
+        self.feedback_config
+            .as_ref()
+            .map(|c| c.pot_comp_id.as_str())
     }
 
     /// Recompute gain from the feedback pot's current resistance.
@@ -562,7 +564,8 @@ impl WdfRoot for OpAmpRoot {
 
         #[cfg(test)]
         {
-            static OPAMP_PROC_TRACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            static OPAMP_PROC_TRACE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let n = OPAMP_PROC_TRACE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // X4 oversampling: 4800 warmup × 4 = 19200 sub-samples before signal
             if n >= 19200 && n < 19220 {

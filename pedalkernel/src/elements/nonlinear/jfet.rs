@@ -322,11 +322,13 @@ impl WdfRoot for JfetRoot {
         } else {
             a * 0.5
         };
-        let v0 = if self.prev_v != 0.0 && (self.prev_v - cold).abs() < 50.0 && self.prev_v.abs() < 100.0 {
-            self.prev_v
-        } else {
-            cold
-        };
+        let v0 =
+            if self.prev_v != 0.0 && (self.prev_v - cold).abs() < 50.0 && self.prev_v.abs() < 100.0
+            {
+                self.prev_v
+            } else {
+                cold
+            };
 
         let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
             (root.drain_current(v), root.drain_current_derivative(v))

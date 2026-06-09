@@ -115,7 +115,10 @@ fn bridged_t_minimal_trigger_produces_output() {
     let output = trigger_and_collect(BRIDGED_T_MINIMAL, 48, 48000);
     let r = rms(&output);
     eprintln!("  bridged_t minimal — RMS = {:.6e}", r);
-    assert!(r > 1e-6, "bridged_t minimal: output too quiet (RMS={r:.2e})");
+    assert!(
+        r > 1e-6,
+        "bridged_t minimal: output too quiet (RMS={r:.2e})"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -160,9 +163,7 @@ fn bridged_t_oscillates_at_expected_frequency() {
         let freq = estimate_freq(window, SAMPLE_RATE);
         let pk = window.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
         let r = rms(window);
-        eprintln!(
-            "  {label}: freq={freq:.1}Hz peak={pk:.3e} rms={r:.3e}"
-        );
+        eprintln!("  {label}: freq={freq:.1}Hz peak={pk:.3e} rms={r:.3e}");
     }
 
     // Use Goertzel to check spectral energy at expected frequency
@@ -282,9 +283,7 @@ fn bridged_t_impulse_response_shape() {
 /// the large circuit without crashing or producing NaN.
 #[test]
 fn sine_drum_full_compiles_and_produces_output() {
-    let src = include_str!(
-        "../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal"
-    );
+    let src = include_str!("../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal");
     let pedal = parse_pedal_file(src).expect("parse sine_drum");
     let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile sine_drum");
 
@@ -302,9 +301,7 @@ fn sine_drum_full_compiles_and_produces_output() {
 /// Diagnostic: compare spectral content of sine_drum C3 vs expected 130 Hz.
 #[test]
 fn sine_drum_spectral_analysis() {
-    let src = include_str!(
-        "../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal"
-    );
+    let src = include_str!("../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal");
     let pedal = parse_pedal_file(src).expect("parse sine_drum");
     let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile sine_drum");
 
