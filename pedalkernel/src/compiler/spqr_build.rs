@@ -19,7 +19,7 @@ use super::rigid::{
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
-use crate::dsl::PedalDef;
+use crate::dsl::{PedalDef, TransformerConfig};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaVariableResistorBinding};
 use pedalkernel_rt::tree::{MnaSystem, WdfPort};
@@ -1959,7 +1959,34 @@ fn build_passive_rtype_stage(
     let node_to_mna =
         |node: NodeId, nodes: &[NodeId]| -> Option<usize> { nodes.iter().position(|&n| n == node) };
 
-    let mut mna = MnaSystem::new(nodes.len(), 1);
+    let transformer_comp_indices: Vec<usize> = {
+        let mut seen = std::collections::HashSet::new();
+        edge_indices
+            .iter()
+            .filter_map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                let cfg = comp.kind.transformer_config()?;
+                if cfg.has_tertiary() || !seen.insert(graph.edges[eidx].comp_idx) {
+                    return None;
+                }
+                Some(graph.edges[eidx].comp_idx)
+            })
+            .collect()
+    };
+    let transformer_internal_base = nodes.len();
+    let transformer_internals: std::collections::HashMap<usize, [usize; 4]> =
+        transformer_comp_indices
+            .iter()
+            .enumerate()
+            .map(|(i, &comp_idx)| {
+                let base = transformer_internal_base + i * 4;
+                (comp_idx, [base, base + 1, base + 2, base + 3])
+            })
+            .collect();
+    let mut mna = MnaSystem::new(
+        nodes.len() + transformer_comp_indices.len() * 4,
+        1 + transformer_comp_indices.len() * 2,
+    );
     let vs_node = node_to_mna(input_node, &nodes);
     mna.stamp_voltage_source(vs_node, None, 0);
 
@@ -1967,6 +1994,22 @@ fn build_passive_rtype_stage(
     let mut ports = Vec::new();
     let mut variable_resistors = Vec::new();
     let mut seen_pots = std::collections::HashSet::new();
+    let mut stamped_transformers = std::collections::HashSet::new();
+
+    let add_dynamic_port = |ports: &mut Vec<WdfPort>,
+                            children: &mut Vec<DynNode>,
+                            variable_resistors: &mut Vec<MnaVariableResistorBinding>,
+                            port: WdfPort,
+                            child: DynNode| {
+        ports.push(port);
+        let child_idx = ports.len() - 1;
+        children.insert(child_idx, child);
+        for binding in variable_resistors {
+            if binding.child_idx >= child_idx {
+                binding.child_idx += 1;
+            }
+        }
+    };
 
     for &eidx in edge_indices {
         let edge = &graph.edges[eidx];
@@ -2002,6 +2045,51 @@ fn build_passive_rtype_stage(
             continue;
         }
 
+        if let Some(cfg) = comp.kind.transformer_config() {
+            if !cfg.has_tertiary() && stamped_transformers.insert(edge.comp_idx) {
+                let Some(&internals) = transformer_internals.get(&edge.comp_idx) else {
+                    continue;
+                };
+                let vsrc_p = 1 + transformer_comp_indices
+                    .iter()
+                    .position(|&idx| idx == edge.comp_idx)
+                    .unwrap()
+                    * 2;
+                let Some(sec_pos_node) = graph.node_names.get(&format!("{}.c", comp.id)).copied()
+                else {
+                    continue;
+                };
+                let Some(sec_neg_node) = graph.node_names.get(&format!("{}.d", comp.id)).copied()
+                else {
+                    continue;
+                };
+                let s1 = node_to_mna(sec_pos_node, &nodes);
+                let s2 = node_to_mna(sec_neg_node, &nodes);
+                let dynamic = stamp_linear_transformer_skeleton(
+                    &mut mna,
+                    &comp.id,
+                    cfg,
+                    n1,
+                    n2,
+                    s1,
+                    s2,
+                    internals,
+                    vsrc_p,
+                    sample_rate,
+                );
+                for (port, child) in dynamic {
+                    add_dynamic_port(
+                        &mut ports,
+                        &mut children,
+                        &mut variable_resistors,
+                        port,
+                        child,
+                    );
+                }
+            }
+            continue;
+        }
+
         if let Some(r) = comp.kind.resistance() {
             mna.stamp_resistor(n1, n2, r);
         } else if comp.kind.capacitance().is_some() || comp.kind.inductance().is_some() {
@@ -2028,7 +2116,11 @@ fn build_passive_rtype_stage(
         }
     }
 
-    let transformer_voltage_gain = passive_transformer_voltage_gain(input_node, output_node, graph);
+    let transformer_voltage_gain = if stamped_transformers.is_empty() {
+        passive_transformer_voltage_gain(input_node, output_node, graph)
+    } else {
+        None
+    };
     let output_mna = node_to_mna(output_node, &nodes);
     let (scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
     let (extraction_coeffs, mut extraction_vs) =
@@ -2073,6 +2165,128 @@ fn build_passive_rtype_stage(
     );
     wdf.output_probe = None;
     Some(wdf)
+}
+
+fn stamp_linear_transformer_skeleton(
+    mna: &mut MnaSystem,
+    comp_id: &str,
+    cfg: &TransformerConfig,
+    p_pos: Option<usize>,
+    p_neg: Option<usize>,
+    s_pos: Option<usize>,
+    s_neg: Option<usize>,
+    internals: [usize; 4],
+    vsrc_p: usize,
+    sample_rate: f64,
+) -> Vec<(WdfPort, DynNode)> {
+    const SHORT_R: f64 = 1.0e-6;
+    const MIN_L: f64 = 1.0e-12;
+    const MIN_C: f64 = 1.0e-15;
+
+    let [p_series, p_core, s_core, s_series] = internals;
+    let n = cfg.turns_ratio;
+    let l_primary = cfg.primary_inductance.max(MIN_L);
+    let l_secondary = l_primary / (n * n);
+    let k = cfg.coupling.clamp(0.0, 1.0);
+    let l_leak_p = cfg.primary_leakage.unwrap_or(l_primary * (1.0 - k));
+    let l_leak_s = cfg.secondary_leakage.unwrap_or(l_secondary * (1.0 - k));
+    let l_mag = cfg
+        .magnetizing_inductance
+        .unwrap_or(l_primary * k.max(1.0e-6));
+
+    fn add_inductor_or_short(
+        mna: &mut MnaSystem,
+        dynamic: &mut Vec<(WdfPort, DynNode)>,
+        comp_id: &str,
+        name: &str,
+        a: Option<usize>,
+        b: Option<usize>,
+        l: f64,
+        sample_rate: f64,
+    ) {
+        const SHORT_R: f64 = 1.0e-6;
+        const MIN_L: f64 = 1.0e-12;
+        if l.is_finite() && l > MIN_L {
+            let rp = 2.0 * sample_rate * l;
+            dynamic.push((
+                WdfPort {
+                    node_pos: a,
+                    node_neg: b,
+                    resistance: rp,
+                },
+                DynNode::Inductor(Some(format!("{comp_id}.{name}")), l, rp),
+            ));
+        } else {
+            mna.stamp_resistor(a, b, SHORT_R);
+        }
+    }
+
+    let mut dynamic = Vec::new();
+
+    mna.stamp_resistor(p_pos, Some(p_series), cfg.primary_dcr.max(SHORT_R));
+    add_inductor_or_short(
+        mna,
+        &mut dynamic,
+        comp_id,
+        "Llp",
+        Some(p_series),
+        Some(p_core),
+        l_leak_p,
+        sample_rate,
+    );
+
+    add_inductor_or_short(
+        mna,
+        &mut dynamic,
+        comp_id,
+        "Lls",
+        Some(s_core),
+        Some(s_series),
+        l_leak_s,
+        sample_rate,
+    );
+    mna.stamp_resistor(Some(s_series), s_pos, cfg.secondary_dcr.max(SHORT_R));
+
+    add_inductor_or_short(
+        mna,
+        &mut dynamic,
+        comp_id,
+        "Lm",
+        Some(p_core),
+        p_neg,
+        l_mag,
+        sample_rate,
+    );
+    if let Some(rc) = cfg
+        .core_loss_resistance
+        .filter(|r| r.is_finite() && *r > 0.0)
+    {
+        mna.stamp_resistor(Some(p_core), p_neg, rc);
+    }
+
+    if cfg.capacitance.is_finite() && cfg.capacitance > MIN_C {
+        let rp = 1.0 / (2.0 * sample_rate * cfg.capacitance);
+        dynamic.push((
+            WdfPort {
+                node_pos: Some(p_core),
+                node_neg: Some(s_core),
+                resistance: rp,
+            },
+            DynNode::Capacitor(Some(format!("{comp_id}.Cp")), cfg.capacitance, rp),
+        ));
+    }
+
+    mna.stamp_transformer(
+        Some(p_core),
+        p_neg,
+        Some(s_core),
+        s_neg,
+        vsrc_p,
+        vsrc_p + 1,
+        n,
+    );
+
+    dynamic
 }
 
 fn passive_transformer_voltage_gain(

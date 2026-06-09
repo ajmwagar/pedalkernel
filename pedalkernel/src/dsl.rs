@@ -685,6 +685,14 @@ pub struct TransformerConfig {
     pub capacitance: f64,
     /// Coupling coefficient (0-1), default 0.99 for audio transformers
     pub coupling: f64,
+    /// Optional explicit primary leakage inductance in Henries.
+    pub primary_leakage: Option<f64>,
+    /// Optional explicit secondary leakage inductance in Henries.
+    pub secondary_leakage: Option<f64>,
+    /// Optional explicit magnetizing inductance in Henries.
+    pub magnetizing_inductance: Option<f64>,
+    /// Optional core-loss resistance in Ohms.
+    pub core_loss_resistance: Option<f64>,
     /// Optional tertiary winding turns ratio (primary:tertiary).
     /// When present, the transformer is modeled as a 3-winding R-type adaptor.
     /// Used for transformers with NFB windings (e.g., Fairchild 670 sidechain output).
@@ -702,6 +710,10 @@ impl Default for TransformerConfig {
             secondary_dcr: 0.0,
             capacitance: 0.0,
             coupling: 0.99,
+            primary_leakage: None,
+            secondary_leakage: None,
+            magnetizing_inductance: None,
+            core_loss_resistance: None,
             tertiary_turns_ratio: None,
         }
     }
@@ -1592,9 +1604,10 @@ fn winding_modifier_primary(input: &str) -> IResult<&str, WindingType> {
 /// `transformer(1:1, 4H, pp, ct)` — push-pull primary, center-tapped secondary
 /// `transformer(10:1, 10H, 150, 300p, ct_primary)` — center-tapped primary
 /// `transformer(10:1, 2H, dcr=75, Cp=200p)` — with named parasitics
+/// `transformer(10:1, 2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k)` — linear T model
 ///
 /// Positional syntax: transformer(ratio, inductance [, dcr] [, cap] [, winding_mod])
-/// Named syntax: transformer(ratio, inductance [, dcr=val] [, Cp=val] [, k=val])
+/// Named syntax: transformer(ratio, inductance [, dcr=val] [, Cp=val] [, k=val] [, Llp=val] [, Lls=val] [, Lm=val] [, Rc=val])
 fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("transformer")(input)?;
     let (input, _) = char('(')(input)?;
@@ -1688,6 +1701,32 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
                 let (input, _) = ws_comments(input)?;
                 let (input, k) = double(input)?;
                 config.coupling = k;
+                remaining = input;
+                continue;
+            }
+
+            if let Ok((input, name)) = alt((
+                tag::<&str, &str, nom::error::Error<&str>>("Llp"),
+                tag("llp"),
+                tag("Lls"),
+                tag("lls"),
+                tag("Lm"),
+                tag("lm"),
+                tag("Rc"),
+                tag("rc"),
+            ))(remaining)
+            {
+                let (input, _) = ws_comments(input)?;
+                let (input, _) = char('=')(input)?;
+                let (input, _) = ws_comments(input)?;
+                let (input, value) = eng_value(input)?;
+                match name {
+                    "Llp" | "llp" => config.primary_leakage = Some(value),
+                    "Lls" | "lls" => config.secondary_leakage = Some(value),
+                    "Lm" | "lm" => config.magnetizing_inductance = Some(value),
+                    "Rc" | "rc" => config.core_loss_resistance = Some(value),
+                    _ => unreachable!(),
+                }
                 remaining = input;
                 continue;
             }
@@ -4639,6 +4678,18 @@ synth "CV Test" {
         assert!((cfg.primary_dcr - 50.0).abs() < 1e-6);
         assert!((cfg.secondary_dcr - 50.0).abs() < 1e-6); // Both set to same value
         assert!((cfg.coupling - 0.98).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_transformer_with_linear_model_fields() {
+        let (_, (c, _)) =
+            component_def("T4: transformer(10:1, 2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k)")
+                .unwrap();
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert!((cfg.primary_leakage.unwrap() - 20e-3).abs() < 1e-9);
+        assert!((cfg.secondary_leakage.unwrap() - 200e-6).abs() < 1e-12);
+        assert!((cfg.magnetizing_inductance.unwrap() - 1.98).abs() < 1e-9);
+        assert!((cfg.core_loss_resistance.unwrap() - 100_000.0).abs() < 1e-6);
     }
 
     #[test]

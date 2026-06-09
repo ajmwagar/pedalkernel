@@ -678,17 +678,37 @@ impl MnaSystem {
         vsrc_s: usize,
         turns_ratio: crate::Wave,
     ) {
-        // Primary voltage: V_p+ - V_p- = n * V_s
-        self.stamp_voltage_source(p_pos, p_neg, vsrc_p);
+        // KCL columns: winding currents enter each positive dotted terminal.
+        if let Some(i) = p_pos {
+            self.b_matrix[i * self.num_vsources + vsrc_p] = 1.0;
+        }
+        if let Some(j) = p_neg {
+            self.b_matrix[j * self.num_vsources + vsrc_p] = -1.0;
+        }
+        if let Some(i) = s_pos {
+            self.b_matrix[i * self.num_vsources + vsrc_s] = 1.0;
+        }
+        if let Some(j) = s_neg {
+            self.b_matrix[j * self.num_vsources + vsrc_s] = -1.0;
+        }
 
-        // Secondary constraint: V_s+ - V_s- = V_s (auxiliary)
-        self.stamp_voltage_source(s_pos, s_neg, vsrc_s);
+        // Row vsrc_p: Vp - n*Vs = 0.
+        if let Some(i) = p_pos {
+            self.c_matrix[vsrc_p * self.num_nodes + i] += 1.0;
+        }
+        if let Some(j) = p_neg {
+            self.c_matrix[vsrc_p * self.num_nodes + j] -= 1.0;
+        }
+        if let Some(i) = s_pos {
+            self.c_matrix[vsrc_p * self.num_nodes + i] -= turns_ratio;
+        }
+        if let Some(j) = s_neg {
+            self.c_matrix[vsrc_p * self.num_nodes + j] += turns_ratio;
+        }
 
-        // Coupling: V_p = n * V_s => D[vsrc_p][vsrc_s] = -n
-        self.d_matrix[vsrc_p * self.num_vsources + vsrc_s] = -turns_ratio;
-
-        // Current relation: I_p = I_s / n => handled by the transformer stamp
-        // The B and C matrices encode current flow through both windings
+        // Row vsrc_s: n*Ip + Is = 0, conserving power with Vp = n*Vs.
+        self.d_matrix[vsrc_s * self.num_vsources + vsrc_p] = turns_ratio;
+        self.d_matrix[vsrc_s * self.num_vsources + vsrc_s] = 1.0;
     }
 
     /// Add a VCCS (Voltage-Controlled Current Source) stamp.
