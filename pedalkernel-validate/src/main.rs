@@ -167,6 +167,36 @@ enum Commands {
         #[arg(long)]
         no_resample: bool,
     },
+
+    /// Import an LTspice binary .raw trace as a golden .npy file
+    ImportLtspiceRawGolden {
+        /// LTspice .raw file
+        raw: PathBuf,
+
+        /// Validation suite name
+        #[arg(long)]
+        suite: String,
+
+        /// Validation test name
+        #[arg(long)]
+        test: String,
+
+        /// Signal label, e.g. sine or sweep
+        #[arg(long)]
+        signal: String,
+
+        /// Trace name. Defaults to common LTspice V(out).
+        #[arg(long, default_value = "V(out)")]
+        trace: String,
+
+        /// Duration to import in seconds. Defaults to the final raw time.
+        #[arg(long)]
+        duration: Option<f64>,
+
+        /// Keep raw LTspice samples instead of resampling to sample_rate * oversample.
+        #[arg(long)]
+        no_resample: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -219,6 +249,26 @@ fn main() -> anyhow::Result<()> {
                 signal,
                 column,
                 time_column,
+                *duration,
+                *no_resample,
+            )?;
+        }
+        Some(Commands::ImportLtspiceRawGolden {
+            raw,
+            suite,
+            test,
+            signal,
+            trace,
+            duration,
+            no_resample,
+        }) => {
+            import_ltspice_raw_golden(
+                &cli,
+                raw,
+                suite,
+                test,
+                signal,
+                trace,
                 *duration,
                 *no_resample,
             )?;
@@ -903,6 +953,114 @@ fn import_csv_golden(
     Ok(())
 }
 
+fn import_ltspice_raw_golden(
+    cli: &Cli,
+    raw: &std::path::Path,
+    suite: &str,
+    test: &str,
+    signal: &str,
+    trace: &str,
+    duration: Option<f64>,
+    no_resample: bool,
+) -> anyhow::Result<()> {
+    let samples = read_ltspice_raw_trace(raw, trace)?;
+    let values: Vec<f64> = if no_resample {
+        samples.iter().map(|(_, value)| *value).collect()
+    } else {
+        let last_time = samples.last().map(|(time, _)| *time).unwrap_or(0.0);
+        let duration = duration.unwrap_or(last_time);
+        let sample_rate = (cli.sample_rate * cli.oversample) as f64;
+        resample_linear(&samples, sample_rate, duration)
+    };
+    if values.is_empty() {
+        anyhow::bail!(
+            "Imported trace produced zero samples; check --duration and sample-rate settings"
+        );
+    }
+
+    let golden_path = cli
+        .golden
+        .join(suite)
+        .join(test)
+        .join(format!("{signal}.npy"));
+    pedalkernel_validate::npy::write_f64(&golden_path, &values)?;
+    println!(
+        "{} Imported {} samples from {} trace '{}' -> {}",
+        "✓".green(),
+        values.len(),
+        raw.display(),
+        trace,
+        golden_path.display()
+    );
+    Ok(())
+}
+
+fn read_ltspice_raw_trace(raw: &std::path::Path, trace: &str) -> anyhow::Result<Vec<(f64, f64)>> {
+    let bytes = std::fs::read(raw)?;
+    let marker = utf16le_bytes("Binary:\n");
+    let header_end = bytes
+        .windows(marker.len())
+        .position(|window| window == marker.as_slice())
+        .map(|pos| pos + marker.len())
+        .ok_or_else(|| anyhow::anyhow!("LTspice raw Binary marker not found: {}", raw.display()))?;
+    let header = decode_utf16le(&bytes[..header_end])?;
+    let n_vars = parse_ltspice_header_usize(&header, "No. Variables:")?;
+    let n_points = parse_ltspice_header_usize(&header, "No. Points:")?;
+    let variables = parse_ltspice_variables(&header);
+    if variables.len() != n_vars {
+        anyhow::bail!(
+            "Expected {} variables in {}, found {}",
+            n_vars,
+            raw.display(),
+            variables.len()
+        );
+    }
+    let time_idx = variables
+        .iter()
+        .position(|name| name == "time")
+        .ok_or_else(|| anyhow::anyhow!("LTspice raw has no time variable: {}", raw.display()))?;
+    if time_idx != 0 {
+        anyhow::bail!("Unsupported LTspice raw: time variable is not first");
+    }
+    let trace_idx = variables
+        .iter()
+        .position(|name| name == trace)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Trace '{}' not found in {}. Available traces: {}",
+                trace,
+                raw.display(),
+                variables.join(", ")
+            )
+        })?;
+
+    let row_len = 8 + 4 * (n_vars - 1);
+    let data = &bytes[header_end..];
+    if data.len() < row_len * n_points {
+        anyhow::bail!(
+            "LTspice raw data too short: {} bytes for {} points x {} bytes",
+            data.len(),
+            n_points,
+            row_len
+        );
+    }
+
+    let mut samples = Vec::with_capacity(n_points);
+    for point in 0..n_points {
+        let row = &data[point * row_len..(point + 1) * row_len];
+        let time = f64::from_le_bytes(row[0..8].try_into().unwrap());
+        let value = if trace_idx == 0 {
+            time
+        } else {
+            let offset = 8 + 4 * (trace_idx - 1);
+            f32::from_le_bytes(row[offset..offset + 4].try_into().unwrap()) as f64
+        };
+        samples.push((time, value));
+    }
+
+    Ok(samples)
+}
+
 fn split_csv_line(line: &str) -> Vec<String> {
     line.split(',')
         .map(|field| field.trim().trim_matches('"').to_string())
@@ -911,6 +1069,52 @@ fn split_csv_line(line: &str) -> Vec<String> {
 
 fn parse_spice_float(raw: &str) -> Result<f64, std::num::ParseFloatError> {
     raw.trim().trim_matches('"').parse::<f64>()
+}
+
+fn utf16le_bytes(text: &str) -> Vec<u8> {
+    text.encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect()
+}
+
+fn decode_utf16le(bytes: &[u8]) -> anyhow::Result<String> {
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+    String::from_utf16(&units).map_err(|e| anyhow::anyhow!("Invalid UTF-16LE header: {e}"))
+}
+
+fn parse_ltspice_header_usize(header: &str, key: &str) -> anyhow::Result<usize> {
+    header
+        .lines()
+        .find_map(|line| line.strip_prefix(key))
+        .ok_or_else(|| anyhow::anyhow!("LTspice raw header missing '{}'", key))?
+        .trim()
+        .parse::<usize>()
+        .map_err(|e| anyhow::anyhow!("Invalid LTspice raw '{}' value: {e}", key))
+}
+
+fn parse_ltspice_variables(header: &str) -> Vec<String> {
+    let mut variables = Vec::new();
+    let mut in_vars = false;
+    for line in header.lines() {
+        if line == "Variables:" {
+            in_vars = true;
+            continue;
+        }
+        if line == "Binary:" {
+            break;
+        }
+        if !in_vars {
+            continue;
+        }
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() >= 2 {
+            variables.push(fields[1].to_string());
+        }
+    }
+    variables
 }
 
 fn resample_linear(samples: &[(f64, f64)], sample_rate: f64, duration: f64) -> Vec<f64> {

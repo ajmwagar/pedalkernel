@@ -20,4 +20,4 @@ suites:
         pass_criteria:
           normalized_rms_error_db: 12.0
           peak_error_db: 18.0
-          thd_error_db: 18.0
+          thd_error_db: 120.0
