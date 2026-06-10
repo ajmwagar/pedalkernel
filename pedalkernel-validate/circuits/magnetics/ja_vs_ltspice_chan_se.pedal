@@ -1,0 +1,22 @@
+# Gapped single-ended output-transformer validation circuit.
+# The runtime model is PedalKernel Jiles-Atherton; the external golden for this
+# opt-in suite is an LTspice CHAN trace with similar Bs/Br/Hc and geometry.
+
+pedal "J-A vs LTspice CHAN SE" {
+    supply 9V
+
+    components {
+        T1: transformer(26:1, OT-DEMO-SE)
+        R_load: resistor(8)
+    }
+
+    nets {
+        in -> T1.a
+        T1.b -> gnd
+        T1.c -> out, R_load.a
+        T1.d -> gnd
+        R_load.b -> gnd
+    }
+
+    controls {}
+}

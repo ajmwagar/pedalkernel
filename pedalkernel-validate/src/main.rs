@@ -133,6 +133,40 @@ enum Commands {
 
     /// Check if ngspice is available
     CheckSpice,
+
+    /// Import an externally exported LTspice/CSV trace as a golden .npy file
+    ImportCsvGolden {
+        /// CSV file exported from LTspice or another SPICE reference
+        csv: PathBuf,
+
+        /// Validation suite name
+        #[arg(long)]
+        suite: String,
+
+        /// Validation test name
+        #[arg(long)]
+        test: String,
+
+        /// Signal label, e.g. sine or sweep
+        #[arg(long)]
+        signal: String,
+
+        /// Output/value column name. Defaults to common LTspice V(out).
+        #[arg(long, default_value = "V(out)")]
+        column: String,
+
+        /// Time column name used for resampling variable-step SPICE output.
+        #[arg(long, default_value = "time")]
+        time_column: String,
+
+        /// Duration to import in seconds. Defaults to the final CSV time.
+        #[arg(long)]
+        duration: Option<f64>,
+
+        /// Keep raw CSV samples instead of resampling to sample_rate * oversample.
+        #[arg(long)]
+        no_resample: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -166,6 +200,28 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::CheckSpice) => {
             check_spice()?;
+        }
+        Some(Commands::ImportCsvGolden {
+            csv,
+            suite,
+            test,
+            signal,
+            column,
+            time_column,
+            duration,
+            no_resample,
+        }) => {
+            import_csv_golden(
+                &cli,
+                csv,
+                suite,
+                test,
+                signal,
+                column,
+                time_column,
+                *duration,
+                *no_resample,
+            )?;
         }
         None => {
             run_validation(&cli, "all", None)?;
@@ -739,6 +795,147 @@ fn check_spice() -> anyhow::Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+fn import_csv_golden(
+    cli: &Cli,
+    csv: &std::path::Path,
+    suite: &str,
+    test: &str,
+    signal: &str,
+    column: &str,
+    time_column: &str,
+    duration: Option<f64>,
+    no_resample: bool,
+) -> anyhow::Result<()> {
+    let contents = std::fs::read_to_string(csv)?;
+    let mut lines = contents.lines().filter(|line| !line.trim().is_empty());
+    let header = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("CSV is empty: {}", csv.display()))?;
+    let headers = split_csv_line(header);
+    let value_idx = headers
+        .iter()
+        .position(|h| h == column)
+        .or_else(|| headers.iter().position(|h| h.eq_ignore_ascii_case(column)))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Column '{}' not found in {}. Available columns: {}",
+                column,
+                csv.display(),
+                headers.join(", ")
+            )
+        })?;
+    let time_idx = headers.iter().position(|h| h == time_column).or_else(|| {
+        headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case(time_column))
+    });
+
+    let mut samples = Vec::new();
+    for (line_idx, line) in lines.enumerate() {
+        let fields = split_csv_line(line);
+        let Some(raw) = fields.get(value_idx) else {
+            continue;
+        };
+        let value = parse_spice_float(raw).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse row {} column '{}': {}",
+                line_idx + 2,
+                column,
+                e
+            )
+        })?;
+        let time = time_idx
+            .and_then(|idx| fields.get(idx))
+            .and_then(|raw| parse_spice_float(raw).ok());
+        samples.push((time, value));
+    }
+
+    if samples.is_empty() {
+        anyhow::bail!("No numeric values imported from {}", csv.display());
+    }
+
+    let values = if no_resample {
+        samples.iter().map(|(_, value)| *value).collect()
+    } else {
+        let Some(_) = time_idx else {
+            anyhow::bail!(
+                "CSV has no '{}' column for resampling. Use --no-resample to import raw samples.",
+                time_column
+            );
+        };
+        let timed: Vec<(f64, f64)> = samples
+            .into_iter()
+            .filter_map(|(time, value)| time.map(|time| (time, value)))
+            .collect();
+        if timed.len() < 2 {
+            anyhow::bail!(
+                "Need at least two timed samples to resample {}",
+                csv.display()
+            );
+        }
+        let last_time = timed.last().map(|(time, _)| *time).unwrap_or(0.0);
+        let duration = duration.unwrap_or(last_time);
+        let sample_rate = (cli.sample_rate * cli.oversample) as f64;
+        resample_linear(&timed, sample_rate, duration)
+    };
+    if values.is_empty() {
+        anyhow::bail!(
+            "Imported trace produced zero samples; check --duration and sample-rate settings"
+        );
+    }
+
+    let golden_path = cli
+        .golden
+        .join(suite)
+        .join(test)
+        .join(format!("{signal}.npy"));
+    pedalkernel_validate::npy::write_f64(&golden_path, &values)?;
+    println!(
+        "{} Imported {} samples from {} column '{}' -> {}",
+        "✓".green(),
+        values.len(),
+        csv.display(),
+        column,
+        golden_path.display()
+    );
+    Ok(())
+}
+
+fn split_csv_line(line: &str) -> Vec<String> {
+    line.split(',')
+        .map(|field| field.trim().trim_matches('"').to_string())
+        .collect()
+}
+
+fn parse_spice_float(raw: &str) -> Result<f64, std::num::ParseFloatError> {
+    raw.trim().trim_matches('"').parse::<f64>()
+}
+
+fn resample_linear(samples: &[(f64, f64)], sample_rate: f64, duration: f64) -> Vec<f64> {
+    let n_samples = (duration * sample_rate) as usize;
+    let mut out = Vec::with_capacity(n_samples);
+    let mut j = 0usize;
+    for i in 0..n_samples {
+        let t = i as f64 / sample_rate;
+        while j + 1 < samples.len() && samples[j + 1].0 < t {
+            j += 1;
+        }
+        if j + 1 >= samples.len() {
+            out.push(samples.last().map(|(_, v)| *v).unwrap_or(0.0));
+            continue;
+        }
+        let (t0, y0) = samples[j];
+        let (t1, y1) = samples[j + 1];
+        if t1 <= t0 {
+            out.push(y0);
+            continue;
+        }
+        let frac = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+        out.push(y0 + frac * (y1 - y0));
+    }
+    out
 }
 
 fn generate_spice_golden(
