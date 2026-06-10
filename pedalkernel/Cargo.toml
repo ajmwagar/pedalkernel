@@ -18,7 +18,6 @@ biquad-table = ["pedalkernel-rt/biquad-table"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
 cli = ["dep:clap"]
-hardware = []
 # Advanced BJT model with base charge modulation, junction capacitances
 gummel-poon = []
 # Use simplified Ebers-Moll BJT model instead of Gummel-Poon.
@@ -32,10 +31,6 @@ solver-stats = []
 # Deliberately injected faults for validating test tolerances.
 # Zero-cost when disabled — all hooks are behind #[cfg(feature)].
 fault-injection = []
-# Runtime warnings for hybrid linear/nonlinear devices (JFET VR, OTA, photocoupler).
-# Detects when devices leave their valid linear operating region.
-# Zero-cost when disabled — all checks are behind #[cfg(feature)].
-runtime-warnings = []
 # Tests that reference .pedal files from the private pedalkernel-pro repo.
 # Disabled by default so open-source consumers can still run all other tests.
 pro-pedals = []

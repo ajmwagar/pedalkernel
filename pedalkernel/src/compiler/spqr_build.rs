@@ -23,6 +23,7 @@ use crate::dsl::{PedalDef, TransformerConfig};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaVariableResistorBinding};
 use pedalkernel_rt::elements::JaCoreModel;
+use pedalkernel_rt::thermal::ThermalModel;
 use pedalkernel_rt::tree::{MnaSystem, WdfPort};
 
 /// A stage built from the SPQR pipeline.
@@ -159,7 +160,11 @@ pub fn compile_via_spqr_with_options(
             delay_lines,
             vcos: Vec::new(),
             vcas: Vec::new(),
-            thermal: None,
+            thermal: if options.thermal {
+                Some(ThermalModel::silicon_standard(sample_rate))
+            } else {
+                None
+            },
             tolerance_seed: 0,
             opamp_stages: Vec::new(),
             power_supply: None,
@@ -1450,19 +1455,17 @@ pub fn compile_via_spqr_with_options(
         (d, ff as u8) // false=0 sorts before true=1
     });
 
-    stages.sort_by_key(|s| {
-        let (d, ff) = match s {
-            Stage::Wdf(w) => (w.signal_flow_distance, w.is_feedforward),
-            Stage::Iir(i) => (i.signal_flow_distance, false),
-            Stage::StateSpace(ss) => (ss.signal_flow_distance, false),
-            Stage::MultiNl(m) => (m.signal_flow_distance, false),
-            Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
-            Stage::Blockwise(k) => (k.signal_flow_distance, false),
-            Stage::KMethod { .. } => (usize::MAX, false),
-            Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
-        };
-        (d, ff as u8)
-    });
+    // When thermal is enabled, snapshot base BJT models so apply_thermal()
+    // can modulate them without accumulating multipliers.
+    if options.thermal {
+        for stage in &mut stages {
+            if let Stage::Wdf(wdf) = stage {
+                if let RootKind::Bjt(bjt) = &wdf.root {
+                    wdf.base_bjt_model = Some(bjt.model.clone());
+                }
+            }
+        }
+    }
 
     let mut compiled = CompiledPedal {
         stages,
@@ -1484,7 +1487,11 @@ pub fn compile_via_spqr_with_options(
         delay_lines,
         vcos: Vec::new(),
         vcas: Vec::new(),
-        thermal: None,
+        thermal: if options.thermal {
+            Some(ThermalModel::silicon_standard(sample_rate))
+        } else {
+            None
+        },
         tolerance_seed: 0,
         opamp_stages: Vec::new(),
         power_supply: None,
@@ -1747,10 +1754,15 @@ pub(super) fn with_voltage_source_rp(passive_tree: DynNode, rp: f64) -> DynNode 
 /// - **PassiveWdf**: VS + DynNode tree + Passthrough root
 /// - **NlWdf**: VS + DynNode tree + NL root from Component::classify_nonlinear()
 /// - **Rigid**: not yet supported (returns Err — build layer will handle IIR/OpAmpRoot/MNA)
+///
+/// `supply_voltage` is the circuit's B+ supply (e.g. 250V for tube stages, 9V for pedals).
+/// It is used to configure tube roots with the correct `v_max` so the WDF voltage source
+/// matches the actual plate supply rail.
 pub(super) fn build_spqr_stage(
     stage: SpqrStage,
     graph: &CircuitGraph,
     _sample_rate: f64,
+    supply_voltage: f64,
 ) -> Result<BuiltStage, String> {
     let bias_node_voltages = std::collections::BTreeMap::new();
     build_spqr_stage_with_options(
@@ -1759,7 +1771,7 @@ pub(super) fn build_spqr_stage(
         _sample_rate,
         false,
         &[],
-        9.0,
+        supply_voltage,
         &bias_node_voltages,
     )
 }
@@ -1907,6 +1919,16 @@ pub(super) fn build_spqr_stage_with_options(
                     let vce = bjt_hint_vce(state_name, supply_voltage, bjt.is_pnp);
                     bjt.set_initial_prev_v(vce);
                 }
+            }
+            // Set the supply voltage on tube roots so the WDF voltage source (VS =
+            // t.v_max()) matches the actual B+ rail.  Without this the triode/pentode
+            // would default to 500 V, shifting the plate operating point and gain by
+            // ~8 dB versus the correct 250 V operating point.
+            match &mut root {
+                RootKind::Triode(t) => t.set_v_max(supply_voltage.max(1.0)),
+                RootKind::VariMu(t) => t.set_v_max(supply_voltage.max(1.0)),
+                RootKind::Pentode(p) => p.set_v_max(supply_voltage.max(1.0)),
+                _ => {}
             }
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);

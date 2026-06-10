@@ -191,6 +191,7 @@ impl ValidationRunner {
         let mut pedal = self.load_and_compile(&circuit_path)?;
 
         let effective_sr = self.config.sample_rate * self.config.oversample;
+        let warmup_trim_ms = test_case.effective_warmup_trim_ms(&self.validation_config.global);
         let mut signal_results = vec![];
         let mut all_passed = true;
 
@@ -202,6 +203,7 @@ impl ValidationRunner {
                 &mut pedal,
                 effective_sr as f64,
                 &test_case.pass_criteria,
+                warmup_trim_ms,
             )?;
 
             if !signal_result.passed {
@@ -218,6 +220,10 @@ impl ValidationRunner {
     }
 
     /// Run a single signal through the circuit and compare to golden.
+    ///
+    /// `warmup_trim_ms` milliseconds are discarded from the head of both the
+    /// WDF output and the golden reference before any metric is computed.  The
+    /// stored golden files are left untouched.
     #[allow(clippy::too_many_arguments)]
     fn run_signal(
         &self,
@@ -227,6 +233,7 @@ impl ValidationRunner {
         pedal: &mut CompiledPedal,
         sample_rate: f64,
         pass_criteria: &PassCriteria,
+        warmup_trim_ms: f64,
     ) -> Result<SignalResult, RunnerError> {
         let signal_label = signal_config.label();
 
@@ -237,7 +244,7 @@ impl ValidationRunner {
         // Process through WDF
         let output = self.process_signal(pedal, &input);
 
-        // Save WDF output if configured
+        // Save WDF output if configured (full signal, pre-trim)
         if self.config.save_output {
             let output_path = self
                 .config
@@ -268,9 +275,24 @@ impl ValidationRunner {
 
         let golden = npy::read_f64(&golden_path)?;
 
-        // Compute comparison metrics
+        // Apply steady-state warmup trim to both signals before metric computation.
+        // Trimming happens here (metric time) so stored golden files remain valid.
+        let trim_samples = ((warmup_trim_ms / 1000.0) * sample_rate).round() as usize;
+        let output_trimmed = if trim_samples < output.len() {
+            &output[trim_samples..]
+        } else {
+            &output[..]
+        };
+        let golden_trimmed = if trim_samples < golden.len() {
+            &golden[trim_samples..]
+        } else {
+            &golden[..]
+        };
+
+        // Compute comparison metrics on trimmed windows
         let fundamental_hz = signal_config.fundamental_hz();
-        let comparison = metrics::compare(&output, &golden, sample_rate, fundamental_hz);
+        let comparison =
+            metrics::compare(output_trimmed, golden_trimmed, sample_rate, fundamental_hz);
 
         // Check pass/fail
         let passed = comparison.passes(pass_criteria);
@@ -386,5 +408,46 @@ mod tests {
         assert_eq!(config.sample_rate, 96000);
         assert_eq!(config.oversample, 4);
         assert!(config.save_output);
+    }
+
+    #[test]
+    fn warmup_trim_sample_count_is_correct() {
+        // At 384 kHz internal rate, 10 ms = 3840 samples.
+        let sample_rate = 384_000.0_f64;
+        let warmup_trim_ms = 10.0_f64;
+        let trim_samples = ((warmup_trim_ms / 1000.0) * sample_rate).round() as usize;
+        assert_eq!(trim_samples, 3840);
+    }
+
+    #[test]
+    fn warmup_trim_preserves_enough_window() {
+        // Shortest signal: 50 ms at 384 kHz = 19200 samples.
+        // After 10 ms trim: 15360 samples remain = 40 ms.
+        // 1 kHz fundamental at 40 ms = 40 cycles — sufficient for THD (needs ~5).
+        let sample_rate = 384_000.0_f64;
+        let signal_len = (0.050 * sample_rate) as usize;
+        let trim_samples = ((10.0_f64 / 1000.0) * sample_rate).round() as usize;
+        let remaining = signal_len - trim_samples;
+        let remaining_ms = remaining as f64 / sample_rate * 1000.0;
+        let cycles_at_1khz = remaining_ms / 1.0; // 1 ms per cycle at 1 kHz
+        assert!(remaining_ms >= 20.0, "at least 20 ms must remain after trim");
+        assert!(
+            cycles_at_1khz >= 5.0,
+            "at least 5 cycles required for THD; got {cycles_at_1khz}"
+        );
+    }
+
+    #[test]
+    fn warmup_trim_clamps_when_signal_shorter_than_trim() {
+        // If trim >= signal length, fall back to full slice (do not panic).
+        let output: Vec<f64> = vec![1.0, 2.0, 3.0];
+        let trim_samples = 10;
+        let trimmed = if trim_samples < output.len() {
+            &output[trim_samples..]
+        } else {
+            &output[..]
+        };
+        // Full slice returned, not empty.
+        assert_eq!(trimmed.len(), output.len());
     }
 }
