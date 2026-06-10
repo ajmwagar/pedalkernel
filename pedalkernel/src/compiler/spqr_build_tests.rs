@@ -1272,3 +1272,129 @@ pedal "12AX7 Common Cathode" {
     let gain = (max_out - min_out) / (2.0 * amplitude);
     eprintln!("After 1s DC warmup, gain at 10mV probe={:.1}x ({:.1}dB)", gain, 20.0*gain.log10());
 }
+
+/// Inspect NR solver convergence during signal: dump v_prev per stage for 5 samples.
+#[test]
+fn diag_triode_nr_convergence() {
+    let src = r#"
+pedal "12AX7 Common Cathode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+    let sample_rate = 48000.0_f64;
+    let compiled = crate::compiler::compile_pedal(&pedal, sample_rate).expect("compile");
+    let mut proc = compiled;
+
+    // Warmup 1 second DC
+    for _ in 0..48000 {
+        proc.process(0.0);
+    }
+
+    // Dump stage internals after warmup
+    for (si, s) in proc.stages.iter().enumerate() {
+        if let crate::compiler::compiled::Stage::MultiNl(m) = s {
+            eprintln!("=== After DC warmup ===");
+            eprintln!("  stage {si}: v_prev={:.4?}", m.v_prev);
+            eprintln!("  stage {si}: dc_bias={:.4?}", m.dc_bias);
+            for (k, child) in m.passive_children.iter().enumerate() {
+                if let pedalkernel_rt::dyn_node::DynNode::Leaf(pedalkernel_rt::wdf_leaf::LeafKind::Capacitor(ref cap)) = child {
+                    eprintln!("  passive_child[{k}] cap state={:.6}, last_b={:.6}", cap.state, cap.last_b);
+                }
+            }
+        }
+    }
+
+    // Process signal and dump v_prev at specific key samples
+    let amplitude = 0.01_f64;
+    let freq = 1000.0_f64;
+    eprintln!("\n=== Signal processing with stage output trace ===");
+
+    // Get stage-by-stage output by running independent copies
+    // First measure per-stage gain by tracing the output of each stage
+    // Stage 0: WDF (C_in), Stage 1: MultiNl (triode), Stage 2: WDF (R_plate, C_out, R_load)
+    let compiled = crate::compiler::compile_pedal(&pedal, sample_rate).expect("compile2");
+    let mut proc2 = compiled;
+    for _ in 0..48000 {
+        proc2.process(0.0);
+    }
+
+    // Measure gain at each stage boundary
+    let mut max_after_s1 = f64::NEG_INFINITY;
+    let mut min_after_s1 = f64::INFINITY;
+    let mut max_final = f64::NEG_INFINITY;
+    let mut min_final = f64::INFINITY;
+    let n_cycles = 20;
+    let samples_per_cycle = (sample_rate / freq) as usize;
+    for i in 0..(n_cycles * samples_per_cycle) {
+        let t = i as f64 / sample_rate;
+        let input = amplitude * (2.0 * std::f64::consts::PI * freq * t).sin();
+        // Process stage 0 (C_in) only
+        let s0_out = if let Some(crate::compiler::compiled::Stage::Wdf(ref mut s0)) = proc2.stages.get_mut(0) {
+            s0.process(input)
+        } else { input };
+        // Process stage 1 (triode MultiNl)
+        let s1_out = if let Some(crate::compiler::compiled::Stage::MultiNl(ref mut s1)) = proc2.stages.get_mut(1) {
+            s1.process(s0_out)
+        } else { s0_out };
+        // Process stage 2 (R_plate, C_out, R_load)
+        let s2_out = if let Some(crate::compiler::compiled::Stage::Wdf(ref mut s2)) = proc2.stages.get_mut(2) {
+            s2.process(s1_out)
+        } else { s1_out };
+        if i >= 10 * samples_per_cycle {
+            max_after_s1 = max_after_s1.max(s1_out);
+            min_after_s1 = min_after_s1.min(s1_out);
+            max_final = max_final.max(s2_out);
+            min_final = min_final.min(s2_out);
+        }
+    }
+    let gain_s1 = (max_after_s1 - min_after_s1) / (2.0 * amplitude);
+    let gain_final = (max_final - min_final) / (2.0 * amplitude);
+    eprintln!("Gain after stage 1 (triode): {:.1}x ({:.1}dB), pp={:.3}V",
+        gain_s1, 20.0*gain_s1.log10(), max_after_s1-min_after_s1);
+    eprintln!("Gain after stage 2 (final): {:.1}x ({:.1}dB), pp={:.3}V",
+        gain_final, 20.0*gain_final.log10(), max_final-min_final);
+
+    // Dump stage 2 structure
+    let compiled3 = crate::compiler::compile_pedal(&pedal, sample_rate).expect("compile3");
+    eprintln!("\n=== Stage structures ===");
+    for (si, s) in compiled3.stages.iter().enumerate() {
+        match s {
+            crate::compiler::compiled::Stage::Wdf(w) => {
+                eprintln!("  stage {si}: WDF (debug: {})", w.debug_label);
+            }
+            crate::compiler::compiled::Stage::MultiNl(m) => {
+                eprintln!("  stage {si}: MultiNl n_nl={} n_passive={} output_port={}",
+                    m.n_nl, m.passive_children.len(), m.output_port);
+            }
+            _ => eprintln!("  stage {si}: other"),
+        }
+    }
+}
