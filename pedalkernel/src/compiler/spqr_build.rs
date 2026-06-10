@@ -17,6 +17,7 @@ use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
 use crate::dsl::PedalDef;
 use crate::oversampling::{Oversampler, OversamplingFactor};
+use pedalkernel_rt::thermal::ThermalModel;
 
 /// A stage built from the SPQR pipeline.
 pub(super) enum BuiltStage {
@@ -126,7 +127,11 @@ pub fn compile_via_spqr_with_options(
             delay_lines: Vec::new(),
             vcos: Vec::new(),
             vcas: Vec::new(),
-            thermal: None,
+            thermal: if options.thermal {
+                Some(ThermalModel::silicon_standard(sample_rate))
+            } else {
+                None
+            },
             tolerance_seed: 0,
             opamp_stages: Vec::new(),
             power_supply: None,
@@ -1040,6 +1045,18 @@ pub fn compile_via_spqr_with_options(
         (d, ff as u8) // false=0 sorts before true=1
     });
 
+    // When thermal is enabled, snapshot base BJT models so apply_thermal()
+    // can modulate them without accumulating multipliers.
+    if options.thermal {
+        for stage in &mut stages {
+            if let Stage::Wdf(wdf) = stage {
+                if let RootKind::Bjt(bjt) = &wdf.root {
+                    wdf.base_bjt_model = Some(bjt.model.clone());
+                }
+            }
+        }
+    }
+
     let mut compiled = CompiledPedal {
         stages,
         push_pull_stages: Vec::new(),
@@ -1059,7 +1076,11 @@ pub fn compile_via_spqr_with_options(
         delay_lines: Vec::new(),
         vcos: Vec::new(),
         vcas: Vec::new(),
-        thermal: None,
+        thermal: if options.thermal {
+            Some(ThermalModel::silicon_standard(sample_rate))
+        } else {
+            None
+        },
         tolerance_seed: 0,
         opamp_stages: Vec::new(),
         power_supply: None,

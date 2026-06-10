@@ -13,6 +13,7 @@ use super::compiled::*;
 // Compile options
 // ═��═══════════════════════════════════════════════════════��═════════════════
 
+#[derive(Clone)]
 pub struct CompileOptions {
     pub oversampling: OversamplingFactor,
     pub tolerance: ToleranceEngine,
