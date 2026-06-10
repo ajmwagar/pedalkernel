@@ -36,6 +36,9 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
             || label_lower.contains("volume")
             || label_lower.contains("output");
         if is_output_divider {
+            if pot_wiper_connects_directly_to_out(pedal, &ctrl.component_id) {
+                continue;
+            }
             if let super::compiled::ControlTarget::PotInStage(stage_idx) = &ctrl.target {
                 let default = pedal
                     .controls
@@ -91,6 +94,25 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
     for ctrl in &pedal.controls {
         compiled.set_control(&ctrl.label, ctrl.default);
     }
+}
+
+fn pot_wiper_connects_directly_to_out(pedal: &PedalDef, comp_id: &str) -> bool {
+    fn is_wiper(pin: &crate::dsl::Pin, comp_id: &str) -> bool {
+        matches!(
+            pin,
+            crate::dsl::Pin::ComponentPin { component, pin }
+                if component == comp_id && (pin == "w" || pin == "wiper")
+        )
+    }
+
+    fn is_out(pin: &crate::dsl::Pin) -> bool {
+        matches!(pin, crate::dsl::Pin::Reserved(name) if name == "out")
+    }
+
+    pedal.nets.iter().any(|net| {
+        (is_wiper(&net.from, comp_id) && net.to.iter().any(is_out))
+            || (is_out(&net.from) && net.to.iter().any(|pin| is_wiper(pin, comp_id)))
+    })
 }
 
 /// Find every stage that owns a pot and create bindings.

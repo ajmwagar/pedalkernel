@@ -1686,8 +1686,11 @@ fn build_pot_divider(
     // Output extracted at the junction (series_junction_voltage).
     let divider = DynNode::Series(Box::new(leaves.remove(0)), Box::new(leaves.remove(0)));
 
-    // Tree: VS in series with the divider chain
-    let tree = with_voltage_source(divider);
+    // Tree: VS in series with the divider chain. A dedicated pot divider is
+    // normally driven by a low-impedance previous stage/output source; using
+    // the generic 10k passive-filter source impedance turns a 100k midpoint
+    // level pot into a 0.45x divider before control scaling.
+    let tree = with_voltage_source_rp(divider, 1.0);
 
     let oversampler = Oversampler::new(OversamplingFactor::X1);
     Ok(BuiltStage::Wdf(WdfStage::new(

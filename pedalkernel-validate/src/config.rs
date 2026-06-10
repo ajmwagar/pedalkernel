@@ -1354,6 +1354,26 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                tests.insert(
+                    "output_wiper_divider".to_string(),
+                    TestCase {
+                        circuit: "extraction/output_wiper_divider.pedal".to_string(),
+                        description: "Three-terminal output pot at default midpoint".to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            amplitude: 1.0,
+                            duration: 0.1,
+                            label: Some("sine".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-50.0),
+                            peak_error_db: Some(-40.0),
+                            ..Default::default()
+                        },
+                    },
+                );
+
                 tests
             },
         },

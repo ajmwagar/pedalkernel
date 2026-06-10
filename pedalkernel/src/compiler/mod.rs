@@ -57,6 +57,8 @@ mod black_feedback_tests;
 #[cfg(test)]
 mod diode_polarity_tests;
 #[cfg(test)]
+mod extraction_candidate_tests;
+#[cfg(test)]
 mod feedforward_tests;
 #[cfg(test)]
 mod general_mna_tests;
