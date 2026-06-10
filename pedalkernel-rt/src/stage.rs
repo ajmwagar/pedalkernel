@@ -4389,7 +4389,6 @@ pub type IirStateMap = LtiStateMap<MnaNodeId>;
 ///
 /// Dimensions correspond to independent control labels (ganged pots = 1 dim).
 /// Table size: `steps^n_dims × 5` crate::Wave entries.
-#[cfg(feature = "biquad-table")]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BiquadTable {
@@ -4403,7 +4402,6 @@ pub struct BiquadTable {
     pub coeffs: alloc::vec::Vec<crate::Wave>,
 }
 
-#[cfg(feature = "biquad-table")]
 impl BiquadTable {
     /// Number of coefficients per entry (b0, b1, b2, a1, a2).
     const COEFF_COUNT: usize = 5;
@@ -4504,7 +4502,6 @@ pub struct IirStage {
     pub output_binding: Option<PortBinding>,
     /// Precomputed biquad lookup table (compile-time sweeps over pot positions).
     /// When present, `set_pot` interpolates from this instead of the DC gain formula.
-    #[cfg(feature = "biquad-table")]
     pub biquad_table: Option<BiquadTable>,
     /// Sample rate (needed for GBW recomputation on gain change).
     pub sample_rate: crate::Wave,
@@ -4540,7 +4537,6 @@ impl IirStage {
             state_map: IirStateMap::empty(transformed_state_count),
             input_binding: None,
             output_binding: None,
-            #[cfg(feature = "biquad-table")]
             biquad_table: None,
             sample_rate,
             gbw_state: 0.0,
@@ -4655,11 +4651,11 @@ impl IirStage {
 
     /// Update pot position and recompute IIR coefficients.
     ///
-    /// With `biquad-table` feature: interpolates full biquad from precomputed
-    /// table. Handles cutoff, resonance, and any other pot — all coefficients
-    /// update correctly for frequency-dependent changes.
+    /// When a lookup table is present, interpolates the full biquad from
+    /// precomputed MNA sweeps. Handles cutoff, resonance, and other generic
+    /// frequency-shaping pots without corrupting a single numerator term.
     ///
-    /// Without table: falls back to DC gain recalculation (Rf/Ri).
+    /// Structured feedback stages can use direct gain/biquad recomputation.
     /// No heap allocations — all state is pre-allocated.
     pub fn set_pot(&mut self, comp_id: &str, position: crate::Wave) {
         let binding_idx = match self.pot_bindings.iter().position(|b| b.comp_id == comp_id) {
@@ -4671,7 +4667,6 @@ impl IirStage {
         let binding = self.pot_bindings[binding_idx].clone();
 
         // ── Table lookup path (full biquad interpolation) ──
-        #[cfg(feature = "biquad-table")]
         if let Some(ref table) = self.biquad_table {
             // Build position vector from all pot bindings, matched by comp_id
             let mut positions = alloc::vec![0.0 as crate::Wave; table.dim_labels.len()];
@@ -4753,6 +4748,10 @@ impl IirStage {
         }
 
         // ── Fallback: DC gain recalculation ──
+        if binding.role == IirPotRole::Generic {
+            return;
+        }
+
         let rf = binding.fixed_series_r + position * binding.max_r;
         let ri = binding.ri;
         let dc_gain = if ri > 0.0 { -(rf / ri) } else { -1.0 };

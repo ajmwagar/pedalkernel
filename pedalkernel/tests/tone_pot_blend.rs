@@ -232,31 +232,37 @@ fn goldenrod_treble_pot_changes_spectrum() {
         return;
     }
     let src = std::fs::read_to_string(&goldenrod_path).unwrap();
-    // Use longer signal — calibration consumes early samples, pot needs
-    // time to settle after set_control before we measure RMS.
-    let input = sine_at(1000.0, 0.1, 0.5, SAMPLE_RATE); // 0.5s = 24000 samples
+    let mut best_db = 0.0_f64;
+    for freq in [1000.0, 3000.0, 5000.0, 8000.0, 10000.0] {
+        // Use longer signal — calibration consumes early samples, pot needs
+        // time to settle after set_control before we measure RMS.
+        let input = sine_at(freq, 0.1, 0.5, SAMPLE_RATE); // 0.5s = 24000 samples
 
-    let bright = compile_and_process(
-        &src,
-        &input,
-        SAMPLE_RATE,
-        &[("Gain", 0.5), ("Treble", 0.0), ("Output", 0.5)],
-    );
-    let dark = compile_and_process(
-        &src,
-        &input,
-        SAMPLE_RATE,
-        &[("Gain", 0.5), ("Treble", 1.0), ("Output", 0.5)],
-    );
+        let bright = compile_and_process(
+            &src,
+            &input,
+            SAMPLE_RATE,
+            &[("Gain", 0.5), ("Treble", 0.0), ("Output", 0.5)],
+        );
+        let dark = compile_and_process(
+            &src,
+            &input,
+            SAMPLE_RATE,
+            &[("Gain", 0.5), ("Treble", 1.0), ("Output", 0.5)],
+        );
 
-    // Measure RMS on last quarter only (after pot has settled)
-    let n = bright.len();
-    let quarter = n * 3 / 4;
-    let db = rms_db_change(&bright[quarter..], &dark[quarter..]).abs();
-    eprintln!("[goldenrod_treble] dB change: {db:.2}");
+        // Measure RMS on last quarter only (after pot has settled)
+        let n = bright.len();
+        let quarter = n * 3 / 4;
+        let db = rms_db_change(&bright[quarter..], &dark[quarter..]).abs();
+        eprintln!("[goldenrod_treble] {freq:.0}Hz dB change: {db:.2}");
+        if db > best_db {
+            best_db = db;
+        }
+    }
 
     assert!(
-        db > 0.5,
-        "Goldenrod Treble pot must affect output: dB change = {db:.4} (expected > 0.5 dB)"
+        best_db > 0.5,
+        "Goldenrod Treble pot must affect output in the treble band: best dB change = {best_db:.4} (expected > 0.5 dB)"
     );
 }

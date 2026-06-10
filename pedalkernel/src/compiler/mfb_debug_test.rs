@@ -454,6 +454,50 @@ fn trace_mfb_hpf_fixed_compilation() {
     }
 }
 
+/// Bead pedalkernel-5sft repro: Rauch/MFB HPF with the C-C input path
+/// terminating at U1.neg and a resistive feedback path from neg to out.
+const MFB_HPF_BEAD_REPRO: &str = r#"pedal "MFB HPF Bead Repro" {
+  supply 9V
+  components {
+    U1: opamp(tl072)
+    C1: cap(10n)
+    C2: cap(10n)
+    Cutoff_R1: pot(100k, b)
+    R_fb: resistor(47k)
+    R_out: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> C2.a
+    C2.b -> U1.neg
+    C1.b -> Cutoff_R1.a
+    Cutoff_R1.b -> gnd
+    U1.neg -> R_fb.a
+    R_fb.b -> U1.out
+    U1.pos -> gnd
+    U1.out -> R_out.a
+    R_out.b -> out
+  }
+  controls {
+    Cutoff_R1.position -> "Cutoff" [1.0, 0.05] = 0.5
+  }
+}"#;
+
+#[test]
+fn mfb_hpf_bead_repro_is_12db_highpass() {
+    let pedal = parse_pedal_file(MFB_HPF_BEAD_REPRO).unwrap();
+    let mut proc = compile_via_spqr(&pedal, SR).unwrap();
+
+    let low = gain_db_at(&mut proc, 100.0, 0.5, 0.0);
+    let high = gain_db_at(&mut proc, 10_000.0, 0.5, 0.0);
+
+    eprintln!("MFB HPF bead repro: 100Hz={low:+.2}dB 10kHz={high:+.2}dB");
+    assert!(
+        high > low + 24.0,
+        "MFB HPF should reject low frequencies with a 2-pole high-pass slope: 100Hz={low:.2}dB, 10kHz={high:.2}dB"
+    );
+}
+
 #[test]
 fn trace_mfb_fixed_compilation() {
     eprintln!("\n=== MFB with Fixed R ===");

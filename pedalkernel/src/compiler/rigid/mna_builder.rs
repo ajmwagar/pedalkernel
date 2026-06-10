@@ -166,7 +166,9 @@ pub(super) fn build_mna(
 
         match edge_kind {
             EdgeKind::Linear => {
-                if let Some(r) = comp.kind.resistance() {
+                if comp.kind.is_pot() {
+                    comp.kind.stamp_mna(&comp.id, n1, n2, &mut mna, sample_rate);
+                } else if let Some(r) = comp.kind.resistance() {
                     mna.stamp_resistor(n1, n2, r);
                 }
             }

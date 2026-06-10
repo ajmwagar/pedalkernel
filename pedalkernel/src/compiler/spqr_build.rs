@@ -2546,20 +2546,42 @@ fn merge_cross_reactive_groups_into_active_groups(
     groups: &mut Vec<super::signal_flow::FlowGroup>,
     graph: &super::graph::CircuitGraph,
 ) {
+    let rails = super::signal_flow::rail_nodes(graph);
+    let is_boundary_node = |node: super::graph::NodeId| -> bool {
+        rails.contains(&node) || node == graph.in_node || node == graph.out_node
+    };
+
     let mut active_terminal_nodes: Vec<std::collections::HashSet<super::graph::NodeId>> =
         Vec::with_capacity(groups.len());
+    let mut active_reactive_nodes: Vec<std::collections::HashSet<super::graph::NodeId>> =
+        Vec::with_capacity(groups.len());
     for group in groups.iter() {
-        let mut nodes = std::collections::HashSet::new();
+        let mut terminal_nodes = std::collections::HashSet::new();
+        let mut reactive_nodes = std::collections::HashSet::new();
         if !can_absorb_cross_reactive_passives(group, graph) {
-            active_terminal_nodes.push(nodes);
+            active_terminal_nodes.push(terminal_nodes);
+            active_reactive_nodes.push(reactive_nodes);
             continue;
         }
         for &eidx in &group.active_edges {
             let edge = &graph.edges[eidx];
-            nodes.insert(edge.node_a);
-            nodes.insert(edge.node_b);
+            terminal_nodes.insert(edge.node_a);
+            terminal_nodes.insert(edge.node_b);
         }
-        active_terminal_nodes.push(nodes);
+        for eidx in group.all_edges() {
+            if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Reactive {
+                continue;
+            }
+            let edge = &graph.edges[eidx];
+            if !is_boundary_node(edge.node_a) {
+                reactive_nodes.insert(edge.node_a);
+            }
+            if !is_boundary_node(edge.node_b) {
+                reactive_nodes.insert(edge.node_b);
+            }
+        }
+        active_terminal_nodes.push(terminal_nodes);
+        active_reactive_nodes.push(reactive_nodes);
     }
 
     let mut merge_into: Vec<Option<usize>> = vec![None; groups.len()];
@@ -2576,15 +2598,29 @@ fn merge_cross_reactive_groups_into_active_groups(
             continue;
         }
 
-        for (target_idx, nodes) in active_terminal_nodes.iter().enumerate() {
+        let mut reactive_group_nodes = std::collections::HashSet::new();
+        for &eidx in &reactive_edges {
+            let edge = &graph.edges[eidx];
+            if !is_boundary_node(edge.node_a) {
+                reactive_group_nodes.insert(edge.node_a);
+            }
+            if !is_boundary_node(edge.node_b) {
+                reactive_group_nodes.insert(edge.node_b);
+            }
+        }
+
+        for (target_idx, terminal_nodes) in active_terminal_nodes.iter().enumerate() {
             if target_idx == source_idx || groups[target_idx].active_edges.is_empty() {
                 continue;
             }
             let bridges_active_terminals = reactive_edges.iter().any(|&eidx| {
                 let edge = &graph.edges[eidx];
-                nodes.contains(&edge.node_a) && nodes.contains(&edge.node_b)
+                terminal_nodes.contains(&edge.node_a) && terminal_nodes.contains(&edge.node_b)
             });
-            if bridges_active_terminals {
+            let shares_reactive_internal_node = reactive_group_nodes
+                .iter()
+                .any(|node| active_reactive_nodes[target_idx].contains(node));
+            if bridges_active_terminals || shares_reactive_internal_node {
                 merge_into[source_idx] = Some(target_idx);
                 break;
             }

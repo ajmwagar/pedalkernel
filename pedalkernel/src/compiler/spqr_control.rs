@@ -120,7 +120,7 @@ fn find_pot_bindings(
         .map(|p| (p.max_r, p.taper))
         .unwrap_or((100_000.0, PotTaper::B));
 
-    compiled
+    let mut bindings: Vec<_> = compiled
         .stages
         .iter()
         .enumerate()
@@ -129,7 +129,21 @@ fn find_pot_bindings(
                 .control_target_for_pot(idx, comp_id)
                 .map(|target| make_binding(ctrl, comp_id, max_r, taper, target))
         })
-        .collect()
+        .collect();
+
+    if bindings.len() <= 1 {
+        return bindings;
+    }
+
+    // One physical pot can be present in multiple extracted stages. Runtime
+    // control application fans out by component id to every owning stage, so a
+    // single UI/control binding is enough and avoids duplicate host parameters.
+    let label = ctrl.label.to_lowercase();
+    if label.contains("level") || label.contains("volume") || label.contains("output") {
+        bindings.pop().into_iter().collect()
+    } else {
+        bindings.into_iter().take(1).collect()
+    }
 }
 
 fn make_binding(

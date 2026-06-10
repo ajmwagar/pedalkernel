@@ -726,6 +726,21 @@ pub(super) fn build_rigid_from_group_with_hints(
         }
     }
 
+    if stats.vcvs_count == 1 && stats.nl_count == 0 {
+        if let Some(g) = group {
+            if let Some(stage) = try_build_linear_feedback_wdf_adaptor(
+                g,
+                &stats,
+                graph,
+                sample_rate,
+                supply_voltage,
+                bias_v_max,
+            ) {
+                return Ok(BuiltStage::Wdf(stage));
+            }
+        }
+    }
+
     // ── IIR: O(1)/sample, ≤2 reactive elements ──────────────────────
     if try_iir || (allow_iir && try_black_feedback) {
         let pendant_trees = Vec::new();
@@ -773,7 +788,6 @@ pub(super) fn build_rigid_from_group_with_hints(
                     // Build biquad lookup table for pot-controlled stages.
                     // Each pot becomes its own dimension (ganged pots sharing a
                     // control label are handled at the BiValve/set_pot level).
-                    #[cfg(feature = "biquad-table")]
                     if !stage.pot_bindings.is_empty() {
                         let labels: Vec<String> = stage
                             .pot_bindings
@@ -1105,11 +1119,14 @@ fn try_build_linear_feedback_wdf_adaptor(
     let mut opamp = opamp_root::make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
     opamp.set_gbw_gain((zf.port_resistance() / input_r).abs().max(1.0));
 
+    let input_node = other(input_edge, neg)?;
     let mut stage = WdfStage::new(
         DynNode::VoltageSource(0.0, 1.0),
         RootKind::Passthrough,
         Oversampler::new(OversamplingFactor::X1),
     );
+    stage.injection_node_id = input_node;
+    stage.output_node_id = out;
     stage.opamp_wdf_adaptor = Some(OpAmpWdfAdaptor::new(
         zi,
         zf,

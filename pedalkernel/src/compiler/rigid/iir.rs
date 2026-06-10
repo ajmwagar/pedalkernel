@@ -204,7 +204,6 @@ pub(in crate::compiler) fn build_iir_stage(
 /// `steps`: grid resolution per dimension (e.g. 64).
 ///
 /// Table entry index for positions (d0, d1, ...): d0 + d1*steps + d2*steps² + ...
-#[cfg(feature = "biquad-table")]
 pub(in crate::compiler) fn build_biquad_table(
     edge_indices: &[usize],
     pendant_trees: &[(DynNode, NodeId)],
@@ -222,6 +221,7 @@ pub(in crate::compiler) fn build_biquad_table(
     let n_dims = control_labels.len();
     let total_entries = steps.checked_pow(n_dims as u32)?;
     let mut coeffs = Vec::with_capacity(total_entries * 5);
+    let invalid_coeffs = [f64::NAN; 5];
 
     // Identify pot edges: for each control label, find the pot component edges
     // and their MNA node pairs. We'll re-stamp these at each grid point.
@@ -231,7 +231,19 @@ pub(in crate::compiler) fn build_biquad_table(
         max_r: f64,
         taper: crate::dsl::PotTaper,
         dim: usize, // which control dimension this pot belongs to
+        leg: PotLeg,
     }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PotLeg {
+        TwoTerminal,
+        AToWiper,
+        WiperToB,
+    }
+
+    let node_for_pin = |comp_id: &str, pin: &str| -> Option<NodeId> {
+        graph.node_names.get(&format!("{comp_id}.{pin}")).copied()
+    };
 
     let mut pot_infos: Vec<PotInfo> = Vec::new();
     for &eidx in edge_indices {
@@ -248,12 +260,32 @@ pub(in crate::compiler) fn build_biquad_table(
                     .as_any()
                     .downcast_ref::<super::super::components::Potentiometer>()
                 {
+                    let wiper_node =
+                        node_for_pin(&comp.id, "w").or_else(|| node_for_pin(&comp.id, "wiper"));
+                    let a_node = node_for_pin(&comp.id, "a");
+                    let b_node = node_for_pin(&comp.id, "b");
+                    let leg = match (a_node, wiper_node, b_node) {
+                        (Some(a), Some(w), _)
+                            if (e.node_a == a && e.node_b == w)
+                                || (e.node_a == w && e.node_b == a) =>
+                        {
+                            PotLeg::AToWiper
+                        }
+                        (_, Some(w), Some(b))
+                            if (e.node_a == w && e.node_b == b)
+                                || (e.node_a == b && e.node_b == w) =>
+                        {
+                            PotLeg::WiperToB
+                        }
+                        _ => PotLeg::TwoTerminal,
+                    };
                     pot_infos.push(PotInfo {
                         edge_idx: eidx,
                         comp_idx: e.comp_idx,
                         max_r: pot.max_r,
                         taper: pot.taper,
                         dim: di,
+                        leg,
                     });
                 }
                 break;
@@ -324,11 +356,19 @@ pub(in crate::compiler) fn build_biquad_table(
             let n1 = node_to_mna(e.node_a);
             let n2 = node_to_mna(e.node_b);
 
-            // Delta conductance: new - old
-            let old_r = (pot.taper.apply(0.5) * pot.max_r).max(1.0);
+            let resistance_for = |position: f64| {
+                let tapered = pot.taper.apply(position);
+                match pot.leg {
+                    PotLeg::TwoTerminal | PotLeg::AToWiper => (tapered * pot.max_r).max(1.0),
+                    PotLeg::WiperToB => ((1.0 - tapered) * pot.max_r).max(1.0),
+                }
+            };
+
+            // Delta conductance: new - old, matching the default 0.5 MNA stamp.
+            let old_r = resistance_for(0.5);
             let old_g = 1.0 / old_r;
             let pos = dim_positions[pot.dim];
-            let new_r = (pot.taper.apply(pos) * pot.max_r).max(1.0);
+            let new_r = resistance_for(pos);
             let new_g = 1.0 / new_r;
             let delta_g = new_g - old_g;
 
@@ -385,7 +425,7 @@ pub(in crate::compiler) fn build_biquad_table(
                     if iir_coeffs_are_stable_and_finite(&b, &a) {
                         coeffs.extend_from_slice(&[b0, b1, 0.0, -a_val, 0.0]);
                     } else {
-                        coeffs.extend_from_slice(&[1.0, 0.0, 0.0, 0.0, 0.0]);
+                        coeffs.extend_from_slice(&invalid_coeffs);
                     }
                 } else {
                     let a11 = a_d[0];
@@ -408,13 +448,31 @@ pub(in crate::compiler) fn build_biquad_table(
                     if iir_coeffs_are_stable_and_finite(&b, &a) {
                         coeffs.extend_from_slice(&[b0, b1, b2, da1, da2]);
                     } else {
-                        coeffs.extend_from_slice(&[1.0, 0.0, 0.0, 0.0, 0.0]);
+                        coeffs.extend_from_slice(&invalid_coeffs);
                     }
                 }
             } else {
-                // Can't extract — fill with passthrough
-                coeffs.extend_from_slice(&[1.0, 0.0, 0.0, 0.0, 0.0]);
+                coeffs.extend_from_slice(&invalid_coeffs);
             }
+        }
+    }
+
+    for entry in 0..total_entries {
+        let base = entry * 5;
+        if coeffs[base].is_finite() {
+            continue;
+        }
+
+        let Some(nearest_valid) = (0..total_entries)
+            .filter(|&candidate| coeffs[candidate * 5].is_finite())
+            .min_by_key(|&candidate| candidate.abs_diff(entry))
+        else {
+            return None;
+        };
+
+        let nearest_base = nearest_valid * 5;
+        for c in 0..5 {
+            coeffs[base + c] = coeffs[nearest_base + c];
         }
     }
 
