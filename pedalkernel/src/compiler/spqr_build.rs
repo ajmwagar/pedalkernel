@@ -11,7 +11,10 @@ use super::classify::NonlinearKind;
 use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
-use super::rigid::{build_general_mna_from_edges, build_rigid, build_rigid_from_group};
+use super::rigid::{
+    build_general_mna_from_edges, build_general_mna_from_edges_with_supply, build_rigid,
+    build_rigid_from_group,
+};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::stage::{IirStage, MultiNlStage, RootKind, StateSpaceStage, WdfStage};
 use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
@@ -1298,6 +1301,25 @@ pub(super) fn build_spqr_stage(
                     &graph.node_names,
                 )
                 .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
+
+            // Triodes with a connected grid node must be compiled as a 3-port
+            // grouped nonlinear stage (TriodeThreePort / VariMuThreePort).
+            // The one-port TriodeRoot path folds the grid network into the WDF
+            // tree and never receives an actual Vgk from the circuit, which
+            // destroys the harmonic structure even when the grid never conducts.
+            if let super::classify::NonlinearKind::Triode {
+                grid_node: Some(_),
+                ..
+            } = &nl_kind
+            {
+                return build_general_mna_from_edges_with_supply(
+                    &edge_indices,
+                    graph,
+                    _sample_rate,
+                    supply_voltage,
+                )
+                .map(BuiltStage::MultiNl);
+            }
 
             // BJTs now use BjtRoot (single-port WDF root with external Vbe),
             // same as triodes use TriodeRoot. No MultiNL fallback needed.

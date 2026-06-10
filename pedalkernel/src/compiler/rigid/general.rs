@@ -20,7 +20,7 @@ use super::super::classify::NonlinearKind;
 use super::super::component::EdgeKind;
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
-use super::super::helpers::gummel_poon_model;
+use super::super::helpers::{gummel_poon_model, triode_model, vari_mu_model};
 use super::super::signal_flow::FlowGroup;
 use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
@@ -192,9 +192,18 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
     graph: &CircuitGraph,
     sample_rate: f64,
 ) -> Result<MultiNlStage, String> {
+    build_general_mna_from_edges_with_supply(all_edges, graph, sample_rate, 9.0)
+}
+
+/// Build from raw edge indices with explicit supply voltage.
+pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    supply_voltage: f64,
+) -> Result<MultiNlStage, String> {
     let oversampling = OversamplingFactor::X2;
     let effective_rate = sample_rate * oversampling.ratio() as f64;
-    let supply_voltage = 9.0; // TODO(#bias): pass from PedalDef via build_rigid_from_group
 
     // Step 1: Collect unique MNA nodes
     let mut node_set = collect_mna_nodes(all_edges, graph);
@@ -367,6 +376,29 @@ fn classify_nl_devices(
                 nl_terminals.push((*base_node, *emitter_node));
                 nl_terminals.push((*collector_node, *emitter_node));
                 for &n in &[*base_node, *collector_node, *emitter_node] {
+                    if !node_set.contains(&n)
+                        && n != graph.gnd_node
+                        && !graph.supply_nodes.contains(&n)
+                    {
+                        node_set.push(n);
+                    }
+                }
+            }
+            // Triode with a connected grid: add grid-cathode port (port 0)
+            // then plate-cathode port (port 1). This is what TriodeThreePort
+            // and VariMuThreePort expect: [Vgk, Vpk].
+            NonlinearKind::Triode {
+                plate_node,
+                cathode_node,
+                grid_node: Some(grid),
+                ..
+            } => {
+                let grid = *grid;
+                let plate = *plate_node;
+                let cathode = *cathode_node;
+                nl_terminals.push((grid, cathode));   // port 0: grid-cathode
+                nl_terminals.push((plate, cathode));  // port 1: plate-cathode
+                for &n in &[grid, plate, cathode] {
                     if !node_set.contains(&n)
                         && n != graph.gnd_node
                         && !graph.supply_nodes.contains(&n)
@@ -635,7 +667,10 @@ fn compute_dc_bias(
         (vec![0.0; n_nl], Vec::new())
     };
 
-    // BJT VBE bias correction
+    // Per-device port bias corrections.
+    // BJTs: clamp Vbe port to ±0.65V if the VCC injection gave zero.
+    // Triodes with grid: 2 ports each (Vgk, Vpk) — no extra clamping needed,
+    // VCC injection provides Vpk bias; Vgk starts at 0 (correct for cold start).
     let vbe_threshold = 0.65;
     let mut port_idx = 0usize;
     for kind in nl_kinds {
@@ -652,6 +687,18 @@ fn compute_dc_bias(
                 }
                 port_idx += 2;
             }
+            NonlinearKind::Triode {
+                grid_node: Some(_),
+                ..
+            } => {
+                // Port 0 = Vgk (grid-cathode), port 1 = Vpk (plate-cathode).
+                // Warm-start Vpk at half supply so the NR solver converges near
+                // the operating point on the first sample.
+                if port_idx + 1 < n_nl && dc_bias[port_idx + 1].abs() < 1.0 {
+                    dc_bias[port_idx + 1] = supply_voltage * 0.5;
+                }
+                port_idx += 2;
+            }
             _ => {
                 port_idx += 1;
             }
@@ -661,10 +708,27 @@ fn compute_dc_bias(
     (dc_bias, vcc_bias_all)
 }
 
-/// Step 7: Create NL device kinds or grouped BJT two-port models.
+/// Step 7: Create NL device kinds or grouped multi-port models.
+///
+/// Triodes with a connected grid node → `TriodeThreePort` / `VariMuThreePort`
+/// grouped path (2 ports each: [Vgk, Vpk]).
+/// BJTs → `BjtTwoPort` grouped path (2 ports each: [Vbe, Vce]).
+/// All other devices → single-port `NlDeviceKind` vector.
 fn create_nl_devices(
     nl_kinds: &[NonlinearKind],
 ) -> Result<(Vec<NlDeviceKind>, Option<MultiNlDeviceGroups>), String> {
+    // Check if all NL devices are triodes with a connected grid node.
+    let all_triode_with_grid = !nl_kinds.is_empty()
+        && nl_kinds.iter().all(|k| {
+            matches!(
+                k,
+                NonlinearKind::Triode {
+                    grid_node: Some(_),
+                    ..
+                }
+            )
+        });
+
     let all_bjt = nl_kinds.iter().all(|k| {
         matches!(
             k,
@@ -672,7 +736,37 @@ fn create_nl_devices(
         )
     });
 
-    if all_bjt && !nl_kinds.is_empty() {
+    if all_triode_with_grid {
+        let mut groups = Vec::new();
+        let mut offsets = Vec::new();
+        let mut offset = 0usize;
+        for kind in nl_kinds {
+            offsets.push(offset);
+            match kind {
+                NonlinearKind::Triode {
+                    model_name,
+                    parallel_count,
+                    is_vari_mu,
+                    ..
+                } => {
+                    if *is_vari_mu {
+                        let model = vari_mu_model(model_name);
+                        groups.push(NlDeviceGroupKind::VariMuThreePort(
+                            VariMuThreePort::new(model).with_parallel_count(*parallel_count),
+                        ));
+                    } else {
+                        let model = triode_model(model_name);
+                        groups.push(NlDeviceGroupKind::TriodeThreePort(
+                            TriodeThreePort::new(model).with_parallel_count(*parallel_count),
+                        ));
+                    }
+                    offset += 2;
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok((Vec::new(), Some(MultiNlDeviceGroups { groups, offsets })))
+    } else if all_bjt && !nl_kinds.is_empty() {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
         let mut offset = 0usize;
@@ -750,15 +844,25 @@ fn assemble_multi_nl_stage(
         for (g, group) in dg.groups.iter().enumerate() {
             let off = dg.offsets[g];
             max_group_ports = max_group_ports.max(group.n_ports());
-            if let NlDeviceGroupKind::BjtTwoPort(bjt) = group {
-                let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
-                if off < n_nl {
-                    let vbe = bjt.model.nf * bjt.model.vt * (1.0e-3_f64 / bjt.model.is).ln();
-                    initial_v[off] = sign * vbe.clamp(0.1, 0.8);
+            match group {
+                NlDeviceGroupKind::BjtTwoPort(bjt) => {
+                    let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+                    if off < n_nl {
+                        let vbe = bjt.model.nf * bjt.model.vt * (1.0e-3_f64 / bjt.model.is).ln();
+                        initial_v[off] = sign * vbe.clamp(0.1, 0.8);
+                    }
+                    if off + 1 < n_nl {
+                        initial_v[off + 1] = sign * supply_voltage * 0.5;
+                    }
                 }
-                if off + 1 < n_nl {
-                    initial_v[off + 1] = sign * supply_voltage * 0.5;
+                NlDeviceGroupKind::TriodeThreePort(_) | NlDeviceGroupKind::VariMuThreePort(_) => {
+                    // Port 0 = Vgk: start at 0 (cold grid, no bias signal yet).
+                    // Port 1 = Vpk: warm-start at half supply for faster convergence.
+                    if off + 1 < n_nl {
+                        initial_v[off + 1] = supply_voltage * 0.5;
+                    }
                 }
+                _ => {}
             }
         }
     }
