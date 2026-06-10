@@ -1,9 +1,27 @@
 # LTspice CHAN vs PedalKernel J-A Validation
 
-PedalKernel keeps Jiles-Atherton as the runtime nonlinear transformer core. The
-LTspice CHAN fixture in this directory is only an external behavioral reference:
-it checks that the J-A transformer is in the same broad family of saturated,
-hysteretic magnetic behavior without treating CHAN as the implementation target.
+PedalKernel keeps Jiles-Atherton as the runtime nonlinear transformer core.
+The LTspice CHAN fixture in this directory is only an external behavioral
+sanity reference: it checks that the J-A transformer is in the same broad
+family of saturated, hysteretic magnetic behavior without treating CHAN as the
+implementation target.
+
+This suite is named and tuned as `chan_behavioral_sanity_se` on purpose. Loose
+THD tolerance here does not mean tight THD validation was dropped; it means CHAN
+and J-A should not be treated as model-identical spectral references. Tight THD
+coverage belongs against a model-identical J-A SPICE/reference implementation
+and, for product work, against measured B-H loop fits from real iron.
+
+The CHAN comparison is still useful for model-agnostic checks such as:
+
+- Saturation onset drive level.
+- THD-vs-frequency trend: distortion concentrated low and vanishing by a few
+  hundred Hz.
+- Cycle energy / loop area within a broad band.
+
+Those checks catch geometry unit errors, Faraday scaling mistakes, sign flips,
+and broken bias/settling behavior without pretending CHAN and J-A have identical
+distortion spectra.
 
 Run the LTspice fixture:
 
@@ -27,7 +45,7 @@ cargo run -p pedalkernel-validate -- \
   import-ltspice-raw-golden \
   pedalkernel-validate/spice-circuits/magnetics/ja_vs_ltspice_chan_se.ltspice.raw \
   --suite magnetics_external \
-  --test ja_vs_ltspice_chan_se \
+  --test chan_behavioral_sanity_se \
   --signal sine \
   --trace 'V(out)' \
   --duration 0.1
@@ -41,7 +59,7 @@ cargo run -p pedalkernel-validate -- \
   --golden pedalkernel-validate/golden \
   import-csv-golden exported.csv \
   --suite magnetics_external \
-  --test ja_vs_ltspice_chan_se \
+  --test chan_behavioral_sanity_se \
   --signal sine \
   --column 'V(out)' \
   --duration 0.1
@@ -61,6 +79,7 @@ cargo run -p pedalkernel-validate -- \
   run --suite magnetics_external
 ```
 
-The tolerances are deliberately loose because CHAN and J-A are different
-hysteresis models. Tightening this suite should wait until we have measured
-transformer data or a vetted J-A SPICE reference.
+The amplitude tolerances are deliberately loose because CHAN and J-A are
+different hysteresis models. The THD tolerance is deliberately very loose for
+the same reason; it should not be tightened until the reference is a J-A
+SPICE/reference implementation or measured transformer data fitted to J-A.

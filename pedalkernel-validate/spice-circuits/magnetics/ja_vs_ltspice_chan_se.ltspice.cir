@@ -1,9 +1,9 @@
-* LTspice-only CHAN reference fixture for magnetics_external/ja_vs_ltspice_chan_se.
+* LTspice-only CHAN reference fixture for magnetics_external/chan_behavioral_sanity_se.
 * This is not an ngspice fixture. Run it in LTspice and export V(out) as CSV,
 * then import with:
 *   cargo run -p pedalkernel-validate -- --config pedalkernel-validate/ltspice-chan.yaml \
 *     --golden pedalkernel-validate/golden import-csv-golden exported.csv \
-*     --suite magnetics_external --test ja_vs_ltspice_chan_se --signal sine \
+*     --suite magnetics_external --test chan_behavioral_sanity_se --signal sine \
 *     --column V(out) --duration 0.1
 
 .param Np=2000 Ns={Np/26}
