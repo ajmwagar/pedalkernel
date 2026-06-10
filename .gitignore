@@ -10,6 +10,7 @@ Cargo.lock
 !examples/wav/**/*.wav
 *.mp3
 *.ogg
+*.tar.gz
 /output/
 tools/.venv/
 *.net
