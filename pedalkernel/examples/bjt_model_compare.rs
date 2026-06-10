@@ -1,7 +1,7 @@
 // Gummel-Poon BJT model showcase.
 // Run with: cargo run --example bjt_model_compare
 
-use pedalkernel::elements::GummelPoonModel;
+use pedalkernel::model_lookup::bjt_model_by_name;
 
 fn main() {
     println!("=== Gummel-Poon BJT Model ===\n");
@@ -15,7 +15,7 @@ fn main() {
     println!("{:>6} | {:>12}", "Vbe", "Ic (mA)");
     println!("{:-<6}-+-{:-<12}", "", "");
 
-    let gp_model = GummelPoonModel::by_name("2N3904");
+    let gp_model = bjt_model_by_name("2N3904");
 
     for vbe in vbe_points {
         // Evaluate Gummel-Poon model at typical Vce = 4.5 V

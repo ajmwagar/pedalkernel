@@ -179,7 +179,6 @@
 //! - [`compiler`] — netlist-to-WDF compiler: graph building, SPQR decomposition, stage synthesis
 //! - [`elements`] — WDF one-port elements (R, C, L) and nonlinear roots (diodes)
 //! - [`tree`] — WDF adaptors (series, parallel) and the processing engine
-//! - [`pedals`] — legacy pedal module (all pedals now use `.pedal` DSL files)
 //! - [`kicad`] — KiCad netlist export from the parsed AST
 //! - [`wav`] — WAV file I/O for offline rendering and testing
 //! - [`oversampling`] — antialiasing via oversampling at nonlinear stages
@@ -190,14 +189,11 @@
 
 pub mod board;
 pub mod compiler;
-pub mod debug;
 pub mod dsl;
 pub mod elements;
 pub mod fast_math;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
-#[cfg(feature = "hardware")]
-pub mod hw;
 pub mod kicad;
 pub mod loading;
 pub mod metering;
@@ -206,17 +202,12 @@ pub mod models;
 pub mod nonideal_fx;
 pub mod oversampling;
 pub mod pedalboard;
-pub mod pedals;
 pub mod pot_taper;
 pub mod precompute;
-#[cfg(feature = "runtime-warnings")]
-pub mod runtime_warnings;
 pub mod thermal;
 pub mod tolerance;
 pub mod tree;
 pub mod wav;
-
-pub use debug::DebugStats;
 
 /// Audio processor trait for pedals — re-exported from pedalkernel-rt.
 pub use pedalkernel_rt::PedalProcessor;
