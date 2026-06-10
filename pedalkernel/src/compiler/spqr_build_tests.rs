@@ -1040,3 +1040,84 @@ fn compile_via_spqr_single_bjt_stage() {
         "BJT should produce output: {output:.6}"
     );
 }
+
+/// Diagnostic: dump the SPQR group structure for the triode common-cathode circuit.
+#[test]
+fn diag_triode_common_cathode_groups() {
+    let src = r#"
+pedal "12AX7 Common Cathode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
+    eprintln!("Supply: {}V", supply_voltage);
+    eprintln!("Edges:");
+    for (i, e) in graph.edges.iter().enumerate() {
+        let comp = &graph.components[e.comp_idx];
+        eprintln!("  edge {i}: {} ({:?}) node_a={:?} node_b={:?}", comp.id, graph.effective_edge_kind(i), e.node_a, e.node_b);
+    }
+    let active_set: std::collections::HashSet<usize> =
+        graph.active_edge_indices.iter().copied().collect();
+    let all_edges: Vec<usize> = (0..graph.edges.len())
+        .filter(|i| !active_set.contains(i))
+        .collect();
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+    eprintln!("Groups: {}", groups.len());
+    for (gi, g) in groups.iter().enumerate() {
+        let edge_names: Vec<String> = g.all_edges().iter().map(|&eidx| {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            format!("{}({:?})", comp.id, graph.effective_edge_kind(eidx))
+        }).collect();
+        eprintln!("  group {gi}: feedback={} active={} edges={:?}", g.has_feedback(), g.active_edges.len(), edge_names);
+    }
+
+    // Also check stage count in compiled output
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    eprintln!("Compiled stages: {}", compiled.stages.len());
+    for (si, s) in compiled.stages.iter().enumerate() {
+        match s {
+            super::compiled::Stage::MultiNl(m) => {
+                eprintln!("  stage {si}: MultiNl n_nl={} n_passive={} output_port={}",
+                    m.n_nl, m.passive_children.len(), m.output_port);
+                eprintln!("    dc_bias={:.4?}", m.dc_bias);
+                eprintln!("    vcc_bias_all={:.4?}", m.vcc_bias_all);
+                eprintln!("    nl_port_resistances={:.1?}", m.nl_port_resistances);
+                eprintln!("    s_nl_adapted={:.6?}", m.scattering.s_nl_adapted);
+                eprintln!("    initial_v_prev={:.4?}", m.initial_v_prev);
+            }
+            super::compiled::Stage::Wdf(_) => eprintln!("  stage {si}: WDF"),
+            super::compiled::Stage::Iir(_) => eprintln!("  stage {si}: IIR"),
+            super::compiled::Stage::StateSpace(_) => eprintln!("  stage {si}: StateSpace"),
+            super::compiled::Stage::BlackFeedback(_) => eprintln!("  stage {si}: BlackFeedback"),
+        }
+    }
+}

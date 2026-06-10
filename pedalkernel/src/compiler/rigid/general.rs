@@ -282,7 +282,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
     );
 
     // Step 7: Create NL device groups
-    let (nl_devices, device_groups) = create_nl_devices(&nl_kinds)?;
+    let (nl_devices, device_groups) = create_nl_devices(&nl_kinds, supply_voltage)?;
 
     // Step 8: Assemble stage
     assemble_multi_nl_stage(
@@ -714,8 +714,13 @@ fn compute_dc_bias(
 /// grouped path (2 ports each: [Vgk, Vpk]).
 /// BJTs → `BjtTwoPort` grouped path (2 ports each: [Vbe, Vce]).
 /// All other devices → single-port `NlDeviceKind` vector.
+///
+/// `supply_voltage` sets the initial `v_max` on triode/vari-mu devices so that
+/// the MNA solver's plate-voltage shift (`vpk = v[1] + v_max`) is correct from
+/// the first Newton-Raphson iteration.
 fn create_nl_devices(
     nl_kinds: &[NonlinearKind],
+    supply_voltage: f64,
 ) -> Result<(Vec<NlDeviceKind>, Option<MultiNlDeviceGroups>), String> {
     // Check if all NL devices are triodes with a connected grid node.
     let all_triode_with_grid = !nl_kinds.is_empty()
@@ -752,12 +757,14 @@ fn create_nl_devices(
                     if *is_vari_mu {
                         let model = vari_mu_model(model_name);
                         groups.push(NlDeviceGroupKind::VariMuThreePort(
-                            VariMuThreePort::new(model).with_parallel_count(*parallel_count),
+                            VariMuThreePort::new_gnd_referenced(model, supply_voltage)
+                                .with_parallel_count(*parallel_count),
                         ));
                     } else {
                         let model = triode_model(model_name);
                         groups.push(NlDeviceGroupKind::TriodeThreePort(
-                            TriodeThreePort::new(model).with_parallel_count(*parallel_count),
+                            TriodeThreePort::new_gnd_referenced(model, supply_voltage)
+                                .with_parallel_count(*parallel_count),
                         ));
                     }
                     offset += 2;

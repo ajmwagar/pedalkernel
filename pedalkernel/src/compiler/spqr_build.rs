@@ -265,11 +265,30 @@ pub fn compile_via_spqr_with_options(
         feedback_groups.iter().enumerate().collect();
     // Track which ground-clip groups were merged into another group's stage
     let mut ground_clip_built: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // Track which passive edges were absorbed into a triode-context MNA stage.
+    // Their containing groups will be skipped to avoid double-processing.
+    let mut triode_absorbed_edges: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
     build_order.sort_by_key(|(_, g)| if g.has_feedback() { 1 } else { 0 });
 
     for &(gi, group) in &build_order {
         if group.all_edges().is_empty() {
             continue;
+        }
+
+        // Skip passive groups whose edges were ALL absorbed into a triode-context MNA stage.
+        // Groups with only some absorbed edges: their group_edges will be filtered below.
+        {
+            let group_edges = group.all_edges();
+            if !group_edges.is_empty()
+                && group_edges
+                    .iter()
+                    .all(|eidx| triode_absorbed_edges.contains(eidx))
+            {
+                #[cfg(test)]
+                eprintln!("  group {gi}: all edges absorbed into triode stage, skipping");
+                continue;
+            }
         }
 
         // Build debug label from component names (zero cost in release)
@@ -640,7 +659,12 @@ pub fn compile_via_spqr_with_options(
             // handling. If left inside a larger SPQR tree, the WDF wave
             // propagation produces V-shaped output at extreme positions.
             let group_edges = group.all_edges();
-            let mut remaining_edges = group_edges.clone();
+            // Remove any edges already absorbed into a triode-context MNA stage.
+            let mut remaining_edges: Vec<usize> = group_edges
+                .iter()
+                .copied()
+                .filter(|eidx| !triode_absorbed_edges.contains(eidx))
+                .collect();
 
             // Find pot component indices with 2 edges in this group.
             // Only extract pots that are OUTPUT dividers (wiper → out or
@@ -723,6 +747,84 @@ pub fn compile_via_spqr_with_options(
             if group_edges.is_empty() {
                 continue;
             } // All edges were pots
+
+            // ── Triode-with-grid detection: single-triode groups need context edges.
+            //
+            // Signal flow analysis classifies a standalone common-cathode triode as a
+            // group with only the triode NL edge (no passive claiming, no feedback).
+            // Calling build_general_mna_from_edges on just the triode edge would
+            // produce a degenerate MNA with no plate load or cathode network.
+            //
+            // Detect this case and collect ALL edges local to the triode's circuit
+            // (plate load, cathode bias, cathode bypass cap, grid leak — but NOT the
+            // input/output coupling capacitors). Build the full MNA and mark the
+            // absorbed passive edges so their groups are skipped.
+            if group_edges.len() == 1 {
+                let nl_edge_idx = group_edges[0];
+                if graph.effective_edge_kind(nl_edge_idx) == super::component::EdgeKind::Nonlinear {
+                    let e = &graph.edges[nl_edge_idx];
+                    let comp = &graph.components[e.comp_idx];
+                    if let Some((nl_kind, _)) = comp.kind.classify_nonlinear(
+                        &comp.id,
+                        e.node_a,
+                        e.node_b,
+                        graph.gnd_node,
+                        &graph.node_names,
+                    ) {
+                        if let super::classify::NonlinearKind::Triode {
+                            grid_node: Some(grid_node),
+                            ..
+                        } = nl_kind
+                        {
+                            let context_edges = collect_triode_context_edges(
+                                nl_edge_idx,
+                                &graph,
+                                &all_edges,
+                            );
+                            #[cfg(test)]
+                            eprintln!(
+                                "  group {gi}: triode-with-grid, context edges={:?}",
+                                context_edges.iter().map(|&eidx| {
+                                    let c = &graph.components[graph.edges[eidx].comp_idx];
+                                    c.id.as_str()
+                                }).collect::<Vec<_>>()
+                            );
+                            // Mark all non-NL context edges as absorbed so their
+                            // groups are skipped later.
+                            for &eidx in &context_edges {
+                                if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Nonlinear {
+                                    triode_absorbed_edges.insert(eidx);
+                                }
+                            }
+                            let built = super::rigid::build_general_mna_from_edges_with_supply(
+                                &context_edges,
+                                &graph,
+                                sample_rate,
+                                supply_voltage,
+                            )
+                            .map_err(|e| format!("Group {gi} (triode-context MNA): {e}"))?;
+                            // The grid node is the triode's audio input.
+                            // Use its BFS distance from in_node as the triode stage's
+                            // signal_flow_distance so it sorts between the input
+                            // coupling group (grid side) and the output coupling
+                            // group (plate side) in the processing chain.
+                            let triode_flow_dist = bfs_dist_from_in_node(grid_node, &graph)
+                                .unwrap_or(group_flow_distances[gi]);
+                            #[cfg(test)]
+                            eprintln!(
+                                "  group {gi}: triode flow_dist={triode_flow_dist} (grid BFS)"
+                            );
+                            push_stage!(
+                                BuiltStage::MultiNl(built),
+                                triode_flow_dist,
+                                group_label.clone(),
+                                is_bypass
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
 
             // ── Blockwise check: can this group be split into chained NL blocks?
             if let Some(built_stages) = super::blockwise::try_build_blockwise(
@@ -1302,25 +1404,6 @@ pub(super) fn build_spqr_stage(
                 )
                 .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
 
-            // Triodes with a connected grid node must be compiled as a 3-port
-            // grouped nonlinear stage (TriodeThreePort / VariMuThreePort).
-            // The one-port TriodeRoot path folds the grid network into the WDF
-            // tree and never receives an actual Vgk from the circuit, which
-            // destroys the harmonic structure even when the grid never conducts.
-            if let super::classify::NonlinearKind::Triode {
-                grid_node: Some(_),
-                ..
-            } = &nl_kind
-            {
-                return build_general_mna_from_edges_with_supply(
-                    &edge_indices,
-                    graph,
-                    _sample_rate,
-                    supply_voltage,
-                )
-                .map(BuiltStage::MultiNl);
-            }
-
             // BJTs now use BjtRoot (single-port WDF root with external Vbe),
             // same as triodes use TriodeRoot. No MultiNL fallback needed.
             let (mut root, base_diode_model) = create_root(&nl_kind, false);
@@ -1353,6 +1436,173 @@ pub(super) fn build_spqr_stage(
             _sample_rate,
         ),
     }
+}
+
+/// BFS distance from `graph.in_node` to `target` through ALL graph edges.
+/// Returns `None` if `target` is unreachable.
+fn bfs_dist_from_in_node(
+    target: super::graph::NodeId,
+    graph: &super::graph::CircuitGraph,
+) -> Option<usize> {
+    use std::collections::VecDeque;
+    let mut visited: hashbrown::HashMap<super::graph::NodeId, usize> = hashbrown::HashMap::new();
+    let mut queue: VecDeque<super::graph::NodeId> = VecDeque::new();
+    visited.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+    while let Some(node) = queue.pop_front() {
+        let dist = visited[&node];
+        if node == target {
+            return Some(dist);
+        }
+        for e in &graph.edges {
+            let (touches, other) = if e.node_a == node {
+                (true, e.node_b)
+            } else if e.node_b == node {
+                (true, e.node_a)
+            } else {
+                (false, node)
+            };
+            if touches && !visited.contains_key(&other) {
+                visited.insert(other, dist + 1);
+                queue.push_back(other);
+            }
+        }
+    }
+    None
+}
+
+/// Collect all edges that belong to a triode's local subcircuit.
+///
+/// Starting from the triode's plate, cathode, and grid nodes, performs a BFS
+/// through the graph collecting all passive (Linear/Reactive) edges. The BFS
+/// stops at any node that is:
+/// - `graph.gnd_node` or a supply node (VCC, global rail)
+/// - `graph.in_node` or `graph.out_node` (global signal boundary)
+///
+/// This lets a standalone common-cathode triode (which gets no passive claiming
+/// from signal_flow because it has no feedback path) gather its plate load,
+/// cathode bias resistor, and cathode bypass capacitor into the same MNA stage.
+///
+/// Returns the collected edge indices (including the triode's own NL edge).
+fn collect_triode_context_edges(
+    triode_nl_edge_idx: usize,
+    graph: &super::graph::CircuitGraph,
+    all_graph_edges: &[usize],
+) -> Vec<usize> {
+    use super::component::EdgeKind;
+
+    let e = &graph.edges[triode_nl_edge_idx];
+    let comp = &graph.components[e.comp_idx];
+
+    // Collect the triode's terminal nodes from its component pins.
+    let mut frontier_nodes: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for pin in ["plate", "cathode", "grid"] {
+        let key = format!("{}.{pin}", comp.id);
+        if let Some(&node) = graph.node_names.get(&key) {
+            frontier_nodes.insert(node);
+        }
+    }
+    // Also include the NL edge endpoints directly.
+    frontier_nodes.insert(e.node_a);
+    frontier_nodes.insert(e.node_b);
+
+    // Boundary nodes: stop BFS here (don't pull in coupling caps / grid leak
+    // that connects to the circuit's global input or output).
+    let is_global = |n: NodeId| -> bool {
+        n == graph.gnd_node
+            || graph.supply_nodes.contains(&n)
+            || n == graph.in_node
+            || n == graph.out_node
+    };
+
+    let mut collected_edges: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    collected_edges.insert(triode_nl_edge_idx);
+
+    let mut visited_nodes: std::collections::HashSet<NodeId> = frontier_nodes.clone();
+    let mut queue: std::collections::VecDeque<NodeId> = frontier_nodes.into_iter().collect();
+
+    while let Some(node) = queue.pop_front() {
+        if is_global(node) {
+            continue;
+        }
+        for &eidx in all_graph_edges {
+            if collected_edges.contains(&eidx) {
+                continue;
+            }
+            let edge = &graph.edges[eidx];
+            let kind = graph.effective_edge_kind(eidx);
+            // Only follow passive (Linear/Reactive) edges — don't cross into
+            // other NL devices.
+            if kind == EdgeKind::Nonlinear {
+                continue;
+            }
+            let (touches, other) = if edge.node_a == node {
+                (true, edge.node_b)
+            } else if edge.node_b == node {
+                (true, edge.node_a)
+            } else {
+                (false, node)
+            };
+            if !touches {
+                continue;
+            }
+
+            let comp = &graph.components[edge.comp_idx];
+
+            // Coupling capacitors (reactive elements connecting to in/out ports)
+            // are NOT part of the triode's local bias network. Exclude them.
+            // R_plate (plate→VCC) and R_cathode/C_cathode (cathode→GND) ARE
+            // included because they connect triode pins to supply rails.
+            if is_global(other) {
+                // other is a global node (VCC, GND, in_node, out_node).
+                // Include the edge only if it is a resistor (bias/load resistor
+                // connecting triode pin to a supply) OR if it is a reactive
+                // element whose global end is VCC/GND (bypass capacitor to GND
+                // is fine; coupling cap to in/out is not).
+                let other_is_signal_port =
+                    other == graph.in_node || other == graph.out_node;
+                if other_is_signal_port {
+                    // This is a coupling element (C_in: in→grid, C_out: plate→out).
+                    // Do NOT include — it would drag in/out signal domain into the MNA.
+                    continue;
+                }
+                // other is VCC or GND — include (plate load, cathode bias, bypass cap)
+                collected_edges.insert(eidx);
+                continue;
+            }
+
+            // other is a non-global internal node.
+            // Exclude coupling caps that lead toward the signal ports: if the
+            // component is reactive and the other node eventually only connects
+            // to in_node / out_node without passing through any resistor to a
+            // supply, it's a coupling cap. Use a simple one-hop check: if the
+            // only connections at 'other' (besides this edge) lead to in_node
+            // or out_node, it's an isolated node that is the output of a
+            // coupling cap chain — don't include.
+            let other_only_connects_to_signal_port = comp.kind.capacitance().is_some()
+                && graph.edges.iter().enumerate().all(|(other_eidx, other_e)| {
+                    if other_eidx == eidx {
+                        return true; // skip self
+                    }
+                    if other_e.node_a != other && other_e.node_b != other {
+                        return true; // doesn't touch other node
+                    }
+                    let far = if other_e.node_a == other { other_e.node_b } else { other_e.node_a };
+                    far == graph.in_node || far == graph.out_node || far == graph.gnd_node
+                });
+            if other_only_connects_to_signal_port {
+                continue;
+            }
+
+            collected_edges.insert(eidx);
+            if !visited_nodes.contains(&other) {
+                visited_nodes.insert(other);
+                queue.push_back(other);
+            }
+        }
+    }
+
+    collected_edges.into_iter().collect()
 }
 
 /// Determine which groups are on the audio signal path (in_node → ... → out_node).
