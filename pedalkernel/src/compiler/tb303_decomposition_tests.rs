@@ -607,19 +607,23 @@ pedal "Q12 To Two Rung Differential Diode Ladder" { supply 9V
 "#;
 
 /// Try to load a .pedal file from the pro crate's acidattack-core directory.
+///
+/// Tries several candidate relative paths so that tests work in both the normal
+/// checkout layout and inside a git worktree (which adds `.worktrees/{name}/`
+/// prefix levels to `CARGO_MANIFEST_DIR`).
 fn load_pro_pedal(filename: &str) -> Option<String> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let pro_path = format!(
-        "{}/../../pedalkernel-pro/crates/acidattack/acidattack-core/{filename}",
-        manifest_dir
-    );
-    match std::fs::read_to_string(&pro_path) {
-        Ok(s) => {
-            eprintln!("  loaded {filename} ({} bytes)", s.len());
-            Some(s)
+    let rel_suffix = format!("pedalkernel-pro/crates/acidattack/acidattack-core/{filename}");
+    // Try 2..=6 levels of `../` to find the correct parent depending on checkout layout.
+    for levels in 2..=6 {
+        let prefix: String = "../".repeat(levels);
+        let candidate = format!("{manifest_dir}/{prefix}{rel_suffix}");
+        if let Ok(s) = std::fs::read_to_string(&candidate) {
+            eprintln!("  loaded {filename} ({} bytes) from {candidate}", s.len());
+            return Some(s);
         }
-        Err(_) => None,
     }
+    None
 }
 
 fn tb303_bkm_vs_signals(
@@ -2443,7 +2447,6 @@ fn q12_to_two_rung_differential_diode_ladder_routes_into_bkm_boundary() {
 }
 
 #[test]
-#[ignore = "documents current Q12 collector boundary runtime-coupling gap; enable when bead 5 fixes per-boundary BKM drive"]
 fn q12_to_two_rung_differential_diode_ladder_handoff_is_lowpass() {
     let def = crate::dsl::parse_pedal_file(Q12_TO_TWO_RUNG_DIFFERENTIAL_DIODE_LADDER)
         .expect("parse failed");
