@@ -520,11 +520,12 @@ mod tests {
             trims: vec![],
             monitors: vec![],
             sidechains: vec![],
-            mirrors: std::collections::HashMap::new(),
+            mirrors: Default::default(),
             subtitle: None,
-            midi_bindings: vec![],
             calibrate: false,
             subcircuits: vec![],
+            ports: vec![],
+            init_hints: vec![],
         }
     }
 

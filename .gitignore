@@ -1,4 +1,6 @@
 /target
+# Per-crate target dirs (e.g. build-cache writes pedalkernel/target/test-cache)
+**/target/
 Cargo.lock
 *.swp
 *.swo
