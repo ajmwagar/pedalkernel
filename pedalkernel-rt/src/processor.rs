@@ -825,7 +825,8 @@ impl CompiledPedal {
                             | NlDeviceKind::DiodePair(_)
                             | NlDeviceKind::ExplicitDiode(_)
                             | NlDeviceKind::ExplicitDiodePair(_)
-                            | NlDeviceKind::Jfet(_) => {}
+                            | NlDeviceKind::Jfet(_)
+                            | NlDeviceKind::Ota(_) => {}
                         }
                     }
                     if let Some(ref mut dg) = mnl.device_groups {
@@ -844,7 +845,8 @@ impl CompiledPedal {
                                     | NlDeviceKind::DiodePair(_)
                                     | NlDeviceKind::ExplicitDiode(_)
                                     | NlDeviceKind::ExplicitDiodePair(_)
-                                    | NlDeviceKind::Jfet(_) => {}
+                                    | NlDeviceKind::Jfet(_)
+                                    | NlDeviceKind::Ota(_) => {}
                                 },
                             }
                         }
