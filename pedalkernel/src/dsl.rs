@@ -704,6 +704,8 @@ pub struct TransformerConfig {
     pub core_path_length: Option<f64>,
     /// Optional air gap length in meters.
     pub core_gap: Option<f64>,
+    /// Optional standing primary DC bias current in Amps.
+    pub dc_bias_current: Option<f64>,
     /// Optional Jiles-Atherton saturation magnetization in A/m.
     pub ja_ms: Option<f64>,
     /// Optional Jiles-Atherton anhysteretic shape parameter in A/m.
@@ -740,6 +742,7 @@ impl Default for TransformerConfig {
             core_area: None,
             core_path_length: None,
             core_gap: None,
+            dc_bias_current: None,
             ja_ms: None,
             ja_a: None,
             ja_alpha: None,
@@ -1764,6 +1767,8 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
                 tag("lp"),
                 tag("Rc"),
                 tag("rc"),
+                tag("Idc"),
+                tag("idc"),
             ))(remaining)
             {
                 let (input, _) = ws_comments(input)?;
@@ -1776,6 +1781,7 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
                     "Lm" | "lm" => config.magnetizing_inductance = Some(value),
                     "Lp" | "lp" => config.primary_inductance = value,
                     "Rc" | "rc" => config.core_loss_resistance = Some(value),
+                    "Idc" | "idc" => config.dc_bias_current = Some(value),
                     _ => unreachable!(),
                 }
                 remaining = input;
@@ -4745,7 +4751,7 @@ synth "CV Test" {
     #[test]
     fn parse_transformer_with_linear_model_fields() {
         let (_, (c, _)) = component_def(
-            "T4: transformer(10:1, JT11P1, Lp=2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k)",
+            "T4: transformer(10:1, JT11P1, Lp=2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k, Idc=45m)",
         )
         .unwrap();
         let cfg = c.kind.transformer_config().expect("expected Transformer");
@@ -4755,6 +4761,7 @@ synth "CV Test" {
         assert!((cfg.secondary_leakage.unwrap() - 200e-6).abs() < 1e-12);
         assert!((cfg.magnetizing_inductance.unwrap() - 1.98).abs() < 1e-9);
         assert!((cfg.core_loss_resistance.unwrap() - 100_000.0).abs() < 1e-6);
+        assert!((cfg.dc_bias_current.unwrap() - 45e-3).abs() < 1e-12);
     }
 
     #[test]

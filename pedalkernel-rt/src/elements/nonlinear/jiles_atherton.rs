@@ -105,6 +105,54 @@ impl JaMagnetizingRoot {
         self.last_iters = 0;
     }
 
+    /// Seed the core from a standing primary DC current.
+    ///
+    /// Single-ended output transformers deliberately carry DC through the
+    /// primary. Starting a gapped core at `(H, M) = (0, 0)` and asking the
+    /// audio-rate transient solve to find that operating point creates an
+    /// artificial startup hit. This initializer solves the static Ampere law
+    /// plus the anhysteretic magnetization curve and leaves derivative state
+    /// at zero.
+    pub fn set_dc_bias_current(&mut self, current: Wave) {
+        if !current.is_finite() || !self.model.is_complete() {
+            return;
+        }
+
+        let p = self.model;
+        let ampere_turns = p.n_turns * current;
+        let mut m: Wave = 0.0;
+        if p.gap <= 0.0 {
+            let h = ampere_turns / self.le_eff.max(1.0e-12);
+            m = solve_anhysteretic_m(&p, h, 0.0);
+            self.state = JaState {
+                h,
+                h_dot: 0.0,
+                m,
+                m_dot: 0.0,
+            };
+            return;
+        }
+
+        // Gap couples M back into Ampere's law. Iterate H(M) and M_an(H, M).
+        for _ in 0..32 {
+            let h = (ampere_turns - m * p.gap) / self.le_eff.max(1.0e-12);
+            let next_m = solve_anhysteretic_m(&p, h, m);
+            if math::abs(next_m - m) <= 1.0e-9 * p.ms.max(1.0) {
+                m = next_m;
+                break;
+            }
+            m = 0.5 * m + 0.5 * next_m;
+        }
+
+        let h = (ampere_turns - m * p.gap) / self.le_eff.max(1.0e-12);
+        self.state = JaState {
+            h,
+            h_dot: 0.0,
+            m,
+            m_dot: 0.0,
+        };
+    }
+
     #[inline]
     fn winding_current(&self, h: Wave, m: Wave) -> Wave {
         (h * self.le_eff + m * self.model.gap) / self.model.n_turns
@@ -204,8 +252,19 @@ impl WdfJaMagnetizing {
         sample_rate: Wave,
         port_resistance: Wave,
     ) -> Self {
+        Self::new_with_dc_bias(comp_id, model, sample_rate, port_resistance, 0.0)
+    }
+
+    pub fn new_with_dc_bias(
+        comp_id: Option<alloc::string::String>,
+        model: JaCoreModel,
+        sample_rate: Wave,
+        port_resistance: Wave,
+        dc_bias_current: Wave,
+    ) -> Self {
         let mut root = JaMagnetizingRoot::new(model);
         root.prepare(sample_rate, port_resistance);
+        root.set_dc_bias_current(dc_bias_current);
         Self {
             comp_id,
             root,
@@ -248,6 +307,24 @@ fn langevin_d2(x: Wave) -> Wave {
         let s = math::sinh(x);
         2.0 * math::cosh(x) / (s * s * s) - 2.0 / (x * x * x)
     }
+}
+
+fn solve_anhysteretic_m(p: &JaCoreModel, h: Wave, initial_m: Wave) -> Wave {
+    let mut m = initial_m.clamp(-p.ms, p.ms);
+    for _ in 0..24 {
+        let q = (h + p.alpha * m) / p.a;
+        let f = m - p.ms * langevin(q);
+        let df = 1.0 - p.ms * langevin_d(q) * p.alpha / p.a;
+        if math::abs(df) < 1.0e-12 {
+            break;
+        }
+        let dm = (f / df).clamp(-0.25 * p.ms, 0.25 * p.ms);
+        m = (m - dm).clamp(-p.ms, p.ms);
+        if math::abs(dm) <= 1.0e-9 * p.ms.max(1.0) {
+            break;
+        }
+    }
+    m
 }
 
 #[inline]
@@ -388,5 +465,29 @@ mod tests {
         }
         assert!(peak_m / root.model().ms > 0.5, "peak_m={peak_m}");
         assert!(e_cycle > 0.0, "core generated energy: {e_cycle}");
+    }
+
+    #[test]
+    fn ja_dc_bias_initializes_gapped_core_state() {
+        let mut model = JaCoreModel::si_steel_demo();
+        model.gap = 1.0e-3;
+        let mut root = JaMagnetizingRoot::new(model);
+        root.prepare(48_000.0, 1000.0);
+        root.set_dc_bias_current(45.0e-3);
+
+        let st = root.state();
+        assert!(st.h.is_finite());
+        assert!(st.m.is_finite());
+        assert!(st.h.abs() > 1.0, "DC bias should produce standing H");
+        assert!(st.m.abs() > 1.0, "DC bias should produce standing M");
+        assert_eq!(st.h_dot, 0.0);
+        assert_eq!(st.m_dot, 0.0);
+
+        let ampere_turns = model.n_turns * 45.0e-3;
+        let reconstructed = st.h * (model.path_len + model.gap) + st.m * model.gap;
+        assert!(
+            (reconstructed - ampere_turns).abs() < 1.0e-6 * ampere_turns.abs().max(1.0),
+            "Ampere mismatch: {reconstructed} vs {ampere_turns}"
+        );
     }
 }

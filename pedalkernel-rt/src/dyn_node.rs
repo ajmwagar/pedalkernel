@@ -360,11 +360,22 @@ impl DynNode {
         sample_rate: crate::Wave,
         rp: crate::Wave,
     ) -> Self {
-        Self::Leaf(LeafKind::JaMagnetizing(WdfJaMagnetizing::new(
+        Self::JaMagnetizingWithDcBias(comp_id, model, sample_rate, rp, 0.0)
+    }
+
+    pub fn JaMagnetizingWithDcBias(
+        comp_id: Option<String>,
+        model: JaCoreModel,
+        sample_rate: crate::Wave,
+        rp: crate::Wave,
+        dc_bias_current: crate::Wave,
+    ) -> Self {
+        Self::Leaf(LeafKind::JaMagnetizing(WdfJaMagnetizing::new_with_dc_bias(
             comp_id,
             model,
             sample_rate,
             rp,
+            dc_bias_current,
         )))
     }
 

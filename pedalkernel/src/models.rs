@@ -381,6 +381,7 @@ pub struct SpiceTransformerModel {
     pub core_area: f64,
     pub magnetic_path_length: f64,
     pub gap_length: f64,
+    pub dc_bias_current: f64,
 
     // Native Jiles-Atherton parameters.
     pub ja_ms: f64,
@@ -413,6 +414,7 @@ impl SpiceTransformerModel {
             core_area: 0.0,
             magnetic_path_length: 0.0,
             gap_length: 0.0,
+            dc_bias_current: 0.0,
             ja_ms: 0.0,
             ja_a: 0.0,
             ja_alpha: 0.0,
@@ -935,6 +937,7 @@ fn parse_transformer_model_line(line: &str) -> Option<SpiceTransformerModel> {
         "AE" | "CORE_AREA" => model.core_area = val,
         "LE" | "MAGNETIC_PATH_LENGTH" => model.magnetic_path_length = val,
         "GAP" | "LG" | "GAP_LENGTH" => model.gap_length = val,
+        "IDC" | "BIAS_CURRENT" | "DC_BIAS_CURRENT" => model.dc_bias_current = val,
         "MS" | "JA_MS" => model.ja_ms = val,
         "A" | "JA_A" => model.ja_a = val,
         "ALPHA" | "JA_ALPHA" => model.ja_alpha = val,

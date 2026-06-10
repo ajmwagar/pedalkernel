@@ -1158,6 +1158,7 @@ pub fn compile_via_spqr_with_options(
                         options.disable_iir,
                         &pedal.init_hints,
                         supply_voltage,
+                        &bias_node_voltages,
                     )
                     .map_err(|e| format!("Group {gi}: {e}"))?;
                     push_stage!(
@@ -1741,7 +1742,16 @@ pub(super) fn build_spqr_stage(
     graph: &CircuitGraph,
     _sample_rate: f64,
 ) -> Result<BuiltStage, String> {
-    build_spqr_stage_with_options(stage, graph, _sample_rate, false, &[], 9.0)
+    let bias_node_voltages = std::collections::BTreeMap::new();
+    build_spqr_stage_with_options(
+        stage,
+        graph,
+        _sample_rate,
+        false,
+        &[],
+        9.0,
+        &bias_node_voltages,
+    )
 }
 
 pub(super) fn build_spqr_stage_with_options(
@@ -1751,12 +1761,15 @@ pub(super) fn build_spqr_stage_with_options(
     disable_iir: bool,
     init_hints: &[crate::dsl::InitHint],
     supply_voltage: f64,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
 ) -> Result<BuiltStage, String> {
     match stage {
         SpqrStage::PassiveWdf {
             tree, edge_indices, ..
         } => {
-            if let Some(wdf) = build_passive_rtype_stage(&edge_indices, graph, _sample_rate) {
+            if let Some(wdf) =
+                build_passive_rtype_stage(&edge_indices, graph, _sample_rate, bias_node_voltages)
+            {
                 return Ok(BuiltStage::Wdf(wdf));
             }
 
@@ -1920,6 +1933,7 @@ fn build_passive_rtype_stage(
     edge_indices: &[usize],
     graph: &CircuitGraph,
     sample_rate: f64,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
 ) -> Option<WdfStage> {
     let is_ground = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
 
@@ -2064,9 +2078,23 @@ fn build_passive_rtype_stage(
                 else {
                     continue;
                 };
+                let primary_pos_node = graph.node_names.get(&format!("{}.a", comp.id)).copied();
+                let primary_neg_node = graph.node_names.get(&format!("{}.b", comp.id)).copied();
                 let s1 = node_to_mna(sec_pos_node, &nodes);
                 let s2 = node_to_mna(sec_neg_node, &nodes);
                 let resolved_cfg = crate::model_lookup::transformer_config_from_dsl(cfg);
+                let dc_bias_current = resolved_cfg.dc_bias_current.or_else(|| {
+                    match (primary_pos_node, primary_neg_node) {
+                        (Some(a), Some(b)) => infer_transformer_dc_bias_current(
+                            &resolved_cfg,
+                            a,
+                            b,
+                            &bias_node_voltages,
+                            &graph,
+                        ),
+                        _ => None,
+                    }
+                });
                 let dynamic = stamp_linear_transformer_skeleton(
                     &mut mna,
                     &comp.id,
@@ -2078,6 +2106,7 @@ fn build_passive_rtype_stage(
                     internals,
                     vsrc_p,
                     sample_rate,
+                    dc_bias_current,
                 );
                 for (port, child) in dynamic {
                     add_dynamic_port(
@@ -2180,6 +2209,7 @@ fn stamp_linear_transformer_skeleton(
     internals: [usize; 4],
     vsrc_p: usize,
     sample_rate: f64,
+    dc_bias_current: Option<f64>,
 ) -> Vec<(WdfPort, DynNode)> {
     const SHORT_R: f64 = 1.0e-6;
     const MIN_L: f64 = 1.0e-12;
@@ -2196,6 +2226,7 @@ fn stamp_linear_transformer_skeleton(
         .magnetizing_inductance
         .unwrap_or(l_primary * k.max(1.0e-6));
     let ja_core = transformer_ja_core_model(cfg);
+    let dc_bias_current = dc_bias_current.unwrap_or(0.0);
 
     fn add_inductor_or_short(
         mna: &mut MnaSystem,
@@ -2233,6 +2264,7 @@ fn stamp_linear_transformer_skeleton(
         l: f64,
         sample_rate: f64,
         ja_core: Option<JaCoreModel>,
+        dc_bias_current: f64,
     ) {
         const SHORT_R: f64 = 1.0e-6;
         const MIN_L: f64 = 1.0e-12;
@@ -2243,7 +2275,13 @@ fn stamp_linear_transformer_skeleton(
 
         let rp = 2.0 * sample_rate * l;
         let node = if let Some(model) = ja_core {
-            DynNode::JaMagnetizing(Some(format!("{comp_id}.Lm")), model, sample_rate, rp)
+            DynNode::JaMagnetizingWithDcBias(
+                Some(format!("{comp_id}.Lm")),
+                model,
+                sample_rate,
+                rp,
+                dc_bias_current as pedalkernel_rt::Wave,
+            )
         } else {
             DynNode::Inductor(Some(format!("{comp_id}.Lm")), l, rp)
         };
@@ -2292,6 +2330,7 @@ fn stamp_linear_transformer_skeleton(
         l_mag,
         sample_rate,
         ja_core,
+        dc_bias_current,
     );
     if let Some(rc) = cfg
         .core_loss_resistance
@@ -2338,6 +2377,41 @@ fn transformer_ja_core_model(cfg: &TransformerConfig) -> Option<JaCoreModel> {
         gap: cfg.core_gap.unwrap_or(0.0) as pedalkernel_rt::Wave,
     };
     model.is_complete().then_some(model)
+}
+
+fn infer_transformer_dc_bias_current(
+    cfg: &TransformerConfig,
+    primary_pos: NodeId,
+    primary_neg: NodeId,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    graph: &CircuitGraph,
+) -> Option<f64> {
+    let r_primary = cfg.primary_dcr;
+    if !(r_primary.is_finite() && r_primary > 1.0e-9) {
+        return None;
+    }
+
+    let vp = node_dc_voltage(primary_pos, bias_node_voltages, graph)?;
+    let vn = node_dc_voltage(primary_neg, bias_node_voltages, graph)?;
+    let current = (vp - vn) / r_primary;
+    (current.is_finite() && current.abs() > 1.0e-12).then_some(current)
+}
+
+fn node_dc_voltage(
+    node: NodeId,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    graph: &CircuitGraph,
+) -> Option<f64> {
+    if node == graph.gnd_node {
+        return Some(0.0);
+    }
+    if let Some(&v) = graph.supply_voltages.get(&node) {
+        return Some(v);
+    }
+    if graph.ac_ground_nodes.contains(&node) {
+        return Some(0.0);
+    }
+    bias_node_voltages.get(&node).copied()
 }
 
 fn passive_transformer_voltage_gain(

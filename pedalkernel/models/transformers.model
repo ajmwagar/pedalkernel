@@ -15,4 +15,4 @@
 
 # Gapped single-ended output-transformer demo from the Phase-2 J-A prototype.
 # The magnetic parameters are behavioral test data, not a verified product fit.
-.TRANSFORMER OT-DEMO-SE LP=10 K=0.997 RP=270 RS=0.5 LLP=30m LLS=1.2u LM=9.97 CP=200p N1=2000 N2=76.923076923 AE=2e-4 LE=0.10 GAP=1e-3 MS=1.6e6 A=1100 ALPHA=1.6e-3 JA_K=400 JA_C=0.2
+.TRANSFORMER OT-DEMO-SE LP=10 K=0.997 RP=270 RS=0.5 LLP=30m LLS=1.2u LM=9.97 CP=200p N1=2000 N2=76.923076923 AE=2e-4 LE=0.10 GAP=1e-3 IDC=45m MS=1.6e6 A=1100 ALPHA=1.6e-3 JA_K=400 JA_C=0.2

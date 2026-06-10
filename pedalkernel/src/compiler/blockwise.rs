@@ -328,6 +328,7 @@ fn lower_block_stages(
                 disable_iir,
                 init_hints,
                 supply_voltage,
+                bias_node_voltages,
             )
             .ok()?;
             eprintln!("  [blockwise] block {bi} stage {si}: built");

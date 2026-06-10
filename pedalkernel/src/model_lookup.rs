@@ -263,6 +263,9 @@ pub fn transformer_config_from_dsl(cfg: &TransformerConfig) -> TransformerConfig
     if cfg.core_gap.is_some() {
         resolved.core_gap = cfg.core_gap;
     }
+    if cfg.dc_bias_current.is_some() {
+        resolved.dc_bias_current = cfg.dc_bias_current;
+    }
     if cfg.ja_ms.is_some() {
         resolved.ja_ms = cfg.ja_ms;
     }
@@ -314,6 +317,7 @@ mod tests {
         assert!((resolved.core_area.unwrap() - 2.0e-4).abs() < 1e-18);
         assert!((resolved.core_path_length.unwrap() - 0.10).abs() < 1e-12);
         assert!((resolved.core_gap.unwrap() - 1.0e-3).abs() < 1e-18);
+        assert!((resolved.dc_bias_current.unwrap() - 45.0e-3).abs() < 1e-18);
         assert!((resolved.ja_ms.unwrap() - 1.6e6).abs() < 1e-6);
         assert!((resolved.ja_a.unwrap() - 1100.0).abs() < 1e-12);
         assert!((resolved.ja_alpha.unwrap() - 1.6e-3).abs() < 1e-18);
@@ -343,6 +347,7 @@ fn transformer_config_from_model(
         core_area: (model.core_area > 0.0).then_some(model.core_area),
         core_path_length: (model.magnetic_path_length > 0.0).then_some(model.magnetic_path_length),
         core_gap: (model.gap_length > 0.0).then_some(model.gap_length),
+        dc_bias_current: (model.dc_bias_current != 0.0).then_some(model.dc_bias_current),
         ja_ms: (model.ja_ms > 0.0).then_some(model.ja_ms),
         ja_a: (model.ja_a > 0.0).then_some(model.ja_a),
         ja_alpha: (model.ja_alpha != 0.0).then_some(model.ja_alpha),
