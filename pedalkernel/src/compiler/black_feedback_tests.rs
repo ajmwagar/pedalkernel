@@ -400,18 +400,113 @@ fn bf_e2e_drive_pot_changes_output() {
 
     // Low gain: Drive = 10%
     let mut lo = compile_via_spqr(&pedal, 48000.0).expect("compile lo");
-    lo.set_control("Drive", 0.1);
+    lo.set_control_immediate("Drive", 0.1);
     let peak_lo = measure_sine_peak(&mut lo, 0.01);
 
     // High gain: Drive = 100%
     let mut hi = compile_via_spqr(&pedal, 48000.0).expect("compile hi");
-    hi.set_control("Drive", 1.0);
+    hi.set_control_immediate("Drive", 1.0);
     let peak_hi = measure_sine_peak(&mut hi, 0.01);
 
     eprintln!("E2E pot: lo={peak_lo:.6}, hi={peak_hi:.6}");
     assert!(
         peak_hi > peak_lo * 2.0,
         "High Drive should give more output: lo={peak_lo:.6}, hi={peak_hi:.6}"
+    );
+}
+
+#[test]
+fn bf_feedback_pot_applies_audio_taper_and_fixed_series_resistance() {
+    // The A taper should use the runtime taper curve at 50% knob rotation,
+    // and the fixed resistor in series with the pot must remain part of Rf.
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "test" { supply 9V
+            components {
+                R1: resistor(10k)
+                U1: opamp(tl072)
+                R_min: resistor(1k)
+                Drive: pot(100k, a)
+            }
+            nets {
+                in -> R1.a
+                R1.b -> U1.neg
+                U1.neg -> R_min.a
+                R_min.b -> Drive.a
+                Drive.b -> U1.out
+                U1.pos -> gnd
+                U1.out -> out
+            }
+            controls { Drive.position -> "Drive" [0.0, 1.0] = 0.5 }
+        }"#,
+    )
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    compiled.set_control_immediate("Drive", 0.5);
+
+    let rf = compiled
+        .stages
+        .iter()
+        .find_map(|stage| match stage {
+            super::compiled::Stage::BlackFeedback(stage) => Some(stage.rf()),
+            _ => None,
+        })
+        .expect("BlackFeedback stage");
+
+    let expected = 1_000.0 + crate::dsl::PotTaper::A.apply(0.5) * 100_000.0;
+    eprintln!("A taper feedback Rf: actual={rf:.2} expected={expected:.2}");
+    assert!(
+        (rf - expected).abs() < 1.0,
+        "feedback pot should use fixed series resistor plus A taper: rf={rf:.2}, expected={expected:.2}"
+    );
+}
+
+#[test]
+fn bf_ground_leg_pot_applies_audio_taper() {
+    // Ground-leg pots update Ri rather than Rf; they need the same taper
+    // semantics as feedback pots.
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "test" { supply 9V
+            components {
+                U1: opamp(tl072)
+                Rf: resistor(100k)
+                R_min: resistor(1k)
+                Gain: pot(100k, a)
+            }
+            nets {
+                in -> U1.pos
+                U1.neg -> Rf.a
+                Rf.b -> U1.out
+                U1.neg -> R_min.a
+                R_min.b -> Gain.a
+                Gain.b -> gnd
+                U1.out -> out
+            }
+            controls { Gain.position -> "Gain" [0.0, 1.0] = 0.5 }
+        }"#,
+    )
+    .expect("parse");
+
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+    compiled.set_control_immediate("Gain", 0.5);
+
+    let gain = compiled
+        .stages
+        .iter()
+        .find_map(|stage| match stage {
+            super::compiled::Stage::BlackFeedback(stage) => Some(stage.gain()),
+            _ => None,
+        })
+        .expect("BlackFeedback stage");
+
+    let ri = 1_000.0 + crate::dsl::PotTaper::A.apply(0.5) * 100_000.0;
+    let expected = 1.0 + 100_000.0 / ri;
+    eprintln!("A taper ground-leg gain: actual={gain:.4} expected={expected:.4}");
+    assert!(
+        (gain - expected).abs() < 0.05,
+        "ground-leg pot should use A taper for Ri: gain={gain:.4}, expected={expected:.4}"
     );
 }
 

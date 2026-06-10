@@ -4811,15 +4811,21 @@ pub struct BlackFeedbackStage {
     pub output_node_id: usize,
     /// Pot component ID bound to Rf (if any). Set at compile time.
     pub pot_comp_id: Option<String>,
-    /// Maximum pot resistance (Ohms). Position 1.0 = this value.
+    /// Fixed resistance in series with the feedback pot.
+    pub pot_fixed_r: crate::Wave,
+    /// Maximum pot resistance (Ohms). Position 1.0 adds this value.
     pub pot_max_r: crate::Wave,
+    /// Taper for the feedback pot.
+    pub pot_taper: crate::pot_taper::PotTaper,
     /// Pot component ID in the ground leg (Ri). When this pot changes,
-    /// Ri = ri_fixed_r + pot_position × ri_pot_max_r.
+    /// Ri = ri_fixed_r + taper(position) × ri_pot_max_r.
     pub ri_pot_comp_id: Option<String>,
     /// Fixed resistance in the ground leg (sum of non-pot resistors: R5 + R6).
     pub ri_fixed_r: crate::Wave,
     /// Max resistance of the Ri pot (e.g. Gain_A max_r = 100k).
     pub ri_pot_max_r: crate::Wave,
+    /// Taper for the ground-leg pot.
+    pub ri_pot_taper: crate::pot_taper::PotTaper,
     /// Shared one-port runtime state owned by this stage.
     ///
     /// Pure resistive BlackFeedback stages have no physical one-port state; reactive
@@ -4865,10 +4871,13 @@ impl BlackFeedbackStage {
             bypass_serial: false,
             output_node_id: usize::MAX,
             pot_comp_id: None,
+            pot_fixed_r: 0.0,
             pot_max_r: 0.0,
+            pot_taper: crate::pot_taper::PotTaper::B,
             ri_pot_comp_id: None,
             ri_fixed_r: 0.0,
             ri_pot_max_r: 0.0,
+            ri_pot_taper: crate::pot_taper::PotTaper::B,
             runtime_state: RuntimeState::new(),
         }
     }
@@ -4902,6 +4911,11 @@ impl BlackFeedbackStage {
         }
     }
 
+    /// Current feedback resistance.
+    pub fn rf(&self) -> crate::Wave {
+        self.rf
+    }
+
     pub fn one_port_states(&self) -> &[OnePortState] {
         &self.runtime_state.states
     }
@@ -4924,10 +4938,13 @@ impl BlackFeedbackStage {
             || self.ri_pot_comp_id.as_deref() == Some(comp_id)
     }
 
-    /// Set pot position (0.0–1.0). Converts to Rf = position * max_r.
-    pub fn set_pot(&mut self, _comp_id: &str, position: crate::Wave) {
-        if self.pot_max_r > 0.0 {
-            self.set_rf(position * self.pot_max_r);
+    /// Set feedback pot position (0.0–1.0).
+    ///
+    /// Converts to `Rf = fixed_series + taper(position) * max_r`.
+    pub fn set_pot(&mut self, comp_id: &str, position: crate::Wave) {
+        if self.pot_comp_id.as_deref() == Some(comp_id) && self.pot_max_r > 0.0 {
+            let tapered = self.pot_taper.apply(position);
+            self.set_rf((self.pot_fixed_r + tapered * self.pot_max_r).max(1.0));
         }
     }
 
@@ -4936,10 +4953,7 @@ impl BlackFeedbackStage {
     /// The position is range-mapped but NOT tapered — apply taper here.
     pub fn update_ri_from_pot(&mut self, comp_id: &str, position: crate::Wave) {
         if self.ri_pot_comp_id.as_deref() == Some(comp_id) {
-            // Apply taper to get actual resistance fraction.
-            // Gain_A is linear (b) taper, so taper(pos) ≈ pos.
-            // For audio (a) taper, taper(pos) gives the log curve.
-            let tapered = crate::pot_taper::PotTaper::B.apply(position); // TODO: store actual taper
+            let tapered = self.ri_pot_taper.apply(position);
             let pot_r = tapered * self.ri_pot_max_r;
             let new_ri = (self.ri_fixed_r + pot_r).max(1.0);
             self.set_ri(new_ri);

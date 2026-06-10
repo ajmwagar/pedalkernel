@@ -703,12 +703,16 @@ pub(super) fn build_rigid_from_group_with_hints(
                     stage.set_v_rails(v, v);
                 }
 
-                for &eidx in &g.all_edges() {
+                for &eidx in &g.feedback_edges {
                     let comp = &graph.components[graph.edges[eidx].comp_idx];
                     if comp.kind.is_pot() {
                         if let Some(max_r) = comp.kind.resistance() {
+                            let taper = comp.kind.pot_taper().unwrap_or(crate::dsl::PotTaper::B);
                             stage.pot_comp_id = Some(comp.id.clone());
+                            stage.pot_fixed_r = (config.rf - max_r).max(0.0);
                             stage.pot_max_r = max_r;
+                            stage.pot_taper = taper;
+                            stage.set_rf((stage.pot_fixed_r + taper.apply(0.5) * max_r).max(1.0));
                             break;
                         }
                     }

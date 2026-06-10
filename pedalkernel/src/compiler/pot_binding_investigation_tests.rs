@@ -415,11 +415,9 @@ fn screamer_level_pot_leaf_in_tree() {
         if let super::compiled::Stage::Wdf(w) = stage {
             #[cfg(debug_assertions)]
             if w.debug_label.contains("Level") {
-                let has_pot = w.tree.get_pot_position("Level").is_some()
-                    || w.tree.get_pot_position("Level__aw").is_some()
-                    || w.tree.get_pot_position("Level__wb").is_some();
+                let has_pot = w.has_pot("Level");
                 eprintln!(
-                    "Tone stage [{}]: Level pot in tree? {has_pot}",
+                    "Tone stage [{}]: Level pot owned by stage? {has_pot}",
                     w.debug_label
                 );
                 eprintln!(
@@ -434,7 +432,7 @@ fn screamer_level_pot_leaf_in_tree() {
                     "  get_pot_position('Level__wb'): {:?}",
                     w.tree.get_pot_position("Level__wb")
                 );
-                assert!(has_pot, "Level pot leaf must exist in the WDF tree");
+                assert!(has_pot, "Level pot must be controllable by the WDF stage");
             }
         }
     }

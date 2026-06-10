@@ -707,6 +707,7 @@ pub fn compile_via_spqr_with_options(
                         let mut ri_fixed = 0.0f64;
                         let mut ri_pot_id: Option<String> = None;
                         let mut ri_pot_max_r = 0.0f64;
+                        let mut ri_pot_taper = crate::dsl::PotTaper::B;
                         let mut visited = std::collections::HashSet::new();
                         let mut frontier = vec![neg];
                         visited.insert(neg);
@@ -743,7 +744,11 @@ pub fn compile_via_spqr_with_options(
                                     if let Some(max_r) = comp.kind.resistance() {
                                         ri_pot_id = Some(comp.id.clone());
                                         ri_pot_max_r = max_r;
-                                        ri_fixed += max_r * 0.5; // default position
+                                        ri_pot_taper = comp
+                                            .kind
+                                            .pot_taper()
+                                            .unwrap_or(crate::dsl::PotTaper::B);
+                                        ri_fixed += ri_pot_taper.apply(0.5) * max_r;
                                         visited.insert(other);
                                         if !is_gnd(other) {
                                             frontier.push(other);
@@ -771,10 +776,12 @@ pub fn compile_via_spqr_with_options(
                         }
                         // Store ground-leg pot mapping for runtime Ri updates
                         if let Some(pot_id) = ri_pot_id {
-                            let fixed_without_pot = ri_fixed - ri_pot_max_r * 0.5;
+                            let fixed_without_pot =
+                                ri_fixed - ri_pot_taper.apply(0.5) * ri_pot_max_r;
                             bf.ri_pot_comp_id = Some(pot_id);
                             bf.ri_fixed_r = fixed_without_pot;
                             bf.ri_pot_max_r = ri_pot_max_r;
+                            bf.ri_pot_taper = ri_pot_taper;
                         }
                     }
                 }

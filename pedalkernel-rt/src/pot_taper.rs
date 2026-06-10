@@ -28,7 +28,7 @@ impl PotTaper {
             // Linear: direct mapping
             PotTaper::B => pos,
             // Audio/Log: slow start, fast end
-            // Using (10^pos - 1) / 9 which gives ~10% at 50% rotation
+            // Using (10^pos - 1) / 9 which gives ~24% at 50% rotation
             PotTaper::A => {
                 (crate::math::powf(10.0 as crate::Wave, pos as crate::Wave) as crate::Wave - 1.0)
                     / 9.0

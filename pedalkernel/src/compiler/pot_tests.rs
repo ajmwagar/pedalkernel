@@ -41,7 +41,7 @@ fn pot_halves_in_same_stage() {
     // With native ports, the pot is "Volume" (not __aw/__wb).
     let pot_stage = compiled.stages.iter().position(|s| {
         if let super::compiled::Stage::Wdf(w) = s {
-            w.tree.get_pot_position("Volume").is_some()
+            w.has_pot("Volume")
         } else {
             false
         }
@@ -121,14 +121,14 @@ fn pot_set_control_changes_level() {
     // bind_controls is now called inside compile_via_spqr
 
     // Full volume
-    compiled.set_control("Volume", 1.0);
+    compiled.set_control_immediate("Volume", 1.0);
     for _ in 0..50 {
         compiled.process(1.0);
     }
     let full = compiled.process(1.0).abs();
 
     // Zero volume
-    compiled.set_control("Volume", 0.0);
+    compiled.set_control_immediate("Volume", 0.0);
     for _ in 0..50 {
         compiled.process(1.0);
     }
@@ -171,14 +171,14 @@ fn pot_in_feedback_changes_gain() {
     // bind_controls is now called inside compile_via_spqr
 
     // Low gain
-    compiled.set_control("Drive", 0.0);
+    compiled.set_control_immediate("Drive", 0.0);
     for _ in 0..50 {
         compiled.process(0.01);
     }
     let low_gain_out = compiled.process(0.01).abs();
 
     // High gain
-    compiled.set_control("Drive", 1.0);
+    compiled.set_control_immediate("Drive", 1.0);
     for _ in 0..50 {
         compiled.process(0.01);
     }
@@ -226,14 +226,14 @@ fn pot_in_feedback_inverted_range() {
     // bind_controls is now called inside compile_via_spqr
 
     // User CW (value=1.0) → range maps to position 0.0 → low Rf → LOW gain
-    compiled.set_control("Drive", 1.0);
+    compiled.set_control_immediate("Drive", 1.0);
     for _ in 0..50 {
         compiled.process(0.01);
     }
     let cw_out = compiled.process(0.01).abs();
 
     // User CCW (value=0.0) → range maps to position 1.0 → high Rf → HIGH gain
-    compiled.set_control("Drive", 0.0);
+    compiled.set_control_immediate("Drive", 0.0);
     for _ in 0..50 {
         compiled.process(0.01);
     }
@@ -275,14 +275,14 @@ fn pot_volume_inverted_range() {
     // bind_controls is now called inside compile_via_spqr
 
     // User CW (value=1.0) → range maps to position 0.0 → wiper at ground → quiet
-    compiled.set_control("Volume", 1.0);
+    compiled.set_control_immediate("Volume", 1.0);
     for _ in 0..50 {
         compiled.process(0.5);
     }
     let cw_out = compiled.process(0.5).abs();
 
     // User CCW (value=0.0) → range maps to position 1.0 → wiper at input → loud
-    compiled.set_control("Volume", 0.0);
+    compiled.set_control_immediate("Volume", 0.0);
     for _ in 0..50 {
         compiled.process(0.5);
     }
