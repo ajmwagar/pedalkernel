@@ -26,7 +26,7 @@ use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
     ScatteringRecomputeData, WdfStage, NR_ITERATION_BUDGET,
 };
-use super::super::wdf_leaf::{LeafKind, WdfVoltageSource};
+use super::super::wdf_leaf::{LeafKind, WdfCapacitor, WdfVoltageSource};
 use super::opamp_root::{extract_opamp_config, make_opamp_root};
 use super::{is_inverting_topology, StageStats};
 use crate::elements::*;
@@ -285,7 +285,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
     let (nl_devices, device_groups) = create_nl_devices(&nl_kinds, supply_voltage)?;
 
     // Step 8: Assemble stage
-    assemble_multi_nl_stage(
+    let mut stage = assemble_multi_nl_stage(
         mna,
         scattering,
         ports,
@@ -304,7 +304,26 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
         graph,
         pot_stamps,
         extract_output_nodes,
-    )
+    )?;
+
+    // Step 9: DC Q-point pre-charge for triode-with-grid stages.
+    //
+    // Problem: the cathode bypass cap (C_cathode) has a very small WDF port
+    // resistance (rp ≈ 1/(2*fs*C) ≈ 0.2Ω for 25μF at 96kHz). In the MNA used
+    // to derive the scattering matrix, this tiny rp effectively shorts the cathode
+    // to GND, eliminating the cathode self-bias signal path. As a result:
+    //   - dc_bias[0] (Vgk port) ≈ 0 — VCC has no direct linear path to grid
+    //   - The NR solver converges to Vgk = 0 (no self-bias)
+    //   - Gain is ~288x instead of expected ~50x
+    //
+    // Fix: compute the DC operating point (load-line intersection) from the
+    // circuit resistances (R_plate, R_cathode) and pre-charge the cap to the
+    // DC cathode voltage. This puts the system at the correct Q-point at t=0.
+    if let Some(dc) = compute_triode_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage) {
+        apply_triode_dc_qpoint(&mut stage, &dc, &nl_kinds, &reactive_edges, graph);
+    }
+
+    Ok(stage)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -947,4 +966,177 @@ fn assemble_multi_nl_stage(
         prev_input: 0.0,
         opamp_post_fx: None,
     })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DC Q-point pre-charge for triode stages
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// DC operating-point data for a single common-cathode triode stage.
+struct TriodeDcQpoint {
+    /// Grid-cathode bias voltage (negative for self-biased stages, e.g. -1.1V).
+    vgk: f64,
+    /// Plate-cathode voltage at the Q-point (e.g. 120V for a 12AX7 @ 250V supply).
+    vpk: f64,
+    /// Cathode voltage = -vgk = Ia × R_cathode.
+    v_cathode: f64,
+    /// Plate current at Q-point (A).
+    ia: f64,
+}
+
+/// Compute the DC operating point for a triode-with-grid stage.
+///
+/// Uses the load-line equations:
+///   Vgk = -Ia × R_cathode    (cathode self-bias)
+///   Vpk = VCC - Ia × R_plate (plate load line)
+///   Ia = Triode.plate_current(Vgk, Vpk)
+///
+/// Solves with a simple Newton-Raphson iteration on the 1-D residual in Ia.
+/// Returns `None` if the circuit doesn't have exactly one triode-with-grid or
+/// if R_plate/R_cathode cannot be found.
+fn compute_triode_dc_qpoint(
+    nl_kinds: &[NonlinearKind],
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<TriodeDcQpoint> {
+    // Only handle single-triode-with-grid stages.
+    if nl_kinds.len() != 1 {
+        return None;
+    }
+    let (model_name, plate_node, cathode_node) = match &nl_kinds[0] {
+        NonlinearKind::Triode {
+            model_name,
+            plate_node,
+            cathode_node,
+            grid_node: Some(_),
+            is_vari_mu: false,
+            ..
+        } => (model_name.as_str(), *plate_node, *cathode_node),
+        _ => return None,
+    };
+
+    // Find R_plate: linear resistor between vcc_node and plate_node.
+    let r_plate = all_edges.iter().find_map(|&eidx| {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+            return None;
+        }
+        let (a, b) = (e.node_a, e.node_b);
+        if (a == graph.vcc_node && b == plate_node) || (b == graph.vcc_node && a == plate_node) {
+            comp.kind.resistance()
+        } else {
+            None
+        }
+    })?;
+
+    // Find R_cathode: linear resistor between cathode_node and gnd_node.
+    let r_cathode = all_edges.iter().find_map(|&eidx| {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+            return None;
+        }
+        let (a, b) = (e.node_a, e.node_b);
+        if (a == cathode_node && b == graph.gnd_node)
+            || (b == cathode_node && a == graph.gnd_node)
+        {
+            comp.kind.resistance()
+        } else {
+            None
+        }
+    })?;
+
+    // Newton-Raphson on F(Ia) = Ia - plate_current(Vgk(Ia), Vpk(Ia)) = 0.
+    let model = super::super::helpers::triode_model(model_name);
+    let mut triode = TriodeRoot::new_with_v_max(model, supply_voltage);
+
+    let mut ia = 1e-4_f64; // initial guess: 0.1mA
+    for _iter in 0..50 {
+        let vgk = -ia * r_cathode;
+        let vpk = (supply_voltage - ia * r_plate).max(0.0);
+        triode.set_vgk(vgk);
+        let ia_model = triode.plate_current(vpk);
+        let f = ia - ia_model;
+        // Numerical Jacobian dF/dIa ≈ 1 (since dIa_model/dIa is small)
+        // Refine with secant step if needed; simple relaxation converges here.
+        ia = (ia - f * 0.5).max(0.0);
+        if f.abs() < 1e-9 {
+            break;
+        }
+    }
+
+    let vgk = -ia * r_cathode;
+    let vpk = (supply_voltage - ia * r_plate).max(0.0);
+    let v_cathode = ia * r_cathode;
+
+    // Sanity: Q-point should have negative Vgk and positive Vpk.
+    if vgk >= 0.0 || vpk <= 0.0 || !vgk.is_finite() || !vpk.is_finite() {
+        return None;
+    }
+
+    Some(TriodeDcQpoint {
+        vgk,
+        vpk,
+        v_cathode,
+        ia,
+    })
+}
+
+/// Apply a pre-computed DC Q-point to a just-built triode MultiNlStage.
+///
+/// Sets `v_prev` and `initial_v_prev` to (Vgk_dc, Vpk_dc) so the NR solver
+/// warm-starts at the correct operating point on the first sample.
+///
+/// Also pre-charges any cathode bypass capacitors among the passive children
+/// to `dc.v_cathode`, so the WDF cap state immediately reflects the correct
+/// DC cathode voltage and the `s_nl_passive` coupling term produces the right
+/// Vgk bias from the very first sample.
+fn apply_triode_dc_qpoint(
+    stage: &mut MultiNlStage,
+    dc: &TriodeDcQpoint,
+    nl_kinds: &[NonlinearKind],
+    reactive_edges: &[(usize, DynNode)],
+    graph: &CircuitGraph,
+) {
+    // Set NR warm-start voltages.
+    if stage.v_prev.len() >= 2 {
+        stage.v_prev[0] = dc.vgk;
+        stage.v_prev[1] = dc.vpk;
+    }
+    if stage.initial_v_prev.len() >= 2 {
+        stage.initial_v_prev[0] = dc.vgk;
+        stage.initial_v_prev[1] = dc.vpk;
+    }
+    if stage.v_prev_2.len() >= 2 {
+        stage.v_prev_2[0] = dc.vgk;
+        stage.v_prev_2[1] = dc.vpk;
+    }
+
+    // Find cathode_node for the triode.
+    let cathode_node = match nl_kinds.first() {
+        Some(NonlinearKind::Triode { cathode_node, .. }) => *cathode_node,
+        _ => return,
+    };
+
+    // Pre-charge cathode bypass capacitors (caps between cathode and GND).
+    // The WDF capacitor's state represents the reflected wave b = a[n-1].
+    // At DC steady state, b_cap = a_cap = V_cathode.  Setting both `state`
+    // and `last_b` to V_cathode pre-charges the cap so the first sample's
+    // `known_a[0] = s_nl_passive * b_cap ≈ -V_cathode = Vgk_dc`.
+    for (k, (eidx, _)) in reactive_edges.iter().enumerate() {
+        let e = &graph.edges[*eidx];
+        let is_cathode_cap = (e.node_a == cathode_node && e.node_b == graph.gnd_node)
+            || (e.node_b == cathode_node && e.node_a == graph.gnd_node);
+        if !is_cathode_cap {
+            continue;
+        }
+        if let Some(DynNode::Leaf(LeafKind::Capacitor(ref mut cap))) =
+            stage.passive_children.get_mut(k)
+        {
+            cap.state = dc.v_cathode;
+            cap.last_b = dc.v_cathode;
+        }
+    }
 }

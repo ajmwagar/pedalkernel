@@ -1112,7 +1112,24 @@ pedal "12AX7 Common Cathode" {
                 eprintln!("    vcc_bias_all={:.4?}", m.vcc_bias_all);
                 eprintln!("    nl_port_resistances={:.1?}", m.nl_port_resistances);
                 eprintln!("    s_nl_adapted={:.6?}", m.scattering.s_nl_adapted);
+                eprintln!("    s_nl (NL-NL block)={:.6?}", m.scattering.s_nl);
+                eprintln!("    s_nl_passive={:.6?}", m.scattering.s_nl_passive);
                 eprintln!("    initial_v_prev={:.4?}", m.initial_v_prev);
+                // Dump scatter_all row for each passive port (to verify DC fixed-point)
+                let n_total = m.n_nl + m.passive_children.len() + 1;
+                for passive_k in 0..m.passive_children.len() {
+                    let port_idx = m.n_nl + passive_k;
+                    // Probe scatter_all with unit vector at each port
+                    let mut b_probe = vec![0.0f64; n_total];
+                    let mut row = vec![0.0f64; n_total];
+                    for j in 0..n_total {
+                        b_probe.fill(0.0);
+                        b_probe[j] = 1.0;
+                        let a = m.adaptor.scatter_all(&b_probe);
+                        row[j] = a[port_idx];
+                    }
+                    eprintln!("    scatter_row[passive_{}]={:.6?}", passive_k, row);
+                }
             }
             super::compiled::Stage::Wdf(_) => eprintln!("  stage {si}: WDF"),
             super::compiled::Stage::Iir(_) => eprintln!("  stage {si}: IIR"),
@@ -1120,4 +1137,138 @@ pedal "12AX7 Common Cathode" {
             super::compiled::Stage::BlackFeedback(_) => eprintln!("  stage {si}: BlackFeedback"),
         }
     }
+}
+
+/// Diagnostic: measure gain at different time windows to see if cathode self-bias develops over time.
+#[test]
+fn diag_triode_gain_vs_time() {
+    let src = r#"
+pedal "12AX7 Common Cathode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+    let sample_rate = 48000.0_f64;
+    let freq = 1000.0_f64;
+    let amplitude = 0.1_f64;
+    let samples_per_cycle = (sample_rate / freq) as usize;
+
+    for &(run_cycles, measure_cycles) in &[(0usize, 10usize), (20, 10), (50, 10), (100, 10), (200, 10), (500, 10)] {
+        let mut proc = crate::compiler::compile_pedal(&pedal, sample_rate).expect("compile");
+        let total = (run_cycles + measure_cycles) * samples_per_cycle;
+        let mut max_out = f64::NEG_INFINITY;
+        let mut min_out = f64::INFINITY;
+        for i in 0..total {
+            let t = i as f64 / sample_rate;
+            let input = amplitude * (2.0 * std::f64::consts::PI * freq * t).sin();
+            let output = proc.process(input);
+            if i >= run_cycles * samples_per_cycle {
+                max_out = max_out.max(output);
+                min_out = min_out.min(output);
+            }
+        }
+        let pp = max_out - min_out;
+        let gain = pp / (2.0 * amplitude);
+        eprintln!("After {}ms: gain={:.1}x ({:.1}dB), pp={:.3}V",
+            run_cycles, gain, 20.0 * gain.log10(), pp);
+    }
+}
+
+/// Trace the operating point of the triode stage at DC steady state.
+#[test]
+fn diag_triode_dc_steady_state() {
+    let src = r#"
+pedal "12AX7 Common Cathode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_cathode: resistor(1.5k)
+    C_cathode: cap(25u)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}
+"#;
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+    let sample_rate = 48000.0_f64;
+    let compiled = crate::compiler::compile_pedal(&pedal, sample_rate).expect("compile");
+    eprintln!("initial_v_prev of MultiNL stage:");
+    for (si, s) in compiled.stages.iter().enumerate() {
+        if let crate::compiler::compiled::Stage::MultiNl(m) = s {
+            eprintln!("  stage {si}: initial_v_prev={:.4?}, n_passive={}", m.initial_v_prev, m.passive_children.len());
+            // Check passive child initial state
+            for (k, child) in m.passive_children.iter().enumerate() {
+                if let pedalkernel_rt::dyn_node::DynNode::Leaf(pedalkernel_rt::wdf_leaf::LeafKind::Capacitor(ref cap)) = child {
+                    eprintln!("  passive_child[{k}] cap state={:.4}, last_b={:.4}", cap.state, cap.last_b);
+                }
+            }
+        }
+    }
+
+    // Run DC steady state (no signal) and report final v_prev and cap state
+    let mut proc = compiled;
+    for _ in 0..48000 { // 1 second warmup
+        proc.process(0.0);
+    }
+    // Small probe signal to measure gain
+    let amplitude = 0.01_f64;
+    let freq = 1000.0_f64;
+    let mut max_out = f64::NEG_INFINITY;
+    let mut min_out = f64::INFINITY;
+    for i in 0..480 {
+        let t = i as f64 / sample_rate;
+        let input = amplitude * (2.0 * std::f64::consts::PI * freq * t).sin();
+        let output = proc.process(input);
+        max_out = max_out.max(output);
+        min_out = min_out.min(output);
+    }
+    let gain = (max_out - min_out) / (2.0 * amplitude);
+    eprintln!("After 1s DC warmup, gain at 10mV probe={:.1}x ({:.1}dB)", gain, 20.0*gain.log10());
 }
