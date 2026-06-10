@@ -2791,6 +2791,11 @@ pub enum NlDeviceKind {
     ExplicitDiodePair(ExplicitDiodePairRoot),
     /// JFET drain-source as a 1-port NL device (Vgs set externally).
     Jfet(JfetRoot),
+    /// CA3080 OTA transconductance amplifier.
+    ///
+    /// Current-output device: `Iout = Iabc * tanh(Vdiff / (2*Vt))`.
+    /// Gain is controlled by `Iabc` (set via modulation or fixed bias).
+    Ota(OtaRoot),
 }
 
 impl NlDeviceKind {
@@ -2812,7 +2817,8 @@ impl NlDeviceKind {
             NlDeviceKind::Diode(_)
             | NlDeviceKind::DiodePair(_)
             | NlDeviceKind::ExplicitDiode(_)
-            | NlDeviceKind::ExplicitDiodePair(_) => {}
+            | NlDeviceKind::ExplicitDiodePair(_)
+            | NlDeviceKind::Ota(_) => {}
             NlDeviceKind::Jfet(j) => {
                 // Vgs driven by input signal (for pitch sweep etc.)
                 j.set_vgs(input * compensation);
@@ -2831,6 +2837,7 @@ impl NlDeviceKind {
             NlDeviceKind::ExplicitDiode(d) => d,
             NlDeviceKind::ExplicitDiodePair(d) => d,
             NlDeviceKind::Jfet(j) => j,
+            NlDeviceKind::Ota(o) => o,
         }
     }
 
@@ -2844,6 +2851,7 @@ impl NlDeviceKind {
             NlDeviceKind::ExplicitDiode(_) => "ExplicitDiode",
             NlDeviceKind::ExplicitDiodePair(_) => "ExplicitDiodePair",
             NlDeviceKind::Jfet(_) => "Jfet",
+            NlDeviceKind::Ota(_) => "Ota",
         }
     }
 }
