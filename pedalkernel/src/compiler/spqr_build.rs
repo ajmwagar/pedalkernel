@@ -2543,6 +2543,10 @@ fn merge_cross_reactive_groups_into_active_groups(
         Vec::with_capacity(groups.len());
     for group in groups.iter() {
         let mut nodes = std::collections::HashSet::new();
+        if !can_absorb_cross_reactive_passives(group, graph) {
+            active_terminal_nodes.push(nodes);
+            continue;
+        }
         for &eidx in &group.active_edges {
             let edge = &graph.edges[eidx];
             nodes.insert(edge.node_a);
@@ -2611,6 +2615,22 @@ fn merge_cross_reactive_groups_into_active_groups(
         idx += 1;
         keep
     });
+}
+
+fn can_absorb_cross_reactive_passives(
+    group: &super::signal_flow::FlowGroup,
+    graph: &super::graph::CircuitGraph,
+) -> bool {
+    if group.active_edges.is_empty() {
+        return false;
+    }
+    let rails = super::signal_flow::rail_nodes(graph);
+    group.active_edges.iter().any(|&eidx| {
+        let edge = &graph.edges[eidx];
+        let comp = &graph.components[edge.comp_idx];
+        !(comp.kind.is_diode_family()
+            && (rails.contains(&edge.node_a) || rails.contains(&edge.node_b)))
+    })
 }
 
 fn is_nonlinear_modulator_group(

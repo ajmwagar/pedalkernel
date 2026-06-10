@@ -69,7 +69,7 @@ struct ActiveElement {
 }
 
 /// Set of nodes that are rails (not signal-carrying shared nodes).
-fn rail_nodes(graph: &CircuitGraph) -> HashSet<NodeId> {
+pub(super) fn rail_nodes(graph: &CircuitGraph) -> HashSet<NodeId> {
     let mut rails = HashSet::new();
     rails.insert(graph.gnd_node);
     rails.insert(graph.vcc_node);
@@ -179,6 +179,27 @@ fn device_parallels_passive(
         (other.node_a == node_a && other.node_b == node_b)
             || (other.node_a == node_b && other.node_b == node_a)
     })
+}
+
+/// Rail-shunt diode clamps are nonlinear loads, not active source boundaries.
+///
+/// They must remain separate stages from an op-amp, but their signal node
+/// should not block passive reachability when the op-amp searches for its own
+/// resistive feedback path. Otherwise a post-gain clipper connected at
+/// `U1.out` hides `Rf: U1.out -> U1.neg` and the gain stage degenerates to
+/// unity.
+fn active_output_blocks_passive_reachability(
+    elem: &ActiveElement,
+    graph: &CircuitGraph,
+    rails: &HashSet<NodeId>,
+) -> bool {
+    let edge = &graph.edges[elem.edge_idx];
+    let comp = &graph.components[edge.comp_idx];
+    if comp.kind.is_diode_family() && (rails.contains(&edge.node_a) || rails.contains(&edge.node_b))
+    {
+        return false;
+    }
+    true
 }
 
 /// Build undirected signal-edge adjacency (excludes rail nodes).
@@ -329,6 +350,7 @@ fn build_flow_graph(
             .iter()
             .enumerate()
             .filter(|&(j, _)| j != i)
+            .filter(|(_, e)| active_output_blocks_passive_reachability(e, graph, rails))
             .flat_map(|(_, e)| {
                 let mut nodes: Vec<NodeId> = e.output_nodes.clone();
                 let comp = &graph.components[graph.edges[e.edge_idx].comp_idx];
@@ -1045,6 +1067,7 @@ pub(in crate::compiler) fn find_flow_groups(
                     .iter()
                     .enumerate()
                     .filter(|&(j, _)| j != scc[0])
+                    .filter(|(_, e)| active_output_blocks_passive_reachability(e, graph, &rails))
                     .filter_map(|(_, e)| {
                         if rails.contains(&e.output_node) {
                             None
@@ -1146,13 +1169,15 @@ pub(in crate::compiler) fn find_flow_groups(
             for (j, other) in active_elements.iter().enumerate() {
                 let other_comp = &graph.components[graph.edges[other.edge_idx].comp_idx];
                 if j != ei {
-                    feedback_block.extend(
-                        other
-                            .output_nodes
-                            .iter()
-                            .copied()
-                            .filter(|node| !rails.contains(node)),
-                    );
+                    if active_output_blocks_passive_reachability(other, graph, &rails) {
+                        feedback_block.extend(
+                            other
+                                .output_nodes
+                                .iter()
+                                .copied()
+                                .filter(|node| !rails.contains(node)),
+                        );
+                    }
                     if other_comp.kind.feedback_input_is_barrier()
                         && !rails.contains(&other.input_node)
                     {
@@ -1219,13 +1244,15 @@ pub(in crate::compiler) fn find_flow_groups(
                     for (k, other) in active_elements.iter().enumerate() {
                         let other_comp = &graph.components[graph.edges[other.edge_idx].comp_idx];
                         if k != ei && k != ej {
-                            feedback_block.extend(
-                                other
-                                    .output_nodes
-                                    .iter()
-                                    .copied()
-                                    .filter(|node| !rails.contains(node)),
-                            );
+                            if active_output_blocks_passive_reachability(other, graph, &rails) {
+                                feedback_block.extend(
+                                    other
+                                        .output_nodes
+                                        .iter()
+                                        .copied()
+                                        .filter(|node| !rails.contains(node)),
+                                );
+                            }
                             if other_comp.kind.feedback_input_is_barrier()
                                 && !rails.contains(&other.input_node)
                             {
