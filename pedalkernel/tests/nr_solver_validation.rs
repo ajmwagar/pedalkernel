@@ -12,10 +12,9 @@
 
 mod audio_analysis;
 
-use pedalkernel::elements::GummelPoonModel;
 use pedalkernel::elements::{
-    reset_solver_stats, solver_stats_snapshot, DiodeModel, DiodePairRoot, DiodeRoot, JfetModel,
-    JfetRoot, SolverStatsSnapshot, TriodeModel, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
+    reset_solver_stats, solver_stats_snapshot, DiodeModel, DiodePairRoot, DiodeRoot, JfetRoot,
+    SolverStatsSnapshot, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
 };
 use pedalkernel::model_lookup::{bjt_model_by_name, jfet_model_by_name, triode_model_by_name};
 
