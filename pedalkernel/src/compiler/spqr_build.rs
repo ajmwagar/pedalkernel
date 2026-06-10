@@ -764,7 +764,7 @@ pub fn compile_via_spqr_with_options(
                 }
 
                 for stage in spqr_stages {
-                    let built = build_spqr_stage(stage, &graph, sample_rate)
+                    let built = build_spqr_stage(stage, &graph, sample_rate, supply_voltage)
                         .map_err(|e| format!("Group {gi}: {e}"))?;
                     push_stage!(
                         built,
@@ -1191,10 +1191,15 @@ pub(super) fn with_voltage_source(passive_tree: DynNode) -> DynNode {
 /// - **PassiveWdf**: VS + DynNode tree + Passthrough root
 /// - **NlWdf**: VS + DynNode tree + NL root from Component::classify_nonlinear()
 /// - **Rigid**: not yet supported (returns Err — build layer will handle IIR/OpAmpRoot/MNA)
+///
+/// `supply_voltage` is the circuit's B+ supply (e.g. 250V for tube stages, 9V for pedals).
+/// It is used to configure tube roots with the correct `v_max` so the WDF voltage source
+/// matches the actual plate supply rail.
 pub(super) fn build_spqr_stage(
     stage: SpqrStage,
     graph: &CircuitGraph,
     _sample_rate: f64,
+    supply_voltage: f64,
 ) -> Result<BuiltStage, String> {
     match stage {
         SpqrStage::PassiveWdf {
@@ -1296,7 +1301,17 @@ pub(super) fn build_spqr_stage(
 
             // BJTs now use BjtRoot (single-port WDF root with external Vbe),
             // same as triodes use TriodeRoot. No MultiNL fallback needed.
-            let (root, base_diode_model) = create_root(&nl_kind, false);
+            let (mut root, base_diode_model) = create_root(&nl_kind, false);
+            // Set the supply voltage on tube roots so the WDF voltage source (VS =
+            // t.v_max()) matches the actual B+ rail.  Without this the triode/pentode
+            // would default to 500 V, shifting the plate operating point and gain by
+            // ~8 dB versus the correct 250 V operating point.
+            match &mut root {
+                RootKind::Triode(t) => t.set_v_max(supply_voltage.max(1.0)),
+                RootKind::VariMu(t) => t.set_v_max(supply_voltage.max(1.0)),
+                RootKind::Pentode(p) => p.set_v_max(supply_voltage.max(1.0)),
+                _ => {}
+            }
             let tree = with_voltage_source(tree);
             let oversampler = Oversampler::new(OversamplingFactor::X1);
             let mut wdf_stage = WdfStage::new(tree, root, oversampler);

@@ -839,10 +839,13 @@ impl CircuitGraph {
         for supply in &pedal.supplies {
             if let Some(&raw_id) = pin_ids.get(&supply.name) {
                 let resolved = uf.find(raw_id);
-                // Skip vcc and gnd — they're standard WDF terminations
+                // Always record the voltage for bias analysis (e.g. so vcc's 250V is
+                // visible in rail_voltage() during DC operating-point computation).
+                // Only add non-vcc, non-gnd nodes to supply_nodes so they are
+                // treated as AC-ground barriers in the SPQR/WDF build paths.
+                supply_voltages.insert(resolved, supply.config.voltage);
                 if resolved != vcc_node && resolved != gnd_node {
                     supply_nodes.insert(resolved);
-                    supply_voltages.insert(resolved, supply.config.voltage);
                 }
             }
         }
