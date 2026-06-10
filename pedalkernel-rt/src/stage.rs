@@ -800,6 +800,10 @@ pub struct WdfStage {
     /// Base diode model (before thermal modulation). Stored so thermal
     /// drift can be applied as a multiplier without accumulation.
     pub base_diode_model: Option<DiodeModel>,
+    /// Base BJT model (before thermal modulation). Stored so thermal
+    /// drift can be applied as a multiplier without accumulation.
+    /// Only set when `options.thermal` is true at compile time.
+    pub base_bjt_model: Option<crate::elements::nonlinear::GummelPoonModel>,
     /// Op-amp buffer paired with this WDF stage (for all-pass circuits).
     ///
     /// When a unity-gain op-amp feedback loop (neg=out) is detected at this
@@ -972,6 +976,7 @@ impl WdfStage {
             compensation: 1.0,
             oversampler,
             base_diode_model: None,
+            base_bjt_model: None,
             paired_opamp: None,
             allpass_feedback: None,
             allpass_direct: None,
@@ -1775,9 +1780,13 @@ impl WdfStage {
 
     /// Apply thermal drift to temperature-sensitive root elements.
     ///
-    /// Modulates diode Is and n_vt based on the current thermal state.
-    /// Uses stored base model to prevent multiplier accumulation.
+    /// Modulates diode Is/n_vt and BJT vt/Is/bf based on the current thermal
+    /// state. Uses stored base models to prevent multiplier accumulation.
+    ///
+    /// Thermal time constants are 10–100s, so this is called at the existing
+    /// `ThermalModel::update_interval` cadence (~1000 samples), not per-sample.
     pub fn apply_thermal(&mut self, state: &crate::thermal::ThermalState) {
+        // Diode roots: modulate Is and n_vt.
         if let Some(base) = &self.base_diode_model {
             let ideality_ratio = base.n_vt / 0.02585; // n factor (ideality * Vt_ref)
             match &mut self.root {
@@ -1798,6 +1807,18 @@ impl WdfStage {
                     d.model.n_vt = ideality_ratio * state.vt;
                 }
                 _ => {}
+            }
+        }
+
+        // BJT WDF root: modulate vt, Is, and bf.
+        // vt scales with absolute temperature (Boltzmann).
+        // Is doubles every ~10°C (silicon) / ~8°C (germanium).
+        // bf drifts linearly with beta_tempco.
+        if let Some(base) = &self.base_bjt_model {
+            if let RootKind::Bjt(bjt) = &mut self.root {
+                bjt.model.vt = state.vt;
+                bjt.model.is = base.is * state.is_multiplier;
+                bjt.model.bf = (base.bf * state.beta_multiplier).max(1.0);
             }
         }
     }
