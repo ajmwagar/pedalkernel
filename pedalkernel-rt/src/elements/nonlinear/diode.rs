@@ -673,6 +673,57 @@ impl WdfRoot for ZenerRoot {
     }
 }
 
+/// Anti-parallel zener pair at the tree root.
+///
+/// This models two zeners connected in opposite directions from the signal node
+/// to ground. The total port current is `i(v) = i_z(v) - i_z(-v)`.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ZenerPairRoot {
+    pub model: ZenerModel,
+    max_iter: usize,
+    prev_v: crate::Wave,
+}
+
+impl ZenerPairRoot {
+    pub fn new(model: ZenerModel) -> Self {
+        Self {
+            model,
+            max_iter: super::solver::NR_MAX_ITER,
+            prev_v: 0.0,
+        }
+    }
+
+    #[inline]
+    pub fn current(&self, v: crate::Wave) -> crate::Wave {
+        let z = ZenerRoot::new(self.model);
+        z.current(v) - z.current(-v)
+    }
+
+    #[inline]
+    fn current_derivative(&self, v: crate::Wave) -> crate::Wave {
+        let z = ZenerRoot::new(self.model);
+        z.current_derivative(v) + z.current_derivative(-v)
+    }
+}
+
+impl WdfRoot for ZenerPairRoot {
+    #[inline]
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
+        let root = *self;
+        let v0 = if self.prev_v != 0.0 && self.prev_v * a >= 0.0 && self.prev_v.abs() < 20.0 {
+            self.prev_v
+        } else {
+            a * 0.5
+        };
+        let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            (root.current(v), root.current_derivative(v))
+        });
+        self.prev_v = (a + b) * 0.5;
+        b
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Diode Pair Root
 // ---------------------------------------------------------------------------

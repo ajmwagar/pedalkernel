@@ -187,6 +187,7 @@ pub fn compile_via_spqr_with_options(
             port_values: Vec::new(),
             initialized: false,
         };
+        compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
         return Ok(compiled);
     }
@@ -246,6 +247,7 @@ pub fn compile_via_spqr_with_options(
             port_values: Vec::new(),
             initialized: false,
         };
+        compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
         return Ok(compiled);
     }
@@ -1503,6 +1505,7 @@ pub fn compile_via_spqr_with_options(
         port_values: Vec::new(),
         initialized: false,
     };
+    compiled.set_supply_voltage(supply_voltage);
 
     // Bind pot controls to their stages (WDF, IIR, MultiNl).
     super::spqr_control::bind_controls(pedal, &mut compiled);
@@ -2677,25 +2680,42 @@ fn build_ground_clip_stage(
         return None;
     }
 
-    // Synthesize DiodePair from two SingleDiode edges (antiparallel to ground)
+    // Synthesize pair roots from two antiparallel ground-clip edges. Otherwise
+    // two opposite zeners collapse to one polarity and clip asymmetrically.
     let (root, base_diode_model) = if nl_kinds.len() >= 2 {
         let mut pair_dt = None;
+        let mut zener_voltage = None;
         for i in 0..nl_kinds.len() {
             for j in (i + 1)..nl_kinds.len() {
-                if let (
-                    super::classify::NonlinearKind::SingleDiode(dt_a),
-                    super::classify::NonlinearKind::SingleDiode(_),
-                ) = (&nl_kinds[i], &nl_kinds[j])
-                {
-                    pair_dt = Some(*dt_a);
-                    break;
+                match (&nl_kinds[i], &nl_kinds[j]) {
+                    (
+                        super::classify::NonlinearKind::SingleDiode(dt_a),
+                        super::classify::NonlinearKind::SingleDiode(_),
+                    ) => {
+                        pair_dt = Some(*dt_a);
+                        break;
+                    }
+                    (
+                        super::classify::NonlinearKind::Zener { voltage },
+                        super::classify::NonlinearKind::Zener { .. },
+                    ) => {
+                        zener_voltage = Some(*voltage);
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            if pair_dt.is_some() {
+            if pair_dt.is_some() || zener_voltage.is_some() {
                 break;
             }
         }
-        if let Some(dt) = pair_dt {
+        if let Some(voltage) = zener_voltage {
+            let model = crate::elements::ZenerModel::new(voltage);
+            (
+                super::stage::RootKind::ZenerPair(crate::elements::ZenerPairRoot::new(model)),
+                None,
+            )
+        } else if let Some(dt) = pair_dt {
             let model = super::helpers::diode_model(dt);
             (
                 super::stage::RootKind::ExplicitDiodePair(

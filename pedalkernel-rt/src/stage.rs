@@ -798,6 +798,7 @@ pub enum RootKind {
     /// Wright Omega–based explicit single diode root.
     ExplicitSingleDiode(ExplicitDiodeRoot),
     Zener(ZenerRoot),
+    ZenerPair(ZenerPairRoot),
     Jfet(JfetRoot),
     /// JFET operating as a voltage-controlled variable resistor.
     /// Used for LFO-modulated JFETs in phaser circuits (e.g., Phase 90).
@@ -963,6 +964,7 @@ impl RootKind {
                 | RootKind::ExplicitDiodePair(_)
                 | RootKind::ExplicitSingleDiode(_)
                 | RootKind::Zener(_)
+                | RootKind::ZenerPair(_)
         )
     }
 
@@ -974,7 +976,8 @@ impl RootKind {
             | RootKind::SingleDiode(_)
             | RootKind::ExplicitDiodePair(_)
             | RootKind::ExplicitSingleDiode(_)
-            | RootKind::Zener(_) => (true, 1),
+            | RootKind::Zener(_)
+            | RootKind::ZenerPair(_) => (true, 1),
             RootKind::Jfet(_)
             | RootKind::Triode(_)
             | RootKind::Mosfet(_)
@@ -1004,6 +1007,7 @@ impl RootKind {
             RootKind::ExplicitDiodePair(dp) => dp.process(b_tree, rp),
             RootKind::ExplicitSingleDiode(d) => d.process(b_tree, rp),
             RootKind::Zener(z) => z.process(b_tree, rp),
+            RootKind::ZenerPair(z) => z.process(b_tree, rp),
             RootKind::Jfet(j) => j.process(b_tree, rp),
             RootKind::JfetVr(j) => j.process_root(b_tree, rp),
             RootKind::Triode(t) => t.process(b_tree, rp),
@@ -2068,7 +2072,8 @@ impl WdfStage {
                 | RootKind::SingleDiode(_)
                 | RootKind::ExplicitDiodePair(_)
                 | RootKind::ExplicitSingleDiode(_)
-                | RootKind::Zener(_) => -vs_voltage,
+                | RootKind::Zener(_)
+                | RootKind::ZenerPair(_) => -vs_voltage,
                 _ => vs_voltage,
             };
             // Apply tree-topology sign correction (detected during construction).
@@ -2142,6 +2147,7 @@ impl WdfStage {
                     RootKind::ExplicitDiodePair(dp) => dp.process(b_tree, rp),
                     RootKind::ExplicitSingleDiode(d) => d.process(b_tree, rp),
                     RootKind::Zener(z) => z.process(b_tree, rp),
+                    RootKind::ZenerPair(z) => z.process(b_tree, rp),
                     RootKind::Jfet(j) => {
                         if is_sf {
                             j.process_source_follower(b_tree, rp, sample * compensation)
@@ -2335,7 +2341,8 @@ impl WdfStage {
                 | RootKind::SingleDiode(_)
                 | RootKind::ExplicitDiodePair(_)
                 | RootKind::ExplicitSingleDiode(_)
-                | RootKind::Zener(_) => -(a_root + b_tree) / 2.0,
+                | RootKind::Zener(_)
+                | RootKind::ZenerPair(_) => -(a_root + b_tree) / 2.0,
                 _ => (a_root + b_tree) / 2.0,
             };
             out
@@ -3195,6 +3202,7 @@ impl WdfStage {
             RootKind::ExplicitDiodePair(_) => "ExplicitDiodePair",
             RootKind::ExplicitSingleDiode(_) => "ExplicitSingleDiode",
             RootKind::Zener(_) => "Zener",
+            RootKind::ZenerPair(_) => "ZenerPair",
             RootKind::Jfet(_) => "Jfet",
             RootKind::JfetVr(_) => "JfetVr",
             RootKind::Triode(_) => "Triode",

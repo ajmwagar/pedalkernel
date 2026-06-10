@@ -45,6 +45,7 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
             RootKind::ExplicitDiodePair(_) => "ExplicitDiodePair",
             RootKind::ExplicitSingleDiode(_) => "ExplicitSingleDiode",
             RootKind::Zener(_) => "Zener",
+            RootKind::ZenerPair(_) => "ZenerPair",
             RootKind::Jfet(_) => "Jfet",
             RootKind::Triode(_) => "Triode",
             RootKind::Mosfet(_) => "Mosfet",
