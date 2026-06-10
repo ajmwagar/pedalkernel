@@ -127,3 +127,5 @@ mod blockwise_detection_tests;
 mod k_method_tests;
 #[cfg(test)]
 mod k_method_non_bjt_tests;
+#[cfg(test)]
+mod bridged_t_bias_loading_tests;
