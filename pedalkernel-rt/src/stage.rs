@@ -868,13 +868,7 @@ pub struct WdfStage {
     /// from `node_signals` at `injection_node_id` and additively blends
     /// its output into the serial chain signal.
     pub is_feedforward: bool,
-    /// Sample counter for runtime warnings rate limiting.
-    /// Only meaningful when `runtime-warnings` feature is enabled.
-    #[allow(dead_code)]
-    pub sample_counter: u64,
-    /// Component ID for the root device (for runtime warning attribution).
-    /// Only meaningful when `runtime-warnings` feature is enabled.
-    #[allow(dead_code)]
+    /// Component ID for the root device (used for NaN diagnostics and debug output).
     pub root_comp_id: String,
     /// When set, identifies a pot in the WDF tree whose resistance drives
     /// OpAmpRoot gain recalculation. After pot update + recompute, the stage
@@ -995,7 +989,6 @@ impl WdfStage {
             is_trigger_voice: false,
             voice_active: false,
             is_feedforward: false,
-            sample_counter: 0,
             root_comp_id: String::new(),
             feedback_pot_id: None,
             feedback_series_r: 0.0,
@@ -1619,26 +1612,6 @@ impl WdfStage {
             *y_prev = flush_denormal(y);
 
             return *y_prev;
-        }
-
-        // Runtime warning checks for hybrid linear/nonlinear devices.
-        // Placed after all tree borrows are dropped to avoid borrow conflicts.
-        #[cfg(feature = "runtime-warnings")]
-        {
-            self.sample_counter += 1;
-            let sc = self.sample_counter;
-            let comp_id = &self.root_comp_id;
-            match &self.root {
-                RootKind::JfetVr(j) => {
-                    j.check_operating_region(wdf_out, None, comp_id, sc);
-                }
-                RootKind::Ota(o) => {
-                    o.check_operating_region(wdf_out, comp_id, sc);
-                }
-                _ => {}
-            }
-            // Check hybrid devices in the tree (JfetVr, Photocoupler leaves).
-            self.tree.check_hybrid_warnings(wdf_out, sc);
         }
 
         flush_denormal(wdf_out)

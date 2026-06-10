@@ -1222,13 +1222,6 @@ impl DynNode {
         self.for_each_leaf_mut(&mut |leaf| leaf.set_unit_delay_partner(val))
     }
 
-    /// Check hybrid linear/nonlinear devices for operating region violations.
-    #[cfg(feature = "runtime-warnings")]
-    pub fn check_hybrid_warnings(&mut self, _v_port: f64, _sample_index: u64) {
-        // Runtime warnings for JfetVr and Photocoupler need access to inner types.
-        // This is feature-gated diagnostic code; will need concrete downcast support.
-    }
-
     /// Count total nodes in tree (for statistics).
     pub fn node_count(&self) -> usize {
         match self {
