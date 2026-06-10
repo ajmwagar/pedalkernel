@@ -12,11 +12,11 @@
 
 mod audio_analysis;
 
-use pedalkernel::elements::GummelPoonModel;
 use pedalkernel::elements::{
-    reset_solver_stats, solver_stats_snapshot, DiodeModel, DiodePairRoot, DiodeRoot, JfetModel,
-    JfetRoot, SolverStatsSnapshot, TriodeModel, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
+    reset_solver_stats, solver_stats_snapshot, DiodeModel, DiodePairRoot, DiodeRoot, JfetRoot,
+    SolverStatsSnapshot, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
 };
+use pedalkernel::model_lookup::{bjt_model_by_name, jfet_model_by_name, triode_model_by_name};
 
 use audio_analysis::{compile_and_process, dc_offset, peak, rms, sine_at, SAMPLE_RATE};
 
@@ -225,7 +225,7 @@ fn nr_l0e_germanium_vs_silicon_vs_led() {
 #[test]
 fn nr_l0f_bjt_vbe_sweep() {
     // Verify Gummel-Poon model: Ic increases monotonically with Vbe.
-    let model = GummelPoonModel::by_name("2N3904");
+    let model = bjt_model_by_name("2N3904");
 
     // Fixed Vce = 4.5 V (half-supply), sweep Vbe from 0.0 to 0.7 V.
     let vce = 4.5;
@@ -254,7 +254,7 @@ fn nr_l0f_bjt_vbe_sweep() {
 
 #[test]
 fn nr_l0g_triode_vgk_sweep() {
-    let model = TriodeModel::by_name("12ax7");
+    let model = triode_model_by_name("12ax7");
     let mut triode = TriodeRoot::new(model);
     triode.set_v_max(250.0);
     let rp = 100_000.0;
@@ -280,7 +280,7 @@ fn nr_l0g_triode_vgk_sweep() {
 
 #[test]
 fn nr_l0h_jfet_vgs_sweep() {
-    let model = JfetModel::by_name("2n5457");
+    let model = jfet_model_by_name("2n5457");
     let mut jfet = JfetRoot::new(model);
     let rp = 10_000.0;
 
