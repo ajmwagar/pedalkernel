@@ -2443,7 +2443,6 @@ fn q12_to_two_rung_differential_diode_ladder_routes_into_bkm_boundary() {
 }
 
 #[test]
-#[ignore = "documents current Q12 collector boundary runtime-coupling gap; enable when bead 5 fixes per-boundary BKM drive"]
 fn q12_to_two_rung_differential_diode_ladder_handoff_is_lowpass() {
     let def = crate::dsl::parse_pedal_file(Q12_TO_TWO_RUNG_DIFFERENTIAL_DIODE_LADDER)
         .expect("parse failed");

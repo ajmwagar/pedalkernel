@@ -561,16 +561,21 @@ fn merge_shared_emitter_input_pairs(nl_blocks: Vec<NlBlock>, graph: &CircuitGrap
         let Some(a_terms) = bjt_terminal_nodes(nl_blocks[a].comp_idx, graph) else {
             continue;
         };
-        if a_terms.base == a_terms.collector {
-            continue;
-        }
+        // Skip fully-diode-connected BJTs — those belong to DifferentialDiodeRung merging.
+        // Mixed pairs (one active + one diode-connected, shared emitter) are valid
+        // InputDifferentialPair candidates: merge them here so classify_block_topology
+        // sees both transistors in a single 2-NL block.
         for b in (a + 1)..nl_blocks.len() {
             let Some(b_terms) = bjt_terminal_nodes(nl_blocks[b].comp_idx, graph) else {
                 continue;
             };
-            if b_terms.base == b_terms.collector {
+            let a_diode_connected = a_terms.base == a_terms.collector;
+            let b_diode_connected = b_terms.base == b_terms.collector;
+            // Skip fully-diode-connected pairs — those are ladder rungs, handled elsewhere.
+            if a_diode_connected && b_diode_connected {
                 continue;
             }
+            // Require shared emitter with distinct base/collector signal paths.
             if a_terms.emitter == b_terms.emitter
                 && a_terms.base != b_terms.base
                 && a_terms.collector != b_terms.collector
@@ -733,17 +738,24 @@ fn classify_block_topology(
         bjt_terminal_nodes(comp_indices[0], graph),
         bjt_terminal_nodes(comp_indices[1], graph),
     ) {
-        if left.base != left.collector
-            && right.base != right.collector
-            && left.emitter == right.emitter
-            && left.base != right.base
-            && left.collector != right.collector
-        {
-            return BlockTopology::InputDifferentialPair {
-                left_comp_idx: comp_indices[0],
-                right_comp_idx: comp_indices[1],
-                shared_emitter: left.emitter,
-            };
+        let left_diode_connected = left.base == left.collector;
+        let right_diode_connected = right.base == right.collector;
+        // Both-active pair (fully differential) or mixed active+diode-connected pair:
+        // as long as the two BJTs share an emitter node and have distinct base/collector
+        // signal paths, this is an InputDifferentialPair. The diode-connected side's
+        // base == collector is legal — it acts as a current-mirror reference whose
+        // base and collector are tied together.
+        if !left_diode_connected || !right_diode_connected {
+            if left.emitter == right.emitter
+                && left.base != right.base
+                && left.collector != right.collector
+            {
+                return BlockTopology::InputDifferentialPair {
+                    left_comp_idx: comp_indices[0],
+                    right_comp_idx: comp_indices[1],
+                    shared_emitter: left.emitter,
+                };
+            }
         }
     }
 
