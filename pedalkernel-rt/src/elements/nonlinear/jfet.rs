@@ -78,6 +78,21 @@ impl JfetModel {
         let arg = (vgd_int / (self.n * VT)).min(40.0);
         sign * self.gate_is * (crate::math::exp(arg) - 1.0)
     }
+
+    /// Compute d(Igs)/d(Vgs): conductance of the gate-source junction diode.
+    ///
+    /// `dIgs/dVgs = IS / (N × Vt) × exp(Vgs / (N × Vt))`
+    ///
+    /// Returns the external-convention derivative (same sign convention as
+    /// `gate_source_current`).
+    #[inline]
+    pub fn gate_source_conductance(&self, vgs: f64) -> f64 {
+        let sign = if self.is_n_channel { 1.0 } else { -1.0 };
+        let vgs_int = sign * vgs;
+        let arg = (vgs_int / (self.n * VT)).min(40.0);
+        // sign² = 1, so the external derivative equals the internal derivative
+        self.gate_is / (self.n * VT) * crate::math::exp(arg)
+    }
 }
 
 // TODO: move to pedalkernel as extension impl
@@ -254,7 +269,9 @@ impl JfetRoot {
             let vgs_int = sign * vgs;
             let vov = vgs_int - model.vto;
 
-            // Cutoff check
+            // Cutoff check — gate diode leakage still applies even in cutoff,
+            // but it is physically negligible (< 1 nA) so we use LEAKAGE_CONDUCTANCE
+            // as the slope rather than computing the full exponential.
             if vov <= 0.0 {
                 return (0.0, LEAKAGE_CONDUCTANCE);
             }
@@ -263,18 +280,30 @@ impl JfetRoot {
             let ids_int = model.beta * vov * vov;
             let ids = sign * ids_int;
 
-            // Derivative of Ids w.r.t. Vs:
-            // dIds/dVs = dIds/dVgs × dVgs/dVs
-            // dIds_int/dVgs_int = 2 × Beta × vov
-            // dVgs_int/dVgs = sign, dVgs/dVs = -1
-            // dIds/dVs = sign × 2 × Beta × vov × sign × (-1)
-            //          = -2 × Beta × vov
+            // Gate-source junction diode current.
             //
-            // Current INTO port = -Ids (sign convention for WDF root)
-            // d(-Ids)/dVs = -dIds/dVs = 2 × Beta × vov
-            let di_dvs = 2.0 * model.beta * vov;
+            // In a source follower the gate is driven from a low-impedance source,
+            // so forward gate conduction draws current that flows through the source
+            // node. Total current into the WDF source port:
+            //   I_source = Ids + Igs
+            // The NR constraint becomes:
+            //   f(Vs) = a - 2*Vs - 2*Rp*(Ids + Igs) = 0
+            let igs = model.gate_source_current(vgs);
 
-            (-ids, di_dvs)
+            // Derivatives w.r.t. Vs:
+            //
+            // dIds/dVs: Vgs = Vgate - Vs  →  dVgs/dVs = -1
+            //   dIds_int/dVgs_int = 2 × Beta × vov,  dVgs_int/dVs = sign × (-1)
+            //   dIds/dVs = sign × 2β·vov × sign × (-1) = -2β·vov
+            //
+            // dIgs/dVs: dIgs/dVgs × dVgs/dVs = gS × (-1)  where gS = dIgs/dVgs
+            //   gS = gate_source_conductance(vgs) ≥ 0
+            //   dIgs/dVs = -gS
+            let gs = model.gate_source_conductance(vgs);
+            let di_total_dvs = -2.0 * model.beta * vov - gs;
+
+            // Current INTO port = -(Ids + Igs),  d/dVs = -di_total_dvs
+            (-ids - igs, -di_total_dvs)
         };
 
         // Initial guess: source follows gate minus typical Vgs bias
