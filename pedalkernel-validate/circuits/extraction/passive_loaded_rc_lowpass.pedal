@@ -1,0 +1,15 @@
+# Passive RC low-pass with an explicit load at the extraction/output node.
+
+pedal "Extraction Passive Loaded RC Lowpass" {
+  components {
+    R1: resistor(10k)
+    C1: cap(10n)
+    R_load: resistor(22k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> C1.a, R_load.a, out
+    C1.b -> gnd
+    R_load.b -> gnd
+  }
+}

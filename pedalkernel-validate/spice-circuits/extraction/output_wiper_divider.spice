@@ -1,0 +1,4 @@
+* Three-terminal output level pot fixed at default 0.5.
+
+Rtop v_in v_out 50k
+Rbot v_out 0 50k

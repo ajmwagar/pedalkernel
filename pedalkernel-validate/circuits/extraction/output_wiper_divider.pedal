@@ -1,0 +1,19 @@
+# Literal three-terminal output level pot. Default Output = 0.5.
+#
+# Candidate repro tracked by pedalkernel-hwme. It is intentionally not
+# registered in the passing extraction suite until physical output-wiper
+# semantics match the paired ngspice 50k/50k divider.
+
+pedal "Extraction Output Wiper Divider" {
+  components {
+    Output: pot(100k, b)
+  }
+  nets {
+    in -> Output.a
+    Output.b -> gnd
+    Output.w -> out
+  }
+  controls {
+    Output.position -> "Output" [0.0, 1.0] = 0.5
+  }
+}

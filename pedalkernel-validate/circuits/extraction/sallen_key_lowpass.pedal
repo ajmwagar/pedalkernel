@@ -1,0 +1,28 @@
+# Unity-gain Sallen-Key low-pass filter.
+#
+# Candidate repro tracked by pedalkernel-ht0o. It is intentionally not
+# registered in the passing extraction suite until active-filter extraction
+# matches the paired ngspice topology.
+
+pedal "Extraction Sallen Key Lowpass" {
+  components {
+    U1: opamp(tl072)
+    R1: resistor(10k)
+    R2: resistor(10k)
+    C1: cap(10n)
+    C2: cap(10n)
+    R_out: resistor(1k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> R2.a
+    R2.b -> U1.pos
+    R1.b -> C1.a
+    C1.b -> U1.out
+    U1.pos -> C2.a
+    C2.b -> gnd
+    U1.neg -> U1.out
+    U1.out -> R_out.a
+    R_out.b -> out
+  }
+}

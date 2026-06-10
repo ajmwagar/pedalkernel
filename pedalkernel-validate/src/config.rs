@@ -1285,6 +1285,80 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
         },
     );
 
+    // Extraction/control regression suite
+    suites.insert(
+        "extraction".to_string(),
+        TestSuite {
+            description: "Focused compiler extraction and control-routing regressions".to_string(),
+            tests: {
+                let mut tests = BTreeMap::new();
+
+                tests.insert(
+                    "active_feedback_treble_shelf".to_string(),
+                    TestCase {
+                        circuit: "extraction/active_feedback_treble_shelf.pedal".to_string(),
+                        description: "Goldenrod-style op-amp feedback treble shelf with split pot"
+                            .to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 3000.0,
+                                amplitude: 0.1,
+                                duration: 0.1,
+                                label: Some("sine".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 100.0,
+                                f_end: 12000.0,
+                                amplitude: 0.1,
+                                duration: 0.1,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(8.0),
+                            peak_error_db: Some(10.0),
+                            spectral_error_db: Some(8.0),
+                            ..Default::default()
+                        },
+                    },
+                );
+
+                tests.insert(
+                    "passive_loaded_rc_lowpass".to_string(),
+                    TestCase {
+                        circuit: "extraction/passive_loaded_rc_lowpass.pedal".to_string(),
+                        description: "Passive RC low-pass with explicit output load".to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 1000.0,
+                                amplitude: 1.0,
+                                duration: 0.1,
+                                label: Some("sine".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 1.0,
+                                duration: 0.1,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-35.0),
+                            peak_error_db: Some(-25.0),
+                            spectral_error_db: Some(2.0),
+                            ..Default::default()
+                        },
+                    },
+                );
+
+                tests
+            },
+        },
+    );
+
     // Classic pedals test suite
     suites.insert(
         "pedals".to_string(),

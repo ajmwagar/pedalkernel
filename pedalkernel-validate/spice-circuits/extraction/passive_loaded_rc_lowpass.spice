@@ -1,0 +1,5 @@
+* Passive RC low-pass loaded by 22k at the output node.
+
+R1 v_in v_out 10k
+C1 v_out 0 10n
+Rload v_out 0 22k
