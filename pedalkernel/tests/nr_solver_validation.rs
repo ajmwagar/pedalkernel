@@ -12,11 +12,11 @@
 
 mod audio_analysis;
 
-use pedalkernel::elements::GummelPoonModel;
 use pedalkernel::elements::{
-    reset_solver_stats, solver_stats_snapshot, DiodeModel, DiodePairRoot, DiodeRoot, JfetModel,
-    JfetRoot, SolverStatsSnapshot, TriodeModel, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
+    reset_solver_stats, solver_stats_snapshot, DiodeModel, DiodePairRoot, DiodeRoot,
+    JfetRoot, SolverStatsSnapshot, TriodeRoot, WdfRoot, ZenerModel, ZenerRoot,
 };
+use pedalkernel::model_lookup::{bjt_model_by_name, jfet_model_by_name, triode_model_by_name};
 
 use audio_analysis::{compile_and_process, dc_offset, peak, rms, sine_at, SAMPLE_RATE};
 
@@ -225,7 +225,7 @@ fn nr_l0e_germanium_vs_silicon_vs_led() {
 #[test]
 fn nr_l0f_bjt_vbe_sweep() {
     // Verify Gummel-Poon model: Ic increases monotonically with Vbe.
-    let model = GummelPoonModel::by_name("2N3904");
+    let model = bjt_model_by_name("2N3904");
 
     // Fixed Vce = 4.5 V (half-supply), sweep Vbe from 0.0 to 0.7 V.
     let vce = 4.5;
@@ -254,7 +254,7 @@ fn nr_l0f_bjt_vbe_sweep() {
 
 #[test]
 fn nr_l0g_triode_vgk_sweep() {
-    let model = TriodeModel::by_name("12ax7");
+    let model = triode_model_by_name("12ax7");
     let mut triode = TriodeRoot::new(model);
     triode.set_v_max(250.0);
     let rp = 100_000.0;
@@ -280,7 +280,7 @@ fn nr_l0g_triode_vgk_sweep() {
 
 #[test]
 fn nr_l0h_jfet_vgs_sweep() {
-    let model = JfetModel::by_name("2n5457");
+    let model = jfet_model_by_name("2n5457");
     let mut jfet = JfetRoot::new(model);
     let rp = 10_000.0;
 
@@ -309,6 +309,134 @@ fn nr_l0h_jfet_vgs_sweep() {
     assert!(
         idss_wdf > 1e-5,
         "JFET should have Idss > 10µA at Vgs=0, got {idss_wdf:.6e}"
+    );
+}
+
+// ============================================================================
+// Gate-junction current tests (pedalkernel-1kmq.1)
+// ============================================================================
+
+/// WHY: `gate_source_current` was implemented but never called from the NR
+/// solve. This test verifies that the newly-wired Igs path (a) produces
+/// visible gate current at Vgs > +0.5V, and (b) is bit-identical to the
+/// old model for Vgs ≤ 0 (no regression below the conduction threshold).
+#[test]
+fn nr_l0_jfet_gate_conduction_iv_sweep() {
+    // Use 2N5457: IS=95.6fA, N=1, VTO=-1.25V, BETA=1.04mA/V²
+    let model = jfet_model_by_name("2n5457");
+
+    // ── Part 1: gate current onset above ~+0.5V ──────────────────────────
+    // At Vgs = +0.0V: Igs should be negligible (< 1 nA)
+    let igs_at_0 = model.gate_source_current(0.0);
+    assert!(
+        igs_at_0.abs() < 1e-9,
+        "Gate current at Vgs=0 should be < 1 nA, got {igs_at_0:.3e}"
+    );
+
+    // At Vgs = +0.6V: expect ~mA-scale gate current from exponential diode
+    // Igs = 95.6e-15 * (exp(0.6 / 0.02585) - 1) ≈ 4 µA..10 mA
+    let igs_at_fwd = model.gate_source_current(0.6);
+    assert!(
+        igs_at_fwd > 1e-6,
+        "Gate current at Vgs=+0.6V should be > 1 µA, got {igs_at_fwd:.3e}"
+    );
+
+    // Gate current should be monotonically increasing across the forward-bias sweep
+    let mut prev_igs = model.gate_source_current(-2.0);
+    for i in -20..=30i32 {
+        let vgs = i as f64 * 0.05; // -1.0V … +1.5V in 50 mV steps
+        let igs = model.gate_source_current(vgs);
+        assert!(
+            igs >= prev_igs - 1e-20,
+            "Igs must be monotonically increasing: at Vgs={vgs:.2}, Igs={igs:.3e} < prev={prev_igs:.3e}"
+        );
+        prev_igs = igs;
+    }
+
+    // ── Part 2: source-follower regression — below conduction is bit-identical ──
+    // In a self-biased source follower, Vgs = Vgate - Vs ≈ -0.5V (negative) for
+    // typical Vgate and Rs values.  That keeps Vgs below the diode conduction
+    // threshold (~+0.5V), so Igs ≈ 0 and the new model should produce the same
+    // reflected wave as the old model (gate_is=0).
+    let rp = 2_200.0; // Matches jfet_source_follower.pedal Rs=2.2k
+    let mut jfet_with_igs = JfetRoot::new(model);
+    let mut old_model = model;
+    old_model.gate_is = 0.0; // Simulate the pre-patch model
+    let mut jfet_no_igs = JfetRoot::new(old_model);
+
+    // Sweep typical source-follower operating range: Vgate -1V to +0.5V.
+    // In all these cases the self-bias keeps Vgs < 0, so Igs ≈ 0.
+    for i in -10..=5i32 {
+        let vgate = i as f64 * 0.1;
+        let a = 0.0_f64;
+        let b_with = jfet_with_igs.process_source_follower(a, rp, vgate);
+        let b_without = jfet_no_igs.process_source_follower(a, rp, vgate);
+        let diff = (b_with - b_without).abs();
+        assert!(
+            diff < 1e-9,
+            "Below conduction (Vgate={vgate:.1}V), Igs should not affect output: |Δb| = {diff:.3e}"
+        );
+    }
+
+    // ── Part 3: direct Igs verification via source_follower with forced Vgs > 0 ──
+    // Construct a scenario where the NR solves with Vgs driven positive:
+    // Use very small Rp (10Ω) so source stays near 0V regardless of Ids, and
+    // drive Vgate = +0.8V so Vgs ≈ 0.8V, past the diode threshold.
+    let rp_small = 10.0_f64;
+    let vgate_fwd = 0.8_f64;
+    let a_fwd = 0.0_f64;
+
+    let b_fwd_with = jfet_with_igs.process_source_follower(a_fwd, rp_small, vgate_fwd);
+    let b_fwd_without = jfet_no_igs.process_source_follower(a_fwd, rp_small, vgate_fwd);
+    let diff_fwd = (b_fwd_with - b_fwd_without).abs();
+
+    // With Rp=10Ω, Ids ≈ beta*(Vgate+1.25)^2 = 1.04e-3 * 4.2 ≈ 4.4mA,
+    // so Vs ≈ 10 * 4.4e-3 ≈ 44mV. Vgs = 0.8 - 0.044 = 0.756V.
+    // Igs = IS * exp(0.756/0.026) ≈ 95.6e-15 * 2e12 ≈ 190mA → very large.
+    // This will shift Vs appreciably, so |Δb| should be >> 1e-6.
+    assert!(
+        diff_fwd > 1e-6,
+        "With small Rp={rp_small}Ω and Vgate={vgate_fwd}V (Vgs > 0.5V), gate conduction should visibly shift Vs: |Δb| = {diff_fwd:.3e}"
+    );
+    eprintln!(
+        "[gate conduction fwd] Rp={rp_small}, Vgate={vgate_fwd}: b_with={b_fwd_with:.6}, b_without={b_fwd_without:.6}, |Δb|={diff_fwd:.3e}"
+    );
+}
+
+/// WHY: derivative wiring must be correct for NR convergence. If
+/// `gate_source_conductance` has the wrong sign the Jacobian is wrong and
+/// NR will oscillate. This test sweeps a source follower past forward
+/// conduction and checks solver convergence stats.
+#[test]
+fn nr_l0_jfet_gate_conduction_nr_convergence() {
+    let model = jfet_model_by_name("2n5457");
+    let mut jfet = JfetRoot::new(model);
+    let rp = 2_200.0;
+
+    reset_solver_stats();
+    // Sweep vgate from -1V to +0.7V in small steps (crosses conduction boundary)
+    for i in -20..=14i32 {
+        let vgate = i as f64 * 0.05;
+        let _b = jfet.process_source_follower(0.0, rp, vgate);
+    }
+    let stats = solver_stats_snapshot();
+
+    assert_eq!(
+        stats.iter_cap_hits, 0,
+        "No convergence failures expected when sweeping past forward conduction, got {}",
+        stats.iter_cap_hits
+    );
+    assert!(
+        stats.max_residual < 1e-3,
+        "Max NR residual should be small, got {:.3e}",
+        stats.max_residual
+    );
+    eprintln!(
+        "[gate conduction NR] solves={}, avg_iter={:.1}, max_iter={}, max_residual={:.3e}",
+        stats.solves,
+        if stats.solves > 0 { stats.total_iterations as f64 / stats.solves as f64 } else { 0.0 },
+        stats.max_iterations,
+        stats.max_residual,
     );
 }
 
