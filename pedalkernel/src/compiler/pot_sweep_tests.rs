@@ -369,13 +369,13 @@ fn core_legend_12_user_pots_have_runtime_bindings() {
         (
             "screamer",
             "screamer",
-            &[("Drive", 1), ("Tone", 1), ("Level", 1)],
+            &[("Drive", 1), ("Tone", 2), ("Level", 1)],
         ),
-        ("sd1", "sd1", &[("Drive", 1), ("Tone", 1), ("Level", 1)]),
+        ("sd1", "sd1", &[("Drive", 1), ("Tone", 2), ("Level", 1)]),
         (
             "goldenrod",
             "goldenrod",
-            &[("Gain", 2), ("Treble", 1), ("Output", 1)],
+            &[("Gain", 3), ("Treble", 1), ("Output", 1)],
         ),
     ];
 
@@ -491,8 +491,8 @@ fn core_legend_12_user_pots_have_runtime_bindings() {
 
     assert_eq!(user_pot_count, 12, "expected 12 user-facing pots");
     assert_eq!(
-        runtime_binding_count, 13,
-        "expected 13 runtime bindings because Goldenrod Gain is dual-gang"
+        runtime_binding_count, 16,
+        "expected split passive controls to bind every runtime stage owner"
     );
 }
 

@@ -108,18 +108,23 @@ fn passive_coupling_cap_passes_audio() {
 #[test]
 fn passive_small_cap_blocks_low_freq() {
     // 1nF cap at 440Hz: Xc = 1/(2π·440·1e-9) ≈ 362kΩ.
-    // With 10k series R, attenuation = R/(R+Xc) ≈ 0.027. Heavy.
+    // With a 10k load, attenuation is about 10k/(10k+10k+Xc) ≈ 0.026.
+    // Without the load this is an open-circuit output and should measure
+    // near unity, so the load is part of the intended high-pass fixture.
     let gain = measure_gain(
         r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
                 C1: cap(1n)
+                Rload: resistor(10k)
             }
             nets {
                 in -> R1.a
                 R1.b -> C1.a
                 C1.b -> out
+                out -> Rload.a
+                Rload.b -> gnd
             }
             controls {}
         }"#,

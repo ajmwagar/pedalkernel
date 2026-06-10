@@ -113,63 +113,85 @@ fn screamer_passive_rtype_tone_recomputes_matrix() {
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
-    let (before, extract_before) = compiled
-        .stages
+    let tone_stage_indices: Vec<usize> = compiled
+        .controls
         .iter()
-        .find_map(|stage| match stage {
+        .filter_map(|binding| {
+            if binding.component_id == "Tone" {
+                if let super::compiled::ControlTarget::PotInStage(stage_idx) = binding.target {
+                    return Some(stage_idx);
+                }
+            }
+            None
+        })
+        .collect();
+    assert!(
+        !tone_stage_indices.is_empty(),
+        "Tone should bind at least one passive stage"
+    );
+
+    let before: Vec<_> = tone_stage_indices
+        .iter()
+        .filter_map(|&stage_idx| match &compiled.stages[stage_idx] {
             super::compiled::Stage::Wdf(w) => match &w.root {
                 super::stage::RootKind::PassiveRType {
                     scattering,
                     extraction_coeffs,
                     ..
-                } => Some((scattering.clone(), extraction_coeffs.clone())),
+                } => Some((stage_idx, scattering.clone(), extraction_coeffs.clone())),
                 _ => None,
             },
             _ => None,
         })
-        .expect("passive rtype stage");
+        .collect();
+    assert!(
+        !before.is_empty(),
+        "Tone should bind at least one PassiveRType stage"
+    );
 
     compiled.set_control("Tone", 1.0);
     for _ in 0..3000 {
         compiled.process(0.0);
     }
 
-    let (after, extract_after) = compiled
-        .stages
-        .iter()
-        .find_map(|stage| match stage {
+    let mut max_delta = 0.0f64;
+    let mut max_extract_delta = 0.0f64;
+    for (stage_idx, scattering_before, extract_before) in before {
+        let (scattering_after, extract_after) = match &compiled.stages[stage_idx] {
             super::compiled::Stage::Wdf(w) => match &w.root {
                 super::stage::RootKind::PassiveRType {
                     scattering,
                     extraction_coeffs,
                     ..
-                } => Some((scattering.clone(), extraction_coeffs.clone())),
-                _ => None,
+                } => (scattering, extraction_coeffs),
+                _ => continue,
             },
-            _ => None,
-        })
-        .expect("passive rtype stage after sweep");
+            _ => continue,
+        };
+        let delta: f64 = scattering_before
+            .iter()
+            .zip(scattering_after.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        let extract_delta: f64 = extract_before
+            .iter()
+            .zip(extract_after.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        max_delta = max_delta.max(delta);
+        max_extract_delta = max_extract_delta.max(extract_delta);
+    }
 
-    let delta: f64 = before
-        .iter()
-        .zip(after.iter())
-        .map(|(a, b)| (a - b).abs())
-        .sum();
-    let extract_delta: f64 = extract_before
-        .iter()
-        .zip(extract_after.iter())
-        .map(|(a, b)| (a - b).abs())
-        .sum();
     eprintln!(
-        "Screamer PassiveRType Tone scattering delta={delta:.6}, extraction delta={extract_delta:.6}"
+        "Screamer PassiveRType Tone max scattering delta={max_delta:.6}, max extraction delta={max_extract_delta:.6}"
     );
     assert!(
-        delta > 1e-4,
-        "Tone sweep should recompute PassiveRType scattering"
+        max_delta > 1e-4,
+        "Tone sweep should recompute a Tone-owned PassiveRType scattering matrix"
     );
     assert!(
-        extract_delta > 1e-4,
-        "Tone sweep should recompute PassiveRType output extraction"
+        max_extract_delta > 1e-4,
+        "Tone sweep should recompute a Tone-owned PassiveRType output extraction"
     );
 }
 
@@ -189,15 +211,17 @@ fn screamer_passive_rtype_tone_changes_stage_response() {
             compiled.process(0.0);
         }
         let stage_idx = compiled
-            .stages
+            .controls
             .iter()
-            .position(|stage| match stage {
-                super::compiled::Stage::Wdf(w) => {
-                    matches!(w.root, super::stage::RootKind::PassiveRType { .. })
+            .find_map(|binding| {
+                if binding.component_id == "Tone" {
+                    if let super::compiled::ControlTarget::PotInStage(stage_idx) = binding.target {
+                        return Some(stage_idx);
+                    }
                 }
-                _ => false,
+                None
             })
-            .expect("passive rtype stage");
+            .expect("Tone-owned passive stage");
         let stage = match &mut compiled.stages[stage_idx] {
             super::compiled::Stage::Wdf(w) => w,
             _ => unreachable!(),
@@ -294,9 +318,10 @@ fn screamer_tone_stage_not_dead() {
 #[test]
 fn output_probe_uses_output_terminal() {
     // The output boundary should be the terminal closest to out_node,
-    // not the first terminal in the list. For the Screamer tone group,
-    // terminals are [35, 56]. Node 56=out_node should be the output boundary.
-    // The probe should find R_out_g (at out_node → GND), not R_t2.
+    // not the first terminal in the list. For the Screamer output-side
+    // passive group, node 56=out_node should be the output boundary.
+    // The probe should find R_out_g/R_out_s at the output boundary, not an
+    // interior tone branch.
     let path = format!(
         "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
         env!("CARGO_MANIFEST_DIR"),
@@ -308,17 +333,19 @@ fn output_probe_uses_output_terminal() {
     let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     let global_terminals = vec![graph.in_node, graph.out_node];
 
-    // Find the tone group
-    let tone_group = groups
+    // Find the output-side passive group. Tone is split across multiple
+    // passive groups, so selecting the first group containing the Tone pot
+    // would validate the wrong boundary.
+    let output_group = groups
         .iter()
         .find(|g| {
             g.all_edges()
                 .iter()
-                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Tone")
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_out_g")
         })
-        .expect("tone group");
+        .expect("output passive group");
 
-    let group_edges = tone_group.all_edges();
+    let group_edges = output_group.all_edges();
     let terminals =
         super::spqr_build::compute_group_terminals(&group_edges, &graph, &global_terminals);
 

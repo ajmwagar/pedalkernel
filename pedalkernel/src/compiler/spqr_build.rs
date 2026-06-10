@@ -1913,6 +1913,21 @@ pub(super) fn build_spqr_stage_with_options(
             pendant_trees,
             ..
         } => {
+            let all_passive = edge_indices.iter().all(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                comp.kind.is_passive()
+            });
+            if all_passive {
+                if let Some(wdf) = build_passive_rtype_stage(
+                    &edge_indices,
+                    graph,
+                    _sample_rate,
+                    bias_node_voltages,
+                ) {
+                    return Ok(BuiltStage::Wdf(wdf));
+                }
+            }
+
             // Use build_rigid_from_group_with_hints so init_hints flow through
             // when this Rigid stage is reached via the SPQR or blockwise path.
             // boundary_nodes and pendant_trees are not used by build_rigid_from_group*
