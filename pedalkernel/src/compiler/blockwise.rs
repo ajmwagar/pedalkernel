@@ -533,7 +533,7 @@ pub(super) fn try_build_blockwise(
         }
 
         for stage in spqr_stages {
-            let mut built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)
+            let mut built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate, supply_voltage)
                 .ok()?;
 
             // Set BJT bias from circuit analysis
@@ -579,7 +579,7 @@ pub(super) fn try_build_blockwise(
         let spqr_stages = spqr_to_stages(&spqr_tree, graph, sample_rate);
 
         for stage in spqr_stages {
-            let built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate)
+            let built = super::spqr_build::build_spqr_stage(stage, graph, sample_rate, supply_voltage)
                 .ok()?;
             all_stages.push(built);
         }
