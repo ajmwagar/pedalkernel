@@ -22,6 +22,7 @@ use super::wdf_leaf::{LeafKind, WdfLeaf, WdfVoltageSource};
 use crate::dsl::{PedalDef, TransformerConfig};
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use pedalkernel_rt::boundary_math::{MnaNodeId, MnaPortTerminals, MnaVariableResistorBinding};
+use pedalkernel_rt::elements::JaCoreModel;
 use pedalkernel_rt::tree::{MnaSystem, WdfPort};
 
 /// A stage built from the SPQR pipeline.
@@ -2194,6 +2195,7 @@ fn stamp_linear_transformer_skeleton(
     let l_mag = cfg
         .magnetizing_inductance
         .unwrap_or(l_primary * k.max(1.0e-6));
+    let ja_core = transformer_ja_core_model(cfg);
 
     fn add_inductor_or_short(
         mna: &mut MnaSystem,
@@ -2222,6 +2224,39 @@ fn stamp_linear_transformer_skeleton(
         }
     }
 
+    fn add_magnetizing_branch(
+        mna: &mut MnaSystem,
+        dynamic: &mut Vec<(WdfPort, DynNode)>,
+        comp_id: &str,
+        a: Option<usize>,
+        b: Option<usize>,
+        l: f64,
+        sample_rate: f64,
+        ja_core: Option<JaCoreModel>,
+    ) {
+        const SHORT_R: f64 = 1.0e-6;
+        const MIN_L: f64 = 1.0e-12;
+        if !(l.is_finite() && l > MIN_L) {
+            mna.stamp_resistor(a, b, SHORT_R);
+            return;
+        }
+
+        let rp = 2.0 * sample_rate * l;
+        let node = if let Some(model) = ja_core {
+            DynNode::JaMagnetizing(Some(format!("{comp_id}.Lm")), model, sample_rate, rp)
+        } else {
+            DynNode::Inductor(Some(format!("{comp_id}.Lm")), l, rp)
+        };
+        dynamic.push((
+            WdfPort {
+                node_pos: a,
+                node_neg: b,
+                resistance: rp,
+            },
+            node,
+        ));
+    }
+
     let mut dynamic = Vec::new();
 
     mna.stamp_resistor(p_pos, Some(p_series), cfg.primary_dcr.max(SHORT_R));
@@ -2248,15 +2283,15 @@ fn stamp_linear_transformer_skeleton(
     );
     mna.stamp_resistor(Some(s_series), s_pos, cfg.secondary_dcr.max(SHORT_R));
 
-    add_inductor_or_short(
+    add_magnetizing_branch(
         mna,
         &mut dynamic,
         comp_id,
-        "Lm",
         Some(p_core),
         p_neg,
         l_mag,
         sample_rate,
+        ja_core,
     );
     if let Some(rc) = cfg
         .core_loss_resistance
@@ -2288,6 +2323,21 @@ fn stamp_linear_transformer_skeleton(
     );
 
     dynamic
+}
+
+fn transformer_ja_core_model(cfg: &TransformerConfig) -> Option<JaCoreModel> {
+    let model = JaCoreModel {
+        ms: cfg.ja_ms? as pedalkernel_rt::Wave,
+        a: cfg.ja_a? as pedalkernel_rt::Wave,
+        alpha: cfg.ja_alpha? as pedalkernel_rt::Wave,
+        k: cfg.ja_k? as pedalkernel_rt::Wave,
+        c: cfg.ja_c? as pedalkernel_rt::Wave,
+        n_turns: cfg.core_primary_turns? as pedalkernel_rt::Wave,
+        area: cfg.core_area? as pedalkernel_rt::Wave,
+        path_len: cfg.core_path_length? as pedalkernel_rt::Wave,
+        gap: cfg.core_gap.unwrap_or(0.0) as pedalkernel_rt::Wave,
+    };
+    model.is_complete().then_some(model)
 }
 
 fn passive_transformer_voltage_gain(

@@ -251,6 +251,33 @@ pub fn transformer_config_from_dsl(cfg: &TransformerConfig) -> TransformerConfig
     if cfg.core_loss_resistance.is_some() {
         resolved.core_loss_resistance = cfg.core_loss_resistance;
     }
+    if cfg.core_primary_turns.is_some() {
+        resolved.core_primary_turns = cfg.core_primary_turns;
+    }
+    if cfg.core_area.is_some() {
+        resolved.core_area = cfg.core_area;
+    }
+    if cfg.core_path_length.is_some() {
+        resolved.core_path_length = cfg.core_path_length;
+    }
+    if cfg.core_gap.is_some() {
+        resolved.core_gap = cfg.core_gap;
+    }
+    if cfg.ja_ms.is_some() {
+        resolved.ja_ms = cfg.ja_ms;
+    }
+    if cfg.ja_a.is_some() {
+        resolved.ja_a = cfg.ja_a;
+    }
+    if cfg.ja_alpha.is_some() {
+        resolved.ja_alpha = cfg.ja_alpha;
+    }
+    if cfg.ja_k.is_some() {
+        resolved.ja_k = cfg.ja_k;
+    }
+    if cfg.ja_c.is_some() {
+        resolved.ja_c = cfg.ja_c;
+    }
 
     resolved.model = Some(model.name.clone());
     resolved
@@ -276,6 +303,23 @@ mod tests {
         assert!((resolved.core_loss_resistance.unwrap() - 250_000.0).abs() < 1e-6);
         assert!((resolved.capacitance - 100e-12).abs() < 1e-21);
     }
+
+    #[test]
+    fn transformer_model_propagates_ja_core_fields() {
+        let cfg = TransformerConfig::with_model(26.0, "OT-DEMO-SE".to_string());
+        let resolved = transformer_config_from_dsl(&cfg);
+
+        assert_eq!(resolved.model.as_deref(), Some("OT-DEMO-SE"));
+        assert!((resolved.core_primary_turns.unwrap() - 2000.0).abs() < 1e-12);
+        assert!((resolved.core_area.unwrap() - 2.0e-4).abs() < 1e-18);
+        assert!((resolved.core_path_length.unwrap() - 0.10).abs() < 1e-12);
+        assert!((resolved.core_gap.unwrap() - 1.0e-3).abs() < 1e-18);
+        assert!((resolved.ja_ms.unwrap() - 1.6e6).abs() < 1e-6);
+        assert!((resolved.ja_a.unwrap() - 1100.0).abs() < 1e-12);
+        assert!((resolved.ja_alpha.unwrap() - 1.6e-3).abs() < 1e-18);
+        assert!((resolved.ja_k.unwrap() - 400.0).abs() < 1e-12);
+        assert!((resolved.ja_c.unwrap() - 0.2).abs() < 1e-12);
+    }
 }
 
 fn transformer_config_from_model(
@@ -295,6 +339,15 @@ fn transformer_config_from_model(
         magnetizing_inductance: Some(model.magnetizing_inductance),
         core_loss_resistance: (model.core_loss_resistance > 0.0)
             .then_some(model.core_loss_resistance),
+        core_primary_turns: (model.primary_turns > 0.0).then_some(model.primary_turns),
+        core_area: (model.core_area > 0.0).then_some(model.core_area),
+        core_path_length: (model.magnetic_path_length > 0.0).then_some(model.magnetic_path_length),
+        core_gap: (model.gap_length > 0.0).then_some(model.gap_length),
+        ja_ms: (model.ja_ms > 0.0).then_some(model.ja_ms),
+        ja_a: (model.ja_a > 0.0).then_some(model.ja_a),
+        ja_alpha: (model.ja_alpha != 0.0).then_some(model.ja_alpha),
+        ja_k: (model.ja_k > 0.0).then_some(model.ja_k),
+        ja_c: (model.ja_c > 0.0).then_some(model.ja_c),
         ..Default::default()
     }
 }

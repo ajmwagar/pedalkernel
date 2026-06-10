@@ -973,6 +973,47 @@ fn model_backed_transformer_compiles_and_steps_down() {
     );
 }
 
+#[test]
+fn ja_model_backed_transformer_compiles_and_stays_finite() {
+    use crate::PedalProcessor;
+
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "test" { supply 9V
+            components {
+                T1: transformer(26:1, OT-DEMO-SE)
+                R_load: resistor(8)
+            }
+            nets {
+                in -> T1.a
+                T1.b -> gnd
+                T1.c -> out, R_load.a
+                T1.d -> gnd
+                R_load.b -> gnd
+            }
+            controls {}
+        }"#,
+    )
+    .expect("parse");
+
+    let mut compiled = super::spqr_build::compile_via_spqr(&pedal, 48000.0).expect("compile");
+
+    let mut peak = 0.0f64;
+    for s in 0..4800 {
+        let input = 2.0 * (2.0 * std::f64::consts::PI * 100.0 * s as f64 / 48000.0).sin();
+        let output = compiled.process(input);
+        assert!(
+            output.is_finite(),
+            "non-finite output at sample {s}: {output}"
+        );
+        if s > 2400 {
+            peak = peak.max(output.abs());
+        }
+    }
+
+    assert!(peak > 1.0e-6, "J-A transformer path produced silence");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Pendant → stage pipeline: SPQR tree with pendants must produce
 // PassiveWdf stages (not Rigid → IIR with b=[0,0,0])

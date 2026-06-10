@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use crate::boundary_math::{OnePortKind, RuntimeOnePort, RuntimeState};
-use crate::elements::{JfetVariableResistor, Photocoupler};
+use crate::elements::{JaCoreModel, JfetVariableResistor, Photocoupler, WdfJaMagnetizing};
 use crate::pot_taper::PotTaper;
 use crate::tree::RTypeAdaptor;
 use crate::wdf_leaf::{
@@ -273,7 +273,10 @@ fn projected_leaf_voltage(leaf: &LeafKind, incident: crate::Wave) -> crate::Wave
         LeafKind::Resistor(_) | LeafKind::Pot(_) | LeafKind::SwitchedResistor(_) => incident / 2.0,
         LeafKind::OnePort { .. } => 0.0,
         LeafKind::LeakyCapacitor(cap) => incident * cap.leakage_decay,
-        LeafKind::VoltageSource(_) | LeafKind::Photocoupler(_) | LeafKind::JfetVr(_) => 0.0,
+        LeafKind::VoltageSource(_)
+        | LeafKind::Photocoupler(_)
+        | LeafKind::JfetVr(_)
+        | LeafKind::JaMagnetizing(_) => 0.0,
         LeafKind::UnitDelay(_) => 0.0,
     }
 }
@@ -298,7 +301,10 @@ fn projected_leaf_voltage_incident_gain(leaf: &LeafKind) -> crate::Wave {
         | LeafKind::SwitchedResistor(_)
         | LeafKind::OnePort { .. } => 0.5,
         LeafKind::LeakyCapacitor(cap) => cap.leakage_decay,
-        LeafKind::VoltageSource(_) | LeafKind::Photocoupler(_) | LeafKind::JfetVr(_) => 0.0,
+        LeafKind::VoltageSource(_)
+        | LeafKind::Photocoupler(_)
+        | LeafKind::JfetVr(_)
+        | LeafKind::JaMagnetizing(_) => 0.0,
         LeafKind::UnitDelay(_) => 0.0,
     }
 }
@@ -346,6 +352,20 @@ impl DynNode {
     pub fn Inductor(comp_id: Option<String>, inductance: crate::Wave, rp: crate::Wave) -> Self {
         let kind = OnePortKind::Inductor(inductance);
         Self::OnePort(comp_id, kind, kind.sample_rate_for_rp(rp))
+    }
+
+    pub fn JaMagnetizing(
+        comp_id: Option<String>,
+        model: JaCoreModel,
+        sample_rate: crate::Wave,
+        rp: crate::Wave,
+    ) -> Self {
+        Self::Leaf(LeafKind::JaMagnetizing(WdfJaMagnetizing::new(
+            comp_id,
+            model,
+            sample_rate,
+            rp,
+        )))
     }
 
     pub fn OnePort(comp_id: Option<String>, kind: OnePortKind, sample_rate: crate::Wave) -> Self {

@@ -696,6 +696,24 @@ pub struct TransformerConfig {
     pub magnetizing_inductance: Option<f64>,
     /// Optional core-loss resistance in Ohms.
     pub core_loss_resistance: Option<f64>,
+    /// Optional primary turns for a nonlinear magnetizing core model.
+    pub core_primary_turns: Option<f64>,
+    /// Optional core cross-sectional area in square meters.
+    pub core_area: Option<f64>,
+    /// Optional magnetic path length in meters.
+    pub core_path_length: Option<f64>,
+    /// Optional air gap length in meters.
+    pub core_gap: Option<f64>,
+    /// Optional Jiles-Atherton saturation magnetization in A/m.
+    pub ja_ms: Option<f64>,
+    /// Optional Jiles-Atherton anhysteretic shape parameter in A/m.
+    pub ja_a: Option<f64>,
+    /// Optional Jiles-Atherton inter-domain coupling.
+    pub ja_alpha: Option<f64>,
+    /// Optional Jiles-Atherton domain-wall pinning parameter in A/m.
+    pub ja_k: Option<f64>,
+    /// Optional Jiles-Atherton reversible magnetization fraction.
+    pub ja_c: Option<f64>,
     /// Optional tertiary winding turns ratio (primary:tertiary).
     /// When present, the transformer is modeled as a 3-winding R-type adaptor.
     /// Used for transformers with NFB windings (e.g., Fairchild 670 sidechain output).
@@ -718,6 +736,15 @@ impl Default for TransformerConfig {
             secondary_leakage: None,
             magnetizing_inductance: None,
             core_loss_resistance: None,
+            core_primary_turns: None,
+            core_area: None,
+            core_path_length: None,
+            core_gap: None,
+            ja_ms: None,
+            ja_a: None,
+            ja_alpha: None,
+            ja_k: None,
+            ja_c: None,
             tertiary_turns_ratio: None,
         }
     }
