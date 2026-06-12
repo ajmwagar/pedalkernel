@@ -1,0 +1,115 @@
+# PK:
+# Opto Leveler — Teletronix LA-2A-inspired electro-optical leveling amplifier.
+# Two knobs, no time-constant controls: the photocell IS the time constant.
+# Slow, smooth, program-dependent gain riding for vocals and bass.
+# Type: compressor (outboard studio gear)
+#
+# PROVENANCE — Teletronix LA-2A (Jim Lawrence, ~1962; later UA reissues)
+#   Topology: audio passes through a PASSIVE gain-reduction attenuator —
+#   a series resistor working against the T4B optical attenuator's CdS
+#   photocell shunting to ground — then into a 12AX7 voltage amplifier and a
+#   12BH7 cathode-follower output driving the output transformer. The
+#   sidechain amplifier rectifies the OUTPUT signal (feedback detector) and
+#   drives the T4B's electroluminescent (EL) panel.
+#
+# KEY TIME CONSTANTS (real unit — set by the T4B's EL panel + CdS cells,
+# NOT by any RC network):
+#   Attack:  ~10 ms
+#   Release: two-stage — ~40-80 ms for the first ~50% of recovery, then a
+#            program-dependent tail of 0.5 s up to ~5 s after sustained GR.
+#   Ratio:   soft, program dependent; "Limit" / "Compress" switch changes
+#            sidechain drive.
+#
+# AS MODELED HERE:
+#   in -> C_in -> R_gr series / PC1 photocoupler(t4b) CdS cell shunt to gnd
+#      -> Gain pot -> V1 (12AX7, 100k plate / 1.5k bypassed cathode, B+ 250V)
+#      -> C_out -> R_load -> out
+#   Sidechain: EF1 envelope follower drives PC1.led (the EL panel).
+#     EF1 = (10k, 1u, 470k, 4.7u, 20k)
+#       attack  tau = 10 kΩ × 1 µF   = 10 ms  (matches T4B attack)
+#       release tau = 470 kΩ × 4.7 µF ≈ 2.2 s (middle of the 0.5-5 s tail)
+#
+# SIMPLIFICATIONS vs real unit (audit notes):
+#   1. NO input or output transformers (real: bridged input transformer,
+#      UTC A-24 style output). Coupling caps + resistive load instead.
+#   2. Single 12AX7 gain stage only — the 12BH7 cathode follower and the
+#      push-pull output stage are omitted; output drive character differs.
+#   3. The T4B's TWO-STAGE release (fast 40-80 ms phase + multi-second
+#      memory tail) is collapsed into ONE RC release (~2.2 s). The
+#      photocoupler t4b model in the engine contributes its own dynamics,
+#      but the dual-time-constant CdS memory effect is not explicit.
+#   4. FEEDBACK detector caveat: EF1.in is wired to the output node to
+#      document the real feedback sidechain, but the engine's envelope
+#      followers read the PEDAL INPUT at runtime, so detection is effectively
+#      feed-forward in simulation (same engine limitation as fet_leveler).
+#   5. No Limit/Compress switch, no sidechain pre-emphasis (R37 trim).
+
+equipment "Opto Leveler LA-2A" {
+  supplies {
+    B+: 250V               # Real unit ~ +250-285 V plate supply
+  }
+
+  components {
+    # === Passive gain-reduction attenuator ===
+    C_in: cap(100n)        # Input coupling
+    R_gr: resistor(100k)   # Series arm working against the photocell
+    PC1: photocoupler(t4b) # T4B: EL panel + CdS cells — the heart of the LA-2A
+
+    # === Gain control (drive into the tube makeup amp) ===
+    Gain: pot(1M, a)       # "Gain" — real unit places it after the GR network
+
+    # === 12AX7 makeup gain stage ===
+    V1: triode(12ax7)
+    R_plate: resistor(100k)            # Plate load
+    R_k: resistor(1.5k)                # Cathode bias resistor
+    C_k: cap(25u, electrolytic)        # Cathode bypass — full gain
+
+    # === Output coupling ===
+    C_out: cap(22n)        # Output coupling cap
+    R_load: resistor(100k) # Output load / level reference
+
+    # === Sidechain ===
+    # envelope_follower(attack_r, attack_c, release_r, release_c, sens_r)
+    # Attack 10k x 1u = 10 ms; Release 470k x 4.7u ~= 2.2 s
+    EF1: envelope_follower(10k, 1u, 470k, 4.7u, 20k)
+  }
+
+  nets {
+    # --- Passive GR divider: series R, photocell shunt to ground ---
+    in -> C_in.a
+    C_in.b -> R_gr.a
+    R_gr.b -> PC1.a, Gain.a
+    PC1.b -> gnd
+
+    # --- Gain pot into the triode grid ---
+    Gain.b -> gnd
+    Gain.w -> V1.grid
+
+    # --- 12AX7 stage: 100k plate to B+, bypassed 1.5k cathode ---
+    B+ -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_k.a, C_k.a
+    R_k.b -> gnd
+    C_k.b -> gnd
+
+    # --- Output coupling ---
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+
+    # --- Sidechain: output-tapped (feedback) detector drives the EL panel ---
+    # NOTE: engine currently reads EF input from the global pedal input; this
+    # net documents the real feedback topology (see header, item 4).
+    EF1.in -> C_out.b
+    EF1.out -> PC1.led
+  }
+
+  controls {
+    Gain.position -> "Gain" [0.0, 1.0] = 0.6
+  }
+
+  monitors {
+    V1.plate_current -> "12AX7" [glow]
+    output -> "Output" [vu]
+  }
+}
