@@ -284,7 +284,6 @@ pedal "Inverting Opamp Input Cap" {
 /// corner loss at 440 Hz. See reports/outboard-gear-audit-2026-06-12.md §3,
 /// §6 G5.
 #[test]
-#[ignore = "red until B2 fix: inverting op-amp stage with input cap compiles to silence (peak 0.000000)"]
 fn inverting_opamp_with_input_cap_passes_audio() {
     let input = sine_at(440.0, 0.05, 1.0, SAMPLE_RATE);
     let output = compile_and_process(INVERTING_OPAMP_INPUT_CAP, &input, SAMPLE_RATE, &[]);
@@ -432,7 +431,6 @@ pedal "RC Coupled Noninverting Cascade" {
 /// > 0.1 for a 1 kHz 0.1-amp sine (ideal gain 4 -> ~0.4 peak).
 /// See reports/outboard-gear-audit-2026-06-12.md §3, §6 G5.
 #[test]
-#[ignore = "red until B3a fix: resistor+cap-coupled op-amp cascade compiles to silence (peak 0.000000)"]
 fn resistor_cap_coupled_opamp_cascade_passes_audio() {
     let input = sine_at(1_000.0, 0.1, 1.0, SAMPLE_RATE);
     let output = compile_and_process(RC_COUPLED_NONINVERTING_CASCADE, &input, SAMPLE_RATE, &[]);

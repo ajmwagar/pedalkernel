@@ -1208,6 +1208,57 @@ pub fn compile_via_spqr_with_options(
                     .chain(std::iter::once(graph.in_node))
                     .collect();
 
+                // F2 (B2/B3a): an edge spanning {in / op-amp out} ↔
+                // {feedback-group node} is NOT automatically a parallel
+                // feedforward branch. Series couplers (input cap before an
+                // inverting input; R→C interstage coupling) match that shape
+                // too, and lowering one to an additive Passthrough bridge
+                // cancels the signal: the open-circuited stage emits −x and
+                // the blend computes x + (−x) = 0. Only build the bridge when
+                // the branch is genuinely parallel:
+                //   (a) the convergence node is an op-amp input pin (nullor
+                //       neg/pos) of a feedback group, AND
+                //   (b) a second serial path from the source into that same
+                //       feedback group exists — the group's own claimed edges
+                //       also reach the source node (mirrors the
+                //       sources_with_feedback check in the phase-2 detector
+                //       below).
+                // When either fails, fall through to the normal serial
+                // (blockwise/SPQR) build.
+                let is_audio_node = |n: super::graph::NodeId| -> bool {
+                    n != graph.gnd_node
+                        && n != graph.vcc_node
+                        && !graph.supply_nodes.contains(&n)
+                        && !graph.ac_ground_nodes.contains(&n)
+                };
+                let genuinely_parallel =
+                    |source: super::graph::NodeId, converge: super::graph::NodeId| -> bool {
+                        if !is_audio_node(converge) {
+                            return false;
+                        }
+                        feedback_groups.iter().any(|fg| {
+                            if !fg.has_feedback() {
+                                return false;
+                            }
+                            // (a) converge is a nullor input pin of this group.
+                            let pin_match = fg.active_edges.iter().any(|&ae| {
+                                let ae_comp = graph.edges[ae].comp_idx;
+                                graph.nullor_pins.iter().any(|p| {
+                                    p.comp_idx == ae_comp
+                                        && (p.neg_node == converge || p.pos_node == converge)
+                                })
+                            });
+                            if !pin_match {
+                                return false;
+                            }
+                            // (b) the group's own edges reach the source node.
+                            fg.all_edges().iter().any(|&fe| {
+                                let f = &graph.edges[fe];
+                                f.node_a == source || f.node_b == source
+                            })
+                        })
+                    };
+
                 let mut built_feedforward = false;
                 for &eidx in &group_edges {
                     let e = &graph.edges[eidx];
@@ -1230,6 +1281,15 @@ pub fn compile_via_spqr_with_options(
                     let Some(source) = source else {
                         continue;
                     };
+
+                    let converge = if source == e.node_a {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    };
+                    if !genuinely_parallel(source, converge) {
+                        continue;
+                    }
 
                     let mut wdf = WdfStage::new(
                         with_voltage_source(leaf),
