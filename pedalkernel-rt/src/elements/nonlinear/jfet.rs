@@ -6,6 +6,7 @@
 //!
 //! Parameters are loaded from the embedded SPICE model file via `by_name()`.
 
+use super::mosfet::MosfetModel;
 use super::solver::{newton_raphson_solve, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 
@@ -131,6 +132,10 @@ pub struct JfetRoot {
     max_iter: usize,
     /// Previous sample's drain voltage for warm-starting Newton-Raphson.
     prev_v: crate::Wave,
+    /// When set, the drain-source I-V law is the enhancement-mode MOSFET
+    /// square law instead of the JFET Level 1 law (see [`Self::from_mosfet`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    mosfet: Option<MosfetModel>,
 }
 
 impl JfetRoot {
@@ -140,12 +145,63 @@ impl JfetRoot {
             vgs: 0.0,
             max_iter: super::solver::NR_MAX_ITER,
             prev_v: 0.0,
+            mosfet: None,
+        }
+    }
+
+    /// Build a 1-port FET root that computes the enhancement-mode MOSFET
+    /// square law ([`MosfetModel::ids`]) instead of the JFET Level 1 law.
+    ///
+    /// Both device families share the external-Vgs / drain-source-port
+    /// contract (`set_vgs()` + I(Vds) via `NlDeviceIv`), so a MOSFET can be
+    /// hosted by `JfetRoot` wherever only that contract is used — currently
+    /// the multi-NL MNA path (`NlDeviceKind::Jfet`), which has no dedicated
+    /// `Mosfet` variant. `drain_current()`/`drain_current_derivative()`
+    /// delegate to the embedded [`MosfetModel`]; everything else (NR solve,
+    /// warm start, clamps) is shared.
+    ///
+    /// The `model` field is filled with an equivalent placeholder so that
+    /// JFET-parameterized code paths (initial NR guesses) see the correct
+    /// overdrive voltage: `vov_jfet = sign*Vgs - VTO` matches
+    /// `vov_mosfet` when `VTO = sign*Vth`. Gate junction parameters are
+    /// zeroed (enhancement MOSFET gates are insulated).
+    pub fn from_mosfet(mosfet: MosfetModel) -> Self {
+        let sign = if mosfet.is_n_channel { 1.0 } else { -1.0 };
+        let placeholder = JfetModel {
+            vto: sign * mosfet.vth,
+            beta: mosfet.kp,
+            lambda: mosfet.lambda,
+            gate_is: 0.0,
+            n: 1.0,
+            rd: 0.0,
+            rs: 0.0,
+            cgs: 0.0,
+            cgd: 0.0,
+            is_n_channel: mosfet.is_n_channel,
+        };
+        Self {
+            model: placeholder,
+            vgs: 0.0,
+            max_iter: super::solver::NR_MAX_ITER,
+            prev_v: 0.0,
+            mosfet: Some(mosfet),
         }
     }
 
     /// Set the gate-source voltage (external control from LFO, bias, etc.)
+    ///
+    /// MOSFET-hosted roots ([`Self::from_mosfet`]) ignore this: the multi-NL
+    /// stage drives Vgs from the stage input (JFET pitch-sweep semantics),
+    /// but an enhancement-mode MOSFET whose gate is not part of the
+    /// WDF/MNA network must keep its floating-gate bias (0 V → channel off,
+    /// matching `RootKind::Mosfet`, where Vgs only changes via explicit
+    /// modulation). Driving Vgs from the audio signal would spuriously
+    /// switch the channel and short the drain node to the source.
     #[inline]
     pub fn set_vgs(&mut self, vgs: crate::Wave) {
+        if self.mosfet.is_some() {
+            return;
+        }
         self.vgs = vgs;
     }
 
@@ -175,6 +231,11 @@ impl JfetRoot {
     /// convention for both N-channel and P-channel devices.
     #[inline]
     pub fn drain_current(&self, vds: crate::Wave) -> crate::Wave {
+        // Enhancement-MOSFET-hosted root: delegate to the MOSFET square law.
+        if let Some(ref mosfet) = self.mosfet {
+            return mosfet.ids(self.vgs, vds);
+        }
+
         let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };
         let vgs_int = sign * self.vgs;
         let vds_int = sign * vds;
@@ -210,6 +271,11 @@ impl JfetRoot {
     /// dIds_int/dVds_int because the two sign factors cancel.
     #[inline]
     fn drain_current_derivative(&self, vds: crate::Wave) -> crate::Wave {
+        // Enhancement-MOSFET-hosted root: delegate to the MOSFET square law.
+        if let Some(ref mosfet) = self.mosfet {
+            return mosfet.ids_vds_derivative(self.vgs, vds);
+        }
+
         let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };
         let vgs_int = sign * self.vgs;
         let vds_int = sign * vds;

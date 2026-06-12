@@ -73,7 +73,21 @@ pub(super) fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
             let model = OtaModel::ca3080();
             Some(NlDeviceKind::Ota(OtaRoot::new(model)))
         }
-        _ => None, // Mosfet, Zener not yet supported in multi-NL
+        NonlinearKind::Mosfet {
+            mosfet_type,
+            is_n_channel,
+        } => {
+            // No dedicated NlDeviceKind::Mosfet variant exists; host the
+            // enhancement-mode square law in JfetRoot (same external-Vgs,
+            // 1-port drain-source contract — see JfetRoot::from_mosfet).
+            // Matches RootKind::Mosfet semantics: Vgs only changes via
+            // explicit modulation (floating gate ⇒ 0 V, channel off) — the
+            // hosted root ignores the multi-NL stage's input-signal Vgs
+            // drive, which is JFET pitch-sweep behavior.
+            let model = mosfet_model(*mosfet_type, *is_n_channel);
+            Some(NlDeviceKind::Jfet(JfetRoot::from_mosfet(model)))
+        }
+        _ => None, // Zener not yet supported in multi-NL
     }
 }
 
