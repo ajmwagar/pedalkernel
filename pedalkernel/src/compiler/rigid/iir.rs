@@ -82,7 +82,59 @@ pub(in crate::compiler) fn build_iir_stage(
         });
     }
 
-    // ── Build IIR biquad ─────────────────────────────────────────
+    // ── Bridged-T resonator: cookbook BPF from component values ──────────
+    // The bridged-T op-amp circuit has its output node controlled by a VCVS
+    // (ideal op-amp), making the state-space c_out vector zero — the output
+    // is not observable through the capacitor state variables. The MNA-derived
+    // IIR path fails for this topology.
+    //
+    // When we detect a bridged-T (2 series Rs, 2 shunt Cs, feedback Rf), use
+    // the Audio EQ Cookbook BPF formula directly from component values.
+    // This gives correct frequency and Q without numerical extraction.
+    let feedback_params = extract_feedback_r(edge_indices, graph);
+    if let Some(ref params) = feedback_params {
+        let rf = params.rf;
+        let r_crit = params.r_crit;
+        let f0 = params.f0;
+
+        let q = if rf > r_crit * 1.01 {
+            rf / (rf - r_crit)
+        } else {
+            100.0
+        };
+
+        // Gain: Rf/R1 (largest shunt R at the neg node diagonal entry).
+        // The MNA G[neg,neg] diagonal includes R1 || R_fb → use Rf/R1 ≈ Rf/r_series[0].
+        let gain = if params.r_series[0] > 1e-9 { rf / params.r_series[0] } else { 1.0 };
+
+        let pi = std::f64::consts::PI;
+        let w0 = 2.0 * pi * f0 / sample_rate;
+        let sin_w0 = w0.sin();
+        let cos_w0 = w0.cos();
+        let alpha = sin_w0 / (2.0 * q);
+
+        let a0 = 1.0 + alpha;
+        let b_coeffs = vec![alpha * gain / a0, 0.0, -alpha * gain / a0];
+        let a_coeffs = vec![1.0, -2.0 * cos_w0 / a0, (1.0 - alpha) / a0];
+
+        if iir_coeffs_are_stable_and_finite(&b_coeffs, &a_coeffs) {
+            let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate);
+            iir.r_fb = rf;
+            iir.r_crit = r_crit;
+            iir.r_series_base = params.r_series;
+            iir.c_shunt_base = params.c_shunt;
+            iir.r_series_product = params.r_series[0] * params.r_series[1];
+            iir.c_shunt_product = params.c_shunt[0] * params.c_shunt[1];
+            return Ok(BuiltIir {
+                data: iir,
+                reactive_one_ports,
+                input_node_id,
+                output_node_id,
+            });
+        }
+    }
+
+    // ── Build IIR biquad from MNA transfer function ───────────────────────
     if let Some((b_coeffs, a_coeffs)) = mna.build_iir(
         &reactive_one_ports,
         vs_idx,
@@ -93,8 +145,8 @@ pub(in crate::compiler) fn build_iir_stage(
     ) {
         if iir_coeffs_are_stable_and_finite(&b_coeffs, &a_coeffs) {
             let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate);
-            let feedback = extract_feedback_r(edge_indices, graph);
-            if let Some(params) = feedback {
+            // For non-bridged-T circuits, feedback_params will be None here.
+            if let Some(params) = feedback_params {
                 iir.r_fb = params.rf;
                 iir.r_crit = params.r_crit;
                 iir.r_series_base = params.r_series;
