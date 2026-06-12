@@ -48,7 +48,7 @@ fn spqr_diode_clipper_produces_audio() {
     let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
 
     assert_eq!(spqr_stages.len(), 1);
-    let mut stage = build_spqr_stage(spqr_stages.into_iter().next().unwrap(), &graph, 48000.0)
+    let mut stage = build_spqr_stage(spqr_stages.into_iter().next().unwrap(), &graph, 48000.0, 9.0)
         .expect("Should build NlWdf stage")
         .into_wdf();
 

@@ -3,8 +3,7 @@ title: "Modeling limits"
 description: "Where PedalKernel is pure WDF, where it approximates, and why."
 section: "Internals"
 weight: 90
-source_commit: "ce2eb772992a4fc8a078aa43395c961b5ffc7907"
-preview: true
+source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
 watches:
   - pedalkernel/src/compiler/stage.rs
   - pedalkernel/src/elements/nonlinear/
@@ -15,8 +14,6 @@ watches:
 ---
 
 # Modeling Limits
-
-> **Preview.** The op-amp section reflects the SPQR-era op-amp routing developed on the `feature/spqr-tree` branch — `OpAmpRoot`-in-WDF-tree with the `NonIdealFxState` post-processor, plus the multi-NL nullor fallback for bridged-T and multi-path topologies. See [compiler internals](./compiler-internals.md) for the in-progress architecture.
 
 PedalKernel is circuit-exact where it can be and pragmatic where it has to be. This page documents where the current implementation falls short of pure component modeling, so expectations are calibrated and contributors know where to push.
 
@@ -30,14 +27,18 @@ These are compiled through the Wave Digital Filter tree and solved per-sample.
 |---|---|
 | Resistor, capacitor, inductor, potentiometer | Textbook one-port adaptors |
 | Diode, diode pair, zener | WDF root, Wright Omega explicit solver (per-device Is/n, no iteration) |
-| NPN / PNP BJT | WDF root, Newton-Raphson Ebers-Moll or Gummel-Poon (feature-gated) |
+| NPN / PNP BJT | `BjtRoot` (full Gummel-Poon: Early effect, high-injection knees, B-E/B-C leakage, junction capacitances, ohmic Rb/Re/Rc, transit times), Newton-Raphson on `(Vbe, Vce)`. Optional 2D K-method lookup table replaces NR when generated. |
 | N- / P- JFET | WDF root, square-law |
 | N- / P- MOSFET | WDF root, square-law |
 | Triode, pentode, vari-mu | WDF root, Koren equation with softplus smoothing |
 | OTA (CA3080) | WDF root, hyperbolic-tangent transconductance |
 | Transformers (audio, output, push-pull, center-tap) | Multi-port WDF element |
 
-Per-device parameters — Shockley Is/n for diodes, Koren parameters for tubes, thermal coefficients for BJTs / JFETs / tubes — are sourced from datasheets where possible and from industry-standard empirical fits otherwise.
+Per-device parameters — Shockley `Is`/`n` for diodes, Koren parameters for tubes, full SPICE Gummel-Poon parameter sets for BJTs (from `pedalkernel/src/model_lookup.rs`), thermal coefficients for BJTs / JFETs / tubes — are sourced from datasheets where possible and from industry-standard empirical fits otherwise.
+
+**DC operating points are derived from the circuit.** Every triode, pentode, and BJT carries its own bias field (`vgk_bias`, `vg1k_bias`, `vbe_bias`) populated at compile time by `compiler::bias_analysis::classify_group_bias`. The bias analyser identifies static-bias subgraphs (rail ↔ interior ↔ rail resistor dividers) and solves their DC voltages via nodal analysis. The earlier global constants — `TRIODE_GRID_BIAS = -2.0 V`, `PENTODE_GRID_BIAS = -8.0 V`, `BJT_BASE_BIAS = 0.6 V` — are gone, surviving only as constructor fallbacks if `set_bias` is never called.
+
+**Memoryless nonlinear roots can run from a precomputed K-method table** instead of Newton-Raphson. See the [nonlinear elements](./nonlinear-elements.md) catalogue and the [compiler internals K-method section](./compiler-internals.md#k-method-tables) for details. The two paths produce the same result up to interpolation error; the table is enabled when the device is K-method-eligible and the runtime decides to use the fast path.
 
 ## Approximations
 

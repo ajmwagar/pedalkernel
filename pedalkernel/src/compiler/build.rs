@@ -69,7 +69,11 @@ pub(super) fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
             let diode_model = DiodeModel::from_bjt_base_emitter(&model);
             Some(NlDeviceKind::Diode(DiodeRoot::new(diode_model)))
         }
-        _ => None, // Mosfet, Zener, Ota not yet supported in multi-NL
+        NonlinearKind::Ota => {
+            let model = OtaModel::ca3080();
+            Some(NlDeviceKind::Ota(OtaRoot::new(model)))
+        }
+        _ => None, // Mosfet, Zener not yet supported in multi-NL
     }
 }
 

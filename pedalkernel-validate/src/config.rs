@@ -78,6 +78,19 @@ pub struct GlobalConfig {
     pub oversample: u32,
     #[serde(default = "default_fft_size")]
     pub fft_size: usize,
+    /// Steady-state warmup trim: milliseconds to discard from the start of BOTH
+    /// the WDF and golden signals before computing any metric (RMS, peak, THD,
+    /// spectral).  Trimming happens at metric time; stored goldens are unaffected.
+    ///
+    /// Default: 10 ms.  Per-test overrides via `TestCase::warmup_trim_ms`.
+    ///
+    /// **Window math** (default settings: 96 kHz × 4× = 384 kHz internal):
+    /// - 10 ms trim = 3840 samples removed.
+    /// - Shortest signal = 50 ms = 19200 samples → 15360 remain (40 ms).
+    /// - 1 kHz fundamental: 40 cycles in remaining window — adequate for both
+    ///   THD (Blackman window needs ~5 cycles) and spectral resolution (25 Hz/bin).
+    #[serde(default = "default_warmup_trim_ms")]
+    pub warmup_trim_ms: f64,
 }
 
 fn default_sample_rate() -> u32 {
@@ -89,6 +102,9 @@ fn default_oversample() -> u32 {
 fn default_fft_size() -> usize {
     65536
 }
+fn default_warmup_trim_ms() -> f64 {
+    10.0
+}
 
 impl Default for GlobalConfig {
     fn default() -> Self {
@@ -96,6 +112,7 @@ impl Default for GlobalConfig {
             sample_rate: default_sample_rate(),
             oversample: default_oversample(),
             fft_size: default_fft_size(),
+            warmup_trim_ms: default_warmup_trim_ms(),
         }
     }
 }
@@ -117,6 +134,10 @@ pub struct TestCase {
     #[serde(default)]
     pub metrics: Vec<MetricConfig>,
     pub pass_criteria: PassCriteria,
+    /// Per-test warmup trim in milliseconds.  `None` means use the global
+    /// `GlobalConfig::warmup_trim_ms` value.
+    #[serde(default)]
+    pub warmup_trim_ms: Option<f64>,
 }
 
 /// Signal configuration.
@@ -366,6 +387,14 @@ pub struct PassCriteria {
     pub max_phase_error_deg: Option<f64>,
 }
 
+impl TestCase {
+    /// Resolve the effective warmup trim in milliseconds, preferring the
+    /// per-test override when set, otherwise falling back to the global value.
+    pub fn effective_warmup_trim_ms(&self, global: &GlobalConfig) -> f64 {
+        self.warmup_trim_ms.unwrap_or(global.warmup_trim_ms)
+    }
+}
+
 impl ValidationConfig {
     /// Load configuration from a YAML file.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
@@ -413,6 +442,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-50.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -447,6 +477,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             spectral_error_db: Some(1.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -479,6 +510,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-25.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -499,6 +531,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-30.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -540,6 +573,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0), // THD comparison not meaningful at low levels
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -576,6 +610,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -621,6 +656,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             spectral_error_db: Some(250.0), // Spectral comparison not primary metric
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
                 // Zener diode clipper (back-to-back 5.1V zeners)
@@ -656,6 +692,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -697,6 +734,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             spectral_error_db: Some(150.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
                 tests
@@ -736,6 +774,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(60.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -772,6 +811,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0), // THD comparison not meaningful for fuzz
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -796,6 +836,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(45.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -832,6 +873,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             spectral_error_db: Some(300.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -855,6 +897,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(12.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -878,6 +921,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(12.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -901,6 +945,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(12.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -932,6 +977,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             // THD comparison not meaningful for linear amplifier
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -963,6 +1009,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             // THD comparison not meaningful for linear amplifier
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -986,6 +1033,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(15.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1015,6 +1063,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             max_dc_drift_mv: Some(1.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
                 tests
@@ -1060,6 +1109,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(7.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1082,6 +1132,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(7.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1103,6 +1154,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             // Don't check spectral for impulse (high-frequency artifacts expected)
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1135,6 +1187,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(7.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1169,6 +1222,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(5.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1191,6 +1245,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(5.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1213,6 +1268,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(5.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1235,6 +1291,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(5.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1256,6 +1313,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(5.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1277,6 +1335,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(5.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1421,6 +1480,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0), // Very loose - THD comparison not meaningful at low levels
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1460,6 +1520,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1497,6 +1558,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(170.0), // Baseline: 163dB at very low levels
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1537,6 +1599,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(150.0), // Relaxed: waveform shapes will differ
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1585,6 +1648,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-40.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1620,6 +1684,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-40.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1656,6 +1721,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-30.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1692,6 +1758,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-20.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1724,6 +1791,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-15.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1771,6 +1839,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0), // Loose until SPICE golden refs available
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1818,6 +1887,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0), // Loose until SPICE golden refs available
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1865,6 +1935,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             thd_error_db: Some(200.0), // Loose until SPICE golden refs available
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1874,4 +1945,57 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
     );
 
     suites
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn global_warmup_trim_default_is_10ms() {
+        let cfg = GlobalConfig::default();
+        assert_eq!(cfg.warmup_trim_ms, 10.0);
+    }
+
+    #[test]
+    fn test_case_uses_global_trim_when_no_override() {
+        let global = GlobalConfig::default();
+        let tc = TestCase {
+            circuit: String::new(),
+            description: String::new(),
+            signals: vec![],
+            metrics: vec![],
+            pass_criteria: PassCriteria::default(),
+            warmup_trim_ms: None,
+        };
+        assert_eq!(tc.effective_warmup_trim_ms(&global), 10.0);
+    }
+
+    #[test]
+    fn test_case_override_takes_precedence_over_global() {
+        let global = GlobalConfig::default(); // warmup_trim_ms = 10.0
+        let tc = TestCase {
+            circuit: String::new(),
+            description: String::new(),
+            signals: vec![],
+            metrics: vec![],
+            pass_criteria: PassCriteria::default(),
+            warmup_trim_ms: Some(5.0),
+        };
+        assert_eq!(tc.effective_warmup_trim_ms(&global), 5.0);
+    }
+
+    #[test]
+    fn zero_trim_is_valid_override() {
+        let global = GlobalConfig::default();
+        let tc = TestCase {
+            circuit: String::new(),
+            description: String::new(),
+            signals: vec![],
+            metrics: vec![],
+            pass_criteria: PassCriteria::default(),
+            warmup_trim_ms: Some(0.0),
+        };
+        assert_eq!(tc.effective_warmup_trim_ms(&global), 0.0);
+    }
 }

@@ -16,7 +16,6 @@ std = []
 serde = ["dep:serde"]
 biquad-table = []
 debug-trace = ["std"]
-runtime-warnings = ["std"]
 fault-injection = ["std"]
 
 [lints.rust]

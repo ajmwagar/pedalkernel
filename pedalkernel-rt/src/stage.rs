@@ -1364,6 +1364,10 @@ pub struct WdfStage {
     /// Base diode model (before thermal modulation). Stored so thermal
     /// drift can be applied as a multiplier without accumulation.
     pub base_diode_model: Option<DiodeModel>,
+    /// Base BJT model (before thermal modulation). Stored so thermal
+    /// drift can be applied as a multiplier without accumulation.
+    /// Only set when `options.thermal` is true at compile time.
+    pub base_bjt_model: Option<crate::elements::nonlinear::GummelPoonModel>,
     /// Op-amp buffer paired with this WDF stage (for all-pass circuits).
     ///
     /// When a unity-gain op-amp feedback loop (neg=out) is detected at this
@@ -1432,13 +1436,7 @@ pub struct WdfStage {
     /// from `node_signals` at `injection_node_id` and additively blends
     /// its output into the serial chain signal.
     pub is_feedforward: bool,
-    /// Sample counter for runtime warnings rate limiting.
-    /// Only meaningful when `runtime-warnings` feature is enabled.
-    #[allow(dead_code)]
-    pub sample_counter: u64,
-    /// Component ID for the root device (for runtime warning attribution).
-    /// Only meaningful when `runtime-warnings` feature is enabled.
-    #[allow(dead_code)]
+    /// Component ID for the root device (used for NaN diagnostics and debug output).
     pub root_comp_id: String,
     /// When set, identifies a pot in the WDF tree whose resistance drives
     /// OpAmpRoot gain recalculation. After pot update + recompute, the stage
@@ -1602,6 +1600,7 @@ impl WdfStage {
             compensation: 1.0,
             oversampler,
             base_diode_model: None,
+            base_bjt_model: None,
             paired_opamp: None,
             allpass_feedback: None,
             allpass_direct: None,
@@ -1619,7 +1618,6 @@ impl WdfStage {
             is_trigger_voice: false,
             voice_active: false,
             is_feedforward: false,
-            sample_counter: 0,
             root_comp_id: String::new(),
             feedback_pot_id: None,
             feedback_series_r: 0.0,
@@ -2417,26 +2415,6 @@ impl WdfStage {
             return *y_prev;
         }
 
-        // Runtime warning checks for hybrid linear/nonlinear devices.
-        // Placed after all tree borrows are dropped to avoid borrow conflicts.
-        #[cfg(feature = "runtime-warnings")]
-        {
-            self.sample_counter += 1;
-            let sc = self.sample_counter;
-            let comp_id = &self.root_comp_id;
-            match &self.root {
-                RootKind::JfetVr(j) => {
-                    j.check_operating_region(wdf_out, None, comp_id, sc);
-                }
-                RootKind::Ota(o) => {
-                    o.check_operating_region(wdf_out, comp_id, sc);
-                }
-                _ => {}
-            }
-            // Check hybrid devices in the tree (JfetVr, Photocoupler leaves).
-            self.tree.check_hybrid_warnings(wdf_out, sc);
-        }
-
         flush_denormal(wdf_out)
     }
 
@@ -2636,9 +2614,13 @@ impl WdfStage {
 
     /// Apply thermal drift to temperature-sensitive root elements.
     ///
-    /// Modulates diode Is and n_vt based on the current thermal state.
-    /// Uses stored base model to prevent multiplier accumulation.
+    /// Modulates diode Is/n_vt and BJT vt/Is/bf based on the current thermal
+    /// state. Uses stored base models to prevent multiplier accumulation.
+    ///
+    /// Thermal time constants are 10–100s, so this is called at the existing
+    /// `ThermalModel::update_interval` cadence (~1000 samples), not per-sample.
     pub fn apply_thermal(&mut self, state: &crate::thermal::ThermalState) {
+        // Diode roots: modulate Is and n_vt.
         if let Some(base) = &self.base_diode_model {
             let ideality_ratio = base.n_vt / 0.02585; // n factor (ideality * Vt_ref)
             match &mut self.root {
@@ -2659,6 +2641,18 @@ impl WdfStage {
                     d.model.n_vt = ideality_ratio * state.vt;
                 }
                 _ => {}
+            }
+        }
+
+        // BJT WDF root: modulate vt, Is, and bf.
+        // vt scales with absolute temperature (Boltzmann).
+        // Is doubles every ~10°C (silicon) / ~8°C (germanium).
+        // bf drifts linearly with beta_tempco.
+        if let Some(base) = &self.base_bjt_model {
+            if let RootKind::Bjt(bjt) = &mut self.root {
+                bjt.model.vt = state.vt;
+                bjt.model.is = base.is * state.is_multiplier;
+                bjt.model.bf = (base.bf * state.beta_multiplier).max(1.0);
             }
         }
     }
@@ -3789,6 +3783,11 @@ pub enum NlDeviceKind {
     ExplicitDiodePair(ExplicitDiodePairRoot),
     /// JFET drain-source as a 1-port NL device (Vgs set externally).
     Jfet(JfetRoot),
+    /// CA3080 OTA transconductance amplifier.
+    ///
+    /// Current-output device: `Iout = Iabc * tanh(Vdiff / (2*Vt))`.
+    /// Gain is controlled by `Iabc` (set via modulation or fixed bias).
+    Ota(OtaRoot),
 }
 
 impl NlDeviceKind {
@@ -3815,7 +3814,8 @@ impl NlDeviceKind {
             NlDeviceKind::Diode(_)
             | NlDeviceKind::DiodePair(_)
             | NlDeviceKind::ExplicitDiode(_)
-            | NlDeviceKind::ExplicitDiodePair(_) => {}
+            | NlDeviceKind::ExplicitDiodePair(_)
+            | NlDeviceKind::Ota(_) => {}
             NlDeviceKind::Jfet(j) => {
                 // Vgs driven by input signal (for pitch sweep etc.)
                 j.set_vgs(input * compensation);
@@ -3834,6 +3834,7 @@ impl NlDeviceKind {
             NlDeviceKind::ExplicitDiode(d) => d,
             NlDeviceKind::ExplicitDiodePair(d) => d,
             NlDeviceKind::Jfet(j) => j,
+            NlDeviceKind::Ota(o) => o,
         }
     }
 
@@ -3847,6 +3848,7 @@ impl NlDeviceKind {
             NlDeviceKind::ExplicitDiode(_) => "ExplicitDiode",
             NlDeviceKind::ExplicitDiodePair(_) => "ExplicitDiodePair",
             NlDeviceKind::Jfet(_) => "Jfet",
+            NlDeviceKind::Ota(_) => "Ota",
         }
     }
 }
