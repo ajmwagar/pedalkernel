@@ -71,6 +71,23 @@ impl Default for CompileOptions {
 }
 
 impl CompileOptions {
+    /// Return a copy of these options with blockwise decomposition disabled,
+    /// forcing all nonlinear groups through the monolithic/rigid MNA path.
+    ///
+    /// Use this for differential testing: compile the same circuit twice
+    /// (`default()` and `force_monolithic()`) and compare outputs sample-wise.
+    /// Any deviation indicates that blockwise is behaving as a dialect change
+    /// rather than a pure optimization — which is a bug.
+    ///
+    /// Follows the same opt-in pattern as [`CompileOptions::thermal`]:
+    /// default `false` (blockwise enabled), set `true` to override.
+    pub fn force_monolithic(self) -> Self {
+        Self {
+            skip_blockwise: true,
+            ..self
+        }
+    }
+
     /// Default options for release builds: full optimization including K-tables.
     pub fn release() -> Self {
         Self::default()
