@@ -1,0 +1,195 @@
+# PK:
+# 808 Kick — Roland TR-808 bass drum voice, adapted as a Eurorack drum
+# module. A trigger pulse at the input excites a bridged-T resonator in the
+# feedback loop of a 4558-class op-amp; regenerative feedback (the Decay
+# pot) stretches the ring from a thump to a long boom; a passive RC tone
+# control rolls off the click.
+# Type: synth (Eurorack drum voice — Line 2 of the product roadmap)
+#
+# PROVENANCE
+#   - K. J. Werner, J. O. Smith III, J. S. Abel, "A physically-informed,
+#     circuit-bendable, digital model of the Roland TR-808 bass drum",
+#     Proc. DAFx-14, Erlangen, 2014.
+#   - K. J. Werner, PhD thesis, Stanford/CCRMA
+#     (purl.stanford.edu/jy057cz8322) — bridged-T pole analysis.
+#   - Roland TR-808 service notes (bass drum section: R162-R167, C40-C42,
+#     VR5, VR6, Q43).
+#   - Tiptop Audio BD808 manual — precedent for adapting this circuit to
+#     Eurorack ±12 V rails and module trigger levels.
+#
+# Value flags: [V] = verified against the sources above,
+#              [A] = approximate / chosen by us, not verified.
+#
+# RESONATOR (bridged-T in op-amp feedback) — all values [V]:
+#   Series arm:  C41 = C42 = 15 nF (film)
+#   Shunt leg:   R166 = 6.8 kΩ + R165 = 47 kΩ in series (53.8 kΩ total)
+#   Bridge:      R167 = 1 MΩ (op-amp inverting input to output)
+#
+# KEY FREQUENCIES — three numbers exist in the literature and they
+# disagree; all are documented here as audit data:
+#   45.7 Hz — ideal bridged-T formula f0 = 1/(2π·C·sqrt(R_shunt·R_bridge))
+#             = 1/(2π·15n·sqrt(53.8k·1M))
+#   49.4 Hz — actual pole frequency from Werner's circuit analysis
+#             (loading/damping shift the pole above the ideal notch f0)
+#   56 Hz   — nominal tuning per the TR-808 service notes
+#   The acceptance test asserts the measured peak falls in 40-60 Hz,
+#   wide enough to cover the documented conflict, and prints the exact
+#   measured value as audit evidence.
+#
+# DECAY — feedback network, values [V] (R164 = 47 kΩ, VR6 = 500 kΩ linear):
+#   In the hardware the bottom of the bridged-T shunt leg (R165) returns
+#   not to ground but to a scaled, buffered copy of the op-amp output:
+#   VR6 divides the output, a buffer drives the leg through R164. More
+#   feedback → higher closed-loop Q → longer decay (hardware range
+#   ≈ 50-800 ms). NOT MODELED — see SIMPLIFICATIONS 3 for the measured
+#   evidence that every wiring of this regeneration path breaks the
+#   current engine. The shunt leg returns to ground here, which is the
+#   hardware's MINIMUM-decay setting.
+#
+# PULSE SHAPER — topology [V], values [A]:
+#   The trigger is differentiated by a first-order RC network and the
+#   falling (negative) edge is clipped by a diode at ≈ -0.71 V, so the
+#   resonator is excited mostly by the rising edge. The exact R162/R163/
+#   C40 values are NOT verified from the service notes — C40 = 33 nF and
+#   R163 = 33 kΩ are our choice for a ≈ 1.1 ms shaped pulse (τ = R163·C40),
+#   and R162 = 100 kΩ injection follows the proven bridged-T test fixture.
+#   R161 = 10 kΩ is a trigger source build-out [A]; it is also an ENGINE
+#   REQUIREMENT — with `in` wired straight into the C40/D40 node the
+#   compiled circuit is silent (measured peak 2.75e-11); with a series
+#   resistor in front it works (measured peak 0.94). FLAGGED APPROXIMATE.
+#
+# TONE — VR5 10 kΩ reverse-log (taper c) [V] as a series rheostat into a
+#   shunt capacitor; the capacitor value (33 nF) is [A] (fc ≈ 480 Hz at
+#   full rotation — rolls off the attack click, leaves the ~50 Hz
+#   fundamental untouched).
+#
+# SUPPLY — the original TR-808 runs ±15 V; this module targets Eurorack
+#   ±12 V (per the roadmap and the Tiptop BD808 precedent). Werner's
+#   analysis notes the bridged-T operating point (and hence tuning) shifts
+#   with rail voltage, so lower rails nudge the pitch slightly; both rails
+#   are documented and ±12 V is what is modeled here.
+#
+# STIMULUS — the trigger IS the audio input: a ~1 ms unipolar pulse.
+#   Hardware accent range is 3.5 V (soft) to 13.5 V (full accent). The
+#   engine works in normalized units (the proven 808 voice tests drive
+#   `in` with a unit-amplitude impulse), so the acceptance test uses a
+#   1 ms pulse of amplitude 1.0 ≈ scaled trigger.
+#
+# SIMPLIFICATIONS vs real unit (audit notes — deviations are intentional):
+#   1. NO Q43 pitch jump. In hardware a transistor shorts R165 for ~4 ms
+#      after each trigger, raising the resonant frequency (shunt leg drops
+#      to 6.8 kΩ → f0 jumps roughly an octave) for the attack transient.
+#      This is trigger-clocked, millisecond-scale switching; the engine's
+#      switched resistors are static panel controls with no time-based
+#      control source, so the transient cannot be expressed. A
+#      `resistor_switched(47k, 1)` in the R165 position with a panel
+#      control would give a static A/B of the two tunings, not the 4 ms
+#      transient — left out of this file to keep the netlist honest
+#      hardware. HARDWARE-FIDELITY GAP.
+#   2. NO retrigger "pitch sigh". Hardware retriggers while the resonator
+#      is still ringing interact with the feedback/pitch-jump path to bend
+#      the pitch downward ("sigh"). Same trigger-clocked switching gap as
+#      (1). HARDWARE-FIDELITY GAP.
+#   3. NO DECAY CONTROL — the VR6/R164 regeneration network is omitted
+#      and the shunt leg is grounded (= hardware minimum decay).
+#      ENGINE LIMITATION, measured 2026-06-12 (48 kHz, 1 ms unit trigger):
+#        leg → gnd:                       rings, 45 Hz-band peak 1.85e-3
+#        leg → R164(47k) → VR6 wiper divider across U1.out (passive
+#          hardware topology):            ring KILLED (peak bin mag
+#          7.6e-4, spectrum monotonic = pulse tail only), and the pot is
+#          INERT — outputs at positions 0.0-1.0 are bit-identical (known
+#          engine TODO: IIR recomputation on pot change, see the ignored
+#          tests in tests/kick_808_wav.rs)
+#        leg → R164(47k) → U1.out (fixed, no pot):  ring KILLED (same)
+#        leg → R164 ← U2 unity buffer ← VR6 divider (full hardware
+#          topology incl. buffer):        TOTAL SILENCE (peak 0.0)
+#      Until the engine models op-amp-output return paths, the decay is
+#      fixed at the shortest hardware setting (measured -40 dB ring time
+#      printed by tests/eurorack_examples.rs).
+#   4. Pulse shaper values are approximate (see above) — the real
+#      R162/R163/C40 values were not verified.
+#   5. No accent/level circuitry — accent is just trigger amplitude.
+#   6. ±12 V Eurorack rails instead of the original ±15 V (see SUPPLY).
+#   7. TRIGGER INJECTION POINT moved. Hardware injects the shaped pulse
+#      into the bridged-T shunt leg (the T midpoint). ENGINE LIMITATION:
+#      signal injected at an internal node of an op-amp feedback network is
+#      dropped entirely — measured peak = 0.0 for midpoint injection (and
+#      the same failure affects the pre-existing tests/kick_808_wav.rs
+#      generator at HEAD: all 9 voices measure 0 Hz). Injecting at the
+#      inverting input instead excites the same closed-loop poles
+#      (resonant frequency and decay are pole properties; only the
+#      transfer-function zeros differ). As shipped, this file measures a
+#      44.5 Hz dominant resonance and a 65.9 ms -40 dB ring — the voice
+#      is correct, but the attack transient shape differs from hardware.
+
+synth "Kick 808" {
+  supplies {
+    V+: 12V              # Eurorack positive rail (original: +15 V)
+    V-: -12V             # Eurorack negative rail (original: -15 V)
+  }
+
+  components {
+    # === Pulse shaper (trigger conditioning) — values [A] ===
+    R161: resistor(10k)  # [A] trigger source build-out (also an engine
+                         #     requirement: `in` driving a cap+diode node
+                         #     directly compiles to silence — see header)
+    C40: cap(33n)        # [A] differentiator cap (τ = 1.1 ms with R163)
+    R163: resistor(33k)  # [A] differentiator return
+    D40: diode(silicon)  # [V] clips the falling edge at ≈ -0.71 V
+    R162: resistor(100k) # [A] injection resistor into the T midpoint
+
+    # === Bridged-T resonator — values [V] ===
+    U1: opamp(jrc4558)   # [V] 4558-class dual op-amp (one half)
+    C41: cap(15n)        # [V] series arm
+    C42: cap(15n)        # [V] series arm
+    R166: resistor(6.8k) # [V] shunt leg, midpoint side
+    R165: resistor(47k)  # [V] shunt leg (shorted by Q43 in hardware — omitted)
+    R167: resistor(1M)   # [V] bridge, inverting input to output
+
+    # === Decay feedback — OMITTED (engine gap, SIMPLIFICATIONS 3) ===
+    # Hardware: VR6 500 kΩ linear divider across the op-amp output [V],
+    # buffered, driving the shunt-leg bottom through R164 47 kΩ [V].
+
+    # === Tone (passive RC lowpass) ===
+    Tone: pot(10k, c)    # [V] VR5, 10 kΩ reverse-log, series rheostat
+    C_tone: cap(33n)     # [A] shunt cap (fc ≈ 480 Hz at full rotation)
+    R_out: resistor(10k) # [A] output build-out
+  }
+
+  nets {
+    # Pulse shaper: differentiate the trigger, clip the falling edge
+    in -> R161.a
+    R161.b -> C40.a
+    C40.b -> R163.a, D40.b, R162.a
+    R163.b -> gnd
+    D40.a -> gnd
+
+    # Bridged-T resonator around U1
+    U1.pos -> gnd
+    U1.neg -> C41.a, R167.a
+    C41.b -> C42.a, R166.a
+    C42.b -> U1.out
+    R167.b -> U1.out
+
+    # Trigger injection — at the inverting node, NOT the hardware's T
+    # midpoint (see SIMPLIFICATIONS 7)
+    R162.b -> U1.neg
+
+    # Shunt leg — grounded (hardware: returns to the VR6/R164 decay
+    # regeneration tap; see SIMPLIFICATIONS 3)
+    R166.b -> R165.a
+    R165.b -> gnd
+
+    # Tone lowpass and output
+    U1.out -> Tone.a
+    Tone.b -> C_tone.a, R_out.a
+    C_tone.b -> gnd
+    R_out.b -> out
+  }
+
+  controls {
+    # No Decay control — see SIMPLIFICATIONS 3 (engine cannot model the
+    # VR6/R164 regeneration path; decay is fixed at hardware minimum).
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+  }
+}

@@ -1,0 +1,173 @@
+# PK:
+# 808 Snare — Roland TR-808 snare drum voice (TONAL path), adapted as a
+# Eurorack drum module. A trigger pulse excites two bridged-T resonators
+# (the drum's two head modes at ~173 Hz and ~336 Hz); a blend pot mixes
+# them. Version 1 ships the tonal voice only — the noise "snappy" path is
+# documented below but cannot be built yet (no noise primitive in the DSL).
+# Type: synth (Eurorack drum voice — Line 2 of the product roadmap)
+#
+# PROVENANCE
+#   - K. J. Werner et al., TR-808 circuit analysis series (DAFx-14 bass
+#     drum companion work; snare resonator values from the same effort).
+#   - K. J. Werner, PhD thesis, Stanford/CCRMA
+#     (purl.stanford.edu/jy057cz8322) — bridged-T analysis.
+#   - Roland TR-808 service notes (snare drum section: R195-R198, C58-C61,
+#     VR8, 2SC828 noise transistor).
+#   - Tiptop Audio SD808 manual — precedent for Eurorack ±12 V adaptation.
+#
+# Value flags: [V] = verified against the sources above,
+#              [A] = approximate / chosen by us, not verified.
+#
+# RESONATORS — two bridged-T networks, each in the feedback loop of a
+# 4558-class op-amp half. All values [V]:
+#   Resonator A (low mode):
+#     shunt R196 = 680 Ω, bridge R197 = 820 kΩ, C58 = 56 nF, C59 = 27 nF
+#     f0 = 1/(2π·sqrt(R196·R197·C58·C59)) = 173.3 Hz
+#   Resonator B (high mode):
+#     shunt R195 = 2.2 kΩ, bridge R198 = 1 MΩ, C60 = 6.8 nF, C61 = 15 nF
+#     f0 = 1/(2π·sqrt(R195·R198·C60·C61)) = 336.0 Hz
+#   Unlike the bass drum there is no decay-feedback pot: the snare's ring
+#   time is fixed by each network's (low) Q — short, drum-like.
+#
+# KEY FREQUENCIES: 173.3 Hz and 336.0 Hz (ideal bridged-T formula, from
+#   the verified RC values above). The acceptance test asserts Goertzel
+#   magnitude peaks at both frequencies well above neighboring bins and
+#   prints the measured magnitudes as audit evidence.
+#
+# TONE BLEND — VR8 100 kΩ linear pot [V] used as a 3-terminal crossfade:
+#   resonator A drives one end, resonator B the other, output from the
+#   wiper. Position 0 = all low mode, 1 = all high mode.
+#
+# SUPPLY — original ±15 V; modeled at Eurorack ±12 V (roadmap target,
+#   Tiptop SD808 precedent). See the kick_808.pedal header for the rail
+#   voltage / tuning note.
+#
+# STIMULUS — the trigger IS the audio input: a ~1 ms unipolar pulse
+#   (hardware trigger 3.5-13.5 V; the engine works in normalized units,
+#   so the acceptance test uses amplitude 1.0).
+#
+# SIMPLIFICATIONS vs real unit (audit notes — deviations are intentional):
+#   1. NO "SNAPPY" NOISE PATH — the defining gap of this v1. The hardware
+#      path is: white noise source (a reverse-biased 2SC828 emitter-base
+#      junction in avalanche breakdown) → single-transistor "swing-type"
+#      VCA gated by the trigger envelope (Snappy pot VR7 sets the envelope
+#      depth) → first-order highpass → summed with the tonal path at the
+#      output mixer. The DSL has NO noise/random source primitive (checked
+#      src/dsl.rs — the only "noise" hits are op-amp datasheet comments),
+#      and a reverse-biased BJT does not avalanche in the engine's BJT
+#      model, so the path cannot be expressed without contriving a fake
+#      source. Ship tonal-only; add the snappy path when a noise primitive
+#      lands. HARDWARE-FIDELITY GAP.
+#   2. Pulse shaper values are approximate [A] — the snare's trigger
+#      conditioning network values were not verified; C/R chosen for a
+#      ≈ 0.5 ms shaped pulse, same topology as the bass drum's (RC
+#      differentiator + falling-edge clipping diode).
+#   3. Each resonator's injection resistor (100 kΩ) is [A], following the
+#      proven bridged-T fixture, not the service notes.
+#   3b. TRIGGER INJECTION POINT moved: hardware injects the shaped pulse
+#      into each bridged-T's shunt leg (T midpoint). ENGINE LIMITATION:
+#      signal injected at an internal node of an op-amp feedback network
+#      is dropped entirely (measured peak = 0.0), so the pulse enters at
+#      each op-amp's inverting input instead. Same closed-loop poles
+#      (mode frequencies and decay unchanged); the transfer-function
+#      zeros — i.e. the attack transient shape — differ from hardware.
+#      See kick_808.pedal SIMPLIFICATIONS 7 for the measurement evidence.
+#   4. The hardware sums the two resonators and the snappy path in an
+#      output mixer stage; here the blend pot replaces the mixer (the
+#      real VR8 balances the two bridged-T outputs ahead of it).
+#   4b. ENGINE LIMITATION — PARALLEL BRANCHES ARE NOT SUMMED. Measured
+#      2026-06-12 (48 kHz, 1 ms unit trigger; magnitudes are Goertzel
+#      |H| over the post-trigger window):
+#        each resonator alone:    A rings at 173 Hz (6.6e-3),
+#                                 B rings at 336 Hz (1.7e-3) — both correct
+#        VR8 crossfade (this netlist): out carries resonator A
+#          (|173| 7.6e-2, +27.5 dB over 250 Hz); resonator B reaches the
+#          output only ~26 dB down (|336| 3.9e-3, +1.7 dB over 250 Hz),
+#          apparently via coupling at the shared injection node, and the
+#          blend pot is INERT (outputs at positions 0.0/0.5/1.0 identical)
+#        passive R+R summing node:        same — A only, pot n/a
+#        inverting summing op-amp stage:  same — A only (B's input to the
+#                                         summing junction is dropped)
+#        A via 47k + B via rheostat:      flips — B only (engine picks ONE
+#                                         branch to own `out`, drops the
+#                                         other)
+#      Until the engine can merge parallel active branches, this file
+#      plays the 173 Hz mode with a weak 336 Hz remnant, and "Tone" has
+#      no effect. The netlist stays hardware-faithful rather than bending
+#      to the engine.
+#   5. No accent circuitry — accent is trigger amplitude.
+#   6. ±12 V Eurorack rails instead of the original ±15 V.
+
+synth "Snare 808" {
+  supplies {
+    V+: 12V              # Eurorack positive rail (original: +15 V)
+    V-: -12V             # Eurorack negative rail (original: -15 V)
+  }
+
+  components {
+    # === Pulse shaper (trigger conditioning) — values [A] ===
+    R_src: resistor(10k) # [A] trigger source build-out (engine requirement:
+                         #     `in` driving a cap+diode node directly
+                         #     compiles to silence — see kick_808.pedal)
+    C_trig: cap(22n)     # [A] differentiator cap (τ ≈ 0.48 ms with R_trig)
+    R_trig: resistor(22k) # [A] differentiator return
+    D_trig: diode(silicon) # [V] clips the falling edge at ≈ -0.71 V
+    R_inj1: resistor(100k) # [A] injection into resonator A midpoint
+    R_inj2: resistor(100k) # [A] injection into resonator B midpoint
+
+    # === Resonator A — 173.3 Hz, values [V] ===
+    U1: opamp(jrc4558)   # [V] 4558-class (one half)
+    C58: cap(56n)        # [V] series arm
+    C59: cap(27n)        # [V] series arm
+    R196: resistor(680)  # [V] shunt leg to ground
+    R197: resistor(820k) # [V] bridge
+
+    # === Resonator B — 336.0 Hz, values [V] ===
+    U2: opamp(jrc4558)   # [V] 4558-class (other half)
+    C60: cap(6.8n)       # [V] series arm
+    C61: cap(15n)        # [V] series arm
+    R195: resistor(2.2k) # [V] shunt leg to ground
+    R198: resistor(1M)   # [V] bridge
+
+    # === Tone blend and output ===
+    Tone: pot(100k, b)   # [V] VR8, 100 kΩ linear, crossfade A↔B
+    R_out: resistor(10k) # [A] output build-out
+  }
+
+  nets {
+    # Pulse shaper: differentiate the trigger, clip the falling edge
+    in -> R_src.a
+    R_src.b -> C_trig.a
+    C_trig.b -> R_trig.a, D_trig.b, R_inj1.a, R_inj2.a
+    R_trig.b -> gnd
+    D_trig.a -> gnd
+
+    # Resonator A (173.3 Hz) around U1
+    U1.pos -> gnd
+    U1.neg -> C58.a, R197.a
+    C58.b -> C59.a, R196.a
+    C59.b -> U1.out
+    R197.b -> U1.out
+    R196.b -> gnd
+    R_inj1.b -> U1.neg
+
+    # Resonator B (336.0 Hz) around U2
+    U2.pos -> gnd
+    U2.neg -> C60.a, R198.a
+    C60.b -> C61.a, R195.a
+    C61.b -> U2.out
+    R198.b -> U2.out
+    R195.b -> gnd
+    R_inj2.b -> U2.neg
+
+    # Blend the two modes and out
+    U1.out -> Tone.a
+    U2.out -> Tone.b
+    Tone.w -> R_out.a
+    R_out.b -> out
+  }
+
+  controls {
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+  }
+}
