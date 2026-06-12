@@ -1061,23 +1061,25 @@ pub fn compile_via_spqr_with_options(
                             ..
                         } = nl_kind
                         {
-                            let context_edges = collect_triode_context_edges(
-                                nl_edge_idx,
-                                &graph,
-                                &all_edges,
-                            );
+                            let context_edges =
+                                collect_triode_context_edges(nl_edge_idx, &graph, &all_edges);
                             #[cfg(test)]
                             eprintln!(
                                 "  group {gi}: triode-with-grid, context edges={:?}",
-                                context_edges.iter().map(|&eidx| {
-                                    let c = &graph.components[graph.edges[eidx].comp_idx];
-                                    c.id.as_str()
-                                }).collect::<Vec<_>>()
+                                context_edges
+                                    .iter()
+                                    .map(|&eidx| {
+                                        let c = &graph.components[graph.edges[eidx].comp_idx];
+                                        c.id.as_str()
+                                    })
+                                    .collect::<Vec<_>>()
                             );
                             // Mark all non-NL context edges as absorbed so their
                             // groups are skipped later.
                             for &eidx in &context_edges {
-                                if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Nonlinear {
+                                if graph.effective_edge_kind(eidx)
+                                    != super::component::EdgeKind::Nonlinear
+                                {
                                     triode_absorbed_edges.insert(eidx);
                                 }
                             }
@@ -2753,8 +2755,7 @@ fn collect_triode_context_edges(
                 // connecting triode pin to a supply) OR if it is a reactive
                 // element whose global end is VCC/GND (bypass capacitor to GND
                 // is fine; coupling cap to in/out is not).
-                let other_is_signal_port =
-                    other == graph.in_node || other == graph.out_node;
+                let other_is_signal_port = other == graph.in_node || other == graph.out_node;
                 if other_is_signal_port {
                     // This is a coupling element (C_in: in→grid, C_out: plate→out).
                     // Do NOT include — it would drag in/out signal domain into the MNA.
@@ -2781,7 +2782,11 @@ fn collect_triode_context_edges(
                     if other_e.node_a != other && other_e.node_b != other {
                         return true; // doesn't touch other node
                     }
-                    let far = if other_e.node_a == other { other_e.node_b } else { other_e.node_a };
+                    let far = if other_e.node_a == other {
+                        other_e.node_b
+                    } else {
+                        other_e.node_a
+                    };
                     far == graph.in_node || far == graph.out_node || far == graph.gnd_node
                 });
             if other_only_connects_to_signal_port {
@@ -3376,8 +3381,11 @@ pub(super) fn compute_group_terminals(
 ) -> Vec<NodeId> {
     use std::collections::HashSet;
 
-    // Collect all nodes touched by this group's edges
-    let mut group_nodes: HashSet<NodeId> = HashSet::new();
+    // Collect all nodes touched by this group's edges. BTreeSet, not HashSet:
+    // the iteration below fixes the terminal order, and downstream input-node
+    // selection and MNA source stamping depend on that order — it must be
+    // deterministic across compiles and processes.
+    let mut group_nodes: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
     for &eidx in group_edges {
         let e = &graph.edges[eidx];
         group_nodes.insert(e.node_a);

@@ -459,12 +459,7 @@ fn resistor_cap_coupled_opamp_cascade_passes_audio() {
 /// is intermittent), parses the children's gains, and asserts the max-min
 /// spread is < 0.1 dB. See reports/outboard-gear-audit-2026-06-12.md §4,
 /// §6 G9.
-///
-/// NOTE: the nondeterminism is INTERMITTENT — a given batch of children can
-/// happen to agree, so this red test may occasionally pass. It stays
-/// `#[ignore]`d until the G9/B1 fix lands regardless.
 #[test]
-#[ignore = "red until B1 fix: dyna_comp compiles nondeterministically across processes (gain spread of several dB, intermittent)"]
 fn dyna_comp_compiles_deterministically_across_processes() {
     const CHILD_ENV: &str = "PK_DETERMINISM_CHILD";
     const MARKER: &str = "PK_DET_GAIN_DB=";
@@ -496,7 +491,6 @@ fn dyna_comp_compiles_deterministically_across_processes() {
                     .args([
                         "--exact",
                         "dyna_comp_compiles_deterministically_across_processes",
-                        "--ignored",
                         "--nocapture",
                     ])
                     .env(CHILD_ENV, "1")
