@@ -43,6 +43,18 @@
 #      followers read the PEDAL INPUT at runtime, so detection is effectively
 #      feed-forward in simulation (same engine limitation as fet_leveler).
 #   5. No Limit/Compress switch, no sidechain pre-emphasis (R37 trim).
+#   6. ENGINE LIMITATION (key audit finding): the engine currently modulates
+#      a photocoupler as a SERIES transmission element regardless of where
+#      the netlist places it — measured behavior is identical whether PC1 is
+#      wired as the shunt cell (this file, the physical LA-2A arrangement)
+#      or in series: loud (0.5) probe gain +14.8 dB, quiet (0.05) probe gain
+#      -20.7 dB. More LED drive -> more transmission, so the envelope
+#      follower produces upward EXPANSION (+35.5 dB loud-vs-quiet delta)
+#      instead of the LA-2A's downward compression. Additionally, in purely
+#      passive stages (no tube) the LED modulation binding has no effect at
+#      all. The netlist below remains the correct hardware topology; treat
+#      the dynamic behavior as wrong-direction until the engine models shunt
+#      photocell gain reduction.
 
 equipment "Opto Leveler LA-2A" {
   supplies {

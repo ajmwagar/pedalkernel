@@ -22,7 +22,7 @@
 # AS MODELED HERE:
 #   in -> C_in -> Input pot (attenuator) -> R_gr series / J1 (2N5457) shunt
 #      -> C_c1 -> Q1 (2N3904 class-A common-emitter line amp, makeup gain)
-#      -> C_out -> Output pot -> out
+#      -> C_out -> T_out (1:1 output transformer) -> Output pot -> out
 #   Sidechain: EF1 envelope follower drives J1.vgs.
 #     envelope_follower(attack_r, attack_c, release_r, release_c, sens_r)
 #     EF1 = (25k, 220n, 5M, 220n, 20k)
@@ -33,10 +33,11 @@
 # SIMPLIFICATIONS vs real unit (audit notes — deviations are intentional):
 #   1. NO input transformer (real: UTC O-12 600 Ω bridged-T input). The input
 #      attenuator is a plain 10k pot instead of the bridged-T pad.
-#   2. NO output transformer. An output transformer was attempted but removed:
-#      a 1:1 transformer between the line amp and the Output pot compiles, but
-#      isolates the level pot from the makeup stage in the current WDF engine
-#      and is not part of the gain-reduction physics, so it is omitted for v1.
+#   2. Output transformer INCLUDED as a 1:1, 10 H winding with 75 ohm DCR and
+#      200 pF parasitics. It compiles cleanly; measured cost in the current
+#      engine is ~3.6 dB (peak 0.0183 with vs 0.0277 without, 0.2 amplitude
+#      220 Hz probe). The real unit's output iron is a step-down driving
+#      600 ohms.
 #   3. NO ratio switch — single fixed ratio set by the envelope follower's
 #      sensitivity; the real 4/8/12/20:1 bias-offset network is future work.
 #   4. The line amp is a single BJT common-emitter stage, not the real
@@ -47,6 +48,14 @@
 #      (pedalkernel-rt processor: `binding.envelope.process(input)`), so the
 #      detector behaves feed-forward in simulation. Audit finding, not hidden.
 #   6. Program-dependent attack (20–800 µs) is collapsed to one fixed RC pair.
+#   7. ENGINE LIMITATION (key audit finding): the EF1 -> J1.vgs modulation
+#      binding compiles but produces NO measurable gain reduction in the
+#      current engine — loud (0.5) and quiet (0.05) probes both measure the
+#      identical gain (GR delta 0.00 dB), and the same holds for a minimal
+#      JFET shunt divider and for the tests/test_pedals/envelope_follower
+#      fixture topology. Expect this file to pass audio with the correct
+#      static divider but apply no dynamic compression until the engine's
+#      JFET vgs modulation affects the compiled gain.
 
 equipment "FET Leveler 1176" {
   supply 30V               # Real 1176 runs a single +30 V rail
@@ -71,7 +80,8 @@ equipment "FET Leveler 1176" {
 
     # === Output ===
     C_out: cap(100n)       # Output coupling
-    Output: pot(100k, a)   # Output level (makeup into the "transformer")
+    T_out: transformer(1:1, 10H, 75, 200p)  # Line output iron (see note 2)
+    Output: pot(100k, a)   # Output level
 
     # === Sidechain ===
     # envelope_follower(attack_r, attack_c, release_r, release_c, sens_r)
@@ -101,9 +111,12 @@ equipment "FET Leveler 1176" {
     R_e.b -> gnd
     C_e.b -> gnd
 
-    # --- Output level ---
+    # --- Output transformer and level ---
     Q1.collector -> C_out.a
-    C_out.b -> Output.a
+    C_out.b -> T_out.pri.a
+    T_out.pri.b -> gnd
+    T_out.sec.a -> Output.a
+    T_out.sec.b -> gnd
     Output.w -> out
     Output.b -> gnd
 

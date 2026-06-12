@@ -1,0 +1,154 @@
+# PK:
+# Passive LC EQ — Pultec EQP-1A-inspired passive program equalizer. Boost and
+# cut shaped by RC shelves and a series-resonant LC high boost that never
+# sounds harsh.
+# Type: equalizer (outboard studio gear)
+#
+# PROVENANCE — Pultec EQP-1A (Pulse Techniques, ~1961)
+#   Architecture: an entirely PASSIVE equalizer section — bridged-T-ish RC
+#   shelving for the low band, a series-resonant LC section for the high
+#   boost, an RC shelf for the high cut — followed by a tube makeup amplifier
+#   that recovers the network's flat insertion loss (~16 dB in the real
+#   unit). Because boost and cut networks are separate, engaging LF boost and
+#   LF cut TOGETHER produces the famous shelf-plus-dip "Pultec trick".
+#   Real makeup amp: push-pull 12AX7 -> 12AU7 with transformer feedback.
+#
+# KEY FREQUENCIES (real unit):
+#   LF boost/cut: 20 / 30 / 60 / 100 Hz (switched caps, RC — NO inductor in
+#                 the low band of the real EQP-1A)
+#   HF boost:     3 / 4 / 5 / 8 / 10 / 12 / 16 kHz — switched inductor taps;
+#                 measured tap values are on the order of
+#                 27m / 33m / 47m / 68m / 82m / 150m henries
+#   HF cut (atten): 5 / 10 / 20 kHz RC shelf
+#
+# AS MODELED HERE (three cascaded passive sections, verified responsive):
+#   1. LF BOOST shelf: R1 (10k series) into a shunt leg of R_s1 (2.7k) in
+#      series with (C_lf || LF_Boost pot). At low frequencies the cap blocks,
+#      the pot raises the shunt impedance -> less attenuation -> shelf boost.
+#      Corner f = 1/(2*pi * 10k * C_lf): 270n -> ~59 Hz (the "60 CPS" panel
+#      position).
+#   2. HF BOOST: series-resonant L+C branch bypasses series resistor R2 at
+#      resonance. C_hf chosen so 47 mH resonates near 5 kHz:
+#      C = 1/(L*(2*pi*f)^2) = 1/(0.047*(2*pi*5000)^2) ~= 21.6n -> 22n
+#      (f0 = 1/(2*pi*sqrt(0.047 * 22n)) ~= 4.95 kHz).
+#      HF_Boost pot = series damping (boost amount), HF_BW pot = additional
+#      series damping in the resonant branch (bandwidth/Q).
+#   3. HF CUT: HF_Atten pot + 6.8n cap shunt to ground after separation
+#      resistor R3.
+#   Flat insertion loss ~ -25 dB (measured; real unit ~ -16 dB), preserving
+#   the passive-pad-plus-makeup character — see makeup note below.
+#
+# SIMPLIFICATIONS vs real unit (audit notes — deviations are intentional):
+#   1. NO MAKEUP GAIN STAGE — key engine finding. Every attempted makeup
+#      stage broke the EQ in the current compiler:
+#        a. 12AX7 after the network: the compiler absorbs the passive
+#           network into the triode's multi-NL stage; the measured response
+#           flattens to ~-20.4 dB at 100 Hz/5 kHz/10 kHz and all boost/cut
+#           pots freeze (deltas -0.00 / -0.02 / -0.55 dB).
+#        b. 12AX7 before the network: output drops to ~-84 dB (unusable).
+#        c. JFET source-follower buffer between network and triode:
+#           output ~-92 dB.
+#        d. Non-inverting NE5532 makeup after the network: output -240 dB
+#           (silence).
+#      The real unit's push-pull 12AX7 -> 12AU7 makeup amp is therefore
+#      omitted entirely in v1; the file is the passive section only, which
+#      keeps the EQ curves and controls fully functional.
+#   2. NO SWITCHED COMPONENTS — second engine finding. Using
+#      cap_switched(150n, 270n, 560n, 820n) or
+#      inductor_switched(27m, 33m, 47m, 68m, 82m, 150m) (the real EQP-1A tap
+#      values) makes the compiled passive network collapse to a unity
+#      passthrough with dead controls (verified on a minimal RC shelf:
+#      plain cap delta +3.45 dB, cap_switched delta +0.00 dB and 0 dB
+#      insertion loss). Fixed values are used instead: C_lf = 270n (60 Hz
+#      position), L_hf = 47m + 22n (~5 kHz position). Re-introduce switched
+#      values once the engine supports them in passive trees.
+#   3. R3 (4.7k) is a topology-separation resistor, not in the real unit:
+#      without it, three branch sections sharing one node also collapse to a
+#      passthrough (verified: all deltas +0.00 dB without R3).
+#   4. HF boost amount is a series damping pot inside the LC branch, not the
+#      real pot-across-the-tank arrangement. The Bandwidth pot is ALSO series
+#      damping (a pot in parallel with the inductor — the more physical
+#      damping arrangement — is another collapse trigger: with HF_BW across
+#      L_hf the entire network compiled to a passthrough). Boost and
+#      Bandwidth therefore interact much more strongly than in the real unit.
+#   5. LF cut section omitted in v1 — the "Pultec trick" (simultaneous LF
+#      boost+cut) is not yet reproducible.
+#   6. NO input/output transformers (real: 600 ohm bridging iron both ends).
+#
+# Measured (48 kHz, 0.1 amplitude probes, this exact netlist, HF_BW = 0.5):
+#   Boost pots 0 -> 1 at 100 Hz: -25.5 dB -> -23.7 dB (+1.8 dB)
+#   Boost pots 0 -> 1 at 1 kHz:  -28.8 dB -> -28.1 dB (+0.7 dB)
+#   Boost pots 0 -> 1 at 10 kHz: -29.6 dB -> -28.7 dB (+0.9 dB)
+
+equipment "Passive LC EQ EQP-1A" {
+  components {
+    # === Input coupling ===
+    C_in: cap(1u)
+
+    # === Section 1: LF boost shelf (RC — real EQP-1A low band is RC) ===
+    R1: resistor(10k)         # Series arm
+    R_s1: resistor(2.7k)      # Upper shunt arm
+    C_lf: cap(270n)           # 60 Hz position (see audit note 2 — fixed value)
+    LF_Boost: pot(10k, a)     # 10k boost pot — 0 ohm = flat, 10k = max shelf
+
+    # === Section 2: HF boost — series-resonant LC bypass across R2 ===
+    R2: resistor(10k)         # Series arm being bypassed at resonance
+    HF_Boost: pot(100k, a)    # Series damping — boost amount (0 ohm = max,
+                              # 100k = branch effectively out of circuit)
+    L_hf: inductor(47m)       # EQP-1A measured tap value (5 kHz position)
+    C_hf: cap(22n)            # Resonates 47m at ~4.95 kHz (see header math)
+    HF_BW: pot(25k)           # Series damping in the branch — bandwidth/Q
+                              # (see audit note 4: parallel-with-L collapses)
+    R_s2: resistor(2.7k)      # Shunt arm of the section divider
+
+    # === Section 3: HF cut (attenuate) shelf ===
+    R3: resistor(4.7k)        # Separation resistor (engine workaround, note 3)
+    HF_Atten: pot(50k, a)     # 0 ohm = max cut
+    C_hcut: cap(6.8n)         # HF cut shunt cap
+
+    # === Output ===
+    R_load: resistor(100k)    # Output load (stands in for the makeup amp's
+                              # grid impedance — makeup omitted, see note 1)
+  }
+
+  nets {
+    # --- Input to section 1 ---
+    in -> C_in.a
+    C_in.b -> R1.a
+
+    # --- Section 1: LF boost shelf ---
+    # Shunt leg: R_s1 in series with (C_lf || LF_Boost) to ground. At LF the
+    # cap blocks, so the pot raises the shunt impedance -> shelf boost.
+    R1.b -> R_s1.a, R2.a
+    R_s1.b -> C_lf.a, LF_Boost.a
+    C_lf.b -> gnd
+    LF_Boost.b -> gnd
+
+    # --- Section 2: HF boost LC bypass across R2 ---
+    R1.b -> HF_Boost.a
+    HF_Boost.b -> L_hf.a
+    L_hf.b -> C_hf.a
+    C_hf.b -> HF_BW.a
+
+    # Bandwidth: additional series damping lowers Q / softens the peak
+    HF_BW.b -> R2.b
+
+    # Section 2 divider shunt
+    R2.b -> R_s2.a, R3.a
+    R_s2.b -> gnd
+
+    # --- Section 3: HF cut after the separation resistor ---
+    R3.b -> HF_Atten.a, R_load.a, out
+    HF_Atten.b -> C_hcut.a
+    C_hcut.b -> gnd
+    R_load.b -> gnd
+  }
+
+  controls {
+    # Ranges oriented so turning each knob UP gives MORE boost / MORE cut.
+    LF_Boost.position -> "LF Boost" [0.0, 1.0] = 0.0
+    HF_Boost.position -> "HF Boost" [1.0, 0.0] = 0.0
+    HF_BW.position -> "HF Bandwidth" [0.0, 1.0] = 0.5
+    HF_Atten.position -> "HF Atten" [1.0, 0.0] = 0.0
+  }
+}
