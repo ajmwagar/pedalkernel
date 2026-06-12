@@ -260,6 +260,17 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
             blocked.insert(rec.neg_node);
             blocked.insert(rec.out_node);
 
+            // Output nodes of OTHER op-amps are driven signal sources
+            // (DC- or R-coupled cascades feed pos from an upstream stage's
+            // output). Treat them like `in`: signal, and opaque — never
+            // traverse through into the upstream feedback network.
+            let upstream_outs: std::collections::HashSet<usize> = graph
+                .nullor_pins
+                .iter()
+                .filter(|r| r.comp_idx != edge.comp_idx)
+                .map(|r| r.out_node)
+                .collect();
+
             let mut visited = std::collections::HashSet::new();
             let mut queue = std::collections::VecDeque::new();
             visited.insert(rec.pos_node);
@@ -286,6 +297,12 @@ pub(super) fn is_inverting_topology(stats: &StageStats, graph: &CircuitGraph) ->
                         }
                         if n == graph.in_node {
                             reaches_signal = true;
+                        }
+                        if upstream_outs.contains(&n) {
+                            // Upstream op-amp output: signal source. Don't
+                            // walk through it (same as rails).
+                            reaches_signal = true;
+                            continue;
                         }
                         if n == graph.gnd_node
                             || n == graph.vcc_node
