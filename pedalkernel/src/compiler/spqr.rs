@@ -1074,6 +1074,17 @@ pub(super) fn spqr_to_stages(
     stages
 }
 
+/// Distinct component IDs for a set of edge indices (diagnostics).
+fn component_ids_for_edges(graph: &CircuitGraph, edge_indices: &[usize]) -> Vec<String> {
+    let mut ids: Vec<String> = edge_indices
+        .iter()
+        .map(|&i| graph.components[graph.edges[i].comp_idx].id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 fn collect_stages(
     node: &SpqrNode,
     graph: &CircuitGraph,
@@ -1092,6 +1103,16 @@ fn collect_stages(
                     order: *order,
                 });
                 *order += 1;
+            } else if comp.kind.is_passive() {
+                // A passive component with no WDF leaf silently vanishes from
+                // the signal path — the symptom is a unity passthrough with
+                // dead controls (audit gap B4/G7).
+                tracing::warn!(
+                    "SPQR: passive component '{}' ({}) produced no WDF leaf; \
+                     dropping its stage — output may collapse to passthrough",
+                    comp.id,
+                    comp.kind.type_tag()
+                );
             }
             // Bare NL Q-nodes are absorbed by their parent stage
         }
@@ -1105,6 +1126,19 @@ fn collect_stages(
                             order: *order,
                         });
                         *order += 1;
+                    } else {
+                        // One missing leaf poisons the whole S/P subtree
+                        // (Option-collect in spqr_to_dyn_node), silently
+                        // dropping every component in the group. Ideally a
+                        // compile error, but spqr_to_stages is infallible at
+                        // its call sites, so warn loudly instead.
+                        tracing::warn!(
+                            "SPQR: all-passive stage could not be converted to \
+                             a WDF tree (a component produced no leaf); \
+                             dropping stage with components [{}] — output may \
+                             collapse to passthrough",
+                            component_ids_for_edges(graph, &node.all_edge_indices()).join(", ")
+                        );
                     }
                 }
                 SpClassification::SingleNl { nl_edge_idx } => {
