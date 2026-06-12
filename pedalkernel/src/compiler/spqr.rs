@@ -533,9 +533,17 @@ pub(super) fn spqr_decompose(
         }
     }
 
+    // Sort boundary_nodes for deterministic ordering. The first two items are
+    // used as the R-node's `endpoints()`, which drives SPQR series-chain
+    // assembly. Non-deterministic HashSet iteration produced different endpoint
+    // pairs across runs, causing different circuit topologies per compilation.
+    // (Precedent: commit 0449cd6a fixed the same class of bug in blockwise.rs
+    // and signal_flow.rs.)
+    let mut boundary_nodes: Vec<NodeId> = junction_nodes.into_iter().collect();
+    boundary_nodes.sort_unstable();
     SpqrNode::R {
         edge_indices: residual_edges,
-        boundary_nodes: junction_nodes.into_iter().collect(),
+        boundary_nodes,
         children: pendant_children,
     }
 }

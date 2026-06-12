@@ -3383,13 +3383,19 @@ pub(super) fn compute_group_terminals(
         group_nodes.insert(e.node_a);
         group_nodes.insert(e.node_b);
     }
+    // Sort to a deterministic iteration order before building terminals.
+    // HashSet iteration is non-deterministic (random seed per HashMap instance).
+    // The terminal ordering directly feeds spqr_decompose(), so any variation
+    // here produces different SPQR trees and different compiled topologies.
+    let mut group_nodes_sorted: Vec<NodeId> = group_nodes.into_iter().collect();
+    group_nodes_sorted.sort_unstable();
 
     // Terminals = nodes in this group that are also global terminals
     // or that connect to edges NOT in this group (boundary nodes).
     let group_edge_set: HashSet<usize> = group_edges.iter().copied().collect();
     let mut terminals: Vec<NodeId> = Vec::new();
 
-    for &node in &group_nodes {
+    for &node in &group_nodes_sorted {
         // Skip rail and AC ground nodes — they're DC references, not
         // signal boundaries. AC ground nodes (VB+ bias junctions) are
         // detected by the graph builder from capacitor-bypassed dividers.

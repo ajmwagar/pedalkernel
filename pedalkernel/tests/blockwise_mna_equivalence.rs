@@ -254,26 +254,26 @@ pedal "OTA CA3080 Test" {
 "#;
 
 #[test]
-#[ignore = "pedalkernel-rk77.3: ota_ca3080 blockwise is non-deterministic — observed -inf dB (bit-identical), -4.44 dB, and +3.52 dB RMS error across runs. Blockwise path selection for the CA3080 OTA is unstable. Un-ignore when rk77.3 is merged."]
 fn ota_ca3080_blockwise_matches_mna_quiet() {
     // INVARIANT: OTA buffer/inverter topology. Both paths must agree on the
     // AC signal path through the transconductance stage.
-    // CURRENTLY FAILS: Non-deterministic — sometimes bit-identical (-inf dB),
-    // sometimes +3.52 dB RMS error. The blockwise path selection for the CA3080
-    // OTA varies between runs, indicating a non-deterministic compilation path.
+    // The CA3080 has no NL blocks for blockwise to decompose; both paths fall
+    // through to the same monolithic SPQR compile. Measured divergence: -inf dB
+    // (bit-identical) after fixing non-deterministic HashSet iteration ordering
+    // in compute_group_terminals() and spqr_decompose() (pedalkernel-rk77.4).
     let input = sine_at(440.0, QUIET_AMP, SIGNAL_DURATION_S, SR);
     let (bw, mna) = compile_both_and_process(OTA_CA3080_SRC, &input, "ota_ca3080[quiet]");
     assert_tight(&bw, &mna, "ota_ca3080", "quiet");
 }
 
 #[test]
-#[ignore = "pedalkernel-rk77.3: ota_ca3080 blockwise is non-deterministic — observed -inf dB (bit-identical), -4.44 dB, and +3.52 dB RMS error across runs (driven case). CA3080 blockwise path selection is unstable. Un-ignore when rk77.3 is merged."]
 fn ota_ca3080_blockwise_matches_mna_driven() {
     // INVARIANT: Driven OTA. Nonlinear compressive gain compression must be
     // equivalent between formulations.
-    // CURRENTLY FAILS: Non-deterministic — sometimes -inf dB (bit-identical),
-    // sometimes -4.44 dB or +3.52 dB RMS error. Both OTA cases are unstable.
-    // Tracked rk77.3.
+    // The CA3080 has no NL blocks for blockwise to decompose; both paths fall
+    // through to the same monolithic SPQR compile. Measured divergence: -inf dB
+    // (bit-identical) after fixing non-deterministic HashSet iteration ordering
+    // in compute_group_terminals() and spqr_decompose() (pedalkernel-rk77.4).
     let input = sine_at(440.0, DRIVEN_AMP, SIGNAL_DURATION_S, SR);
     let (bw, mna) = compile_both_and_process(OTA_CA3080_SRC, &input, "ota_ca3080[driven]");
     assert_tight(&bw, &mna, "ota_ca3080", "driven");
