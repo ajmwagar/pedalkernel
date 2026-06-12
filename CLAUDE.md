@@ -163,3 +163,12 @@ ORCHESTRATOR: Update this section as the project evolves.
 Include: active work, recent decisions, known issues, architectural notes.
 Keep it concise — pointers to files are better than duplicated content.
 -->
+
+**2026-06-12 — Outboard gear audit** (`reports/outboard-gear-audit-2026-06-12.md`):
+DSL has all dynamics primitives, but the detector→gain-element wiring is broken:
+envelope followers read global input (not their tap), `-> J.vgs` envelope routing
+is inert, photocoupler LED drive acts as series gain (inverted GR), `vca()` is an
+unstamped stub. New measurement layer in `tests/audio_analysis.rs`
+(frequency_response_db, static_gain_curve, attack/release) + 4 research-grounded
+examples in `examples/outboard/`. Known: dyna_comp compiles nondeterministically
+across processes; transformer step-down ~19 dB off vs SPICE.
