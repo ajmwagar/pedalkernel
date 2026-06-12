@@ -267,6 +267,7 @@ pub fn compile_via_spqr_with_options(
     );
     let mut feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph);
+    merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
     eprintln!("  [compile] Step 1 done: {} groups", feedback_groups.len());
 
     // Step 1b: Compute signal flow distance for each group via BFS from in_node.
@@ -2841,6 +2842,181 @@ fn is_ground_clip_group(
             || graph.ac_ground_nodes.contains(&e.node_b);
         is_diode && to_gnd
     })
+}
+
+/// Merge purely-linear passive groups (series input resistors) into adjacent
+/// active groups so the active group's MNA captures the source impedance.
+///
+/// Motivation: Sallen-Key and other active filter topologies have a series
+/// input resistor R1 in its own FlowGroup (no feedback, no reactive elements).
+/// Without merging, the active group's MNA treats its first node (junction J)
+/// as an ideal voltage source, losing R1's contribution and producing a flat
+/// frequency response instead of the correct filter shape.
+///
+/// Merge condition (all must hold):
+/// 1. Source group is passive (no active edges).
+/// 2. Source group's edges are ALL linear (no reactive, NL, or VCVS).
+/// 3. One endpoint of every source edge connects the circuit `in_node` or the
+///    output node of a preceding active group (i.e. an already-committed
+///    signal source) to a node that is also an internal node of exactly one
+///    active group.
+/// 4. The target active group contains a VCVS (needs source impedance for
+///    correct filter computation).
+///
+/// Only source groups with a single linear resistor touching the active
+/// group's node-set qualify — broader merges are too risky.
+fn merge_input_coupling_into_active_groups(
+    groups: &mut Vec<super::signal_flow::FlowGroup>,
+    graph: &super::graph::CircuitGraph,
+) {
+    // Build node sets for each active group (include all edges — active,
+    // feedback, and pendant — so we can find the coupling junction J even
+    // when the VCVS is a self-loop at node_out and the filter passives are
+    // in pendant_edges rather than active_edges).
+    let active_group_nodes: Vec<std::collections::HashSet<super::graph::NodeId>> = groups
+        .iter()
+        .map(|g| {
+            let mut nodes = std::collections::HashSet::new();
+            for &eidx in &g.all_edges() {
+                let e = &graph.edges[eidx];
+                nodes.insert(e.node_a);
+                nodes.insert(e.node_b);
+            }
+            nodes
+        })
+        .collect();
+
+    // Identify which active groups contain a VCVS AND are purely linear
+    // (no NL/ControlledConductance). We must not merge input resistors into
+    // General-class groups (those with pots, JFETs, etc.) — the General
+    // builder handles source impedance differently and merging pendant edges
+    // into it disrupts signal flow routing.
+    let has_vcvs: Vec<bool> = groups
+        .iter()
+        .map(|g| {
+            let all = g.all_edges();
+            let has_v = g.active_edges.iter().any(|&eidx| {
+                graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs
+            });
+            let is_linear = all.iter().all(|&eidx| {
+                matches!(
+                    graph.effective_edge_kind(eidx),
+                    super::component::EdgeKind::Linear
+                        | super::component::EdgeKind::Reactive
+                        | super::component::EdgeKind::Vcvs
+                )
+            });
+            has_v && is_linear
+        })
+        .collect();
+
+    let mut merge_into: Vec<Option<usize>> = vec![None; groups.len()];
+
+    for (source_idx, source) in groups.iter().enumerate() {
+        // Must be a passive group.
+        if !source.active_edges.is_empty() {
+            continue;
+        }
+
+        let edges = source.all_edges();
+        if edges.is_empty() {
+            continue;
+        }
+
+        // All edges must be strictly linear (resistors/pots only).
+        let all_linear = edges.iter().all(|&eidx| {
+            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear
+        });
+        if !all_linear {
+            continue;
+        }
+
+        // For each edge, one endpoint must be `in_node` (or another "source"
+        // node) and the other must be an internal node of exactly one VCVS
+        // active group.
+        let is_source_node = |n: super::graph::NodeId| -> bool {
+            n == graph.in_node
+                || n == graph.gnd_node
+                || graph.supply_nodes.contains(&n)
+                || graph.ac_ground_nodes.contains(&n)
+        };
+
+        let mut target: Option<usize> = None;
+        for &eidx in &edges {
+            let e = &graph.edges[eidx];
+            // One side must be a "source" node.
+            let (src_side, other_side) = if is_source_node(e.node_a) {
+                (e.node_a, e.node_b)
+            } else if is_source_node(e.node_b) {
+                (e.node_b, e.node_a)
+            } else {
+                continue;
+            };
+            let _ = src_side;
+
+            // The other side must be in exactly one VCVS active group's
+            // node set (not the output node — we want an internal coupling node).
+            let candidate = active_group_nodes
+                .iter()
+                .enumerate()
+                .filter(|(gi, nodes)| has_vcvs[*gi] && nodes.contains(&other_side))
+                .map(|(gi, _)| gi)
+                .collect::<Vec<_>>();
+            if candidate.len() == 1 {
+                let t = candidate[0];
+                match target {
+                    None => target = Some(t),
+                    Some(prev) if prev == t => {} // Same target
+                    Some(_) => {
+                        // Ambiguous — don't merge.
+                        target = None;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(t) = target {
+            // Don't create a cycle (source must not be the target).
+            if t != source_idx {
+                merge_into[source_idx] = Some(t);
+            }
+        }
+    }
+
+    // Apply merges: move source edges into target's pendant_edges.
+    for source_idx in 0..groups.len() {
+        let Some(target_idx) = merge_into[source_idx] else {
+            continue;
+        };
+        let edges = groups[source_idx].all_edges();
+        if edges.is_empty() {
+            continue;
+        }
+        #[cfg(test)]
+        {
+            let names: Vec<&str> = edges
+                .iter()
+                .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+                .collect();
+            eprintln!(
+                "  [compile] merged input-coupling group {source_idx} into active group {target_idx}: {names:?}"
+            );
+        }
+        for eidx in edges {
+            if !groups[target_idx].pendant_edges.contains(&eidx) {
+                groups[target_idx].pendant_edges.push(eidx);
+            }
+        }
+    }
+
+    // Remove merged-away groups.
+    let mut idx = 0;
+    groups.retain(|_| {
+        let keep = merge_into.get(idx).and_then(|target| *target).is_none();
+        idx += 1;
+        keep
+    });
 }
 
 fn merge_cross_reactive_groups_into_active_groups(

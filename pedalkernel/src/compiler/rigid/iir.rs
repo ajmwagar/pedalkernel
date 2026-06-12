@@ -109,8 +109,6 @@ pub(in crate::compiler) fn build_iir_stage(
                 output_node_id,
             });
         }
-        #[cfg(test)]
-        eprintln!("IIR: rejected unstable/non-finite direct coeffs b={b_coeffs:?} a={a_coeffs:?}");
     }
 
     // Fallback: state-space reduction → extract biquad if 2nd order

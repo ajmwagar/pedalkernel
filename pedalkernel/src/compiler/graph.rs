@@ -372,6 +372,36 @@ impl CircuitGraph {
             }
         }
 
+        // Pre-build a set of node IDs adjacent to reactive components
+        // (capacitors, inductors). Used to guard the unity-follower pos↔out
+        // union: in Sallen-Key topologies the opamp's pos pin shares a node
+        // with capacitor pins, and the union would collapse the filter network.
+        // Plain unity buffers (Screamer tone U2, bf_unity_follower tests) have
+        // no reactive edges at pos — the union is correct for those.
+        let reactive_nodes: std::collections::HashSet<usize> = {
+            let mut set = std::collections::HashSet::new();
+            for comp in &all_components {
+                let edges_decl = comp.kind.edges();
+                let is_reactive = edges_decl
+                    .first()
+                    .map(|e| e.kind == super::component::EdgeKind::Reactive)
+                    .unwrap_or(false);
+                if is_reactive {
+                    for edge_decl in &edges_decl {
+                        let key_a = format!("{}.{}", comp.id, edge_decl.pin_a);
+                        let key_b = format!("{}.{}", comp.id, edge_decl.pin_b);
+                        // Use get_id to ensure pins are registered, then record
+                        // their union-find root.
+                        let ida = get_id(&key_a, &mut uf);
+                        set.insert(uf.find(ida));
+                        let idb = get_id(&key_b, &mut uf);
+                        set.insert(uf.find(idb));
+                    }
+                }
+            }
+            set
+        };
+
         // Build edges for two-terminal components.
         let mut edges = Vec::new();
         let mut num_active = 0usize;
@@ -639,17 +669,33 @@ impl CircuitGraph {
 
                     // Unity follower detection: if neg == out (direct wire
                     // feedback, e.g., U2.out → U2.neg), the op-amp is a
-                    // voltage buffer. Union pos and out — they're electrically
-                    // the same node. This makes the buffer transparent to
-                    // the SPQR decomposition.
+                    // voltage buffer. Union pos↔out to make the buffer transparent
+                    // — UNLESS pos_node is adjacent to reactive components.
+                    //
+                    // The union is correct for plain buffers (Screamer tone U2,
+                    // `bf_unity_follower` tests) where pos is a simple junction
+                    // driven by the previous stage.
+                    //
+                    // The union is WRONG for Sallen-Key topologies where pos is
+                    // a reactive-network junction (C2.a/R2.b). Unioning pos into
+                    // out collapses the SK feedback loop and produces −240 dB silence.
+                    //
+                    // Guard: skip the union if pos_node appears in the
+                    // reactive_nodes pre-computed set (i.e., pos is a pin of a
+                    // capacitor or inductor).
                     let node_neg = uf.find(id_neg);
                     let node_out = uf.find(id_out);
                     if node_neg == node_out {
-                        // Unity follower: pos = out (buffer is a wire)
-                        uf.union(id_pos, id_out);
+                        let pos_root = uf.find(id_pos);
+                        if !reactive_nodes.contains(&pos_root) {
+                            // Plain unity follower: pos is not reactive-adjacent.
+                            // Union pos→out to make it a transparent wire.
+                            uf.union(id_pos, id_out);
+                        }
+                        // else: Sallen-Key or similar — keep pos and out separate.
                     }
 
-                    // Re-resolve after potential union
+                    // Re-resolve after potential union.
                     let node_neg = uf.find(id_neg);
                     let node_out = uf.find(id_out);
 
