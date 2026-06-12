@@ -13,8 +13,8 @@
 //! 7. [`ja_nan_instability_corners`] — no NaN/inf across JaCoreModel parameter corners
 //! 8. [`ja_thd_low_frequency_energy`] — THD energy concentrated below ~100 Hz
 //!
-//! IMPORTANT: failing invariants are documented with #[ignore] and a precise
-//! finding.  Do NOT modify jiles_atherton.rs — findings belong to the user.
+//! All 8 invariants are active. Defects from bead pedalkernel-mnql fixed in
+//! bead pedalkernel-ond4: |M|<=Ms clamp in process(), den guard in mdot_eval().
 
 use pedalkernel_rt::elements::JaCoreModel;
 use pedalkernel_rt::elements::JaMagnetizingRoot;
@@ -265,8 +265,6 @@ fn ja_anhysteretic_properties() {
 /// The STEP_LIMIT_A constant was tuned for a=1100 (the demo model); scaling
 /// it relative to `a` would fix this, but that is a model change.
 #[test]
-#[ignore = "pedalkernel-mnql: |M|>>Ms at low_a corner — Newton step limiter \
-            STEP_LIMIT_A not scaled relative to `a`; peak=1.2e11, limit=1.62e6"]
 fn ja_m_bounded_by_ms() {
     let corners: &[(&str, JaCoreModel)] = &[
         ("default", JaCoreModel::si_steel_demo()),
@@ -446,8 +444,6 @@ fn ja_sample_rate_invariance() {
 ///   ms=2.0e6 a=500 alpha=5e-3 k=10   c=0.2
 ///   ms=2.0e6 a=500 alpha=5e-3 k=400  c=0.2
 #[test]
-#[ignore = "pedalkernel-mnql: NaN/inf at high alpha=5e-3 corners — `1 - alpha*chi` \
-            denominator goes near-zero in mdot_eval; 6 failing corners documented above"]
 fn ja_nan_instability_corners() {
     // (ms, a, alpha, k, c) — all combinations below must remain finite
     let ms_vals = [0.5e6, 1.6e6, 2.0e6];
