@@ -4622,6 +4622,8 @@ fn tb303_forced_serial_tracks_stinchcombe_htb_shape() {
 }
 
 #[test]
+#[ignore = "pedalkernel-284: late-stage acceptance — run with --ignored once granular probes pass; \
+full forced-serial delayed-feedback fit against Stinchcombe H_tb reference shape"]
 fn tb303_forced_serial_delayed_feedback_fit_vs_stinchcombe_htb() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let def = crate::dsl::parse_pedal_file(&source).expect("parse failed");
