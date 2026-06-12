@@ -2776,6 +2776,64 @@ impl WdfStage {
         false
     }
 
+    /// Whether this stage contains a photocoupler LEAF with the given
+    /// component id (in the WDF tree or among PassiveRType MNA children).
+    ///
+    /// A leaf is the photocoupler at its netlist position — a dynamic
+    /// resistance in the audio path. This deliberately does NOT look at
+    /// `input_photocouplers` (the op-amp input-path gain model): the two
+    /// representations are exclusive (audit gap G3) and binding resolution
+    /// must prefer the leaf.
+    pub fn contains_photocoupler(&self, comp_id: &str) -> bool {
+        let probe = |leaf: &dyn crate::wdf_leaf::WdfLeaf| -> Option<()> {
+            (leaf.type_tag() == "photocoupler" && leaf.comp_id() == Some(comp_id)).then_some(())
+        };
+        if self.tree.find_leaf(&probe).is_some() {
+            return true;
+        }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            return children.iter().any(|c| c.find_leaf(&probe).is_some());
+        }
+        false
+    }
+
+    /// Set LED drive on a photocoupler LEAF anywhere in this stage — in the
+    /// WDF tree or among PassiveRType MNA children — and trigger the
+    /// matching impedance recompute. Returns `true` if the component was
+    /// found.
+    ///
+    /// Mirrors [`Self::set_jfet_vr_vgs`]: photocouplers inside a
+    /// PassiveRType stage are MNA variable-resistor children, so after the
+    /// LED drive updates the CdS resistance the scattering matrix must be
+    /// re-derived for the gain change to reach the audio path.
+    pub fn set_photocoupler_led(&mut self, comp_id: &str, led_drive: crate::Wave) -> bool {
+        if self.tree.set_photocoupler_led(comp_id, led_drive) {
+            self.tree.recompute();
+            return true;
+        }
+        let mut found = false;
+        if let RootKind::PassiveRType {
+            children,
+            needs_recompute,
+            ..
+        } = &mut self.root
+        {
+            for child in children.iter_mut() {
+                if child.set_photocoupler_led(comp_id, led_drive) {
+                    found = true;
+                }
+            }
+            if found {
+                *needs_recompute = true;
+            }
+        }
+        if found {
+            // Re-derive the scattering matrix with the CdS cell's new R.
+            self.flush_passive_rtype_recompute();
+        }
+        found
+    }
+
     /// Set the grid-cathode voltage for triode root elements.
     ///
     /// This is used for external modulation (bias, LFO, signal input).

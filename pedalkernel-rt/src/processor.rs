@@ -2724,10 +2724,14 @@ impl CompiledPedal {
             ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                 if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
                     let led = modulation.clamp(0.0, 1.0);
-                    if wdf.tree.set_photocoupler_led(comp_id, led) {
-                        wdf.tree.recompute();
+                    // Leaf-positioned XOR input-path (audit gap G3): a
+                    // photocoupler that compiled as a leaf (its netlist
+                    // position) must NOT also be driven as an op-amp
+                    // input-path series gain — that path inverts the GR
+                    // direction for shunt CdS cells.
+                    if !wdf.set_photocoupler_led(comp_id, led) {
+                        wdf.set_input_photocoupler_led(comp_id, led);
                     }
-                    wdf.set_input_photocoupler_led(comp_id, led);
                 }
             }
             ModulationTarget::TriodeVgk { stage_idx } => {
@@ -2895,10 +2899,11 @@ impl PedalProcessor for CompiledPedal {
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
                         let led = modulation.clamp(0.0, 1.0);
-                        if wdf.tree.set_photocoupler_led(comp_id, led) {
-                            wdf.tree.recompute();
+                        // Leaf-positioned XOR input-path (audit gap G3) —
+                        // see route_envelope_modulation.
+                        if !wdf.set_photocoupler_led(comp_id, led) {
+                            wdf.set_input_photocoupler_led(comp_id, led);
                         }
-                        wdf.set_input_photocoupler_led(comp_id, led);
                     }
                 }
                 ModulationTarget::TriodeVgk { stage_idx } => {

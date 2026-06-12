@@ -625,8 +625,16 @@ pub(super) fn resolve_envelope_tap(
 /// `modulation_sink()` — the same scaling the LFO path uses, mapping the
 /// envelope's [0,1] output onto a negative Vgs swing toward pinch-off.
 ///
-/// Scope: JFET vgs/gate sinks only. Other sink kinds (photocoupler, VCA cv,
-/// ...) are separate audit gaps (G3/G4) and keep their current behavior.
+/// Photocoupler LED sinks (audit gap G3) are bound here too: the envelope
+/// drives the LED of a photocoupler that compiled as a leaf (WDF tree or
+/// PassiveRType MNA child — its netlist position), or, when no leaf exists,
+/// as an op-amp input-path gain element. The classification is exclusive
+/// (leaf-positioned XOR input-path) so a shunt CdS cell is never doubly
+/// modeled as a series transmission gain.
+///
+/// Scope: JFET vgs/gate and photocoupler LED sinks. Other sink kinds
+/// (VCA cv, ...) are separate audit gaps (G4) and keep their current
+/// behavior.
 pub(super) fn build_envelope_jfet_bindings(
     pedal: &PedalDef,
     stages: &[Stage],
@@ -679,26 +687,67 @@ pub(super) fn build_envelope_jfet_bindings(
                 else {
                     continue;
                 };
-                if !matches!(sink.target_kind, ModulationSinkKind::JfetVgs) {
-                    continue;
+                match sink.target_kind {
+                    ModulationSinkKind::JfetVgs => {
+                        let Some(stage_idx) = stages.iter().position(
+                            |s| matches!(s, Stage::Wdf(w) if w.contains_jfet_vr(target_comp)),
+                        ) else {
+                            continue;
+                        };
+                        envelopes.push(EnvelopeBinding {
+                            envelope: envelope.clone(),
+                            target: ModulationTarget::JfetVrVgs {
+                                stage_idx,
+                                comp_id: target_comp.clone(),
+                            },
+                            bias: sink.bias,
+                            range: sink.range,
+                            env_id: comp.id.clone(),
+                            tap,
+                        });
+                    }
+                    ModulationSinkKind::PhotocouplerLed => {
+                        // Leaf-positioned XOR input-path (audit gap G3):
+                        // prefer the stage holding the photocoupler at its
+                        // netlist position (WDF tree leaf or PassiveRType MNA
+                        // child); only fall back to an op-amp stage that
+                        // models it as an input-path gain element when no
+                        // leaf exists anywhere. Skip (no binding) if the
+                        // photocoupler didn't compile into any stage.
+                        let stage_idx = stages
+                            .iter()
+                            .position(
+                                |s| matches!(s, Stage::Wdf(w) if w.contains_photocoupler(target_comp)),
+                            )
+                            .or_else(|| {
+                                stages.iter().position(|s| {
+                                    matches!(s, Stage::Wdf(w) if w
+                                        .input_photocouplers
+                                        .iter()
+                                        .any(|pc| pc.comp_id == *target_comp))
+                                })
+                            });
+                        let Some(stage_idx) = stage_idx else {
+                            continue;
+                        };
+                        // The sink's bias/range (0.5/0.5) map a BIPOLAR LFO
+                        // onto LED drive [0, 1]; the envelope output is
+                        // already unipolar [0, 1] and detector silence must
+                        // mean LED dark, so pass it through unscaled.
+                        envelopes.push(EnvelopeBinding {
+                            envelope: envelope.clone(),
+                            target: ModulationTarget::PhotocouplerLed {
+                                stage_idx,
+                                comp_id: target_comp.clone(),
+                            },
+                            bias: 0.0,
+                            range: 1.0,
+                            env_id: comp.id.clone(),
+                            tap,
+                        });
+                    }
+                    _ => continue,
                 }
-                let Some(stage_idx) = stages
-                    .iter()
-                    .position(|s| matches!(s, Stage::Wdf(w) if w.contains_jfet_vr(target_comp)))
-                else {
-                    continue;
-                };
-                envelopes.push(EnvelopeBinding {
-                    envelope: envelope.clone(),
-                    target: ModulationTarget::JfetVrVgs {
-                        stage_idx,
-                        comp_id: target_comp.clone(),
-                    },
-                    bias: sink.bias,
-                    range: sink.range,
-                    env_id: comp.id.clone(),
-                    tap,
-                });
             }
         }
     }
@@ -892,22 +941,20 @@ fn resolve_modulation_target(
             }
         }
         ModulationSinkKind::PhotocouplerLed => {
-            // Find the stage containing this photocoupler — either in the WDF tree
-            // or as an input-path photocoupler on an opamp stage.
+            // Find the stage containing this photocoupler. Classification is
+            // leaf-positioned XOR op-amp-input-path (audit gap G3): prefer the
+            // stage holding the photocoupler as a LEAF (WDF tree or
+            // PassiveRType MNA child — its netlist position), and only fall
+            // back to a stage that models it as an op-amp input-path gain
+            // element when no leaf exists anywhere.
             let tc = target_comp;
             let stage_idx = stages
                 .iter()
-                .position(|s| {
-                    s.tree
-                        .find_leaf(&|leaf| {
-                            if leaf.comp_id() == Some(tc) {
-                                Some(())
-                            } else {
-                                None
-                            }
-                        })
-                        .is_some()
-                        || s.input_photocouplers.iter().any(|pc| pc.comp_id == tc)
+                .position(|s| s.contains_photocoupler(tc))
+                .or_else(|| {
+                    stages
+                        .iter()
+                        .position(|s| s.input_photocouplers.iter().any(|pc| pc.comp_id == tc))
                 })
                 .unwrap_or(0);
             ModulationTarget::PhotocouplerLed {
