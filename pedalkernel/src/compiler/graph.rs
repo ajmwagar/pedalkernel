@@ -4016,11 +4016,24 @@ pub(super) fn make_leaf(
 /// This generalizes `detect_lfo_controlled_jfets()` and
 /// `detect_envelope_controlled_otas()` in compile.rs.
 pub(super) fn resolve_components(graph: &mut CircuitGraph, pedal: &PedalDef) {
+    resolve_components_by(graph, pedal, |c| c.kind.is_modulation_source())
+}
+
+/// Like [`resolve_components`] but with a caller-supplied modulator-source
+/// filter. The SPQR pipeline currently resolves only envelope-modulated
+/// components (audit gap G2 — `EF.out -> J.vgs`); LFO-modulated components
+/// keep their existing compilation behavior until the LFO binding path is
+/// wired up.
+pub(super) fn resolve_components_by(
+    graph: &mut CircuitGraph,
+    pedal: &PedalDef,
+    is_modulator: impl Fn(&ComponentDef) -> bool,
+) {
     // Collect modulator component IDs (LFO, EnvelopeFollower).
     let modulator_ids: HashSet<&str> = pedal
         .components
         .iter()
-        .filter(|c| c.kind.is_modulation_source())
+        .filter(|c| is_modulator(c))
         .map(|c| c.id.as_str())
         .collect();
 

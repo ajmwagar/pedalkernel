@@ -828,6 +828,10 @@ pub enum ModulationTarget {
     JfetVgs { stage_idx: usize },
     /// Modulate ALL JFET stages' Vgs together (for phasers).
     AllJfetVgs,
+    /// Modulate a JFET variable-resistor *leaf* inside a stage's WDF tree.
+    /// Modulated JFETs compile to `jfet_vr` leaves (EdgeKind::Linear), not
+    /// stage roots, so root-targeting `set_jfet_vgs()` cannot reach them.
+    JfetVrVgs { stage_idx: usize, comp_id: String },
     /// Modulate a Photocoupler's LED drive.
     PhotocouplerLed { stage_idx: usize, comp_id: String },
     /// Modulate a Triode's Vgk (grid-cathode bias).
@@ -2740,6 +2744,11 @@ impl PedalProcessor for CompiledPedal {
                         }
                     }
                 }
+                ModulationTarget::JfetVrVgs { stage_idx, comp_id } => {
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_jfet_vr_vgs(comp_id, modulation);
+                    }
+                }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
                         let led = modulation.clamp(0.0, 1.0);
@@ -2826,6 +2835,11 @@ impl PedalProcessor for CompiledPedal {
                                 wdf.set_jfet_vgs(modulation);
                             }
                         }
+                    }
+                }
+                ModulationTarget::JfetVrVgs { stage_idx, comp_id } => {
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_jfet_vr_vgs(comp_id, modulation);
                     }
                 }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {

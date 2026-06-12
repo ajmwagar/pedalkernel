@@ -2706,6 +2706,57 @@ impl WdfStage {
         }
     }
 
+    /// Set Vgs on a `jfet_vr` LEAF anywhere in this stage — in the WDF tree
+    /// or among PassiveRType MNA children — and trigger the matching
+    /// impedance recompute.
+    ///
+    /// Gate-modulated JFETs compile to `jfet_vr` leaves (variable
+    /// resistors), not stage roots, so external modulation (LFO, envelope)
+    /// must reach the leaf; the root setter [`Self::set_jfet_vgs`] silently
+    /// no-ops for them. Returns `true` if the component was found.
+    pub fn set_jfet_vr_vgs(&mut self, comp_id: &str, vgs: crate::Wave) -> bool {
+        if self.tree.set_jfet_vr_vgs(comp_id, vgs) {
+            self.tree.recompute();
+            return true;
+        }
+        let mut found = false;
+        if let RootKind::PassiveRType {
+            children,
+            needs_recompute,
+            ..
+        } = &mut self.root
+        {
+            for child in children.iter_mut() {
+                if child.set_jfet_vr_vgs(comp_id, vgs) {
+                    found = true;
+                }
+            }
+            if found {
+                *needs_recompute = true;
+            }
+        }
+        if found {
+            // Re-derive the scattering matrix with the JFET's new Rds.
+            self.flush_passive_rtype_recompute();
+        }
+        found
+    }
+
+    /// Whether this stage contains a `jfet_vr` leaf with the given component
+    /// id (in the WDF tree or among PassiveRType MNA children).
+    pub fn contains_jfet_vr(&self, comp_id: &str) -> bool {
+        let probe = |leaf: &dyn crate::wdf_leaf::WdfLeaf| -> Option<()> {
+            (leaf.type_tag() == "jfet_vr" && leaf.comp_id() == Some(comp_id)).then_some(())
+        };
+        if self.tree.find_leaf(&probe).is_some() {
+            return true;
+        }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            return children.iter().any(|c| c.find_leaf(&probe).is_some());
+        }
+        false
+    }
+
     /// Set the grid-cathode voltage for triode root elements.
     ///
     /// This is used for external modulation (bias, LFO, signal input).

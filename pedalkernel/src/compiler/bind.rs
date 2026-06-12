@@ -445,6 +445,97 @@ pub(super) fn build_envelope_bindings(
     envelopes
 }
 
+/// Build envelope-follower → JFET bindings for the SPQR pipeline.
+///
+/// The SPQR pipeline never calls the legacy [`build_envelope_bindings`] (it
+/// expects the removed 6-pass pipeline's bare `WdfStage` list), so
+/// `CompiledPedal::envelopes` stayed empty and `EF.out -> J.vgs` nets were
+/// inert (audit gap G2). This builder works on the runtime [`Stage`] list.
+///
+/// A gate-modulated JFET compiles to a `jfet_vr` LEAF (`resolve_edges()`
+/// reclassifies the drain–source edge as `EdgeKind::Linear`), not a stage
+/// root, so the binding targets the leaf by component id
+/// (`ModulationTarget::JfetVrVgs`). Bias/range come from the component's
+/// `modulation_sink()` — the same scaling the LFO path uses, mapping the
+/// envelope's [0,1] output onto a negative Vgs swing toward pinch-off.
+///
+/// Scope: JFET vgs/gate sinks only. Other sink kinds (photocoupler, VCA cv,
+/// ...) are separate audit gaps (G3/G4) and keep their current behavior.
+pub(super) fn build_envelope_jfet_bindings(
+    pedal: &PedalDef,
+    stages: &[Stage],
+    sample_rate: f64,
+) -> Vec<EnvelopeBinding> {
+    use super::component::ModulationSinkKind;
+
+    let mut envelopes = Vec::new();
+
+    for comp in &pedal.components {
+        let Some(ef) = comp
+            .kind
+            .as_any()
+            .downcast_ref::<crate::compiler::components::EnvelopeFollower>()
+        else {
+            continue;
+        };
+        let envelope = crate::elements::EnvelopeFollower::from_rc(
+            ef.attack_r,
+            ef.attack_c,
+            ef.release_r,
+            ef.release_c,
+            ef.sensitivity_r,
+            sample_rate,
+        );
+
+        for net in &pedal.nets {
+            let Pin::ComponentPin { component, pin } = &net.from else {
+                continue;
+            };
+            if component != &comp.id || pin != "out" {
+                continue;
+            }
+            for target_pin in &net.to {
+                let Pin::ComponentPin {
+                    component: target_comp,
+                    pin: target_prop,
+                } = target_pin
+                else {
+                    continue;
+                };
+                let Some(sink) = pedal
+                    .components
+                    .iter()
+                    .find(|c| &c.id == target_comp)
+                    .and_then(|c| c.kind.modulation_sink(target_prop))
+                else {
+                    continue;
+                };
+                if !matches!(sink.target_kind, ModulationSinkKind::JfetVgs) {
+                    continue;
+                }
+                let Some(stage_idx) = stages
+                    .iter()
+                    .position(|s| matches!(s, Stage::Wdf(w) if w.contains_jfet_vr(target_comp)))
+                else {
+                    continue;
+                };
+                envelopes.push(EnvelopeBinding {
+                    envelope: envelope.clone(),
+                    target: ModulationTarget::JfetVrVgs {
+                        stage_idx,
+                        comp_id: target_comp.clone(),
+                    },
+                    bias: sink.bias,
+                    range: sink.range,
+                    env_id: comp.id.clone(),
+                });
+            }
+        }
+    }
+
+    envelopes
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Sidechain construction
 // ═══════════════════════════════════════════════════════════════════════════
@@ -591,6 +682,21 @@ fn resolve_modulation_target(
 
     let target = match sink.target_kind {
         ModulationSinkKind::JfetVgs => {
+            // Leaf resolution first: a JFET whose gate is modulated compiles
+            // to a `jfet_vr` LEAF (EdgeKind::Linear) inside a stage tree, not
+            // a stage root — root-targeting set_jfet_vgs() would silently
+            // no-op. Find the stage whose tree contains this exact component.
+            let tc = target_comp;
+            if let Some(stage_idx) = stages.iter().position(|s| s.contains_jfet_vr(tc)) {
+                return Some((
+                    ModulationTarget::JfetVrVgs {
+                        stage_idx,
+                        comp_id: tc.to_string(),
+                    },
+                    sink.bias,
+                    sink.range,
+                ));
+            }
             let jfet_count = stages
                 .iter()
                 .filter(|s| matches!(&s.root, RootKind::Jfet(_) | RootKind::JfetVr(_)))

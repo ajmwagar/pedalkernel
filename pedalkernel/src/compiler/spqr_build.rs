@@ -103,6 +103,17 @@ pub fn compile_via_spqr_with_options(
     use super::signal_flow::find_flow_groups;
 
     let mut graph = CircuitGraph::from_pedal(pedal);
+    // Resolve envelope-modulated component edge kinds (audit gap G2):
+    // `EF.out -> J.vgs` reclassifies the JFET's drain–source edge to Linear
+    // so it compiles as a `jfet_vr` variable-resistor leaf the envelope
+    // binding can reach. Restricted to envelope followers so LFO-modulated
+    // circuits keep their existing compilation behavior.
+    super::graph::resolve_components_by(&mut graph, pedal, |c| {
+        c.kind
+            .as_any()
+            .downcast_ref::<super::components::EnvelopeFollower>()
+            .is_some()
+    });
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
     let delay_lines = build_delay_line_bindings(pedal, sample_rate);
 
@@ -997,6 +1008,64 @@ pub fn compile_via_spqr_with_options(
                 }
             }
 
+            // Linear (gate-modulated) JFET groups: keep only edges that are
+            // graph-connected to the JFET's drain–source path through
+            // non-ground nodes. Signal-flow grouping claims the gate-bias
+            // network into the JFET's group (the gate is the amplifier
+            // "input"), but a JFET resolved to a variable resistor conducts
+            // audio only drain–source; gate-bias edges share no signal node
+            // and would compile into a bogus series chain that silences the
+            // stage (audit gap G2, fet_leveler).
+            {
+                let linear_jfet_edges: Vec<usize> = remaining_edges
+                    .iter()
+                    .copied()
+                    .filter(|&eidx| {
+                        graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear
+                            && graph.components[graph.edges[eidx].comp_idx].kind.is_jfet()
+                    })
+                    .collect();
+                if !linear_jfet_edges.is_empty() {
+                    let is_ground = |n: super::graph::NodeId| -> bool {
+                        n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
+                    };
+                    let mut keep_nodes: std::collections::HashSet<super::graph::NodeId> =
+                        linear_jfet_edges
+                            .iter()
+                            .flat_map(|&eidx| {
+                                let e = &graph.edges[eidx];
+                                [e.node_a, e.node_b]
+                            })
+                            .filter(|&n| !is_ground(n))
+                            .collect();
+                    // Grow the connected component over non-ground nodes.
+                    loop {
+                        let mut grew = false;
+                        for &eidx in &remaining_edges {
+                            let e = &graph.edges[eidx];
+                            let touches = (keep_nodes.contains(&e.node_a) && !is_ground(e.node_a))
+                                || (keep_nodes.contains(&e.node_b) && !is_ground(e.node_b));
+                            if touches {
+                                for n in [e.node_a, e.node_b] {
+                                    if !is_ground(n) && keep_nodes.insert(n) {
+                                        grew = true;
+                                    }
+                                }
+                            }
+                        }
+                        if !grew {
+                            break;
+                        }
+                    }
+                    remaining_edges.retain(|&eidx| {
+                        let e = &graph.edges[eidx];
+                        linear_jfet_edges.contains(&eidx)
+                            || (!is_ground(e.node_a) && keep_nodes.contains(&e.node_a))
+                            || (!is_ground(e.node_b) && keep_nodes.contains(&e.node_b))
+                    });
+                }
+            }
+
             // Process remaining non-pot edges through SPQR
             let group_edges = remaining_edges;
             if group_edges.is_empty() {
@@ -1580,6 +1649,9 @@ pub fn compile_via_spqr_with_options(
         }
     }
 
+    // Envelope-follower → JFET-leaf modulation bindings (audit gap G2).
+    let envelopes = super::bind::build_envelope_jfet_bindings(pedal, &stages, sample_rate);
+
     let mut compiled = CompiledPedal {
         stages,
         stage_route_plan: pedalkernel_rt::processor::StageRoutePlan::default(),
@@ -1594,7 +1666,7 @@ pub fn compile_via_spqr_with_options(
         supply_voltage,
         oversampling: options.oversampling,
         lfos: Vec::new(),
-        envelopes: Vec::new(),
+        envelopes,
         slew_limiters: Vec::new(),
         bbds: Vec::new(),
         delay_lines,
@@ -2284,6 +2356,28 @@ fn build_passive_rtype_stage(
             continue;
         }
 
+        // Gate-modulated JFETs reach this builder as Linear edges (variable
+        // resistors). Stamp the current Rds and register the `jfet_vr` child
+        // so runtime Vgs modulation (LFO/envelope) can update the G matrix
+        // and re-derive scattering — same mechanism as pots. Without this
+        // the JFET edge was silently dropped from the MNA (audit gap G2).
+        if comp.kind.is_jfet() {
+            if let Some(child) = comp.kind.make_leaf(&comp.id, sample_rate) {
+                let r = child.port_resistance();
+                mna.stamp_resistor(n1, n2, r);
+                variable_resistors.push(MnaVariableResistorBinding {
+                    child_idx: children.len(),
+                    terminals: MnaPortTerminals::maybe_differential(
+                        n1.map(MnaNodeId::new),
+                        n2.map(MnaNodeId::new),
+                    ),
+                    conductance: 1.0 / r,
+                });
+                children.push(child);
+            }
+            continue;
+        }
+
         if let Some(r) = comp.kind.resistance() {
             mna.stamp_resistor(n1, n2, r);
         } else if comp.kind.capacitance().is_some() || comp.kind.inductance().is_some() {
@@ -2636,6 +2730,9 @@ fn pot_edge_is_aw_half_for_build(
     (a == w_node && b == a_node) || (a == a_node && b == w_node)
 }
 
+// NOTE: stage-ordering helper. Walks ALL edges (including through rails),
+// unlike `signal_flow::bfs_distances_from_in_node`, which measures
+// signal-path distance (rail-blocked) for the F10 claiming bound.
 fn bfs_dist_from_in_node(
     target: super::graph::NodeId,
     graph: &super::graph::CircuitGraph,
@@ -2711,6 +2808,27 @@ fn collect_triode_context_edges(
             || n == graph.out_node
     };
 
+    // F10 upstream bound: never collect toward a non-global node strictly
+    // closer to `in_node` than the triode's grid pin. Such a node belongs to
+    // the UPSTREAM network (e.g. a passive EQ feeding this makeup stage);
+    // collecting it would swallow the network into the triode's MNA stage,
+    // flattening its response and freezing its pots. Rail-terminated bias
+    // edges (vcc→plate, cathode→gnd, grid→gnd) are handled by the is_global
+    // branch and stay collected. Unreachable nodes (disconnected
+    // subcircuits) have no distance and are never bounded.
+    let d_in = super::signal_flow::bfs_distances_from_in_node(graph);
+    let grid_dist: Option<usize> = graph
+        .node_names
+        .get(&format!("{}.grid", comp.id))
+        .and_then(|node| d_in.get(node))
+        .copied();
+    let upstream_of_grid = |n: NodeId| -> bool {
+        match (d_in.get(&n), grid_dist) {
+            (Some(&d), Some(d_grid)) => d < d_grid,
+            _ => false,
+        }
+    };
+
     let mut collected_edges: std::collections::HashSet<usize> = std::collections::HashSet::new();
     collected_edges.insert(triode_nl_edge_idx);
 
@@ -2767,6 +2885,11 @@ fn collect_triode_context_edges(
             }
 
             // other is a non-global internal node.
+            // F10: refuse to collect toward the upstream network (see the
+            // upstream_of_grid doc above).
+            if upstream_of_grid(other) {
+                continue;
+            }
             // Exclude coupling caps that lead toward the signal ports: if the
             // component is reactive and the other node eventually only connects
             // to in_node / out_node without passing through any resistor to a

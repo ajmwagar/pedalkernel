@@ -66,6 +66,11 @@ struct ActiveElement {
     /// All output-side nodes (for BJT: both collector and emitter carry signal).
     /// Used for flow graph BFS starting points.
     output_nodes: Vec<NodeId>,
+    /// Whether this element modulates an existing impedance in parallel with
+    /// a passive element (NL/ControlledConductance shunt) rather than
+    /// amplifying signal. Its input pin is a control pin outside the signal
+    /// path, so signal-flow-distance bounds relative to it are meaningless.
+    is_shunt_modulator: bool,
 }
 
 /// Set of nodes that are rails (not signal-carrying shared nodes).
@@ -102,6 +107,7 @@ fn find_active_elements(edge_indices: &[usize], graph: &CircuitGraph) -> Vec<Act
                     input_node: in_node,
                     output_node: out_node,
                     output_nodes: vec![out_node],
+                    is_shunt_modulator: false,
                 });
             }
             SignalTerminals::Amplifier { input, output, .. } => {
@@ -141,6 +147,7 @@ fn find_active_elements(edge_indices: &[usize], graph: &CircuitGraph) -> Vec<Act
                     input_node: in_node,
                     output_node: out_node,
                     output_nodes,
+                    is_shunt_modulator,
                 });
             }
         }
@@ -735,6 +742,50 @@ fn merge_shared_active_node_sccs(
     merged.into_values().collect()
 }
 
+/// Signal-path BFS hop distance from `graph.in_node`.
+///
+/// Walks all circuit edges but never expands THROUGH rail nodes (GND, VCC,
+/// supplies, AC grounds): rails reached from the input get a distance but do
+/// not propagate it, so the result measures distance along signal paths
+/// rather than through the ground plane.
+///
+/// Used to bound passive claiming (F10): a non-rail node strictly closer to
+/// the circuit input than an active device's input pin lies upstream of the
+/// device — claiming edges toward it would swallow the upstream network
+/// (e.g. a passive EQ between `in` and a makeup stage) into the active
+/// group, flattening its response and freezing its pots. Nodes with no
+/// signal-path distance (disconnected subcircuits like LFOs, control pins
+/// biased only from rails) are absent from the map and are never bounded.
+pub(in crate::compiler) fn bfs_distances_from_in_node(
+    graph: &CircuitGraph,
+) -> HashMap<NodeId, usize> {
+    let rails = rail_nodes(graph);
+    let mut visited: HashMap<NodeId, usize> = HashMap::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    visited.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+    while let Some(node) = queue.pop_front() {
+        if rails.contains(&node) && node != graph.in_node {
+            continue;
+        }
+        let dist = visited[&node];
+        for e in &graph.edges {
+            let other = if e.node_a == node {
+                e.node_b
+            } else if e.node_b == node {
+                e.node_a
+            } else {
+                continue;
+            };
+            if !visited.contains_key(&other) {
+                visited.insert(other, dist + 1);
+                queue.push_back(other);
+            }
+        }
+    }
+    visited
+}
+
 /// Classify unclaimed passive edges as ground-shunts or pendants relative
 /// to a set of active elements and their signal nodes.
 ///
@@ -817,6 +868,98 @@ fn claim_passive_edges(
         })
         .collect();
 
+    // ── F10 upstream bound ──────────────────────────────────────────────
+    //
+    // Hop distance from the circuit input. A non-rail node strictly closer
+    // to `in` than the device's input pins is part of the UPSTREAM network
+    // (e.g. a passive EQ feeding a makeup stage) — claiming toward it would
+    // swallow that network into this active group, flattening its response
+    // and freezing its pots. Rail-terminated claims (vcc→plate, cathode→gnd,
+    // grid→gnd) are never bounded — they are load-bearing bias edges for
+    // every standalone tube/BJT/JFET fixture. Direct edges to `in_node`
+    // itself (ordinary input coupling caps) are also never bounded: in/out
+    // are already BFS barriers, so claiming them cannot swallow anything.
+    // Unreachable nodes (disconnected subcircuits like LFOs) have no
+    // distance and are never bounded.
+    //
+    // The bound is enabled only for groups made entirely of amplifier-class
+    // non-BJT, non-shunt-modulator elements (op-amps, tubes, JFET/MOSFET
+    // followers):
+    // - BJT makeup stages compiled without `in` in their group go silent
+    //   (the NlWdf voltage source sits at the global terminals), so
+    //   swallowing the upstream network into a rigid whole-group stage is
+    //   currently the only way such stages function (e.g. fet_leveler's
+    //   class-A line amp behind the FET gain-reduction divider). Bounding
+    //   them trades a working circuit for a dead one — keep old behavior
+    //   until cascade injection for BJT stages lands (F10 link 2).
+    // - Shunt modulators' input pins are control pins outside the signal
+    //   path; distances relative to them are meaningless.
+    // - Two-ports (transformers) legitimately claim their input coupling
+    //   from upstream nodes.
+    let bound_enabled = scc.iter().all(|&i| {
+        let elem = &active_elements[i];
+        let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+        !comp.kind.is_bjt()
+            && !elem.is_shunt_modulator
+            && matches!(
+                comp.kind.signal_terminals(),
+                SignalTerminals::Amplifier { .. }
+            )
+    });
+    let d_in = bfs_distances_from_in_node(graph);
+    let input_pin_dist: Option<usize> = input_terminals
+        .iter()
+        .filter_map(|node| d_in.get(node).copied())
+        .min();
+    let upstream_of_inputs = |node: NodeId| -> bool {
+        if !bound_enabled {
+            return false;
+        }
+        if rails.contains(&node) || node == graph.in_node {
+            return false;
+        }
+        match (d_in.get(&node), input_pin_dist) {
+            (Some(&d), Some(d_pin)) => d < d_pin,
+            _ => false,
+        }
+    };
+
+    // Build barrier set: active input nodes of OTHER SCCs, plus circuit I/O
+    // terminals. Built here (before the single-hop pass) because the F10
+    // single-hop bound consults it; used below to prevent the BFS from
+    // crossing into downstream active elements' domains (e.g., IC1a's BFS
+    // reaching IC1b.neg through a pot).
+    let scc_set: HashSet<usize> = scc.iter().copied().collect();
+    let mut bfs_barriers: HashSet<NodeId> = HashSet::new();
+    if !rails.contains(&graph.in_node) {
+        bfs_barriers.insert(graph.in_node);
+    }
+    if !rails.contains(&graph.out_node) {
+        bfs_barriers.insert(graph.out_node);
+    }
+    for &node in &graph.output_pin_nodes {
+        if !voltage_source_output_nodes.contains(&node) && !rails.contains(&node) {
+            bfs_barriers.insert(node);
+        }
+    }
+    for pins in &graph.nullor_pins {
+        for node in [pins.pos_node, pins.neg_node] {
+            if !input_terminals.contains(&node) && !rails.contains(&node) {
+                bfs_barriers.insert(node);
+            }
+        }
+    }
+    for (i, elem) in active_elements.iter().enumerate() {
+        if !scc_set.contains(&i) && !rails.contains(&elem.input_node) {
+            bfs_barriers.insert(elem.input_node);
+        }
+        // Also barrier on other elements' output nodes (voltage sources
+        // like op-amp outputs are natural split points).
+        if !scc_set.contains(&i) && !rails.contains(&elem.output_node) {
+            bfs_barriers.insert(elem.output_node);
+        }
+    }
+
     let mut pendant_edges = Vec::new();
     let mut ground_shunt_edges = Vec::new();
 
@@ -860,7 +1003,22 @@ fn claim_passive_edges(
             || (input_terminals.contains(&e.node_b)
                 && !voltage_source_output_nodes.contains(&e.node_b))
         {
-            pendant_edges.push(eidx);
+            // F10: skip single-hop claims whose far endpoint is a strictly
+            // upstream INTERIOR node — that edge is a purely passive
+            // upstream network's output coupling, and claiming it seeds the
+            // BFS expansion that swallows the network. Barrier far
+            // endpoints (in/out, other elements' pins) are exempt: BFS can
+            // never expand from them, so claiming such coupling edges is
+            // the ordinary, safe behavior (input caps from `in`, input
+            // resistors from a previous stage's output).
+            let far = if input_terminals.contains(&e.node_a) {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            if bfs_barriers.contains(&far) || !upstream_of_inputs(far) {
+                pendant_edges.push(eidx);
+            }
         }
     }
 
@@ -877,42 +1035,8 @@ fn claim_passive_edges(
     // - Edge to rail (GND/ac_ground) → claim as ground_shunt
     // - Edge to interior (non-rail, non-barrier) node → claim as pendant,
     //   add endpoint to frontier, continue BFS
-    // - Stop at barrier nodes (other active inputs, circuit terminals)
-
-    // Build barrier set for BFS: active input nodes of OTHER SCCs,
-    // plus circuit I/O terminals. This prevents the BFS from crossing
-    // into downstream active elements' domains (e.g., IC1a's BFS
-    // reaching IC1b.neg through a pot).
-    let scc_set: HashSet<usize> = scc.iter().copied().collect();
-    let mut bfs_barriers: HashSet<NodeId> = HashSet::new();
-    if !rails.contains(&graph.in_node) {
-        bfs_barriers.insert(graph.in_node);
-    }
-    if !rails.contains(&graph.out_node) {
-        bfs_barriers.insert(graph.out_node);
-    }
-    for &node in &graph.output_pin_nodes {
-        if !voltage_source_output_nodes.contains(&node) && !rails.contains(&node) {
-            bfs_barriers.insert(node);
-        }
-    }
-    for pins in &graph.nullor_pins {
-        for node in [pins.pos_node, pins.neg_node] {
-            if !input_terminals.contains(&node) && !rails.contains(&node) {
-                bfs_barriers.insert(node);
-            }
-        }
-    }
-    for (i, elem) in active_elements.iter().enumerate() {
-        if !scc_set.contains(&i) && !rails.contains(&elem.input_node) {
-            bfs_barriers.insert(elem.input_node);
-        }
-        // Also barrier on other elements' output nodes (voltage sources
-        // like op-amp outputs are natural split points).
-        if !scc_set.contains(&i) && !rails.contains(&elem.output_node) {
-            bfs_barriers.insert(elem.output_node);
-        }
-    }
+    // - Stop at barrier nodes (other active inputs, circuit terminals);
+    //   the barrier set is built above, before the single-hop pass.
 
     let mut already_claimed: HashSet<usize> = HashSet::new();
     for &eidx in pendant_edges.iter().chain(ground_shunt_edges.iter()) {
@@ -942,6 +1066,15 @@ fn claim_passive_edges(
         // branches leaving that upstream output are independent feedforward or
         // tone paths and must not be swallowed by this active group.
         if bfs_barriers.contains(&node) {
+            continue;
+        }
+        // F10: never expand FROM a node strictly upstream of the device's
+        // input pins. Such a node (e.g. the far end of the input coupling
+        // cap) may legitimately enter the frontier through a single-hop
+        // pendant claim — the coupling edge itself belongs to this group —
+        // but every other branch leaving it is the UPSTREAM network (a
+        // passive EQ feeding this makeup stage) and must not be swallowed.
+        if upstream_of_inputs(node) {
             continue;
         }
         for &eidx in edge_indices {
@@ -993,6 +1126,13 @@ fn claim_passive_edges(
                 ground_shunt_edges.push(eidx);
                 already_claimed.insert(eidx);
             } else if !visited_bfs.contains(&other) {
+                // F10: never expand to a non-rail node strictly closer to
+                // `in_node` than the device's input pins — that direction is
+                // upstream toward the circuit input, and walking it swallows
+                // the upstream network (passive EQ → makeup stage flattening).
+                if upstream_of_inputs(other) {
+                    continue;
+                }
                 // Interior node → pendant, continue BFS
                 pendant_edges.push(eidx);
                 already_claimed.insert(eidx);
@@ -1092,13 +1232,62 @@ pub(in crate::compiler) fn find_flow_groups(
             // point. Standalone diode clippers are different: downstream tone,
             // coupling, and feedforward networks should remain split so they
             // can compile as passive WDF/IIR stages with independent controls.
-            let should_claim_local_passives = scc.iter().any(|&i| {
+            let mut should_claim_local_passives = scc.iter().any(|&i| {
                 let comp = &graph.components[graph.edges[active_elements[i].edge_idx].comp_idx];
                 comp.kind.is_bjt()
                     || comp.kind.is_jfet()
                     || comp.kind.is_mosfet()
                     || comp.kind.is_tube()
             });
+
+            // F10: a tube fed from an upstream INTERIOR node (a passive
+            // network between `in` and the grid, e.g. an EQ ahead of a
+            // makeup stage) must NOT claim local passives here. Claiming
+            // would make the group multi-edge and route it to the NlWdf
+            // builder, whose voltage source sits at the global in/out
+            // terminals — absent from such a group, the stage goes dead.
+            // Leaving the group as the bare NL edge routes it to the
+            // triode-context MNA path (spqr_build), which collects the
+            // rail-terminated bias edges and injects the cascade input at
+            // the grid. Tubes coupled directly from `in` (far endpoint ==
+            // in_node) are unaffected.
+            if should_claim_local_passives {
+                let d_in = bfs_distances_from_in_node(graph);
+                let tube_fed_from_interior = scc.iter().any(|&i| {
+                    let elem = &active_elements[i];
+                    let comp = &graph.components[graph.edges[elem.edge_idx].comp_idx];
+                    if !comp.kind.is_tube() {
+                        return false;
+                    }
+                    let Some(&d_pin) = d_in.get(&elem.input_node) else {
+                        return false;
+                    };
+                    edge_indices.iter().any(|&eidx| {
+                        if claimed.contains(&eidx) {
+                            return false;
+                        }
+                        let e = &graph.edges[eidx];
+                        let comp = &graph.components[e.comp_idx];
+                        if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+                            return false;
+                        }
+                        let far = if e.node_a == elem.input_node {
+                            e.node_b
+                        } else if e.node_b == elem.input_node {
+                            e.node_a
+                        } else {
+                            return false;
+                        };
+                        if rails.contains(&far) || far == graph.in_node {
+                            return false;
+                        }
+                        matches!(d_in.get(&far), Some(&d) if d < d_pin)
+                    })
+                });
+                if tube_fed_from_interior {
+                    should_claim_local_passives = false;
+                }
+            }
 
             let (pendant_edges, ground_shunt_edges) = if should_claim_local_passives {
                 claim_passive_edges(

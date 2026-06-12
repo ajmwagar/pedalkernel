@@ -102,7 +102,6 @@ fn fet_leveler_compresses() {
 /// audio path. See reports/outboard-gear-audit-2026-06-12.md §3 (fet_leveler
 /// notes) and §6 G2.
 #[test]
-#[ignore = "red until G2 fix: envelope -> JFET gate modulation is inert (0.00 dB loud/quiet delta)"]
 fn envelope_to_jfet_vgs_modulates_gain() {
     let src = test_pedal_source("envelope_follower.pedal");
 
@@ -350,7 +349,6 @@ pedal "DC Coupled Noninverting Cascade" {
 /// vca_bus_comp.pedal to cap-couple its stages.
 /// See reports/outboard-gear-audit-2026-06-12.md §3, §6 G5.
 #[test]
-#[ignore = "red until B3b fix: DC/resistor-coupled op-amp cascade loses a stage's gain (peak 0.199, expected ~0.4)"]
 fn dc_coupled_noninverting_cascade_has_positive_gain() {
     let input = sine_at(1_000.0, 0.1, 1.0, SAMPLE_RATE);
     let output = compile_and_process(DC_COUPLED_NONINVERTING_CASCADE, &input, SAMPLE_RATE, &[]);
