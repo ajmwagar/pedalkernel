@@ -1794,6 +1794,38 @@ impl MnaSystem {
             b_kept.resize(n_aug_kept, 0.0);
             b_c_kept.resize(n_aug_kept, 0.0);
 
+            // ── Normalize near-ideal VCVS rows ───────────────────────────
+            // A near-ideal VCVS (A ≈ 1e5) stamps the C matrix row with
+            // entries of magnitude A (e.g. +A at neg, −A at pos).  These
+            // large off-diagonal values dominate g_aa and cause the Schur
+            // complement G_aa⁻¹ to be numerically ill-conditioned, leading
+            // to spurious discrete poles (observed: z ≈ −1 for MFB HPF).
+            //
+            // Dividing the entire VCVS row by its max |entry| is equivalent
+            // to taking the ideal limit A → ∞:
+            //   V_out − A·V_pos + A·V_neg + Ro·I = 0
+            //     ÷A→  (V_out/A) − V_pos + V_neg + (Ro/A)·I = 0
+            //       →  V_neg = V_pos   (nullator constraint)
+            //
+            // This preserves the correct filter topology while eliminating
+            // the conditioning problem.  Threshold 100 catches any gain
+            // above ~100 (audio op-amps: A ≥ 10 000).
+            for vi in 0..n_other_vs {
+                let vs_row_start = (n_kept + vi) * n_aug_kept;
+                let max_abs = (0..n_aug_kept)
+                    .map(|j| g_aug[vs_row_start + j].abs())
+                    .fold(0.0_f64, f64::max);
+                if max_abs > 100.0 {
+                    let scale = 1.0 / max_abs;
+                    for j in 0..n_aug_kept {
+                        g_aug[vs_row_start + j] *= scale;
+                    }
+                    // Also scale the input-coupling entry at this VCVS row.
+                    b_kept[n_kept + vi] *= scale;
+                    b_c_kept[n_kept + vi] *= scale;
+                }
+            }
+
             // ── Step 2: Schur complement on the augmented kept system ────
             // Cap indices in the kept system
             let cap_indices: Vec<usize> = (0..n_kept)
@@ -1930,8 +1962,12 @@ impl MnaSystem {
                 //
                 // DC check: b_M + b_N = 2·G[i,vn] → correct (proportional to G only).
                 // HPF check: b_M - b_N = 4fs·C[i,vn] → creates (z-1) zero for cap inputs.
-                let circuit_nodes_eliminated = alg_indices.iter().any(|&i| i < n_kept);
-                let b_scale = if circuit_nodes_eliminated { 2.0 } else { 1.0 };
+                // Input-coupling scale: b_scale = 1.0 always.
+                // The factor-of-2 that appeared here historically was
+                // compensating for the ill-conditioned VCVS rows; now that
+                // those rows are normalised above, the correct bilinear
+                // coupling is simply M⁻¹·(G_b ± 2fs·C_b) without scaling.
+                let b_scale = 1.0_f64;
 
                 // Compute b_plus = M⁻¹·b_M_red and b_minus = M⁻¹·b_N_red
                 let mut b_plus = vec![0.0; n_c];

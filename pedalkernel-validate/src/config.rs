@@ -1436,6 +1436,112 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // Active filter extraction fixtures (pedalkernel-53bz / pedalkernel-oi0y).
+                // MFB HPF: Rauch/MFB high-pass, controlled shunt leg.
+                // SK HPF/LPF: unity-gain Sallen-Key high-pass and low-pass.
+                // Acceptance: <3dB RMS error vs ngspice reference.
+                tests.insert(
+                    "mfb_highpass_controlled".to_string(),
+                    TestCase {
+                        circuit: "extraction/mfb_highpass_controlled.pedal".to_string(),
+                        description: "Rauch/MFB HPF with controlled shunt, default Cutoff=0.5"
+                            .to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 100.0,
+                                amplitude: 1.0,
+                                duration: 0.1,
+                                label: Some("low_sine".to_string()),
+                            },
+                            SignalConfig::Sine {
+                                frequency: 5000.0,
+                                amplitude: 1.0,
+                                duration: 0.1,
+                                label: Some("high_sine".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 1.0,
+                                duration: 1.0,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(3.0),
+                            peak_error_db: Some(6.0),
+                            spectral_error_db: Some(3.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                    },
+                );
+
+                tests.insert(
+                    "sallen_key_highpass".to_string(),
+                    TestCase {
+                        circuit: "extraction/sallen_key_highpass.pedal".to_string(),
+                        description: "Unity-gain Sallen-Key HPF, R=R=10k C=C=10n, f0≈1592Hz"
+                            .to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 5000.0,
+                                amplitude: 1.0,
+                                duration: 0.1,
+                                label: Some("sine".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 1.0,
+                                duration: 1.0,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(3.0),
+                            peak_error_db: Some(6.0),
+                            spectral_error_db: Some(3.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                    },
+                );
+
+                tests.insert(
+                    "sallen_key_lowpass".to_string(),
+                    TestCase {
+                        circuit: "extraction/sallen_key_lowpass.pedal".to_string(),
+                        description: "Unity-gain Sallen-Key LPF, R=R=10k C=C=10n, f0≈1592Hz"
+                            .to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 440.0,
+                                amplitude: 1.0,
+                                duration: 0.1,
+                                label: Some("sine".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 1.0,
+                                duration: 1.0,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(3.0),
+                            peak_error_db: Some(6.0),
+                            spectral_error_db: Some(3.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                    },
+                );
+
                 tests
             },
         },
