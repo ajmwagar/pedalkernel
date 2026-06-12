@@ -7,6 +7,7 @@
 //! 4. Modeling active elements (transistors, opamps) as gain stages
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
+mod bbd_lowering;
 mod bias_analysis;
 mod bind;
 mod blockwise;

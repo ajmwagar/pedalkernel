@@ -116,6 +116,8 @@ pub fn compile_via_spqr_with_options(
     });
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
     let delay_lines = build_delay_line_bindings(pedal, sample_rate);
+    // Lower bbd() components into runtime BBD delay lines (census bug #1).
+    let bbds = super::bbd_lowering::build_bbd_delay_lines(pedal, sample_rate);
 
     // When ports are declared, the first input port replaces `in` and
     // the first output port replaces `out` as the circuit's I/O nodes.
@@ -147,7 +149,7 @@ pub fn compile_via_spqr_with_options(
         .filter(|i| !active_set.contains(i))
         .collect();
 
-    if all_edges.is_empty() && delay_lines.is_empty() {
+    if all_edges.is_empty() && delay_lines.is_empty() && bbds.is_empty() {
         return Err("No circuit edges found".to_string());
     }
 
@@ -168,7 +170,7 @@ pub fn compile_via_spqr_with_options(
             lfos: Vec::new(),
             envelopes: Vec::new(),
             slew_limiters: Vec::new(),
-            bbds: Vec::new(),
+            bbds,
             delay_lines,
             vcos: Vec::new(),
             vcas: Vec::new(),
@@ -206,6 +208,7 @@ pub fn compile_via_spqr_with_options(
         };
         compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
+        super::bbd_lowering::bind_bbd_runtime(pedal, &mut compiled, sample_rate);
         return Ok(compiled);
     }
 
@@ -232,7 +235,7 @@ pub fn compile_via_spqr_with_options(
             lfos: Vec::new(),
             envelopes: Vec::new(),
             slew_limiters: Vec::new(),
-            bbds: Vec::new(),
+            bbds,
             delay_lines,
             vcos: Vec::new(),
             vcas: Vec::new(),
@@ -266,6 +269,7 @@ pub fn compile_via_spqr_with_options(
         };
         compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
+        super::bbd_lowering::bind_bbd_runtime(pedal, &mut compiled, sample_rate);
         return Ok(compiled);
     }
 
@@ -278,6 +282,13 @@ pub fn compile_via_spqr_with_options(
     );
     let mut feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph);
+    // BBD pedals: the bbd() component is GraphRole::Virtual, so the netlist
+    // is galvanically cut at BBD.in/BBD.out. Split any group that spans the
+    // gap (the sides stay "connected" through ground only) into separate
+    // serial stages — a stage built across the gap probes exact 0.
+    if !bbds.is_empty() {
+        super::bbd_lowering::split_groups_at_behavioral_gaps(&mut feedback_groups, &graph);
+    }
     eprintln!("  [compile] Step 1 done: {} groups", feedback_groups.len());
 
     // Step 1b: Compute signal flow distance for each group via BFS from in_node.
@@ -305,7 +316,18 @@ pub fn compile_via_spqr_with_options(
     }
 
     // Step 2: SPQR decompose each group independently.
-    let terminals = vec![graph.in_node, graph.out_node];
+    // BBD signal pins are behavioral stage boundaries: treat them like global
+    // terminals so the group on each side of the galvanic gap gets a port
+    // there (otherwise the dangling side has no entry/exit node and its
+    // stage probes 0).
+    let mut terminals = vec![graph.in_node, graph.out_node];
+    if !bbds.is_empty() {
+        for node in super::bbd_lowering::bbd_boundary_nodes(pedal, &graph) {
+            if !terminals.contains(&node) {
+                terminals.push(node);
+            }
+        }
+    }
     let mut stages: Vec<Stage> = Vec::new();
     let mut stage_comp_ids: Vec<Vec<String>> = Vec::new();
     let mut bkm_consumed_comp_ids: std::collections::HashSet<String> =
@@ -1728,7 +1750,7 @@ pub fn compile_via_spqr_with_options(
         lfos: Vec::new(),
         envelopes,
         slew_limiters: Vec::new(),
-        bbds: Vec::new(),
+        bbds,
         delay_lines,
         vcos: Vec::new(),
         vcas: Vec::new(),
@@ -1768,6 +1790,9 @@ pub fn compile_via_spqr_with_options(
 
     // Bind pot controls to their stages (WDF, IIR, MultiNl).
     super::spqr_control::bind_controls(pedal, &mut compiled);
+
+    // Bind BBD controls (clock/feedback/mix pots) and clock LFOs.
+    super::bbd_lowering::bind_bbd_runtime(pedal, &mut compiled, sample_rate);
 
     if pedal.calibrate {
         super::calibrate::calibrate_output(&mut compiled);
