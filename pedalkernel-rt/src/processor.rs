@@ -75,6 +75,21 @@ impl core::fmt::Debug for Stage {
 }
 
 impl Stage {
+    /// Whether this stage is excluded from the serial audio chain
+    /// (static bias networks, K-method blocks driven via route plans, ...).
+    pub fn bypass_serial(&self) -> bool {
+        match self {
+            Stage::Wdf(w) => w.bypass_serial,
+            Stage::MultiNl(m) => m.bypass_serial,
+            Stage::Iir(i) => i.bypass_serial,
+            Stage::StateSpace(s) => s.bypass_serial,
+            Stage::BlackFeedback(b) => b.bypass_serial,
+            Stage::Blockwise(k) => k.bypass_serial,
+            Stage::KMethod { .. } => true,
+            Stage::SerialDelayedFeedback(s) => s.bypass_serial,
+        }
+    }
+
     pub fn k_method_ports(&self) -> &[(crate::stage::OwnedPortRole, PortBinding)] {
         match self {
             Stage::KMethod { ports, .. } => ports.as_slice(),
@@ -936,6 +951,28 @@ pub struct LfoBinding {
     pub lfo_id: String,
 }
 
+/// Signal source feeding an envelope follower's detector input.
+///
+/// Resolved at compile time from the follower's `EF.in -> <node>` net
+/// (see `resolve_envelope_tap` in the compiler's bind pass). Historically
+/// every envelope follower read the global pedal input regardless of its
+/// netlist tap (audit gap G1); `StageOutput` makes feed-forward taps on
+/// interior nodes and feedback taps on the circuit output real.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum EnvelopeTapSource {
+    /// Detector reads the raw pedal input (ticked before any stage runs).
+    #[default]
+    GlobalInput,
+    /// Detector reads the serial-chain output of `stages[idx]`, ticked
+    /// inside the stage loop right after that stage produces its sample.
+    /// Feed-forward taps (tap stage before the modulated gain stage) thus
+    /// modulate the CURRENT sample; feedback taps (tap stage at/after the
+    /// gain stage) take effect on the NEXT sample — an inherent one-sample
+    /// delay, same convention as `SidechainProcessor::cv_delayed`.
+    StageOutput(usize),
+}
+
 /// Envelope follower binding in a compiled pedal.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnvelopeBinding {
@@ -948,6 +985,9 @@ pub struct EnvelopeBinding {
     /// Envelope follower component ID.
     #[allow(dead_code)]
     pub env_id: String,
+    /// Where the detector taps its signal (compile-time resolved).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub tap: EnvelopeTapSource,
 }
 
 /// Smoothed parameter for zipper-free pot control.
@@ -2642,6 +2682,109 @@ impl CompiledPedal {
                 .sum(),
         }
     }
+
+    /// Route one envelope follower's output to its modulation target.
+    ///
+    /// Takes disjoint field borrows (not `&mut self`) so it can be called
+    /// from inside `process()`'s serial stage loop while the envelope
+    /// binding itself is mutably borrowed. `env_out` is the raw follower
+    /// output (used by `DelaySpeed`, which scales it by `range` without the
+    /// bias); `modulation` is `bias + env_out * range`.
+    #[allow(clippy::too_many_arguments)]
+    fn route_envelope_modulation(
+        stages: &mut [Stage],
+        bbds: &mut [BbdDelayLine],
+        opamp_stages: &mut [OpAmpStage],
+        delay_lines: &mut [DelayLineBinding],
+        target: &ModulationTarget,
+        modulation: crate::Wave,
+        env_out: crate::Wave,
+        range: crate::Wave,
+    ) {
+        match target {
+            ModulationTarget::JfetVgs { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_jfet_vgs(modulation);
+                }
+            }
+            ModulationTarget::AllJfetVgs => {
+                for stage in stages.iter_mut() {
+                    if let Stage::Wdf(wdf) = stage {
+                        if matches!(&wdf.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
+                            wdf.set_jfet_vgs(modulation);
+                        }
+                    }
+                }
+            }
+            ModulationTarget::JfetVrVgs { stage_idx, comp_id } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_jfet_vr_vgs(comp_id, modulation);
+                }
+            }
+            ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    let led = modulation.clamp(0.0, 1.0);
+                    if wdf.tree.set_photocoupler_led(comp_id, led) {
+                        wdf.tree.recompute();
+                    }
+                    wdf.set_input_photocoupler_led(comp_id, led);
+                }
+            }
+            ModulationTarget::TriodeVgk { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_triode_vgk(modulation);
+                }
+            }
+            ModulationTarget::PentodeVg1k { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_pentode_vg1k(modulation);
+                }
+            }
+            ModulationTarget::VariMuVgk { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_vari_mu_vgk(modulation);
+                }
+            }
+            ModulationTarget::MosfetVgs { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_mosfet_vgs(modulation);
+                }
+            }
+            ModulationTarget::OtaIabc { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    let gain = (1.0 - modulation).clamp(0.0, 1.0);
+                    wdf.set_ota_gain(gain);
+                }
+            }
+            ModulationTarget::OtaIabcLinear { multi_nl_idx } => {
+                if let Some(Stage::MultiNl(mnl)) = stages.get_mut(*multi_nl_idx) {
+                    let gain = (1.0 - modulation).clamp(0.0, 1.0);
+                    mnl.set_ota_gain_linear(gain);
+                }
+            }
+            ModulationTarget::BbdClock { bbd_idx } => {
+                if let Some(bbd) = bbds.get_mut(*bbd_idx) {
+                    bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
+                }
+            }
+            ModulationTarget::OpAmpVp { opamp_idx } => {
+                if let Some(opamp_stage) = opamp_stages.get_mut(*opamp_idx) {
+                    opamp_stage.opamp.set_vp(modulation);
+                }
+            }
+            ModulationTarget::DelaySpeed { delay_idx } => {
+                if let Some(dl) = delay_lines.get_mut(*delay_idx) {
+                    dl.delay_line.add_speed_mod(env_out * range);
+                }
+            }
+            ModulationTarget::DelayTime { delay_idx } => {
+                if let Some(dl) = delay_lines.get_mut(*delay_idx) {
+                    dl.delay_line
+                        .set_delay_normalized(modulation.clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
 }
 
 impl PedalProcessor for CompiledPedal {
@@ -2817,94 +2960,32 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
-        // Tick all envelope followers and route their outputs to targets.
+        // Tick envelope followers and route their outputs to targets.
+        // GlobalInput-tapped detectors read the raw pedal input here, before
+        // any stage runs. Stage-tapped detectors (EnvelopeTapSource::
+        // StageOutput) tick inside the serial stage loop instead, fed by
+        // their tap stage's fresh output — except when a stage route plan
+        // bypasses the serial loop, in which case they fall back to the
+        // global input (the pre-tap legacy behavior).
+        let route_plan_active = self.stage_route_plan.primary_bkm.is_some();
         for binding in &mut self.envelopes {
+            match binding.tap {
+                EnvelopeTapSource::GlobalInput => {}
+                EnvelopeTapSource::StageOutput(_) if route_plan_active => {}
+                EnvelopeTapSource::StageOutput(_) => continue,
+            }
             let env_out = binding.envelope.process(input);
             let modulation = binding.bias + env_out * binding.range;
-
-            match &binding.target {
-                ModulationTarget::JfetVgs { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_jfet_vgs(modulation);
-                    }
-                }
-                ModulationTarget::AllJfetVgs => {
-                    for stage in &mut self.stages {
-                        if let Stage::Wdf(wdf) = stage {
-                            if matches!(&wdf.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
-                                wdf.set_jfet_vgs(modulation);
-                            }
-                        }
-                    }
-                }
-                ModulationTarget::JfetVrVgs { stage_idx, comp_id } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_jfet_vr_vgs(comp_id, modulation);
-                    }
-                }
-                ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        let led = modulation.clamp(0.0, 1.0);
-                        if wdf.tree.set_photocoupler_led(comp_id, led) {
-                            wdf.tree.recompute();
-                        }
-                        wdf.set_input_photocoupler_led(comp_id, led);
-                    }
-                }
-                ModulationTarget::TriodeVgk { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_triode_vgk(modulation);
-                    }
-                }
-                ModulationTarget::PentodeVg1k { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_pentode_vg1k(modulation);
-                    }
-                }
-                ModulationTarget::VariMuVgk { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_vari_mu_vgk(modulation);
-                    }
-                }
-                ModulationTarget::MosfetVgs { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_mosfet_vgs(modulation);
-                    }
-                }
-                ModulationTarget::OtaIabc { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        let gain = (1.0 - modulation).clamp(0.0, 1.0);
-                        wdf.set_ota_gain(gain);
-                    }
-                }
-                ModulationTarget::OtaIabcLinear { multi_nl_idx } => {
-                    if let Some(Stage::MultiNl(mnl)) = self.stages.get_mut(*multi_nl_idx) {
-                        let gain = (1.0 - modulation).clamp(0.0, 1.0);
-                        mnl.set_ota_gain_linear(gain);
-                    }
-                }
-                ModulationTarget::BbdClock { bbd_idx } => {
-                    if let Some(bbd) = self.bbds.get_mut(*bbd_idx) {
-                        bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
-                    }
-                }
-                ModulationTarget::OpAmpVp { opamp_idx } => {
-                    if let Some(opamp_stage) = self.opamp_stages.get_mut(*opamp_idx) {
-                        opamp_stage.opamp.set_vp(modulation);
-                    }
-                }
-                ModulationTarget::DelaySpeed { delay_idx } => {
-                    if let Some(dl) = self.delay_lines.get_mut(*delay_idx) {
-                        dl.delay_line.add_speed_mod(env_out * binding.range);
-                    }
-                }
-                ModulationTarget::DelayTime { delay_idx } => {
-                    if let Some(dl) = self.delay_lines.get_mut(*delay_idx) {
-                        dl.delay_line
-                            .set_delay_normalized(modulation.clamp(0.0, 1.0));
-                    }
-                }
-            }
+            Self::route_envelope_modulation(
+                &mut self.stages,
+                &mut self.bbds,
+                &mut self.opamp_stages,
+                &mut self.delay_lines,
+                &binding.target,
+                modulation,
+                env_out,
+                binding.range,
+            );
         }
 
         // Tick VCOs — generate audio-rate waveforms and inject into node_signals.
@@ -3053,16 +3134,7 @@ impl PedalProcessor for CompiledPedal {
 
             // Check bypass_serial: static bias networks process for metering
             // but don't overwrite the serial audio signal.
-            let bypass_serial = match &self.stages[stage_idx] {
-                Stage::Wdf(w) => w.bypass_serial,
-                Stage::MultiNl(m) => m.bypass_serial,
-                Stage::Iir(i) => i.bypass_serial,
-                Stage::StateSpace(s) => s.bypass_serial,
-                Stage::BlackFeedback(b) => b.bypass_serial,
-                Stage::Blockwise(k) => k.bypass_serial,
-                Stage::KMethod { .. } => true,
-                Stage::SerialDelayedFeedback(s) => s.bypass_serial,
-            };
+            let bypass_serial = self.stages[stage_idx].bypass_serial();
 
             if bypass_serial {
                 // Process for metering but don't touch `signal`
@@ -3095,6 +3167,12 @@ impl PedalProcessor for CompiledPedal {
                 }
                 continue;
             }
+
+            // This stage's own output sample, fed to envelope followers whose
+            // detector taps resolve to this stage (EnvelopeTapSource::
+            // StageOutput). Mirrors `signal` except for feedforward WDF
+            // stages, where `signal` is the additive blend.
+            let mut stage_tap_output: crate::Wave = 0.0;
 
             if is_wdf {
                 let stage = if let Stage::Wdf(w) = &mut self.stages[stage_idx] {
@@ -3187,6 +3265,7 @@ impl PedalProcessor for CompiledPedal {
                     }
                     0.0
                 };
+                stage_tap_output = stage_output;
 
                 // Write output to stage's output node for junction summing
                 // (only for trigger voice stages).
@@ -3434,6 +3513,12 @@ impl PedalProcessor for CompiledPedal {
                 }
             }
 
+            if !is_wdf {
+                // All non-WDF serial stages write their output straight to
+                // `signal`, so the tap sample is just the updated chain value.
+                stage_tap_output = signal;
+            }
+
             // Apply output wiper dividers after the stage that contains them.
             // The WDF stage still owns the passive filtering/loading behavior;
             // this routing layer only applies the explicit wiper ratio. Using
@@ -3442,7 +3527,35 @@ impl PedalProcessor for CompiledPedal {
             for wd in &self.wiper_dividers {
                 if wd.after_stage_idx == stage_idx {
                     signal *= wd.position;
+                    // The wiper belongs to this stage, so detector taps on its
+                    // output (e.g. an 1176 feedback detector tapping the
+                    // output pot wiper) see the post-wiper level too.
+                    stage_tap_output *= wd.position;
                 }
+            }
+
+            // Tick envelope followers whose detector taps this stage's output
+            // with the fresh sample. Taps on stages BEFORE their modulated
+            // gain element (feed-forward) affect the current sample (the gain
+            // stage hasn't run yet); taps at/after it (feedback) take effect
+            // next sample — a one-sample-delayed feedback loop, the same
+            // convention as SidechainProcessor::cv_delayed.
+            for binding in &mut self.envelopes {
+                if binding.tap != EnvelopeTapSource::StageOutput(stage_idx) {
+                    continue;
+                }
+                let env_out = binding.envelope.process(stage_tap_output);
+                let modulation = binding.bias + env_out * binding.range;
+                Self::route_envelope_modulation(
+                    &mut self.stages,
+                    &mut self.bbds,
+                    &mut self.opamp_stages,
+                    &mut self.delay_lines,
+                    &binding.target,
+                    modulation,
+                    env_out,
+                    binding.range,
+                );
             }
         }
 

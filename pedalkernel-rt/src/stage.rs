@@ -2742,6 +2742,25 @@ impl WdfStage {
         found
     }
 
+    /// Whether this stage contains ANY leaf belonging to the given component
+    /// id (in the WDF tree or among PassiveRType MNA children), or owns it
+    /// as a pot. Used by envelope-tap resolution to map a detector's tap
+    /// node onto the stage that produces its signal.
+    pub fn contains_component(&self, comp_id: &str) -> bool {
+        let probe = |leaf: &dyn crate::wdf_leaf::WdfLeaf| -> Option<()> {
+            (leaf.comp_id() == Some(comp_id)).then_some(())
+        };
+        if self.tree.find_leaf(&probe).is_some() {
+            return true;
+        }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            if children.iter().any(|c| c.find_leaf(&probe).is_some()) {
+                return true;
+            }
+        }
+        self.has_pot(comp_id) || self.root_comp_id == comp_id
+    }
+
     /// Whether this stage contains a `jfet_vr` leaf with the given component
     /// id (in the WDF tree or among PassiveRType MNA children).
     pub fn contains_jfet_vr(&self, comp_id: &str) -> bool {

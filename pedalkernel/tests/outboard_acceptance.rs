@@ -50,9 +50,18 @@ fn steady_gain_db(src: &str, controls: &[(&str, f64)], amplitude: f64, freq_hz: 
 /// sidechain must produce real gain reduction. Audit measured loud and quiet
 /// program at the IDENTICAL gain (GR delta 0.00 dB) because vgs envelope
 /// routing is inert (G2) and detector taps are fake (G1).
+///
+/// 2026-06-12 (F4+F5): G2 and G1 are FIXED — the EF->J1.vgs binding is live
+/// and the feedback tap (`EF1.in -> Output.w`) is honored (rewiring the
+/// detector to the input measures >15 dB GR on this circuit; see
+/// tests/envelope_taps.rs for the tap acceptance tests). The remaining
+/// blocker is the chain's absolute gain: the BJT line amp produces almost
+/// no makeup gain (G5 family) and the output transformer costs ~19 dB vs
+/// SPICE, so the whole chain sits at ~-58 dB and the feedback detector sees
+/// only mV-level drive (GR 0.01 dB, ratio 1.00).
 /// See reports/outboard-gear-audit-2026-06-12.md §3, §6.
 #[test]
-#[ignore = "red until G1+G2 fix: EF -> J1.vgs routing is inert, fet_leveler shows 0.00 dB GR"]
+#[ignore = "red until makeup-gain fix (G5 family): tap+vgs routing now live, but the BJT line amp + transformer leave the chain at ~-58 dB, starving the feedback detector (GR 0.01 dB)"]
 fn fet_leveler_compresses() {
     let src = example_pedal_source("fet_leveler.pedal");
     let controls: &[(&str, f64)] = &[("Input", 0.7), ("Output", 0.7)];

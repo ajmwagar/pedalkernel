@@ -432,6 +432,9 @@ pub(super) fn build_envelope_bindings(
                                         bias,
                                         range,
                                         env_id: comp.id.clone(),
+                                        // Legacy 6-pass builder (no runtime
+                                        // Stage list): global-input tap.
+                                        tap: EnvelopeTapSource::default(),
                                     });
                                 }
                             }
@@ -443,6 +446,169 @@ pub(super) fn build_envelope_bindings(
     }
 
     envelopes
+}
+
+/// Resolve an envelope follower's detector tap (`EF.in -> <node>`) to a
+/// runtime signal source.
+///
+/// Historically the runtime fed EVERY envelope follower the global pedal
+/// input, ignoring the `.in` net entirely (audit gap G1). This resolves the
+/// tap at compile time with the following rule, applied to the electrical
+/// node the `EF.in` pin sits on:
+///
+/// 1. **No `.in` net** → [`EnvelopeTapSource::GlobalInput`] (legacy
+///    behavior, also the safe default).
+/// 2. Walk outward from the tap node through PASSIVE two-terminal-ish
+///    components only (resistors, capacitors, inductors, pots and their
+///    switched/tempco variants), level by level, never expanding through
+///    supply rails or ground. At each level (level 0 = the tap node
+///    itself):
+///    - if the reserved `in` node is reached → `GlobalInput` (the tap is
+///      input-coupled, e.g. `EF.in -> C_in.b`; checked before `out` so a
+///      degenerate node touching both resolves to the legacy source);
+///    - if the reserved `out` node is reached →
+///      [`EnvelopeTapSource::StageOutput`] of the LAST serial stage (the
+///      tap is output-coupled — a feedback detector, e.g. an 1176 rev D
+///      tapping the output pot wiper).
+///    Active devices (transistors, tubes, op-amps, transformers, ...) are
+///    deliberate walk barriers: a tap behind an amplifier is NOT the same
+///    signal as the node on the amplifier's other side.
+/// 3. Otherwise (an interior tap node that reaches neither `in` nor `out`
+///    through passives): the first stage of the serial chain that owns a
+///    component touched by the walk (tap-node neighbors first) →
+///    `StageOutput` of that stage — i.e. the tap is approximated by the
+///    output of the stage the tapped network compiled into.
+/// 4. If nothing matches → `GlobalInput`.
+///
+/// The runtime feeds `StageOutput(i)` detectors stage `i`'s post-wiper
+/// serial output each sample (see the serial loop in
+/// `CompiledPedal::process`): feed-forward taps modulate the same sample,
+/// feedback taps the next (one-sample delay).
+pub(super) fn resolve_envelope_tap(
+    pedal: &PedalDef,
+    stages: &[Stage],
+    ef_id: &str,
+) -> EnvelopeTapSource {
+    use std::collections::VecDeque;
+
+    // Pin → set key. Reserved nodes are namespaced so a component named
+    // "in" can't collide with the reserved input node.
+    let pin_key = |p: &Pin| -> Option<String> {
+        match p {
+            Pin::Reserved(n) => Some(format!("@{n}")),
+            Pin::ComponentPin { component, pin } => Some(format!("{component}.{pin}")),
+            Pin::Fork { .. } | Pin::SubcircuitPort { .. } => None,
+        }
+    };
+    // Rails/ground must never join the node closure: half the circuit
+    // touches ground, and expanding through it would merge everything.
+    let is_rail_key = |key: &str| matches!(key.strip_prefix('@'), Some(n) if n == "gnd" || n == "vcc" || pedal.is_supply_rail(n));
+
+    let passive_pins = |comp_id: &str| -> Option<Vec<&'static str>> {
+        let comp = pedal.components.iter().find(|c| c.id == comp_id)?;
+        if comp.kind.is_pot() {
+            return Some(vec!["a", "b", "w", "wiper"]);
+        }
+        match comp.kind.type_tag() {
+            "resistor" | "capacitor" | "inductor" | "tempco resistor" | "switched resistor"
+            | "switched capacitor" | "switched inductor" => Some(vec!["a", "b"]),
+            _ => None,
+        }
+    };
+
+    let last_serial_stage = stages.iter().rposition(|s| !s.bypass_serial());
+
+    let mut visited: HashSet<String> = HashSet::new();
+    // Components touched by the walk, in BFS order (tap-node neighbors
+    // first) — fallback candidates for rule 3.
+    let mut touched_components: Vec<String> = Vec::new();
+    // Current BFS level's frontier of pin keys.
+    let mut frontier: Vec<String> = vec![format!("{ef_id}.in")];
+    visited.insert(frontier[0].clone());
+
+    while !frontier.is_empty() {
+        // Expand the frontier to its full electrical node closure: any net
+        // sharing a (non-rail) pin with the closure contributes all its
+        // pins. Iterate to fixpoint since nets chain through named nodes.
+        let mut closure: Vec<String> = frontier.clone();
+        let mut closure_set: HashSet<String> = closure.iter().cloned().collect();
+        loop {
+            let mut grew = false;
+            for net in &pedal.nets {
+                let keys: Vec<String> = std::iter::once(&net.from)
+                    .chain(net.to.iter())
+                    .filter_map(&pin_key)
+                    .collect();
+                if !keys
+                    .iter()
+                    .any(|k| closure_set.contains(k) && !is_rail_key(k))
+                {
+                    continue;
+                }
+                for k in keys {
+                    if !is_rail_key(&k) && closure_set.insert(k.clone()) {
+                        closure.push(k);
+                        grew = true;
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+
+        // Reserved-node checks for this level. `in` first: a node touching
+        // both resolves to the legacy global-input source.
+        if closure_set.contains("@in") {
+            return EnvelopeTapSource::GlobalInput;
+        }
+        if closure_set.contains("@out") {
+            return match last_serial_stage {
+                Some(idx) => EnvelopeTapSource::StageOutput(idx),
+                None => EnvelopeTapSource::GlobalInput,
+            };
+        }
+
+        // Cross passive components to their other pins → next level.
+        let mut next: Vec<String> = Vec::new();
+        let mut queue: VecDeque<String> = closure.into();
+        while let Some(key) = queue.pop_front() {
+            let Some((comp_id, pin)) = key.rsplit_once('.') else {
+                continue;
+            };
+            if comp_id == ef_id {
+                continue;
+            }
+            visited.insert(key.clone());
+            if !touched_components.iter().any(|c| c == comp_id) {
+                touched_components.push(comp_id.to_string());
+            }
+            let Some(pins) = passive_pins(comp_id) else {
+                continue;
+            };
+            for other in pins {
+                if other == pin {
+                    continue;
+                }
+                let other_key = format!("{comp_id}.{other}");
+                if visited.insert(other_key.clone()) {
+                    next.push(other_key);
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    // Rule 3 fallback: first serial stage owning a touched component.
+    for comp_id in &touched_components {
+        if let Some(idx) = stages.iter().position(
+            |s| matches!(s, Stage::Wdf(w) if !w.bypass_serial && w.contains_component(comp_id)),
+        ) {
+            return EnvelopeTapSource::StageOutput(idx);
+        }
+    }
+
+    EnvelopeTapSource::GlobalInput
 }
 
 /// Build envelope-follower → JFET bindings for the SPQR pipeline.
@@ -486,6 +652,9 @@ pub(super) fn build_envelope_jfet_bindings(
             ef.sensitivity_r,
             sample_rate,
         );
+        // Detector tap: resolve the `EF.in -> <node>` net to its runtime
+        // signal source (global input vs. a specific stage's output).
+        let tap = resolve_envelope_tap(pedal, stages, &comp.id);
 
         for net in &pedal.nets {
             let Pin::ComponentPin { component, pin } = &net.from else {
@@ -528,6 +697,7 @@ pub(super) fn build_envelope_jfet_bindings(
                     bias: sink.bias,
                     range: sink.range,
                     env_id: comp.id.clone(),
+                    tap,
                 });
             }
         }

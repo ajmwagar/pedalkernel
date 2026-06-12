@@ -2174,7 +2174,7 @@ fn build_passive_rtype_stage(
 
     let terminals =
         compute_group_terminals(edge_indices, graph, &vec![graph.in_node, graph.out_node]);
-    let output_node = terminals
+    let mut output_node = terminals
         .iter()
         .copied()
         .find(|&t| t == graph.out_node)
@@ -2184,7 +2184,7 @@ fn build_passive_rtype_stage(
                 .copied()
                 .find(|&t| !is_ground(t) && t != graph.in_node)
         })?;
-    let input_node = terminals
+    let mut input_node = terminals
         .iter()
         .copied()
         .find(|&t| t == graph.in_node)
@@ -2194,6 +2194,25 @@ fn build_passive_rtype_stage(
                 .copied()
                 .find(|&t| !is_ground(t) && t != output_node)
         })?;
+    // Interior groups (neither terminal is the global in/out) picked their
+    // input/output above by terminal ITERATION order — i.e. by NodeId —
+    // which flips with incidental node renumbering (e.g. a virtual
+    // `EF.in` tap pin unioning into a nearby node shifts union-find roots).
+    // An inverted orientation stamps the MNA voltage source on the
+    // DOWNSTREAM terminal and extracts at the upstream one, erasing the
+    // group's transfer (a JFET-shunt GR divider measured vs=1.0 — flat —
+    // in exactly that case). Orient by rail-blocked signal-flow distance
+    // from `in`: the upstream terminal drives, the downstream one extracts.
+    // Swap only on PROVEN inversion (both distances known and ordered) so
+    // unreachable/tied terminals keep the legacy order.
+    if output_node != graph.out_node && input_node != graph.in_node {
+        let d_in = super::signal_flow::bfs_distances_from_in_node(graph);
+        if let (Some(&d_input), Some(&d_output)) = (d_in.get(&input_node), d_in.get(&output_node)) {
+            if d_output < d_input {
+                core::mem::swap(&mut input_node, &mut output_node);
+            }
+        }
+    }
 
     let mut nodes: Vec<NodeId> = edge_indices
         .iter()

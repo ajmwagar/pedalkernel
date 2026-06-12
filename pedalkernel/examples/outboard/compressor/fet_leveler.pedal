@@ -42,20 +42,20 @@
 #      sensitivity; the real 4/8/12/20:1 bias-offset network is future work.
 #   4. The line amp is a single BJT common-emitter stage, not the real
 #      five-transistor class-A line amplifier.
-#   5. FEEDBACK detector caveat: EF1.in is wired to the output node below to
-#      document the rev D feedback topology, but the current engine's
-#      envelope followers always read the PEDAL INPUT at runtime
-#      (pedalkernel-rt processor: `binding.envelope.process(input)`), so the
-#      detector behaves feed-forward in simulation. Audit finding, not hidden.
+#   5. FEEDBACK detector: EF1.in is wired to the output node (rev D feedback
+#      topology) and the engine now HONORS the tap — the detector reads the
+#      circuit output one sample late (compile-time tap resolution, G1 fix).
+#      Feed-forward taps (e.g. `EF1.in -> C_in.b`) are honored too.
 #   6. Program-dependent attack (20–800 µs) is collapsed to one fixed RC pair.
-#   7. ENGINE LIMITATION (key audit finding): the EF1 -> J1.vgs modulation
-#      binding compiles but produces NO measurable gain reduction in the
-#      current engine — loud (0.5) and quiet (0.05) probes both measure the
-#      identical gain (GR delta 0.00 dB), and the same holds for a minimal
-#      JFET shunt divider and for the tests/test_pedals/envelope_follower
-#      fixture topology. Expect this file to pass audio with the correct
-#      static divider but apply no dynamic compression until the engine's
-#      JFET vgs modulation affects the compiled gain.
+#   7. ENGINE LIMITATION (updated 2026-06-12, F5): the EF1 -> J1.vgs
+#      modulation path is LIVE (rewiring the detector to `C_in.b` measures
+#      >15 dB of gain reduction on this very circuit), but with the feedback
+#      tap the detector is starved: the simulated chain sits at ~-58 dB
+#      overall (the BJT line amp contributes almost no makeup gain — audit
+#      gap G5 family — and the output transformer costs ~19 dB more than
+#      SPICE), so the output node delivers only ~mV-level drive and GR
+#      measures ~0 dB. Expect real feedback compression here once the
+#      makeup-gain/transformer defects are fixed, not before.
 
 equipment "FET Leveler 1176" {
   supply 30V               # Real 1176 runs a single +30 V rail
