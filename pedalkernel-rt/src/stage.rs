@@ -1407,16 +1407,20 @@ impl WdfStage {
                 // should be extracted at the load resistor, not the root port.
                 RootKind::Passthrough => {
                     // Open-circuit termination: a_root = b_tree (total reflection).
-                    // Port voltage V = (a + b) / 2 = (b_tree + b_tree) / 2 = b_tree.
+                    // The tree's down-sweep is done here (before line ~1565 would
+                    // incorrectly re-scatter with b_tree/2).  We early-return to
+                    // skip the duplicate tree.set_incident(a_root) at line ~1565.
+                    //
+                    // Physical output voltage = (a + b) / 2 = b_tree.
+                    // WdfVoltageSource emits b = 2*V, so b_tree = 2*V_physical.
+                    // Divide by 2 to recover the correct physical voltage.
                     tree.set_incident(b_tree);
-                    // Check output_probe BEFORE fallback
                     if let Some(ref probe_id) = output_probe {
                         if let Some(v) = tree.leaf_voltage(probe_id) {
                             return v;
                         }
                     }
-                    // Open circuit: full voltage appears at the port.
-                    (b_tree + b_tree) / 2.0
+                    return b_tree / 2.0;
                 }
                 // ShortCircuit: ground termination (a = -b)
                 // Ground has zero impedance, so it reflects with inverted sign.
@@ -1426,10 +1430,14 @@ impl WdfStage {
                     let a_root = -b_tree;
                     tree.set_incident(a_root);
 
-                    // Check output_probe first (for SP-reduced orphan stages)
+                    // Check output_probe first (for SP-reduced orphan stages).
+                    // leaf_voltage() returns a/2 for resistors; for a VS-driven
+                    // tree the WDF b=2V convention inflates a by 2× relative to
+                    // physical. The short_circuit_junction_voltage() path already
+                    // divides by 2 when a VS is detected. To match, divide here.
                     if let Some(ref probe_id) = output_probe {
                         if let Some(v) = tree.leaf_voltage(probe_id) {
-                            return v;
+                            return v / 2.0;
                         }
                     }
                     // Extract output at junction (voltage across load resistor)
