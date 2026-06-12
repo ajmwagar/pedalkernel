@@ -1120,15 +1120,19 @@ pub fn compile_via_spqr_with_options(
             // the pre-rework structure and is dropped to avoid double-processing.
 
             if !group.has_feedback() {
+                // Restrict to ONLY the op-amp neg/pos input nodes — not all
+                // intermediate nodes of the feedback group. Using all nodes was
+                // too broad: a series input resistor (e.g. R_in feeding the
+                // mid-node of a bridged-T) would be flagged as feedforward
+                // because its output node touches the feedback group's interior.
+                // The intent is to detect direct-connect modulator paths
+                // (LED→LDR, photocoupler) from an op-amp output to an op-amp
+                // input pin, not ordinary series input resistors.
                 let feedback_nodes: std::collections::HashSet<super::graph::NodeId> =
-                    feedback_groups
+                    graph
+                        .nullor_pins
                         .iter()
-                        .filter(|g| g.has_feedback())
-                        .flat_map(|g| g.all_edges())
-                        .flat_map(|eidx| {
-                            let e = &graph.edges[eidx];
-                            [e.node_a, e.node_b].into_iter()
-                        })
+                        .flat_map(|pins| [pins.neg_node, pins.pos_node].into_iter())
                         .collect();
                 let main_outputs: std::collections::HashSet<super::graph::NodeId> = graph
                     .nullor_pins
