@@ -22,20 +22,20 @@ use crate::elements::WdfRoot;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriodeModel {
     /// Amplification factor (mu). Higher = more gain. 12AX7 ≈ 100, 12AU7 ≈ 20.
-    pub mu: f64,
+    pub mu: crate::Wave,
     /// Plate resistance factor. Affects output impedance.
-    pub kp: f64,
+    pub kp: crate::Wave,
     /// Knee voltage constant. Affects saturation behavior.
-    pub kvb: f64,
+    pub kvb: crate::Wave,
     /// Exponent (typically 1.3-1.5). Affects transfer curve shape.
-    pub ex: f64,
+    pub ex: crate::Wave,
     /// Plate current scaling factor (KG1). Scales the absolute plate current
     /// magnitude. 12AX7 ≈ 1060, 12AU7 ≈ 1180.
-    pub kg1: f64,
+    pub kg1: crate::Wave,
     /// Plate resistance at typical operating point (Ω).
     /// Used as virtual resistance in WDF tree construction.
     /// 12AX7 ≈ 62.5kΩ, 12AU7 ≈ 7.7kΩ, 12AT7 ≈ 10.9kΩ.
-    pub rp: f64,
+    pub rp: crate::Wave,
 }
 
 impl TriodeModel {
@@ -65,18 +65,18 @@ pub struct TriodeRoot {
     pub model: TriodeModel,
     /// DC grid-cathode bias voltage, set at compile time from circuit analysis.
     /// The runtime input signal modulates around this operating point.
-    vgk_bias: f64,
+    vgk_bias: crate::Wave,
     /// Current grid-cathode voltage (bias + AC signal).
-    vgk: f64,
+    vgk: crate::Wave,
     /// Maximum plate voltage (determined by supply rail B+).
     /// Triode plate can swing from 0V (saturated) to B+ (cutoff).
-    v_max: f64,
+    v_max: crate::Wave,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
     /// Number of parallel tubes (default 1). Plate current is scaled by N.
     parallel_count: usize,
     /// Previous sample's plate voltage for warm-starting Newton-Raphson.
-    prev_v: f64,
+    prev_v: crate::Wave,
 }
 
 impl TriodeRoot {
@@ -93,7 +93,7 @@ impl TriodeRoot {
     }
 
     /// Create a triode root with a specific supply voltage (B+).
-    pub fn new_with_v_max(model: TriodeModel, v_max: f64) -> Self {
+    pub fn new_with_v_max(model: TriodeModel, v_max: crate::Wave) -> Self {
         Self {
             model,
             vgk_bias: -2.0,
@@ -121,13 +121,13 @@ impl TriodeRoot {
     /// - Fender Deluxe: 350V
     /// - Starved plate design: 9-48V
     #[inline]
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         self.v_max = v_max.max(1.0); // Minimum 1V to avoid degeneracy
     }
 
     /// Get the current v_max setting.
     #[inline]
-    pub fn v_max(&self) -> f64 {
+    pub fn v_max(&self) -> crate::Wave {
         self.v_max
     }
 
@@ -136,25 +136,25 @@ impl TriodeRoot {
     }
 
     /// Set the DC bias operating point from circuit analysis.
-    pub fn set_bias(&mut self, vgk_bias: f64) {
+    pub fn set_bias(&mut self, vgk_bias: crate::Wave) {
         self.vgk_bias = vgk_bias;
         self.vgk = vgk_bias;
     }
 
     /// Get the DC bias operating point.
-    pub fn vgk_bias(&self) -> f64 {
+    pub fn vgk_bias(&self) -> crate::Wave {
         self.vgk_bias
     }
 
     /// Set the grid-cathode voltage (external control from bias, signal, LFO).
     #[inline]
-    pub fn set_vgk(&mut self, vgk: f64) {
+    pub fn set_vgk(&mut self, vgk: crate::Wave) {
         self.vgk = vgk;
     }
 
     /// Get current grid-cathode voltage.
     #[inline]
-    pub fn vgk(&self) -> f64 {
+    pub fn vgk(&self) -> crate::Wave {
         self.vgk
     }
 
@@ -163,7 +163,7 @@ impl TriodeRoot {
     /// The Koren equation:
     /// `Ip = (Vpk/Kp * ln(1 + exp(Kp * (1/mu + Vgk/sqrt(Kvb + Vpk^2)))))^Ex / KG1`
     #[inline]
-    pub fn plate_current(&self, vpk: f64) -> f64 {
+    pub fn plate_current(&self, vpk: crate::Wave) -> crate::Wave {
         let mu = self.model.mu;
         let kp = self.model.kp;
         let kvb = self.model.kvb;
@@ -192,12 +192,12 @@ impl TriodeRoot {
         }
 
         // Ip = base^Ex / KG1, scaled by parallel_count for N tubes in parallel.
-        (crate::math::powf(base, ex) / self.model.kg1) * self.parallel_count as f64
+        (crate::math::powf(base, ex) / self.model.kg1) * self.parallel_count as crate::Wave
     }
 
     /// Compute derivative of plate current w.r.t. Vpk for Newton-Raphson.
     #[inline]
-    fn plate_current_derivative(&self, vpk: f64) -> f64 {
+    fn plate_current_derivative(&self, vpk: crate::Wave) -> crate::Wave {
         let mu = self.model.mu;
         let kp = self.model.kp;
         let kvb = self.model.kvb;
@@ -244,14 +244,15 @@ impl TriodeRoot {
 
         // d(base^Ex / KG1)/dVpk = Ex * base^(Ex-1) * dbase_dvpk / KG1
         // Scale by parallel_count to match plate_current() scaling.
-        (ex * crate::math::powf(base, ex - 1.0) * dbase_dvpk / self.model.kg1) * self.parallel_count as f64
+        (ex * crate::math::powf(base, ex - 1.0) * dbase_dvpk / self.model.kg1)
+            * self.parallel_count as crate::Wave
     }
 }
 
 impl WdfRoot for TriodeRoot {
     /// Triode plate-cathode path with warm-starting.
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let root = *self;
         let v_max = self.v_max;
         let cold = a * 0.5;
@@ -280,12 +281,12 @@ impl WdfRoot for TriodeRoot {
 
 impl NlDeviceIv for TriodeRoot {
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         (self.plate_current(v), self.plate_current_derivative(v))
     }
 
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         (-50.0, self.v_max)
     }
 }
@@ -320,7 +321,7 @@ impl NlDeviceIv for TriodeRoot {
 pub struct TriodeThreePort {
     pub model: TriodeModel,
     /// Maximum plate voltage (B+ supply rail).
-    v_max: f64,
+    v_max: crate::Wave,
     /// Voltage offset added to port-1 wave before computing Vpk.
     ///
     /// Two MNA conventions exist:
@@ -329,13 +330,13 @@ pub struct TriodeThreePort {
     ///   Clamp: `(-v_max, 10)`.
     /// - **GND-referenced** (general MNA path): MNA ground = GND, so port-1 wave =
     ///   `V_plate` (positive). Set `v_offset = 0` and clamp `(0, v_max)`.
-    v_offset: f64,
+    v_offset: crate::Wave,
     /// Number of parallel tubes.
     parallel_count: usize,
     /// Grid emission current (saturation current for grid diode).
-    grid_is: f64,
+    grid_is: crate::Wave,
     /// Grid thermal voltage.
-    grid_vt: f64,
+    grid_vt: crate::Wave,
 }
 
 impl TriodeThreePort {
@@ -350,7 +351,7 @@ impl TriodeThreePort {
         }
     }
 
-    pub fn new_with_v_max(model: TriodeModel, v_max: f64) -> Self {
+    pub fn new_with_v_max(model: TriodeModel, v_max: crate::Wave) -> Self {
         let v_max = v_max.max(1.0);
         Self {
             v_max,
@@ -379,7 +380,7 @@ impl TriodeThreePort {
         self
     }
 
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         let old_offset_was_vmax = (self.v_offset - self.v_max).abs() < 1.0;
         self.v_max = v_max.max(1.0);
         // Keep v_offset in sync for VCC-referenced convention
@@ -388,7 +389,7 @@ impl TriodeThreePort {
         }
     }
 
-    pub fn v_max(&self) -> f64 {
+    pub fn v_max(&self) -> crate::Wave {
         self.v_max
     }
 
@@ -399,20 +400,24 @@ impl TriodeThreePort {
     /// Grid current (diode model): i_g = I_gs × (exp(Vgk/Vt) - 1).
     /// Returns (current, di_g/dv_gk).
     #[inline]
-    fn grid_iv(&self, vgk: f64) -> (f64, f64) {
+    fn grid_iv(&self, vgk: crate::Wave) -> (crate::Wave, crate::Wave) {
         let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
         let ev = crate::math::exp(x);
-        let ig = self.grid_is * (ev - 1.0) * self.parallel_count as f64;
-        let dig = self.grid_is * ev / self.grid_vt * self.parallel_count as f64;
+        let ig = self.grid_is * (ev - 1.0) * self.parallel_count as crate::Wave;
+        let dig = self.grid_is * ev / self.grid_vt * self.parallel_count as crate::Wave;
         (ig, dig)
     }
 
     /// Plate current using the Koren equation, with explicit Vgk and Vpk.
     /// Returns (Ia, ∂Ia/∂Vpk, ∂Ia/∂Vgk).
     #[inline]
-    fn plate_iv(&self, vgk: f64, vpk: f64) -> (f64, f64, f64) {
+    fn plate_iv(
+        &self,
+        vgk: crate::Wave,
+        vpk: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, crate::Wave) {
         let m = &self.model;
-        let pc = self.parallel_count as f64;
+        let pc = self.parallel_count as crate::Wave;
 
         if vpk <= 0.0 {
             return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
@@ -476,7 +481,7 @@ impl NlDeviceGroupIv for TriodeThreePort {
         2
     }
 
-    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let vgk = v[0]; // Port 0: grid-cathode (actual voltage, no shift needed)
 
         // Port 1: plate-cathode. The wave v[1] represents the port voltage in
@@ -502,7 +507,7 @@ impl NlDeviceGroupIv for TriodeThreePort {
         jacobian[3] = dip_dvpk; // ∂ip/∂vpk
     }
 
-    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+    fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
         match port {
             0 => (-50.0, 10.0), // Grid: well below cutoff to slight forward bias
             _ => {

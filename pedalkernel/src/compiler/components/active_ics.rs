@@ -69,9 +69,7 @@ impl Component for OpAmp {
             // bias network is detected. The v_max here assumes the minimum
             // common pedal supply (9V). Pipeline patches this after bias
             // analysis with the actual supply voltage and bias point.
-            NonIdealFx::RailSaturation {
-                v_max: 3.0,
-            },
+            NonIdealFx::RailSaturation { v_max: 3.0 },
         ]
     }
 
@@ -111,7 +109,7 @@ impl Component for OpAmp {
 
     fn port_semantic(&self, pin_a: &str, pin_b: &str) -> crate::compiler::component::PortSemantic {
         if self.op_type.is_ota() {
-            return crate::compiler::component::PortSemantic::Nonlinear;
+            return crate::compiler::component::PortSemantic::LinearPassive;
         }
         // VCVS output is a voltage constraint
         let pins = [pin_a, pin_b];
@@ -167,7 +165,11 @@ impl Component for OpAmp {
     }
 
     fn mna_vsource_count(&self) -> usize {
-        if self.op_type.is_ota() { 0 } else { 1 }
+        if self.op_type.is_ota() {
+            0
+        } else {
+            1
+        }
     }
 
     fn mna_internal_node_count(&self) -> usize {
@@ -204,8 +206,13 @@ impl Component for OpAmp {
         // energy recirculation. Without this, the output is eliminated
         // algebraically and the Q drops to ~0.3.
         if model.output_capacitance > 0.0 {
-            if let Some(ref mut caps) = ctx.cap_stamps {
-                caps.push((out_mna, None, model.output_capacitance));
+            if let Some(ref mut reactive_one_ports) = ctx.reactive_one_ports {
+                reactive_one_ports.push(pedalkernel_rt::boundary_math::OnePort::new(
+                    pedalkernel_rt::boundary_math::MnaPortTerminals::maybe_single_ended(
+                        out_mna.map(pedalkernel_rt::boundary_math::MnaNodeId::new),
+                    ),
+                    pedalkernel_rt::boundary_math::OnePortKind::Capacitor(model.output_capacitance),
+                ));
             }
         }
 
@@ -217,7 +224,7 @@ impl Component for OpAmp {
             vec![ComponentEdge {
                 pin_a: "pos",
                 pin_b: "neg",
-                kind: EdgeKind::Nonlinear,
+                kind: EdgeKind::Vccs,
                 port_group: None,
             }]
         } else {
@@ -334,7 +341,8 @@ impl Component for OpAmp {
         const HEADROOM: f64 = 1.5; // Typical output stage headroom
 
         // Use bias voltage if provided; default to supply/2 (symmetric)
-        let bias_v = bias_voltages.get("pos")
+        let bias_v = bias_voltages
+            .get("pos")
             .or_else(|| bias_voltages.get("neg"))
             .copied()
             .unwrap_or(supply_voltage / 2.0);

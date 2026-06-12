@@ -21,6 +21,15 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+/// Runtime audio/wave scalar.
+///
+/// Desktop builds use `f64` to preserve regression-test precision and analysis
+/// output. Embedded Cortex-M builds use `f32`, matching the M7 FPU.
+#[cfg(all(target_arch = "arm", target_os = "none"))]
+pub type Wave = f32;
+#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+pub type Wave = f64;
+
 // ── Runtime math ─────────────────────────────────────────────────────────
 // On std targets, f64 inherent methods (sin, cos, exp, etc.) are available.
 // On no_std targets, we use libm. This module provides a uniform interface.
@@ -30,8 +39,8 @@ pub mod math;
 pub mod fast_math;
 
 // ── Shared types (no dependencies) ───────────────────────────────────────
-pub mod pot_taper;
 pub mod nonideal_fx;
+pub mod pot_taper;
 
 // ── Oversampling (antialiasing for nonlinear stages) ────────────────────
 pub mod oversampling;
@@ -41,6 +50,13 @@ pub mod loading;
 
 // ── Metering (lock-free audio->UI metrics) ──────────────────────────────
 pub mod metering;
+
+// ── Stage graph routing (compiled topology → runtime route plan) ─────────
+pub mod route;
+pub mod routing;
+
+// ── Typed WDF boundary-drive math ──────────────────────────────────────
+pub mod boundary_math;
 
 // ── Thermal drift (temperature-dependent component behavior) ────────────
 pub mod thermal;
@@ -52,8 +68,8 @@ pub mod elements;
 pub mod tree;
 
 // ── Dynamic WDF leaf nodes and tree ────────────────────────────────────
-pub mod wdf_leaf;
 pub mod dyn_node;
+pub mod wdf_leaf;
 
 // ── Runtime helpers (balance_parallel_vs, has_pot) ───────────────────
 pub mod helpers;
@@ -64,6 +80,15 @@ pub mod subcircuit;
 // ── WDF stage processing ─────────────────────────────────────────────
 pub mod stage;
 
+// ── Band-limited VCO with analog imperfections ──────────────────────
+pub mod oscillator;
+
+// ── One-pole exponential decay envelope (MEG/VEG) ──────────────────
+pub mod envelope;
+
+// ── One-pole pitch glide (portamento) ───────────────────────────────
+pub mod glide;
+
 // ── Compiled pedal processor (audio pipeline) ────────────────────────
 pub mod processor;
 
@@ -71,31 +96,71 @@ pub mod processor;
 
 use alloc::{string::String, vec::Vec};
 
+// ── Named ports (audio-rate voltage I/O) ────────────────────────────
+
+/// Direction of a named voltage port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PortDirection {
+    Input,
+    Output,
+}
+
 /// Audio processor trait for pedals.
 pub trait PedalProcessor {
     /// Process a single sample.
-    fn process(&mut self, input: f64) -> f64;
+    fn process(&mut self, input: Wave) -> Wave;
 
     /// Set sample rate (call before processing).
-    fn set_sample_rate(&mut self, rate: f64);
+    fn set_sample_rate(&mut self, rate: Wave);
 
     /// Reset all internal state.
     fn reset(&mut self);
 
     /// Set a named control parameter (0.0-1.0). Default: no-op.
-    fn set_control(&mut self, _label: &str, _value: f64) {}
+    fn set_control(&mut self, _label: &str, _value: Wave) {}
 
     /// Set supply voltage in volts (default 9.0).
-    fn set_supply_voltage(&mut self, _voltage: f64) {}
+    fn set_supply_voltage(&mut self, _voltage: Wave) {}
+
+    // ── Named port API (audio-rate voltage I/O) ─────────────────────
+
+    /// Resolve a port name to its index in the ports slice.
+    /// Call once at init to cache indices.
+    fn resolve_port(&self, _name: &str) -> Option<usize> {
+        None
+    }
+
+    /// Number of declared ports (for allocating the ports slice).
+    fn port_count(&self) -> usize {
+        0
+    }
+
+    /// Process one sample with named port I/O.
+    ///
+    /// `ports` is a mutable slice indexed by port index (from `resolve_port`).
+    /// Write input port values before calling. Read output port values after.
+    /// All ports are voltages. Audio rate, no impedance recompute.
+    ///
+    /// ```ignore
+    /// let mut ports = vec![0.0; filter.port_count()];
+    /// ports[audio_in] = input_sample;
+    /// ports[cv_cutoff] = envelope_value;
+    /// filter.process_ports(&mut ports);
+    /// let output = ports[audio_out];
+    /// ```
+    fn process_ports(&mut self, _ports: &mut [Wave]) {}
+
+    // ── Component introspection ─────────────────────────────────────
 
     /// List all editable passive components (R, C, L with comp_ids).
     /// Returns (comp_id, kind_str, current_value) for each editable leaf.
-    fn list_editable_components(&self) -> Vec<(String, &'static str, f64)> {
+    fn list_editable_components(&self) -> Vec<(String, &'static str, Wave)> {
         Vec::new()
     }
 
     /// Set a passive component's value by comp_id. Returns true if found.
-    fn set_passive(&mut self, _comp_id: &str, _value: f64) -> bool {
+    fn set_passive(&mut self, _comp_id: &str, _value: Wave) -> bool {
         false
     }
 
@@ -105,7 +170,7 @@ pub trait PedalProcessor {
     }
 
     /// Debug: return current control state as (label, target_value, smoothed_value).
-    fn control_debug_info(&self) -> Vec<(String, f64, f64)> {
+    fn control_debug_info(&self) -> Vec<(String, Wave, Wave)> {
         Vec::new()
     }
 }

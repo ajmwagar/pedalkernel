@@ -1,0 +1,36 @@
+* LTspice-only CHAN reference fixture for magnetics_external/chan_behavioral_sanity_se.
+* This is not an ngspice fixture. Run it in LTspice and export V(out) as CSV,
+* then import with:
+*   cargo run -p pedalkernel-validate -- --config pedalkernel-validate/ltspice-chan.yaml \
+*     --golden pedalkernel-validate/golden import-csv-golden exported.csv \
+*     --suite magnetics_external --test chan_behavioral_sanity_se --signal sine \
+*     --column V(out) --duration 0.1
+
+.param Np=2000 Ns={Np/26}
+.param Lw=1u Rwp=270 Rws=0.5 Rload=8
+.param Bs=0.4 Br=0.1 Hc=20
+.param Ae=2e-4 Le=0.10 Lg=1e-3
+.param Rp=100k Cp=200p
+
+Vin in 0 SINE(0 2 100 0 0 0)
+
+* Ideal winding wrapper. Node c carries core volts-per-turn and ampere-turns.
+.subckt Winding s f c params: n=100 L=1u Rs=1m Rp=1G
+Lw s 1 {L} Rser={Rs} Rpar={Rp}
+Ew 1 f c 0 {n}
+Fw 0 c Ew {n}
+.ends Winding
+
+* LTspice CHAN inductor wrapped as the shared magnetic core.
+.subckt Core_Chan c params: Bs=0.4 Br=0.1 Hc=20 A=2e-4 Lm=0.10 Lg=1e-3 Rp=100k Cp=200p
+Lc c 0 Rser=0 n=1 Bs={Bs} Br={Br} Hc={Hc} A={A} Lm={Lm} Lg={Lg} Rpar={Rp} Cpar={Cp}
+.ends Core_Chan
+
+Xp in 0 core Winding n={Np} L={Lw} Rs={Rwp} Rp=1G
+Xs out 0 core Winding n={Ns} L={Lw} Rs={Rws} Rp=1G
+Rload out 0 {Rload}
+Xc core Core_Chan Bs={Bs} Br={Br} Hc={Hc} A={Ae} Lm={Le} Lg={Lg} Rp={Rp} Cp={Cp}
+
+.tran 0 0.1 0 2.6041666666666667u
+.save V(out)
+.end

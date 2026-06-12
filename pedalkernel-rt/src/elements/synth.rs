@@ -29,26 +29,26 @@ pub enum VcoWaveform {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vco {
     /// Current phase (0.0 - 1.0)
-    phase: f64,
+    phase: crate::Wave,
     /// Base frequency in Hz (before CV modulation)
-    base_freq: f64,
+    base_freq: crate::Wave,
     /// Current frequency in Hz
-    frequency: f64,
+    frequency: crate::Wave,
     /// Phase increment per sample
-    phase_inc: f64,
+    phase_inc: crate::Wave,
     /// Sample rate
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Pulse width (0.0 - 1.0, default 0.5 = square)
-    pulse_width: f64,
+    pulse_width: crate::Wave,
     /// Last output values for each waveform
-    last_saw: f64,
-    last_tri: f64,
-    last_pulse: f64,
+    last_saw: crate::Wave,
+    last_tri: crate::Wave,
+    last_pulse: crate::Wave,
 }
 
 impl Vco {
     /// Create a new VCO at the given sample rate.
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: crate::Wave) -> Self {
         let base_freq = 440.0; // A4
         let phase_inc = base_freq / sample_rate;
         Self {
@@ -69,32 +69,32 @@ impl Vco {
     /// CV is in volts, with 0V = 440Hz (A4) by default.
     /// Each volt doubles the frequency.
     #[inline]
-    pub fn set_cv_pitch(&mut self, cv: f64) {
+    pub fn set_cv_pitch(&mut self, cv: crate::Wave) {
         // 1V/octave: frequency = base_freq * 2^cv
-        self.frequency = self.base_freq * crate::math::powf(2.0_f64, cv);
+        self.frequency = self.base_freq * crate::math::powf(2.0 as crate::Wave, cv);
         self.phase_inc = self.frequency / self.sample_rate;
     }
 
     /// Set the base frequency (the frequency at 0V CV).
-    pub fn set_base_freq(&mut self, freq: f64) {
+    pub fn set_base_freq(&mut self, freq: crate::Wave) {
         self.base_freq = freq.clamp(1.0, 20000.0);
         self.frequency = self.base_freq;
         self.phase_inc = self.frequency / self.sample_rate;
     }
 
     /// Set pulse width (0.0 - 1.0). 0.5 = square wave.
-    pub fn set_pulse_width(&mut self, pw: f64) {
+    pub fn set_pulse_width(&mut self, pw: crate::Wave) {
         self.pulse_width = pw.clamp(0.01, 0.99);
     }
 
     /// Get current frequency in Hz.
-    pub fn frequency(&self) -> f64 {
+    pub fn frequency(&self) -> crate::Wave {
         self.frequency
     }
 
     /// PolyBLEP correction for reducing aliasing at discontinuities.
     #[inline]
-    fn poly_blep(&self, t: f64) -> f64 {
+    fn poly_blep(&self, t: crate::Wave) -> crate::Wave {
         let dt = self.phase_inc;
         if t < dt {
             // Rising edge
@@ -113,7 +113,7 @@ impl Vco {
     ///
     /// Returns (saw, triangle, pulse) outputs in range [-1, 1].
     #[inline]
-    pub fn tick(&mut self) -> (f64, f64, f64) {
+    pub fn tick(&mut self) -> (crate::Wave, crate::Wave, crate::Wave) {
         // Raw sawtooth (naive: 2*phase - 1)
         let mut saw = 2.0 * self.phase - 1.0;
         // Apply PolyBLEP antialiasing
@@ -155,17 +155,17 @@ impl Vco {
     }
 
     /// Get last saw output without advancing.
-    pub fn saw(&self) -> f64 {
+    pub fn saw(&self) -> crate::Wave {
         self.last_saw
     }
 
     /// Get last triangle output without advancing.
-    pub fn tri(&self) -> f64 {
+    pub fn tri(&self) -> crate::Wave {
         self.last_tri
     }
 
     /// Get last pulse output without advancing.
-    pub fn pulse(&self) -> f64 {
+    pub fn pulse(&self) -> crate::Wave {
         self.last_pulse
     }
 
@@ -178,7 +178,7 @@ impl Vco {
     }
 
     /// Update sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.phase_inc = self.frequency / sample_rate;
     }
@@ -196,20 +196,20 @@ impl Vco {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vcf {
     /// Filter stages (4-pole = 4 one-pole sections)
-    stage: [f64; 4],
+    stage: [crate::Wave; 4],
     /// Cutoff frequency in Hz
-    cutoff: f64,
+    cutoff: crate::Wave,
     /// Resonance (0.0 - 1.0, self-oscillation above ~0.9)
-    resonance: f64,
+    resonance: crate::Wave,
     /// Sample rate
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Precomputed coefficient
-    g: f64,
+    g: crate::Wave,
 }
 
 impl Vcf {
     /// Create a new VCF at the given sample rate.
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: crate::Wave) -> Self {
         let mut vcf = Self {
             stage: [0.0; 4],
             cutoff: 1000.0,
@@ -231,32 +231,32 @@ impl Vcf {
 
     /// Set cutoff frequency via CV (1V/octave from 1kHz base).
     #[inline]
-    pub fn set_cv_cutoff(&mut self, cv: f64) {
+    pub fn set_cv_cutoff(&mut self, cv: crate::Wave) {
         // 1V/octave: cutoff = 1000 * 2^cv
-        self.cutoff = 1000.0 * crate::math::powf(2.0_f64, cv);
+        self.cutoff = 1000.0 * crate::math::powf(2.0 as crate::Wave, cv);
         self.cutoff = self.cutoff.clamp(20.0, 20000.0);
         self.update_coefficients();
     }
 
     /// Set cutoff frequency directly in Hz.
-    pub fn set_cutoff(&mut self, freq: f64) {
+    pub fn set_cutoff(&mut self, freq: crate::Wave) {
         self.cutoff = freq.clamp(20.0, 20000.0);
         self.update_coefficients();
     }
 
     /// Set resonance (0.0 - 1.0).
-    pub fn set_resonance(&mut self, res: f64) {
+    pub fn set_resonance(&mut self, res: crate::Wave) {
         self.resonance = res.clamp(0.0, 1.0);
     }
 
     /// Get current cutoff frequency.
-    pub fn cutoff(&self) -> f64 {
+    pub fn cutoff(&self) -> crate::Wave {
         self.cutoff
     }
 
     /// Process one sample through the filter.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Resonance feedback (from 4th stage output back to input)
         let feedback = self.resonance * 4.0 * self.stage[3];
 
@@ -286,7 +286,7 @@ impl Vcf {
     }
 
     /// Update sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.update_coefficients();
     }
@@ -304,9 +304,9 @@ impl Vcf {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vca {
     /// Current gain (0.0 - 1.0+)
-    gain: f64,
+    gain: crate::Wave,
     /// CV to gain conversion: dB per volt
-    db_per_volt: f64,
+    db_per_volt: crate::Wave,
 }
 
 impl Vca {
@@ -323,26 +323,26 @@ impl Vca {
     /// Exponential response: 0V = unity gain, negative = attenuation.
     /// Typical range: -5V (off) to 0V (unity).
     #[inline]
-    pub fn set_cv(&mut self, cv: f64) {
+    pub fn set_cv(&mut self, cv: crate::Wave) {
         // Exponential: gain = 10^(cv * dB_per_volt / 20)
         // For SSM2164: -5V = -100dB (effectively off)
         let db = cv * self.db_per_volt;
-        self.gain = crate::math::powf(10.0_f64, db / 20.0).clamp(0.0, 10.0);
+        self.gain = crate::math::powf(10.0 as crate::Wave, db / 20.0).clamp(0.0, 10.0);
     }
 
     /// Set gain directly (0.0 - 1.0+).
-    pub fn set_gain(&mut self, gain: f64) {
+    pub fn set_gain(&mut self, gain: crate::Wave) {
         self.gain = gain.clamp(0.0, 10.0);
     }
 
     /// Get current gain.
-    pub fn gain(&self) -> f64 {
+    pub fn gain(&self) -> crate::Wave {
         self.gain
     }
 
     /// Process one sample.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // Apply gain with soft saturation
         let output = input * self.gain;
         // Soft clip at high levels
@@ -383,30 +383,30 @@ pub struct AdsrEnvelope {
     /// Current stage
     stage: EnvelopeStage,
     /// Current envelope value (0.0 - 1.0)
-    value: f64,
+    value: crate::Wave,
     /// Attack time in seconds
-    attack: f64,
+    attack: crate::Wave,
     /// Decay time in seconds
-    decay: f64,
+    decay: crate::Wave,
     /// Sustain level (0.0 - 1.0)
-    sustain: f64,
+    sustain: crate::Wave,
     /// Release time in seconds
-    release: f64,
+    release: crate::Wave,
     /// Sample rate
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Gate state
     gate: bool,
     /// Attack coefficient
-    attack_coef: f64,
+    attack_coef: crate::Wave,
     /// Decay coefficient
-    decay_coef: f64,
+    decay_coef: crate::Wave,
     /// Release coefficient
-    release_coef: f64,
+    release_coef: crate::Wave,
 }
 
 impl AdsrEnvelope {
     /// Create a new ADSR envelope.
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: crate::Wave) -> Self {
         let mut env = Self {
             stage: EnvelopeStage::Idle,
             value: 0.0,
@@ -433,24 +433,24 @@ impl AdsrEnvelope {
     }
 
     /// Set attack time in seconds.
-    pub fn set_attack(&mut self, time: f64) {
+    pub fn set_attack(&mut self, time: crate::Wave) {
         self.attack = time.max(0.001);
         self.update_coefficients();
     }
 
     /// Set decay time in seconds.
-    pub fn set_decay(&mut self, time: f64) {
+    pub fn set_decay(&mut self, time: crate::Wave) {
         self.decay = time.max(0.001);
         self.update_coefficients();
     }
 
     /// Set sustain level (0.0 - 1.0).
-    pub fn set_sustain(&mut self, level: f64) {
+    pub fn set_sustain(&mut self, level: crate::Wave) {
         self.sustain = level.clamp(0.0, 1.0);
     }
 
     /// Set release time in seconds.
-    pub fn set_release(&mut self, time: f64) {
+    pub fn set_release(&mut self, time: crate::Wave) {
         self.release = time.max(0.001);
         self.update_coefficients();
     }
@@ -479,7 +479,7 @@ impl AdsrEnvelope {
     }
 
     /// Get current envelope value.
-    pub fn value(&self) -> f64 {
+    pub fn value(&self) -> crate::Wave {
         self.value
     }
 
@@ -490,7 +490,7 @@ impl AdsrEnvelope {
 
     /// Process one sample of the envelope.
     #[inline]
-    pub fn tick(&mut self) -> f64 {
+    pub fn tick(&mut self) -> crate::Wave {
         match self.stage {
             EnvelopeStage::Idle => {
                 self.value = 0.0;
@@ -534,7 +534,7 @@ impl AdsrEnvelope {
     }
 
     /// Update sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.update_coefficients();
     }
@@ -562,24 +562,24 @@ pub struct SynthProcessor {
     /// Filter envelope
     filter_env: AdsrEnvelope,
     /// Filter envelope amount (how much the envelope affects cutoff)
-    filter_env_amount: f64,
+    filter_env_amount: crate::Wave,
     /// Base filter cutoff frequency
-    filter_base_cutoff: f64,
+    filter_base_cutoff: crate::Wave,
     /// Current note frequency (Hz)
-    note_freq: f64,
+    note_freq: crate::Wave,
     /// Current gate state
     gate: bool,
     /// Sample rate
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Output level
-    output_level: f64,
+    output_level: crate::Wave,
     /// Selected waveform (0=saw, 1=tri, 2=pulse)
     waveform_select: usize,
 }
 
 impl SynthProcessor {
     /// Create a new synth processor at the given sample rate.
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: crate::Wave) -> Self {
         let mut vco = Vco::new(sample_rate);
         vco.set_base_freq(440.0);
 
@@ -618,7 +618,8 @@ impl SynthProcessor {
     /// Set note on with MIDI note number.
     pub fn note_on(&mut self, midi_note: u8, _velocity: u8) {
         // Convert MIDI note to frequency: f = 440 * 2^((n-69)/12)
-        self.note_freq = 440.0 * crate::math::powf(2.0_f64, (midi_note as f64 - 69.0) / 12.0);
+        self.note_freq =
+            440.0 * crate::math::powf(2.0 as crate::Wave, (midi_note as crate::Wave - 69.0) / 12.0);
         self.vco.set_base_freq(self.note_freq);
         self.vco.set_cv_pitch(0.0); // Reset CV offset
         self.gate = true;
@@ -634,7 +635,7 @@ impl SynthProcessor {
     }
 
     /// Set CV pitch directly (1V/octave, 0V = 440Hz).
-    pub fn set_cv_pitch(&mut self, cv: f64) {
+    pub fn set_cv_pitch(&mut self, cv: crate::Wave) {
         self.vco.set_cv_pitch(cv);
     }
 
@@ -652,45 +653,45 @@ impl SynthProcessor {
     }
 
     /// Set filter cutoff frequency in Hz.
-    pub fn set_filter_cutoff(&mut self, freq: f64) {
+    pub fn set_filter_cutoff(&mut self, freq: crate::Wave) {
         self.filter_base_cutoff = freq.clamp(20.0, 20000.0);
     }
 
     /// Set filter resonance (0.0 - 1.0).
-    pub fn set_filter_resonance(&mut self, res: f64) {
+    pub fn set_filter_resonance(&mut self, res: crate::Wave) {
         self.vcf.set_resonance(res);
     }
 
     /// Set filter envelope amount in octaves.
-    pub fn set_filter_env_amount(&mut self, octaves: f64) {
+    pub fn set_filter_env_amount(&mut self, octaves: crate::Wave) {
         self.filter_env_amount = octaves.clamp(-5.0, 5.0);
     }
 
     /// Set amplitude envelope attack time in seconds.
-    pub fn set_attack(&mut self, time: f64) {
+    pub fn set_attack(&mut self, time: crate::Wave) {
         self.amp_env.set_attack(time);
         self.filter_env.set_attack(time);
     }
 
     /// Set amplitude envelope decay time in seconds.
-    pub fn set_decay(&mut self, time: f64) {
+    pub fn set_decay(&mut self, time: crate::Wave) {
         self.amp_env.set_decay(time);
         self.filter_env.set_decay(time);
     }
 
     /// Set amplitude envelope sustain level (0.0 - 1.0).
-    pub fn set_sustain(&mut self, level: f64) {
+    pub fn set_sustain(&mut self, level: crate::Wave) {
         self.amp_env.set_sustain(level);
     }
 
     /// Set amplitude envelope release time in seconds.
-    pub fn set_release(&mut self, time: f64) {
+    pub fn set_release(&mut self, time: crate::Wave) {
         self.amp_env.set_release(time);
         self.filter_env.set_release(time);
     }
 
     /// Set output level (0.0 - 1.0).
-    pub fn set_output_level(&mut self, level: f64) {
+    pub fn set_output_level(&mut self, level: crate::Wave) {
         self.output_level = level.clamp(0.0, 1.0);
     }
 
@@ -700,13 +701,13 @@ impl SynthProcessor {
     }
 
     /// Set pulse width (0.0 - 1.0, only affects pulse wave).
-    pub fn set_pulse_width(&mut self, pw: f64) {
+    pub fn set_pulse_width(&mut self, pw: crate::Wave) {
         self.vco.set_pulse_width(pw);
     }
 
     /// Process one sample and return the output.
     #[inline]
-    pub fn process(&mut self) -> f64 {
+    pub fn process(&mut self) -> crate::Wave {
         // Generate oscillator waveforms
         let (saw, tri, pulse) = self.vco.tick();
 
@@ -720,8 +721,8 @@ impl SynthProcessor {
         // Process filter envelope
         let filter_env_val = self.filter_env.tick();
         // Modulate filter cutoff: base_cutoff * 2^(env * amount)
-        let cutoff =
-            self.filter_base_cutoff * crate::math::powf(2.0_f64, filter_env_val * self.filter_env_amount);
+        let cutoff = self.filter_base_cutoff
+            * crate::math::powf(2.0 as crate::Wave, filter_env_val * self.filter_env_amount);
         self.vcf.set_cutoff(cutoff);
 
         // Filter the oscillator
@@ -740,11 +741,11 @@ impl SynthProcessor {
     /// Process audio input through the synth (for external audio processing).
     /// The synth VCF and VCA will process the input.
     #[inline]
-    pub fn process_audio(&mut self, input: f64) -> f64 {
+    pub fn process_audio(&mut self, input: crate::Wave) -> crate::Wave {
         // For audio input mode, just apply filter and envelope
         let filter_env_val = self.filter_env.tick();
-        let cutoff =
-            self.filter_base_cutoff * crate::math::powf(2.0_f64, filter_env_val * self.filter_env_amount);
+        let cutoff = self.filter_base_cutoff
+            * crate::math::powf(2.0 as crate::Wave, filter_env_val * self.filter_env_amount);
         self.vcf.set_cutoff(cutoff);
 
         let filtered = self.vcf.process(input);
@@ -765,7 +766,7 @@ impl SynthProcessor {
     }
 
     /// Update sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.vco.set_sample_rate(sample_rate);
         self.vcf.set_sample_rate(sample_rate);
@@ -774,12 +775,12 @@ impl SynthProcessor {
     }
 
     /// Set a control by label (for compatibility with pedal interface).
-    pub fn set_control(&mut self, label: &str, value: f64) {
+    pub fn set_control(&mut self, label: &str, value: crate::Wave) {
         let value = value.clamp(0.0, 1.0);
         match label.to_ascii_lowercase().as_str() {
             "cutoff" | "filter" => {
                 // Map 0-1 to 20Hz - 20kHz (exponential)
-                let freq = 20.0 * crate::math::powf(1000.0_f64, value);
+                let freq = 20.0 * crate::math::powf(1000.0 as crate::Wave, value);
                 self.set_filter_cutoff(freq);
             }
             "resonance" | "res" | "q" => {
@@ -787,18 +788,18 @@ impl SynthProcessor {
             }
             "attack" => {
                 // Map 0-1 to 1ms - 2s (exponential)
-                let time = 0.001 * crate::math::powf(2000.0_f64, value);
+                let time = 0.001 * crate::math::powf(2000.0 as crate::Wave, value);
                 self.set_attack(time);
             }
             "decay" => {
-                let time = 0.001 * crate::math::powf(2000.0_f64, value);
+                let time = 0.001 * crate::math::powf(2000.0 as crate::Wave, value);
                 self.set_decay(time);
             }
             "sustain" => {
                 self.set_sustain(value);
             }
             "release" => {
-                let time = 0.001 * crate::math::powf(5000.0_f64, value);
+                let time = 0.001 * crate::math::powf(5000.0 as crate::Wave, value);
                 self.set_release(time);
             }
             "level" | "volume" | "output" => {
@@ -882,7 +883,7 @@ mod tests {
         // High frequency input should be attenuated
         let mut output_sum = 0.0;
         for i in 0..1000 {
-            let input = crate::math::sin(i as f64 * 0.5); // ~3.8kHz at 48kHz
+            let input = crate::math::sin(i as crate::Wave * 0.5); // ~3.8kHz at 48kHz
             output_sum += vcf.process(input).abs();
         }
 
@@ -899,11 +900,11 @@ mod tests {
 
         // Unity gain
         vca.set_gain(1.0);
-        assert!((vca.process(0.5) - crate::math::tanh(0.5_f64)).abs() < 0.01);
+        assert!((vca.process(0.5) - crate::math::tanh(0.5 as crate::Wave)).abs() < 0.01);
 
         // Half gain
         vca.set_gain(0.5);
-        assert!((vca.process(1.0) - crate::math::tanh(0.5_f64)).abs() < 0.01);
+        assert!((vca.process(1.0) - crate::math::tanh(0.5 as crate::Wave)).abs() < 0.01);
     }
 
     #[test]

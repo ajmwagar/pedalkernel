@@ -26,33 +26,33 @@ pub enum RectifierType {
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Resistor {
-    resistance: f64,
+    resistance: crate::Wave,
 }
 
 impl Resistor {
-    pub fn new(resistance: f64) -> Self {
+    pub fn new(resistance: crate::Wave) -> Self {
         Self { resistance }
     }
 
     /// Change the resistance value in-place (no state reset).
-    pub fn set_resistance(&mut self, resistance: f64) {
+    pub fn set_resistance(&mut self, resistance: crate::Wave) {
         self.resistance = resistance;
     }
 }
 
 impl WdfLeaf for Resistor {
     #[inline]
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.resistance
     }
 
     #[inline]
-    fn reflected(&self) -> f64 {
+    fn reflected(&self) -> crate::Wave {
         0.0
     }
 
     #[inline]
-    fn set_incident(&mut self, _a: f64) {
+    fn set_incident(&mut self, _a: crate::Wave) {
         // Resistor has no state to update
     }
 }
@@ -68,13 +68,13 @@ impl WdfLeaf for Resistor {
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Capacitor {
-    capacitance: f64,
-    resistance: f64,
-    state: f64, // z^{-1} of incident wave
+    capacitance: crate::Wave,
+    resistance: crate::Wave,
+    state: crate::Wave, // z^{-1} of incident wave
 }
 
 impl Capacitor {
-    pub fn new(capacitance: f64, sample_rate: f64) -> Self {
+    pub fn new(capacitance: crate::Wave, sample_rate: crate::Wave) -> Self {
         Self {
             capacitance,
             resistance: 1.0 / (2.0 * sample_rate * capacitance),
@@ -85,21 +85,21 @@ impl Capacitor {
 
 impl WdfLeaf for Capacitor {
     #[inline]
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.resistance
     }
 
     #[inline]
-    fn reflected(&self) -> f64 {
+    fn reflected(&self) -> crate::Wave {
         self.state
     }
 
     #[inline]
-    fn set_incident(&mut self, a: f64) {
+    fn set_incident(&mut self, a: crate::Wave) {
         self.state = a;
     }
 
-    fn set_sample_rate(&mut self, sample_rate: f64) {
+    fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.resistance = 1.0 / (2.0 * sample_rate * self.capacitance);
     }
 
@@ -119,13 +119,13 @@ impl WdfLeaf for Capacitor {
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Inductor {
-    inductance: f64,
-    resistance: f64,
-    state: f64,
+    inductance: crate::Wave,
+    resistance: crate::Wave,
+    state: crate::Wave,
 }
 
 impl Inductor {
-    pub fn new(inductance: f64, sample_rate: f64) -> Self {
+    pub fn new(inductance: crate::Wave, sample_rate: crate::Wave) -> Self {
         Self {
             inductance,
             resistance: 2.0 * sample_rate * inductance,
@@ -136,21 +136,21 @@ impl Inductor {
 
 impl WdfLeaf for Inductor {
     #[inline]
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.resistance
     }
 
     #[inline]
-    fn reflected(&self) -> f64 {
+    fn reflected(&self) -> crate::Wave {
         -self.state
     }
 
     #[inline]
-    fn set_incident(&mut self, a: f64) {
+    fn set_incident(&mut self, a: crate::Wave) {
         self.state = a;
     }
 
-    fn set_sample_rate(&mut self, sample_rate: f64) {
+    fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.resistance = 2.0 * sample_rate * self.inductance;
     }
 
@@ -170,40 +170,40 @@ impl WdfLeaf for Inductor {
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VoltageSource {
-    voltage: f64,
-    resistance: f64,
+    voltage: crate::Wave,
+    resistance: crate::Wave,
 }
 
 impl VoltageSource {
-    pub fn new(port_resistance: f64) -> Self {
+    pub fn new(port_resistance: crate::Wave) -> Self {
         Self {
             voltage: 0.0,
             resistance: port_resistance,
         }
     }
 
-    pub fn set_voltage(&mut self, v: f64) {
+    pub fn set_voltage(&mut self, v: crate::Wave) {
         self.voltage = v;
     }
 
-    pub fn voltage(&self) -> f64 {
+    pub fn voltage(&self) -> crate::Wave {
         self.voltage
     }
 }
 
 impl WdfLeaf for VoltageSource {
     #[inline]
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.resistance
     }
 
     #[inline]
-    fn reflected(&self) -> f64 {
+    fn reflected(&self) -> crate::Wave {
         2.0 * self.voltage
     }
 
     #[inline]
-    fn set_incident(&mut self, _a: f64) {
+    fn set_incident(&mut self, _a: crate::Wave) {
         // No state update needed
     }
 }
@@ -235,18 +235,18 @@ impl WdfLeaf for VoltageSource {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PowerSupply {
     /// Nominal (no-load) supply voltage (V).
-    nominal_voltage: f64,
+    nominal_voltage: crate::Wave,
     /// Total supply output impedance (Ω): rectifier + transformer + ESR.
-    impedance: f64,
+    impedance: crate::Wave,
     /// Filter capacitance (F) — determines sag recovery time constant.
-    filter_cap: f64,
+    filter_cap: crate::Wave,
     /// Current cap voltage — tracks the RC charge/discharge state.
-    cap_voltage: f64,
+    cap_voltage: crate::Wave,
     /// Reciprocal of sample rate × capacitance (precomputed for efficiency).
     /// This is dt/C where dt = 1/fs.
-    dt_over_c: f64,
+    dt_over_c: crate::Wave,
     /// Sample rate (Hz).
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Rectifier type (affects static voltage drop model).
     rectifier: RectifierType,
 }
@@ -260,11 +260,11 @@ impl PowerSupply {
     /// * `rectifier` — Tube or solid-state rectifier
     /// * `sample_rate` — Audio sample rate (Hz)
     pub fn new(
-        nominal_voltage: f64,
-        impedance: f64,
-        filter_cap: f64,
+        nominal_voltage: crate::Wave,
+        impedance: crate::Wave,
+        filter_cap: crate::Wave,
         rectifier: RectifierType,
-        sample_rate: f64,
+        sample_rate: crate::Wave,
     ) -> Self {
         Self {
             nominal_voltage,
@@ -291,7 +291,7 @@ impl PowerSupply {
     /// Discretized (forward Euler):
     ///   `Vcap[n+1] = Vcap[n] + dt/C * ((V_nominal - Vcap[n]) / Z_output - I_load)`
     #[inline]
-    pub fn tick(&mut self, current_draw: f64) -> f64 {
+    pub fn tick(&mut self, current_draw: crate::Wave) -> crate::Wave {
         // Rectifier charging current: (V_nominal - V_cap) / Z_output
         // This is the current flowing from the rectifier into the filter cap.
         // When V_cap < V_nominal, current flows in to recharge.
@@ -337,7 +337,7 @@ impl PowerSupply {
     }
 
     /// Update the sample rate (recomputes dt/C).
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.dt_over_c = 1.0 / (sample_rate * self.filter_cap);
     }
@@ -348,12 +348,12 @@ impl PowerSupply {
     }
 
     /// Get the current (sagged) voltage.
-    pub fn voltage(&self) -> f64 {
+    pub fn voltage(&self) -> crate::Wave {
         self.cap_voltage
     }
 
     /// Get the nominal (no-load) voltage.
-    pub fn nominal_voltage(&self) -> f64 {
+    pub fn nominal_voltage(&self) -> crate::Wave {
         self.nominal_voltage
     }
 
@@ -366,7 +366,7 @@ impl PowerSupply {
     ///
     /// Use this to initialize `set_supply_voltage()` so the first audio
     /// sample sees the same voltage the PSU will produce at idle.
-    pub fn steady_state_voltage(&self) -> f64 {
+    pub fn steady_state_voltage(&self) -> crate::Wave {
         let static_drop = match self.rectifier {
             RectifierType::Tube => 10.0,
             RectifierType::SolidState => 1.4,

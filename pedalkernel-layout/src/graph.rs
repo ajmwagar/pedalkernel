@@ -524,6 +524,8 @@ mod tests {
             subtitle: None,
             calibrate: false,
             subcircuits: vec![],
+            ports: vec![],
+            init_hints: vec![],
         }
     }
 

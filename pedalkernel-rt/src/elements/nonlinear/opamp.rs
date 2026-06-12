@@ -2,8 +2,8 @@
 //!
 //! Models common op-amps (TL072, LM308, JRC4558) as VCVS with feedback.
 
-use alloc::string::String;
 use crate::elements::WdfRoot;
+use alloc::string::String;
 
 // ---------------------------------------------------------------------------
 // Op-Amp (Voltage-Controlled Voltage Source) Models
@@ -32,24 +32,24 @@ use crate::elements::WdfRoot;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpAmpModel {
     /// Open-loop DC gain. TL072 ≈ 200k (106dB), LM308 ≈ 300k.
-    pub open_loop_gain: f64,
+    pub open_loop_gain: crate::Wave,
     /// Gain-bandwidth product (Hz). TL072 ≈ 3MHz, LM308 ≈ 1MHz.
     /// Determines closed-loop bandwidth: f_cl = GBW / closed_loop_gain.
-    pub gbw: f64,
+    pub gbw: crate::Wave,
     /// Slew rate (V/µs). TL072 ≈ 13, LM308 ≈ 0.3.
-    pub slew_rate: f64,
+    pub slew_rate: crate::Wave,
     /// Maximum positive output swing (V above bias point).
     /// For symmetric bias: same as v_rail_neg. For asymmetric: differs.
-    pub v_rail_pos: f64,
+    pub v_rail_pos: crate::Wave,
     /// Maximum negative output swing (V below bias point).
-    pub v_rail_neg: f64,
+    pub v_rail_neg: crate::Wave,
     /// Output impedance (Ω). Typically 50-200Ω for voltage-feedback op-amps.
     /// Used by the VCVS stamp in the MNA nullor path.
-    pub output_impedance: f64,
+    pub output_impedance: crate::Wave,
     /// Output capacitance (F). Physical capacitance of the output stage.
     /// Keeps the output node as a dynamic state in the state-space reduction,
     /// preserving the feedback loop's energy recirculation. Typical: 10-50pF.
-    pub output_capacitance: f64,
+    pub output_capacitance: crate::Wave,
 }
 
 impl OpAmpModel {
@@ -64,8 +64,8 @@ impl OpAmpModel {
             gbw: 3e6,                  // 3 MHz
             slew_rate: 13.0,           // 13 V/µs
             v_rail_pos: 12.0,
-            v_rail_neg: 12.0,               // ±12V swing at ±15V supply
-            output_impedance: 75.0,  // Ω
+            v_rail_neg: 12.0,           // ±12V swing at ±15V supply
+            output_impedance: 75.0,     // Ω
             output_capacitance: 20e-12, // 20pF
         }
     }
@@ -93,7 +93,7 @@ impl OpAmpModel {
             slew_rate: 0.3,
             v_rail_pos: 12.0,
             v_rail_neg: 12.0,
-            output_impedance: 200.0, // Higher Ro than JFET types
+            output_impedance: 200.0,    // Higher Ro than JFET types
             output_capacitance: 30e-12, // 30pF — slower output stage
         }
     }
@@ -141,7 +141,7 @@ impl OpAmpModel {
             slew_rate: 9.0,
             v_rail_pos: 12.0,
             v_rail_neg: 12.0,
-            output_impedance: 50.0, // Lower Ro — studio grade
+            output_impedance: 50.0,     // Lower Ro — studio grade
             output_capacitance: 15e-12, // 15pF — fast output
         }
     }
@@ -192,11 +192,11 @@ pub struct FeedbackConfig {
     /// Component ID of the pot controlling gain.
     pub pot_comp_id: String,
     /// Resistance of the other leg (Ri when pot is Rf, Rf when pot is Ri).
-    pub other_leg_r: f64,
+    pub other_leg_r: crate::Wave,
     /// Fixed resistance in series with the pot.
-    pub fixed_series_r: f64,
+    pub fixed_series_r: crate::Wave,
     /// Fixed resistance in parallel across (pot + series R). None if no parallel R.
-    pub parallel_r: Option<f64>,
+    pub parallel_r: Option<crate::Wave>,
     /// True = pot is in the feedback (Rf) leg; false = pot is in the input (Ri) leg.
     pub pot_is_feedback: bool,
     /// True = inverting topology; false = non-inverting.
@@ -230,10 +230,10 @@ pub struct FeedbackConfig {
 pub enum OpAmpMode {
     /// Inverting amplifier: Vout = -gain * Vin
     /// Input comes from WDF wave variable (virtual ground at V-).
-    Inverting { gain: f64 },
+    Inverting { gain: crate::Wave },
     /// Non-inverting amplifier: Vout = gain * Vp
     /// Input set via `set_vp()`. Unity buffer = gain of 1.0.
-    NonInverting { gain: f64 },
+    NonInverting { gain: crate::Wave },
 }
 
 /// Unified op-amp root for WDF trees.
@@ -257,14 +257,14 @@ pub struct OpAmpPostFx {
     /// Datasheet parameters (slew_rate, v_max).
     pub model: OpAmpModel,
     /// Sample rate for slew-per-sample conversion.
-    pub sample_rate: f64,
+    pub sample_rate: crate::Wave,
     /// Previous output voltage for slew-rate limiting.
-    prev_out: f64,
+    prev_out: crate::Wave,
 }
 
 impl OpAmpPostFx {
     /// Create with model parameters and sample rate.
-    pub fn new(model: OpAmpModel, sample_rate: f64) -> Self {
+    pub fn new(model: OpAmpModel, sample_rate: crate::Wave) -> Self {
         Self {
             model,
             sample_rate,
@@ -277,7 +277,7 @@ impl OpAmpPostFx {
     /// Rail clamping first so the slew limiter is bounded by the clamped
     /// target. This matches SPICE behaviour where the op-amp can't exceed
     /// the supply rails regardless of input rate of change.
-    pub fn process(&mut self, v_raw: f64) -> f64 {
+    pub fn process(&mut self, v_raw: crate::Wave) -> crate::Wave {
         let v_clip = v_raw.clamp(-self.model.v_rail_neg, self.model.v_rail_pos);
         // slew_rate is V/µs in the datasheet. Convert to V/sample.
         let slew_max = self.model.slew_rate * 1e6 / self.sample_rate;
@@ -312,27 +312,27 @@ pub struct OpAmpRoot {
     /// Operating mode (inverting/non-inverting).
     mode: OpAmpMode,
     /// Non-inverting input voltage (for NonInverting mode).
-    vp: f64,
+    vp: crate::Wave,
     /// Previous output voltage (for slew rate limiting).
-    prev_out: f64,
+    prev_out: crate::Wave,
     /// Sample rate (needed for slew rate limiting and GBW filter).
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Soft clipping limit from feedback diodes.
     /// If set, uses tanh-based soft clipping instead of hard clipping.
-    soft_clip_v: Option<f64>,
+    soft_clip_v: Option<crate::Wave>,
     /// GBW rolloff filter state (single-pole LPF on closed-loop output).
     /// Models the dominant-pole frequency response: f_cl = GBW / closed_loop_gain.
-    gbw_state: f64,
+    gbw_state: crate::Wave,
     /// GBW rolloff filter coefficient: g = 1 - exp(-2π·f_cl/fs).
     /// Recomputed when gain or sample rate changes.
-    gbw_coeff: f64,
+    gbw_coeff: crate::Wave,
     /// Actual closed-loop gain for GBW bandwidth calculation ONLY.
     ///
     /// In the 3-port adaptor path, the VCVS mode gain is set to 1.0 because
     /// the scattering matrix handles the output impedance — but the GBW filter
     /// still needs the true closed-loop gain to compute f_cl = GBW / gbw_gain.
     /// For all other paths, gbw_gain == self.gain().
-    gbw_gain: f64,
+    gbw_gain: crate::Wave,
     /// Feedback pot configuration. When set, the op-amp recomputes its own
     /// gain from the pot's resistance via `set_feedback_pot_r()`.
     feedback_config: Option<FeedbackConfig>,
@@ -347,7 +347,11 @@ impl OpAmpRoot {
     /// We model this as a single-pole LPF: g = 1 - exp(-2π·f_cl / fs).
     /// When f_cl >= fs/2 (Nyquist), the filter is transparent (g = 1.0).
     #[inline]
-    fn compute_gbw_coeff(gbw: f64, gain: f64, sample_rate: f64) -> f64 {
+    fn compute_gbw_coeff(
+        gbw: crate::Wave,
+        gain: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> crate::Wave {
         let g = gain.max(1.0);
         let f_cl = gbw / g;
         if f_cl >= sample_rate * 0.5 {
@@ -383,7 +387,7 @@ impl OpAmpRoot {
     }
 
     /// Create an inverting op-amp: Vout = -gain * Vin.
-    pub fn new_inverting(model: OpAmpModel, gain: f64) -> Self {
+    pub fn new_inverting(model: OpAmpModel, gain: crate::Wave) -> Self {
         let g = gain.abs();
         let gbw_coeff = Self::compute_gbw_coeff(model.gbw, g, 48000.0);
         Self {
@@ -401,7 +405,7 @@ impl OpAmpRoot {
     }
 
     /// Create a non-inverting op-amp: Vout = gain * Vin.
-    pub fn new_non_inverting(model: OpAmpModel, gain: f64) -> Self {
+    pub fn new_non_inverting(model: OpAmpModel, gain: crate::Wave) -> Self {
         let g = gain.abs();
         let gbw_coeff = Self::compute_gbw_coeff(model.gbw, g, 48000.0);
         Self {
@@ -423,19 +427,19 @@ impl OpAmpRoot {
     /// For non-inverting mode (including unity buffer), this is the input signal.
     /// For inverting mode, this is typically ground or a bias voltage.
     #[inline]
-    pub fn set_vp(&mut self, vp: f64) {
+    pub fn set_vp(&mut self, vp: crate::Wave) {
         self.vp = vp;
     }
 
     /// Get the current non-inverting input voltage.
     #[inline]
-    pub fn vp(&self) -> f64 {
+    pub fn vp(&self) -> crate::Wave {
         self.vp
     }
 
     /// Set the closed-loop gain. Recomputes GBW rolloff coefficient.
     #[inline]
-    pub fn set_gain(&mut self, gain: f64) {
+    pub fn set_gain(&mut self, gain: crate::Wave) {
         let g = gain.abs();
         match &mut self.mode {
             OpAmpMode::Inverting { gain: gv } => *gv = g,
@@ -451,14 +455,14 @@ impl OpAmpRoot {
     /// matrix handles port impedance), but the GBW rolloff filter must use the true
     /// closed-loop gain to compute f_cl = GBW / gbw_gain correctly.
     #[inline]
-    pub fn set_gbw_gain(&mut self, gbw_gain: f64) {
+    pub fn set_gbw_gain(&mut self, gbw_gain: crate::Wave) {
         self.gbw_gain = gbw_gain.abs().max(1.0);
         self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gbw_gain, self.sample_rate);
     }
 
     /// Get the current gain.
     #[inline]
-    pub fn gain(&self) -> f64 {
+    pub fn gain(&self) -> crate::Wave {
         match &self.mode {
             OpAmpMode::Inverting { gain } => *gain,
             OpAmpMode::NonInverting { gain } => *gain,
@@ -476,7 +480,7 @@ impl OpAmpRoot {
 
     /// Enable soft clipping mode for feedback diodes.
     #[inline]
-    pub fn set_soft_clip(&mut self, diode_vf: f64) {
+    pub fn set_soft_clip(&mut self, diode_vf: crate::Wave) {
         self.soft_clip_v = Some(diode_vf.max(0.1));
     }
 
@@ -488,41 +492,41 @@ impl OpAmpRoot {
 
     /// Set the sample rate (for slew rate limiting and GBW filter).
     #[inline]
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gbw_gain, sample_rate);
     }
 
     /// Get the current sample rate.
     #[inline]
-    pub fn sample_rate(&self) -> f64 {
+    pub fn sample_rate(&self) -> crate::Wave {
         self.sample_rate
     }
 
     /// Get the current GBW filter coefficient (for testing).
     #[inline]
-    pub fn gbw_coeff(&self) -> f64 {
+    pub fn gbw_coeff(&self) -> crate::Wave {
         self.gbw_coeff
     }
 
     /// Set the maximum output voltage (supply rails).
     #[inline]
     /// Set symmetric rail limits (both positive and negative).
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         let v = v_max.max(0.5);
         self.model.v_rail_pos = v;
         self.model.v_rail_neg = v;
     }
 
     /// Set asymmetric rail limits (from bias analysis).
-    pub fn set_v_rails(&mut self, v_rail_pos: f64, v_rail_neg: f64) {
+    pub fn set_v_rails(&mut self, v_rail_pos: crate::Wave, v_rail_neg: crate::Wave) {
         self.model.v_rail_pos = v_rail_pos.max(0.5);
         self.model.v_rail_neg = v_rail_neg.max(0.5);
     }
 
     /// Get the symmetric v_max (minimum of both rails).
     #[inline]
-    pub fn v_max(&self) -> f64 {
+    pub fn v_max(&self) -> crate::Wave {
         self.model.v_rail_pos.min(self.model.v_rail_neg)
     }
 
@@ -551,7 +555,7 @@ impl OpAmpRoot {
     /// - Pot in Rf, inverting:      gain = effective_rf / ri
     /// - Pot in Rf, non-inverting:  gain = 1 + effective_rf / ri
     /// - Pot in Ri, non-inverting:  gain = 1 + rf / effective_ri
-    pub fn set_feedback_pot_r(&mut self, pot_r: f64) {
+    pub fn set_feedback_pot_r(&mut self, pot_r: crate::Wave) {
         let cfg = match &self.feedback_config {
             Some(c) => c,
             None => return,
@@ -587,13 +591,13 @@ impl OpAmpRoot {
     /// Configure feedback topology (for advanced use).
     /// This is a no-op for gain stages; use set_gain() instead.
     #[inline]
-    pub fn set_feedback(&mut self, _ratio: f64, _vm_external: f64) {
+    pub fn set_feedback(&mut self, _ratio: crate::Wave, _vm_external: crate::Wave) {
         // Kept for API compatibility with existing code
     }
 
     /// Apply slew rate limiting.
     #[inline]
-    fn apply_slew_limit(&mut self, v: f64) -> f64 {
+    fn apply_slew_limit(&mut self, v: crate::Wave) -> crate::Wave {
         let max_dv = self.model.slew_rate * 1e6 / self.sample_rate;
         let dv = v - self.prev_out;
         let limited = if dv > max_dv {
@@ -619,7 +623,7 @@ impl OpAmpRoot {
     /// Returns the magnitude (positive) of the gained voltage, since WDF
     /// DiodePair convention already negates the VS voltage.
     #[inline]
-    pub fn compute_vs_voltage(&mut self, input: f64) -> f64 {
+    pub fn compute_vs_voltage(&mut self, input: crate::Wave) -> crate::Wave {
         let gain = self.gain();
 
         // Apply gain (magnitude only — WDF handles sign convention)
@@ -649,7 +653,7 @@ impl OpAmpRoot {
 impl WdfRoot for OpAmpRoot {
     /// Op-amp processing based on mode.
     #[inline]
-    fn process(&mut self, a: f64, _rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, _rp: crate::Wave) -> crate::Wave {
         // Compute output voltage based on topology
         let mut v_out = match self.mode {
             OpAmpMode::Inverting { gain } => {
@@ -706,7 +710,7 @@ mod tests {
 
     /// Helper: drive OpAmpRoot with a WDF incident wave `a` and extract
     /// the output voltage. In WDF: v_out = (a + b) / 2, where b = process(a).
-    fn drive(root: &mut OpAmpRoot, a: f64) -> f64 {
+    fn drive(root: &mut OpAmpRoot, a: crate::Wave) -> crate::Wave {
         let b = root.process(a, 10_000.0);
         (a + b) / 2.0
     }
@@ -725,10 +729,12 @@ mod tests {
 
         let mut lm_model = lm308();
         lm_model.slew_rate = 100.0; // fast slew so it doesn't interfere
-        lm_model.v_rail_pos = 1000.0; lm_model.v_rail_neg = 1000.0;
+        lm_model.v_rail_pos = 1000.0;
+        lm_model.v_rail_neg = 1000.0;
         let mut tl_model = tl072();
         tl_model.slew_rate = 100.0;
-        tl_model.v_rail_pos = 1000.0; tl_model.v_rail_neg = 1000.0;
+        tl_model.v_rail_pos = 1000.0;
+        tl_model.v_rail_neg = 1000.0;
 
         let mut lm = OpAmpRoot::new_inverting(lm_model, gain);
         lm.set_sample_rate(sr);
@@ -737,12 +743,13 @@ mod tests {
 
         let measure = |root: &mut OpAmpRoot| {
             for s in 0..500 {
-                let v = 0.001 * crate::math::sin(crate::math::TAU * freq * s as f64 / sr);
+                let v = 0.001 * crate::math::sin(crate::math::TAU * freq * s as crate::Wave / sr);
                 drive(root, 2.0 * v);
             }
-            let mut peak = 0.0f64;
+            let mut peak = 0.0 as crate::Wave;
             for s in 500..600 {
-                let v = 0.001 * crate::math::sin(crate::math::TAU * freq * (500 + s) as f64 / sr);
+                let v = 0.001
+                    * crate::math::sin(crate::math::TAU * freq * (500 + s) as crate::Wave / sr);
                 peak = peak.max(drive(root, 2.0 * v).abs());
             }
             peak
@@ -751,7 +758,10 @@ mod tests {
         let peak_lm = measure(&mut lm);
         let peak_tl = measure(&mut tl);
         eprintln!("GBW: LM308 peak={peak_lm:.6}, TL072 peak={peak_tl:.6}");
-        assert!(peak_tl > peak_lm * 1.1, "TL072 (higher GBW) should pass more HF: tl={peak_tl:.6} > lm={peak_lm:.6}");
+        assert!(
+            peak_tl > peak_lm * 1.1,
+            "TL072 (higher GBW) should pass more HF: tl={peak_tl:.6} > lm={peak_lm:.6}"
+        );
     }
 
     // ── Slew rate limiting ───────────────────────────────────────────────
@@ -802,7 +812,10 @@ mod tests {
         let out_tl = drive(&mut tl, 0.0);
 
         eprintln!("Slew comparison: LM308={out_lm:.4}, TL072={out_tl:.4}");
-        assert!(out_tl > out_lm, "TL072 should slew faster: tl={out_tl:.4} > lm={out_lm:.4}");
+        assert!(
+            out_tl > out_lm,
+            "TL072 should slew faster: tl={out_tl:.4} > lm={out_lm:.4}"
+        );
     }
 
     // ── Rail saturation ──────────────────────────────────────────────────
@@ -811,7 +824,8 @@ mod tests {
     fn opamp_rails_clamp_output() {
         // v_max = 3.0V (9V supply). Output should hard clip at ±3V.
         let mut model = tl072();
-        model.v_rail_pos =3.0; model.v_rail_neg =3.0;
+        model.v_rail_pos = 3.0;
+        model.v_rail_neg = 3.0;
         // High slew rate so it doesn't interfere
         model.slew_rate = 100.0;
         let mut root = OpAmpRoot::new_non_inverting(model, 1.0);
@@ -843,7 +857,8 @@ mod tests {
         let mut model = lm308();
         model.gbw = 100_000.0; // Very low GBW
         model.slew_rate = 0.1; // Very slow slew
-        model.v_rail_pos =20.0; model.v_rail_neg =20.0; // High rails so they don't interfere
+        model.v_rail_pos = 20.0;
+        model.v_rail_neg = 20.0; // High rails so they don't interfere
         let mut root = OpAmpRoot::new_non_inverting(model, 10.0);
         root.set_sample_rate(48000.0);
 
@@ -857,7 +872,10 @@ mod tests {
         let out = drive(&mut root, 0.0);
         eprintln!("GBW+slew: step to 5V, out={out:.6}");
         // Output should be very small — GBW smooths first, then slew limits what's left
-        assert!(out < 3.0, "Combined GBW+slew should heavily limit: got {out:.6}");
+        assert!(
+            out < 3.0,
+            "Combined GBW+slew should heavily limit: got {out:.6}"
+        );
     }
 
     // ── Inverting gain ───────────────────────────────────────────────────
@@ -868,7 +886,8 @@ mod tests {
         // In WDF: v_in = a/2, so a=0.02 → v_in=0.01 → v_out=-0.1.
         let mut model = tl072();
         model.slew_rate = 100.0; // Fast slew
-        model.v_rail_pos =10.0; model.v_rail_neg =10.0;
+        model.v_rail_pos = 10.0;
+        model.v_rail_neg = 10.0;
         let mut root = OpAmpRoot::new_inverting(model, 10.0);
         root.set_sample_rate(48000.0);
 
@@ -897,22 +916,29 @@ mod tests {
         // produce proportionally different output.
         let mut model = tl072();
         model.slew_rate = 100.0; // fast slew
-        model.v_rail_pos =100.0; model.v_rail_neg =100.0; // high rails
+        model.v_rail_pos = 100.0;
+        model.v_rail_neg = 100.0; // high rails
         let mut root = OpAmpRoot::new_inverting(model, 10.0);
         root.set_sample_rate(48000.0);
 
         // Warmup at gain=10
-        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        for _ in 0..100 {
+            root.compute_vs_voltage(0.0);
+        }
         let out_g10 = root.compute_vs_voltage(0.01).abs();
 
         // Change gain to 2
         root.set_gain(2.0);
-        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        for _ in 0..100 {
+            root.compute_vs_voltage(0.0);
+        }
         let out_g2 = root.compute_vs_voltage(0.01).abs();
 
         eprintln!("VS voltage: g10={out_g10:.6}, g2={out_g2:.6}");
-        assert!(out_g10 > out_g2 * 3.0,
-            "Higher gain should give more VS voltage: g10={out_g10:.6}, g2={out_g2:.6}");
+        assert!(
+            out_g10 > out_g2 * 3.0,
+            "Higher gain should give more VS voltage: g10={out_g10:.6}, g2={out_g2:.6}"
+        );
     }
 
     #[test]
@@ -921,20 +947,25 @@ mod tests {
         // Rf=100k, Ri=10k → gain=10.
         let mut model = tl072();
         model.slew_rate = 100.0;
-        model.v_rail_pos =100.0; model.v_rail_neg =100.0;
+        model.v_rail_pos = 100.0;
+        model.v_rail_neg = 100.0;
         let rf = 100_000.0;
         let ri = 10_000.0;
         let gain = rf / ri; // = 10.0
 
         let mut root = OpAmpRoot::new_inverting(model, gain);
         root.set_sample_rate(48000.0);
-        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        for _ in 0..100 {
+            root.compute_vs_voltage(0.0);
+        }
 
         let out = root.compute_vs_voltage(0.01).abs();
         let measured_gain = out / 0.01;
         eprintln!("Rf/Ri gain: expected=10, measured={measured_gain:.2}");
-        assert!(measured_gain > 7.0 && measured_gain < 13.0,
-            "Gain should be ~10: got {measured_gain:.2}");
+        assert!(
+            measured_gain > 7.0 && measured_gain < 13.0,
+            "Gain should be ~10: got {measured_gain:.2}"
+        );
     }
 
     #[test]
@@ -945,7 +976,8 @@ mod tests {
         // 3. Output should change
         let mut model = tl072();
         model.slew_rate = 100.0;
-        model.v_rail_pos =100.0; model.v_rail_neg =100.0;
+        model.v_rail_pos = 100.0;
+        model.v_rail_neg = 100.0;
 
         let ri = 10_000.0;
         let rf_lo = 10_000.0; // pot at 10% of 100k
@@ -955,18 +987,27 @@ mod tests {
         root.set_sample_rate(48000.0);
 
         // Measure at low gain
-        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        for _ in 0..100 {
+            root.compute_vs_voltage(0.0);
+        }
         let out_lo = root.compute_vs_voltage(0.01).abs();
 
         // Update gain to high
         root.set_gain(rf_hi / ri);
-        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        for _ in 0..100 {
+            root.compute_vs_voltage(0.0);
+        }
         let out_hi = root.compute_vs_voltage(0.01).abs();
 
-        eprintln!("Pot change: lo={out_lo:.6} (g={:.1}), hi={out_hi:.6} (g={:.1})",
-            rf_lo/ri, rf_hi/ri);
-        assert!(out_hi > out_lo * 3.0,
-            "Higher Rf should give more output: lo={out_lo:.6}, hi={out_hi:.6}");
+        eprintln!(
+            "Pot change: lo={out_lo:.6} (g={:.1}), hi={out_hi:.6} (g={:.1})",
+            rf_lo / ri,
+            rf_hi / ri
+        );
+        assert!(
+            out_hi > out_lo * 3.0,
+            "Higher Rf should give more output: lo={out_lo:.6}, hi={out_hi:.6}"
+        );
     }
 
     #[test]
@@ -975,7 +1016,8 @@ mod tests {
         // This is what the stage should compute from port resistances.
         let mut model = tl072();
         model.slew_rate = 100.0;
-        model.v_rail_pos =100.0; model.v_rail_neg =100.0;
+        model.v_rail_pos = 100.0;
+        model.v_rail_neg = 100.0;
 
         let ri = 10_000.0;
         let r_clip = 4_700.0;
@@ -988,15 +1030,21 @@ mod tests {
         let mut root = OpAmpRoot::new_inverting(model, rf_lo / ri);
         root.set_sample_rate(48000.0);
 
-        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        for _ in 0..100 {
+            root.compute_vs_voltage(0.0);
+        }
         let out_lo = root.compute_vs_voltage(0.01).abs();
 
         root.set_gain(rf_hi / ri);
-        for _ in 0..100 { root.compute_vs_voltage(0.0); }
+        for _ in 0..100 {
+            root.compute_vs_voltage(0.0);
+        }
         let out_hi = root.compute_vs_voltage(0.01).abs();
 
         eprintln!("Pot+series: lo={out_lo:.6} (Rf={rf_lo:.0}), hi={out_hi:.6} (Rf={rf_hi:.0})");
-        assert!(out_hi > out_lo * 3.0,
-            "Higher pot should give more output: lo={out_lo:.6}, hi={out_hi:.6}");
+        assert!(
+            out_hi > out_lo * 3.0,
+            "Higher pot should give more output: lo={out_lo:.6}, hi={out_hi:.6}"
+        );
     }
 }

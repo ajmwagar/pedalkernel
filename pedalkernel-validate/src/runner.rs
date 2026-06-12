@@ -57,7 +57,8 @@ use crate::config::{PassCriteria, SignalConfig, TestCase, TestSuite, ValidationC
 use crate::metrics::{self, ComparisonResult};
 use crate::npy;
 use crate::report::{SignalResult, SuiteResult, TestResult};
-use pedalkernel::compiler::CompiledPedal;
+use pedalkernel::compiler::{compile_pedal_with_options, CompileOptions, CompiledPedal};
+use pedalkernel::oversampling::OversamplingFactor;
 use pedalkernel::PedalProcessor;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -316,7 +317,12 @@ impl ValidationRunner {
 
         // Test circuits have no Gain/Drive controls, so they automatically get unity gain.
         // Only pedals with explicit gain controls get automatic distortion gain.
-        pedalkernel::compiler::compile_pedal(&pedal_def, effective_sr)
+        let options = CompileOptions {
+            oversampling: OversamplingFactor::X1,
+            ..CompileOptions::default()
+        };
+
+        compile_pedal_with_options(&pedal_def, effective_sr, options)
             .map_err(|e| RunnerError::CompileError(format!("Compile error: {}", e)))
     }
 
@@ -355,7 +361,12 @@ pub fn quick_validate(
     let pedal_def = pedalkernel::dsl::parse_pedal_file(&contents)
         .map_err(|e| RunnerError::CompileError(e.to_string()))?;
 
-    let mut pedal = pedalkernel::compiler::compile_pedal(&pedal_def, sample_rate)
+    let options = CompileOptions {
+        oversampling: OversamplingFactor::X1,
+        ..CompileOptions::default()
+    };
+
+    let mut pedal = compile_pedal_with_options(&pedal_def, sample_rate, options)
         .map_err(|e| RunnerError::CompileError(e.to_string()))?;
 
     // Generate 1kHz sine test signal

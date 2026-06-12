@@ -26,12 +26,17 @@ use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
     ScatteringRecomputeData, WdfStage, NR_ITERATION_BUDGET,
 };
-use super::super::wdf_leaf::{LeafKind, WdfCapacitor, WdfVoltageSource};
+use super::super::wdf_leaf::{LeafKind, WdfVoltageSource};
 use super::opamp_root::{extract_opamp_config, make_opamp_root};
 use super::{is_inverting_topology, StageStats};
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
+use pedalkernel_rt::boundary_math::{
+    MnaNodeId, MnaOnePort, MnaPortTerminals, MnaVariableResistorBinding, OnePortKind,
+    RuntimeOnePort, RuntimeState, WdfPortTerminals,
+};
+use pedalkernel_rt::wdf_leaf::WdfLeaf;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Op-amp + NL root (TS/RAT/Klon pattern)
@@ -158,6 +163,7 @@ pub(in crate::compiler) fn build_opamp_nl_feedback(
         voltage: 0.0,
         rp: config.model.output_impedance,
         is_cathode_bias: false,
+        port_name: None,
     }));
 
     let oversampler = Oversampler::new(OversamplingFactor::X2);
@@ -192,14 +198,37 @@ pub(in crate::compiler) fn build_general_mna_from_edges(
     graph: &CircuitGraph,
     sample_rate: f64,
 ) -> Result<MultiNlStage, String> {
-    build_general_mna_from_edges_with_supply(all_edges, graph, sample_rate, 9.0)
+    build_general_mna_from_edges_inner(all_edges, graph, sample_rate, &[], 9.0)
 }
 
-/// Build from raw edge indices with explicit supply voltage.
+/// Build from raw edge indices with explicit init hints (branch rework).
+pub(in crate::compiler) fn build_general_mna_from_edges_with_hints(
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    init_hints: &[crate::dsl::InitHint],
+) -> Result<MultiNlStage, String> {
+    build_general_mna_from_edges_inner(all_edges, graph, sample_rate, init_hints, 9.0)
+}
+
+/// Build from raw edge indices with explicit supply voltage (#85).
 pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
     all_edges: &[usize],
     graph: &CircuitGraph,
     sample_rate: f64,
+    supply_voltage: f64,
+) -> Result<MultiNlStage, String> {
+    build_general_mna_from_edges_inner(all_edges, graph, sample_rate, &[], supply_voltage)
+}
+
+/// Core builder carrying both branch features: init hints (warm-start /
+/// nl_comp_labels matching) and an explicit supply voltage (triode v_max +
+/// DC Q-point pre-charge from #85).
+fn build_general_mna_from_edges_inner(
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    init_hints: &[crate::dsl::InitHint],
     supply_voltage: f64,
 ) -> Result<MultiNlStage, String> {
     let oversampling = OversamplingFactor::X2;
@@ -208,8 +237,15 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
     // Step 1: Collect unique MNA nodes
     let mut node_set = collect_mna_nodes(all_edges, graph);
 
-    // Step 2: Classify NL devices
-    let (nl_kinds, nl_terminals) = classify_nl_devices(all_edges, graph, &mut node_set)?;
+    let diode_ladder_filter = differential_diode_ladder_component_filter(all_edges, graph);
+
+    // Step 2: Classify NL devices (also returns component labels for hint matching)
+    let (nl_kinds, nl_comp_labels, nl_terminals) = classify_nl_devices(
+        all_edges,
+        graph,
+        &mut node_set,
+        diode_ladder_filter.as_ref(),
+    )?;
     let n_nl = nl_terminals.len();
 
     // Step 3: Check VCC, build MNA, stamp passives
@@ -244,7 +280,7 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
         .copied()
         .collect();
 
-    let (mut mna, reactive_edges, pot_stamps) = stamp_passive_edges(
+    let (mut mna, reactive_edges, variable_resistor_candidates) = stamp_passive_edges(
         all_edges,
         &nl_edge_set,
         graph,
@@ -263,9 +299,12 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
         &node_to_mna,
         n_nl,
         all_edges,
+        effective_rate,
     );
     let n_passive = passive_children.len();
-    let extract_output_nodes = node_to_mna(graph.out_node).map(|out| (Some(out), None));
+    let extract_output_nodes = find_output_extract_node(all_edges, &node_set, graph)
+        .and_then(node_to_mna)
+        .map(WdfPortTerminals::single_ended);
 
     // Step 5: Derive scattering matrix + Thevenin adaptation
     let (scattering, vcc_injection_vec) =
@@ -301,9 +340,12 @@ pub(in crate::compiler) fn build_general_mna_from_edges_with_supply(
         n_passive,
         supply_voltage,
         oversampling,
+        effective_rate,
         graph,
-        pot_stamps,
+        variable_resistor_candidates,
         extract_output_nodes,
+        &nl_comp_labels,
+        init_hints,
     )?;
 
     // Step 9: DC Q-point pre-charge for triode-with-grid stages.
@@ -348,14 +390,91 @@ fn collect_mna_nodes(all_edges: &[usize], graph: &CircuitGraph) -> Vec<NodeId> {
     nodes
 }
 
+fn find_output_extract_node(
+    all_edges: &[usize],
+    node_set: &[NodeId],
+    graph: &CircuitGraph,
+) -> Option<NodeId> {
+    if node_set.contains(&graph.out_node) {
+        return Some(graph.out_node);
+    }
+
+    let edge_set: HashSet<usize> = all_edges.iter().copied().collect();
+    graph.edges.iter().enumerate().find_map(|(eidx, edge)| {
+        if edge_set.contains(&eidx) {
+            return None;
+        }
+        if edge.node_a == graph.out_node && node_set.contains(&edge.node_b) {
+            Some(edge.node_b)
+        } else if edge.node_b == graph.out_node && node_set.contains(&edge.node_a) {
+            Some(edge.node_a)
+        } else {
+            None
+        }
+    })
+}
+
+fn differential_diode_ladder_component_filter(
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+) -> Option<HashSet<usize>> {
+    let mut seen = HashSet::new();
+    let diode_connected_bjt_count = all_edges
+        .iter()
+        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
+        .filter(|&&eidx| {
+            let edge = &graph.edges[eidx];
+            if !seen.insert(edge.comp_idx) {
+                return false;
+            }
+            let comp = &graph.components[edge.comp_idx];
+            comp.kind
+                .classify_nonlinear(
+                    &comp.id,
+                    edge.node_a,
+                    edge.node_b,
+                    graph.gnd_node,
+                    &graph.node_names,
+                )
+                .is_some_and(|(kind, _)| is_diode_connected_bjt(&kind))
+        })
+        .count();
+    if diode_connected_bjt_count < 8 {
+        return None;
+    }
+
+    let plan = super::super::blockwise::analyze_blockwise(all_edges, graph)?;
+    let mut rung_components = HashSet::new();
+    let mut rung_count = 0usize;
+
+    for block in &plan.blocks {
+        let super::super::blockwise::BlockTopology::DifferentialDiodeRung {
+            left_comp_idx,
+            right_comp_idx,
+            ..
+        } = block.topology
+        else {
+            continue;
+        };
+        rung_count += 1;
+        rung_components.insert(left_comp_idx);
+        rung_components.insert(right_comp_idx);
+    }
+
+    (rung_count >= 4).then_some(rung_components)
+}
+
 /// Step 2: Classify NL edges into NonlinearKind + terminal pairs.
 /// Deduplicates by comp_idx for multi-port devices (BJTs have 2 edges).
+/// Also returns a parallel Vec of component labels (e.g. "Q1") for hint matching.
 fn classify_nl_devices(
     all_edges: &[usize],
     graph: &CircuitGraph,
     node_set: &mut Vec<NodeId>,
-) -> Result<(Vec<NonlinearKind>, Vec<(NodeId, NodeId)>), String> {
+    comp_filter: Option<&HashSet<usize>>,
+) -> Result<(Vec<NonlinearKind>, Vec<String>, Vec<(NodeId, NodeId)>), String> {
     let mut nl_kinds = Vec::new();
+    let mut nl_comp_labels = Vec::new();
     let mut nl_terminals = Vec::new();
     let mut seen: HashSet<usize> = HashSet::new();
 
@@ -364,6 +483,9 @@ fn classify_nl_devices(
             continue;
         }
         let e = &graph.edges[eidx];
+        if comp_filter.is_some_and(|filter| !filter.contains(&e.comp_idx)) {
+            continue;
+        }
         if !seen.insert(e.comp_idx) {
             continue;
         }
@@ -392,8 +514,12 @@ fn classify_nl_devices(
                 emitter_node,
                 ..
             } => {
-                nl_terminals.push((*base_node, *emitter_node));
-                nl_terminals.push((*collector_node, *emitter_node));
+                if base_node == collector_node {
+                    nl_terminals.push((*base_node, *emitter_node));
+                } else {
+                    nl_terminals.push((*base_node, *emitter_node));
+                    nl_terminals.push((*collector_node, *emitter_node));
+                }
                 for &n in &[*base_node, *collector_node, *emitter_node] {
                     if !node_set.contains(&n)
                         && n != graph.gnd_node
@@ -430,13 +556,14 @@ fn classify_nl_devices(
                 nl_terminals.push((e.node_a, e.node_b));
             }
         }
+        nl_comp_labels.push(comp.id.clone());
         nl_kinds.push(kind);
     }
 
     if nl_kinds.is_empty() {
         return Err("build_general_mna: no NL edges found".to_string());
     }
-    Ok((nl_kinds, nl_terminals))
+    Ok((nl_kinds, nl_comp_labels, nl_terminals))
 }
 
 /// Check if any edge or NL terminal touches VCC.
@@ -457,7 +584,7 @@ fn check_vcc_needed(
 /// Returns (mna, reactive_edges).
 /// A pot detected during passive stamping. Stamped into MNA as a fixed resistor
 /// at its initial position, but also tracked for runtime delta-updating.
-struct PotStamp {
+struct VariableResistorCandidate {
     /// WDF pot leaf for runtime position changes.
     leaf: DynNode,
     /// MNA node indices (pos, neg) for G-matrix delta updates.
@@ -476,10 +603,14 @@ fn stamp_passive_edges(
     num_vsources: usize,
     effective_rate: f64,
     vcc_vs_idx: Option<usize>,
-) -> (MnaSystem, Vec<(usize, DynNode)>, Vec<PotStamp>) {
+) -> (
+    MnaSystem,
+    Vec<(usize, OnePortKind)>,
+    Vec<VariableResistorCandidate>,
+) {
     let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
-    let mut reactive_edges: Vec<(usize, DynNode)> = Vec::new();
-    let mut pot_stamps: Vec<PotStamp> = Vec::new();
+    let mut reactive_edges: Vec<(usize, OnePortKind)> = Vec::new();
+    let mut variable_resistor_candidates: Vec<VariableResistorCandidate> = Vec::new();
 
     for &eidx in all_edges {
         if nl_edge_set.contains(&eidx) {
@@ -492,28 +623,29 @@ fn stamp_passive_edges(
 
         if comp.kind.is_pot() {
             // Pots: stamp initial resistance into MNA AND create a WDF leaf
-            // for runtime updates. The leaf tracks position; flush_recompute
-            // delta-updates the G matrix when the pot moves.
-            if let Some(r) = comp.kind.resistance() {
-                let initial_r = r * 0.5; // Default position = 0.5
-                mna.stamp_resistor(n1, n2, initial_r);
-                if let Some(leaf) = comp.kind.make_leaf(&comp.id, effective_rate) {
-                    pot_stamps.push(PotStamp {
-                        leaf,
-                        mna_pos: n1,
-                        mna_neg: n2,
-                        initial_conductance: 1.0 / initial_r,
-                    });
+            // for runtime updates. A 3-terminal pot appears as two graph
+            // edges: a-w tracks position, w-b tracks 1-position.
+            if let Some(mut leaf) = comp.kind.make_leaf(&comp.id, effective_rate) {
+                if pot_edge_is_wb_half(graph, &comp.id, e.node_a, e.node_b) {
+                    if let DynNode::Leaf(ref mut l) = leaf {
+                        l.set_complement();
+                    }
                 }
+                let initial_r = leaf.port_resistance();
+                mna.stamp_resistor(n1, n2, initial_r);
+                variable_resistor_candidates.push(VariableResistorCandidate {
+                    leaf,
+                    mna_pos: n1,
+                    mna_neg: n2,
+                    initial_conductance: 1.0 / initial_r,
+                });
             }
         } else if let Some(r) = comp.kind.resistance() {
             mna.stamp_resistor(n1, n2, r);
         } else if let Some(c) = comp.kind.capacitance() {
-            let rp = 1.0 / (2.0 * effective_rate * c);
-            reactive_edges.push((eidx, DynNode::Capacitor(None, c, rp)));
+            reactive_edges.push((eidx, OnePortKind::Capacitor(c)));
         } else if let Some(l) = comp.kind.inductance() {
-            let rp = 2.0 * effective_rate * l;
-            reactive_edges.push((eidx, DynNode::Inductor(None, l, rp)));
+            reactive_edges.push((eidx, OnePortKind::Inductor(l)));
         }
     }
 
@@ -528,21 +660,36 @@ fn stamp_passive_edges(
         mna.stamp_voltage_source(vcc_mna, None, vcc_idx);
     }
 
-    (mna, reactive_edges, pot_stamps)
+    (mna, reactive_edges, variable_resistor_candidates)
+}
+
+fn pot_edge_is_wb_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId) -> bool {
+    let Some(&w_node) = graph
+        .node_names
+        .get(&format!("{comp_id}.w"))
+        .or_else(|| graph.node_names.get(&format!("{comp_id}.wiper")))
+    else {
+        return false;
+    };
+    let Some(&b_node) = graph.node_names.get(&format!("{comp_id}.b")) else {
+        return false;
+    };
+    (a == w_node && b == b_node) || (a == b_node && b == w_node)
 }
 
 /// Step 4: Build WDF ports (NL + reactive + adapted input).
 fn build_wdf_ports(
     nl_terminals: &[(NodeId, NodeId)],
-    reactive_edges: &[(usize, DynNode)],
+    reactive_edges: &[(usize, OnePortKind)],
     graph: &CircuitGraph,
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
     n_nl: usize,
     edge_indices: &[usize],
+    effective_rate: f64,
 ) -> (
     Vec<WdfPort>,
-    Vec<(Option<usize>, Option<usize>)>,
-    Vec<DynNode>,
+    Vec<WdfPortTerminals>,
+    Vec<MnaOnePort>,
     Vec<f64>,
 ) {
     let r_nl_default = 1000.0;
@@ -560,23 +707,26 @@ fn build_wdf_ports(
             node_neg: neg,
             resistance: nl_port_resistances[i],
         });
-        port_node_pairs.push((pos, neg));
+        port_node_pairs.push(WdfPortTerminals::maybe_differential(pos, neg));
     }
 
     // Reactive ports
-    let mut passive_children = Vec::with_capacity(reactive_edges.len());
-    for (eidx, dyn_node) in reactive_edges {
+    let mut passive_one_ports = Vec::with_capacity(reactive_edges.len());
+    for (eidx, kind) in reactive_edges {
         let e = &graph.edges[*eidx];
         let pos = node_to_mna(e.node_a);
         let neg = node_to_mna(e.node_b);
-        let rp = dyn_node.port_resistance();
+        let rp = kind.rp(effective_rate);
         ports.push(WdfPort {
             node_pos: pos,
             node_neg: neg,
             resistance: rp,
         });
-        port_node_pairs.push((pos, neg));
-        passive_children.push(dyn_node.clone());
+        port_node_pairs.push(WdfPortTerminals::maybe_differential(pos, neg));
+        passive_one_ports.push(MnaOnePort::new(
+            MnaPortTerminals::maybe_differential(pos.map(MnaNodeId::new), neg.map(MnaNodeId::new)),
+            *kind,
+        ));
     }
 
     // Adapted (input voltage source) port.
@@ -599,12 +749,12 @@ fn build_wdf_ports(
         node_neg: None,
         resistance: r_adapted,
     });
-    port_node_pairs.push((injection_mna, None));
+    port_node_pairs.push(WdfPortTerminals::maybe_single_ended(injection_mna));
 
     (
         ports,
         port_node_pairs,
-        passive_children,
+        passive_one_ports,
         nl_port_resistances,
     )
 }
@@ -727,6 +877,22 @@ fn compute_dc_bias(
     (dc_bias, vcc_bias_all)
 }
 
+fn is_diode_connected_bjt(kind: &NonlinearKind) -> bool {
+    match kind {
+        NonlinearKind::BjtNpn {
+            base_node,
+            collector_node,
+            ..
+        }
+        | NonlinearKind::BjtPnp {
+            base_node,
+            collector_node,
+            ..
+        } => base_node == collector_node,
+        _ => false,
+    }
+}
+
 /// Step 7: Create NL device kinds or grouped multi-port models.
 ///
 /// Triodes with a connected grid node → `TriodeThreePort` / `VariMuThreePort`
@@ -758,6 +924,12 @@ fn create_nl_devices(
             k,
             NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
         )
+    });
+    let any_bjt_two_port = nl_kinds.iter().any(|k| {
+        matches!(
+            k,
+            NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. }
+        ) && !is_diode_connected_bjt(k)
     });
 
     if all_triode_with_grid {
@@ -792,24 +964,31 @@ fn create_nl_devices(
             }
         }
         Ok((Vec::new(), Some(MultiNlDeviceGroups { groups, offsets })))
-    } else if all_bjt && !nl_kinds.is_empty() {
+    } else if all_bjt && any_bjt_two_port {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
         let mut offset = 0usize;
         for kind in nl_kinds {
             offsets.push(offset);
             match kind {
-                NonlinearKind::BjtNpn { model_name, .. } => {
+                NonlinearKind::BjtNpn { model_name, .. } if !is_diode_connected_bjt(kind) => {
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(
                         gummel_poon_model(model_name),
                     )));
                     offset += 2;
                 }
-                NonlinearKind::BjtPnp { model_name, .. } => {
+                NonlinearKind::BjtPnp { model_name, .. } if !is_diode_connected_bjt(kind) => {
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new_pnp(
                         gummel_poon_model(model_name),
                     )));
                     offset += 2;
+                }
+                NonlinearKind::BjtNpn { .. } | NonlinearKind::BjtPnp { .. } => {
+                    let device = super::super::build::create_nl_device(kind).ok_or_else(|| {
+                        "Unsupported diode-connected BJT device kind in general MNA".to_string()
+                    })?;
+                    groups.push(NlDeviceGroupKind::SinglePort(device));
+                    offset += 1;
                 }
                 _ => unreachable!(),
             }
@@ -826,14 +1005,37 @@ fn create_nl_devices(
     }
 }
 
+/// Resolve a named BJT init state to (Vbe, Vce) magnitudes (unsigned; PNP sign applied by caller).
+///
+/// Named states:
+/// - `saturated`: BJT fully on, low Vce. [Vbe=0.75, Vce=0.1]
+/// - `cutoff`:    BJT fully off, full supply across CE. [Vbe=0.0, Vce=supply]
+/// - `active`:    BJT in linear region. [Vbe=0.65, Vce=supply/2]
+/// - `forward`:   Treated as active (used for diodes, mapped to active for BJT).
+/// - `reverse`:   Treated as cutoff (used for diodes, mapped to cutoff for BJT).
+///
+/// These constants match the table in INIT_BLOCK_DESIGN.md.
+fn resolve_bjt_init_state(state_name: &str, supply_voltage: f64) -> (f64, f64) {
+    match state_name {
+        "saturated" => (0.75, 0.1),
+        "cutoff" => (0.0, supply_voltage),
+        "active" => (0.65, supply_voltage * 0.5),
+        // Diode aliases — map to closest BJT state
+        "forward" => (0.65, supply_voltage * 0.5),
+        "reverse" => (0.0, supply_voltage),
+        // Unknown states fall through to active (safest non-zero state)
+        _ => (0.65, supply_voltage * 0.5),
+    }
+}
+
 /// Step 8: Assemble the final MultiNlStage.
 #[allow(clippy::too_many_arguments)]
 fn assemble_multi_nl_stage(
     mna: MnaSystem,
     scattering: Vec<f64>,
     ports: Vec<WdfPort>,
-    port_node_pairs: Vec<(Option<usize>, Option<usize>)>,
-    passive_children: Vec<DynNode>,
+    port_node_pairs: Vec<WdfPortTerminals>,
+    passive_one_port_specs: Vec<MnaOnePort>,
     nl_devices: Vec<NlDeviceKind>,
     device_groups: Option<MultiNlDeviceGroups>,
     nl_port_resistances: Vec<f64>,
@@ -844,16 +1046,21 @@ fn assemble_multi_nl_stage(
     n_passive: usize,
     supply_voltage: f64,
     oversampling: OversamplingFactor,
+    effective_rate: f64,
     graph: &CircuitGraph,
-    pot_stamps: Vec<PotStamp>,
-    extract_output_nodes: Option<(Option<usize>, Option<usize>)>,
+    variable_resistor_candidates: Vec<VariableResistorCandidate>,
+    extract_output_nodes: Option<WdfPortTerminals>,
+    nl_comp_labels: &[String],
+    init_hints: &[crate::dsl::InitHint],
 ) -> Result<MultiNlStage, String> {
     let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
     let r_adapted = 1000.0;
-    let extract_coeffs = extract_output_nodes
-        .map(|(out_pos, out_neg)| mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg));
+    let extract_coeffs = extract_output_nodes.map(|out| {
+        let (out_pos, out_neg) = out.as_tuple();
+        mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
+    });
 
     // Output port: last CE port for BJTs, first NL port otherwise
     let output_port = if let Some(ref dg) = device_groups {
@@ -863,7 +1070,7 @@ fn assemble_multi_nl_stage(
         0
     };
 
-    // Initial voltage state from device groups
+    // Initial voltage state from device groups (physics-based defaults).
     let mut initial_v = vec![0.0; n_nl];
     let mut max_group_ports = 0usize;
     if let Some(ref dg) = device_groups {
@@ -893,22 +1100,73 @@ fn assemble_multi_nl_stage(
         }
     }
 
+    // Apply init hints: override physics-based defaults with author-specified states.
+    // Only BJT two-port groups are supported (Vbe + Vce at port offsets).
+    // Unrecognized hints are silently ignored (they may target diodes or JFETs
+    // in circuits where no grouped solver applies — not an error).
+    if !init_hints.is_empty() {
+        if let Some(ref dg) = device_groups {
+            for (g, group) in dg.groups.iter().enumerate() {
+                let label = nl_comp_labels.get(g).map(|s| s.as_str()).unwrap_or("");
+                let hint = init_hints.iter().find(|h| h.device_label == label);
+                let Some(hint) = hint else { continue };
+                let off = dg.offsets[g];
+                if let NlDeviceGroupKind::BjtTwoPort(bjt) = group {
+                    let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+                    let crate::dsl::InitState::Named(ref state_name) = hint.state;
+                    let (vbe, vce) = resolve_bjt_init_state(state_name, supply_voltage);
+                    if off < n_nl {
+                        initial_v[off] = sign * vbe;
+                    }
+                    if off + 1 < n_nl {
+                        initial_v[off + 1] = sign * vce;
+                    }
+                    eprintln!(
+                        "[init-hint] {label}: {state_name} → Vbe={:.3}, Vce={:.3} (sign={sign})",
+                        vbe, vce
+                    );
+                }
+            }
+        }
+    }
+
     let nr_workspace = if device_groups.is_some() {
         crate::elements::nonlinear::solver::NrWorkspace::new_grouped(n_nl, max_group_ports)
     } else {
         crate::elements::nonlinear::solver::NrWorkspace::new(n_nl)
     };
 
+    let mut passive_runtime_state = RuntimeState::new();
+    let passive_one_ports = passive_one_port_specs
+        .into_iter()
+        .map(|spec| {
+            let state_slot = passive_runtime_state.allocate_one_port(spec.kind);
+            RuntimeOnePort::new(spec, state_slot)
+        })
+        .collect();
+
     Ok(MultiNlStage {
         adaptor,
         nl_devices,
         nl_port_resistances,
-        passive_children,
-        pot_children: pot_stamps.iter().map(|ps| ps.leaf.clone()).collect(),
-        pot_mna_stamps: pot_stamps
+        passive_one_ports,
+        passive_runtime_state,
+        passive_sample_rate: effective_rate,
+        pot_children: variable_resistor_candidates
+            .iter()
+            .map(|ps| ps.leaf.clone())
+            .collect(),
+        variable_resistors: variable_resistor_candidates
             .iter()
             .enumerate()
-            .map(|(i, ps)| (i, ps.mna_pos, ps.mna_neg, ps.initial_conductance))
+            .map(|(i, ps)| MnaVariableResistorBinding {
+                child_idx: i,
+                terminals: MnaPortTerminals::maybe_differential(
+                    ps.mna_pos.map(MnaNodeId::new),
+                    ps.mna_neg.map(MnaNodeId::new),
+                ),
+                conductance: ps.initial_conductance,
+            })
             .collect(),
         n_nl,
         v_prev: initial_v.clone(),
@@ -1097,7 +1355,7 @@ fn apply_triode_dc_qpoint(
     stage: &mut MultiNlStage,
     dc: &TriodeDcQpoint,
     nl_kinds: &[NonlinearKind],
-    reactive_edges: &[(usize, DynNode)],
+    reactive_edges: &[(usize, OnePortKind)],
     graph: &CircuitGraph,
 ) {
     // Set NR warm-start voltages.
@@ -1121,10 +1379,17 @@ fn apply_triode_dc_qpoint(
     };
 
     // Pre-charge cathode bypass capacitors (caps between cathode and GND).
-    // The WDF capacitor's state represents the reflected wave b = a[n-1].
-    // At DC steady state, b_cap = a_cap = V_cathode.  Setting both `state`
-    // and `last_b` to V_cathode pre-charges the cap so the first sample's
-    // `known_a[0] = s_nl_passive * b_cap ≈ -V_cathode = Vgk_dc`.
+    //
+    // MERGE NOTE: #85's original code set `cap.state`/`cap.last_b` directly on a
+    // `LeafKind::Capacitor` inside `passive_children`. The branch refactored
+    // passive one-ports into `passive_one_ports: Vec<RuntimeOnePort>` whose
+    // capacitor memory lives in the shared `passive_runtime_state`. The
+    // semantically-equivalent pre-charge is to seed the capacitor *voltage*
+    // state to V_cathode via the branch-native runtime-state API, so the first
+    // sample's reflected wave already encodes the DC self-bias.
+    //
+    // `reactive_edges[k]` corresponds 1:1 to `passive_one_ports[k]` (both are
+    // built in the same order by `build_wdf_ports`).
     for (k, (eidx, _)) in reactive_edges.iter().enumerate() {
         let e = &graph.edges[*eidx];
         let is_cathode_cap = (e.node_a == cathode_node && e.node_b == graph.gnd_node)
@@ -1132,11 +1397,11 @@ fn apply_triode_dc_qpoint(
         if !is_cathode_cap {
             continue;
         }
-        if let Some(DynNode::Leaf(LeafKind::Capacitor(ref mut cap))) =
-            stage.passive_children.get_mut(k)
-        {
-            cap.state = dc.v_cathode;
-            cap.last_b = dc.v_cathode;
+        if let Some(&one_port) = stage.passive_one_ports.get(k) {
+            one_port.wdf_set_one_port_state(
+                pedalkernel_rt::boundary_math::OnePortState::CapacitorVoltage(dc.v_cathode),
+                &mut stage.passive_runtime_state,
+            );
         }
     }
 }

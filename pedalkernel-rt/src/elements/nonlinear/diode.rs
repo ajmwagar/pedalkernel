@@ -26,7 +26,15 @@ use crate::elements::WdfRoot;
 /// assert!((wright_omega(0.0) - 0.5671).abs() < 1e-4);
 /// ```
 #[inline]
-pub fn wright_omega(x: f64) -> f64 {
+pub fn wright_omega(x: crate::Wave) -> crate::Wave {
+    if !x.is_finite() {
+        return if x.is_sign_positive() {
+            1.0e12
+        } else {
+            1.0e-300
+        };
+    }
+
     // Guard against extreme underflow
     if x <= -33.0 {
         return 0.0;
@@ -46,7 +54,7 @@ pub fn wright_omega(x: f64) -> f64 {
             // Simpler: Euler's initial, w₀ = 0.5 + 0.5·x gives decent coverage.
             // Empirically best: start near the known value for x=0 (≈0.567) and
             // scale: w₀ = crate::math::powf(x + 1.0, 0.571)
-            crate::math::powf(x + 1.0_f64, 0.571)
+            crate::math::powf(x + 1.0 as crate::Wave, 0.571)
         }
     } else {
         // x in (-33, 0): w₀ = exp(x), ω is well approximated by exp(x) here.
@@ -74,7 +82,7 @@ pub fn wright_omega(x: f64) -> f64 {
     //
     // N.B. that formula holds for f(w) = w + ln w − x = 0, not for a different sign.
     // With r = x − ln w − w = −f(w), we want Δw = r·w1 / (w1² + 0.5·r):
-    fn halley(w: f64, x: f64) -> f64 {
+    fn halley(w: crate::Wave, x: crate::Wave) -> crate::Wave {
         debug_assert!(w > 0.0);
         let ln_w = crate::math::ln(w);
         // residual r = −f(w) = x − w − ln(w)
@@ -133,7 +141,23 @@ pub fn wright_omega(x: f64) -> f64 {
 /// * `is`   - Saturation current (A)
 /// * `n_vt` - Thermal voltage × ideality factor (V)
 #[inline]
-pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
+pub fn explicit_diode_pair(
+    a: crate::Wave,
+    rp: crate::Wave,
+    is: crate::Wave,
+    n_vt: crate::Wave,
+) -> crate::Wave {
+    if !a.is_finite()
+        || !rp.is_finite()
+        || !is.is_finite()
+        || !n_vt.is_finite()
+        || rp <= 0.0
+        || is <= 0.0
+        || n_vt <= 0.0
+    {
+        return 0.0;
+    }
+
     // α = Rp·Is / nVt
     let alpha = rp * is / n_vt;
     let ln_alpha = crate::math::ln(alpha);
@@ -143,7 +167,11 @@ pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     let a_half = a * 0.5;
 
     // Exploit odd symmetry: v(−a) = −v(a) for anti-parallel pair.
-    let sgn = if a_half >= 0.0 { 1.0_f64 } else { -1.0_f64 };
+    let sgn = if a_half >= 0.0 {
+        1.0 as crate::Wave
+    } else {
+        -1.0 as crate::Wave
+    };
     let a_abs_half = a_half.abs();
 
     // Wright Omega warm start:
@@ -156,7 +184,13 @@ pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     // NR correction on g(v) = v + Rp·i(v) − a/2,  g'(v) = 1 + Rp·di/dv
     // Run up to two steps: the WO estimate needs ≤ 2 steps even for large alpha.
     #[inline]
-    fn nr_step_pair(v: f64, rp: f64, is: f64, n_vt: f64, a_half: f64) -> f64 {
+    fn nr_step_pair(
+        v: crate::Wave,
+        rp: crate::Wave,
+        is: crate::Wave,
+        n_vt: crate::Wave,
+        a_half: crate::Wave,
+    ) -> crate::Wave {
         let xu = (v / n_vt).clamp(-500.0, 500.0);
         let ev_pos = crate::math::exp(xu);
         let ev_neg = crate::math::exp(-xu);
@@ -204,7 +238,23 @@ pub fn explicit_diode_pair(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
 /// * `is`   - Saturation current (A)
 /// * `n_vt` - Thermal voltage × ideality factor (V)
 #[inline]
-pub fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
+pub fn explicit_single_diode(
+    a: crate::Wave,
+    rp: crate::Wave,
+    is: crate::Wave,
+    n_vt: crate::Wave,
+) -> crate::Wave {
+    if !a.is_finite()
+        || !rp.is_finite()
+        || !is.is_finite()
+        || !n_vt.is_finite()
+        || rp <= 0.0
+        || is <= 0.0
+        || n_vt <= 0.0
+    {
+        return 0.0;
+    }
+
     // α = Rp·Is / nVt
     let alpha = rp * is / n_vt;
     let ln_alpha = crate::math::ln(alpha);
@@ -220,7 +270,13 @@ pub fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
     // NR corrections on g(v) = v + Rp·i(v) − a/2,  g'(v) = 1 + Rp·di/dv
     // Two steps for robustness with large alpha (e.g., germanium with large Rp).
     #[inline]
-    fn nr_step_single(v: f64, rp: f64, is: f64, n_vt: f64, a_half: f64) -> f64 {
+    fn nr_step_single(
+        v: crate::Wave,
+        rp: crate::Wave,
+        is: crate::Wave,
+        n_vt: crate::Wave,
+        a_half: crate::Wave,
+    ) -> crate::Wave {
         let xu = (v / n_vt).clamp(-500.0, 500.0);
         let ev = crate::math::exp(xu);
         let i = is * (ev - 1.0);
@@ -246,15 +302,69 @@ pub fn explicit_single_diode(a: f64, rp: f64, is: f64, n_vt: f64) -> f64 {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiodeModel {
     /// Saturation current (A). Silicon ≈ 1e-15, Germanium ≈ 1e-6.
-    pub is: f64,
+    pub is: crate::Wave,
     /// Thermal voltage * ideality factor (V). Vt ≈ 25.85 mV at 20 °C.
-    pub n_vt: f64,
+    pub n_vt: crate::Wave,
     /// Series resistance (Ω). Accounts for ohmic contact and bulk resistance.
     /// SPICE: RS parameter. Typical: 0.5-1Ω for silicon, 2-5Ω for germanium.
-    pub rs: f64,
+    pub rs: crate::Wave,
 }
 
 impl DiodeModel {
+    /// Base-emitter diode approximation from a Gummel-Poon BJT model.
+    ///
+    /// Used for diode-connected BJTs where base and collector are shorted.
+    /// The resulting one-port uses the BJT's saturation current and forward
+    /// ideality factor, with emitter resistance represented as series Rs.
+    pub fn from_bjt_base_emitter(model: &super::bjt::GummelPoonModel) -> Self {
+        Self {
+            is: model.is,
+            n_vt: model.nf * model.vt,
+            rs: model.re,
+        }
+    }
+
+    /// Small-signal resistance at a diode operating point set by Thevenin
+    /// sources feeding the diode anode.
+    pub fn dynamic_resistance_from_sources(
+        &self,
+        sources: &[(crate::Wave, crate::Wave)],
+    ) -> crate::Wave {
+        let mut vj = 0.6 as crate::Wave;
+        for _ in 0..32 {
+            let x = (vj / self.n_vt).clamp(-80.0, 80.0);
+            let ev = crate::math::exp(x);
+            let i_diode = self.is * (ev - 1.0);
+            let g_diode = self.is * ev / self.n_vt;
+            let v_total = vj + i_diode * self.rs;
+            let dv_total = 1.0 + g_diode * self.rs;
+
+            let mut i_source = 0.0;
+            let mut g_source = 0.0;
+            for &(v_src, r_src) in sources {
+                if r_src.is_finite() && r_src > 1e-9 {
+                    i_source += (v_src - v_total) / r_src;
+                    g_source += 1.0 / r_src;
+                }
+            }
+
+            let f = i_source - i_diode;
+            let df = -g_source * dv_total - g_diode;
+            if df.abs() < 1e-18 {
+                break;
+            }
+            let step = (f / df).clamp(-0.25, 0.25);
+            vj -= step;
+            if step.abs() < 1e-9 {
+                break;
+            }
+        }
+
+        let x = (vj / self.n_vt).clamp(-80.0, 80.0);
+        let conductance = self.is * crate::math::exp(x) / self.n_vt;
+        (1.0 / conductance.max(1e-18) + self.rs).clamp(1.0, 1_000_000.0)
+    }
+
     /// Generic silicon diode — averaged parameters for 1N914/1N4148 family.
     pub fn silicon() -> Self {
         // 1N4148 datasheet: Is ≈ 2.52nA, n ≈ 1.752, Rs ≈ 0.568Ω
@@ -385,24 +495,24 @@ impl DiodeModel {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZenerModel {
     /// Zener breakdown voltage (V). Common values: 3.3, 4.7, 5.1, 6.2, 9.1, 12.
-    pub vz: f64,
+    pub vz: crate::Wave,
     /// Forward saturation current (A). Similar to silicon diode.
-    pub is_fwd: f64,
+    pub is_fwd: crate::Wave,
     /// Forward thermal voltage * ideality (V).
-    pub n_vt_fwd: f64,
+    pub n_vt_fwd: crate::Wave,
     /// Reverse saturation current at breakdown (A). Controls sharpness.
-    pub is_rev: f64,
+    pub is_rev: crate::Wave,
     /// Reverse thermal voltage * ideality (V). Smaller = sharper knee.
-    pub n_vt_rev: f64,
+    pub n_vt_rev: crate::Wave,
     /// Dynamic resistance in breakdown region (Ω). Typical: 1-30Ω.
-    pub rz: f64,
+    pub rz: crate::Wave,
 }
 
 impl ZenerModel {
     /// Create a zener diode with specified breakdown voltage.
     ///
     /// Alias for `with_voltage` for API compatibility.
-    pub fn new(vz: f64) -> Self {
+    pub fn new(vz: crate::Wave) -> Self {
         Self::with_voltage(vz)
     }
 
@@ -416,7 +526,7 @@ impl ZenerModel {
     ///
     /// Empirical fit: Rz ≈ 2 + 28 / (1 + (Vz/5.5)^3)
     /// Matches datasheet Rz values for common zeners (1N47xx series) within ±20%.
-    pub fn with_voltage(vz: f64) -> Self {
+    pub fn with_voltage(vz: crate::Wave) -> Self {
         // Continuous Rz model: high at low Vz (avalanche), low at high Vz (zener)
         let vz_norm = vz / 5.5; // Crossover point at ~5.5V
         let rz = 2.0 + 28.0 / (1.0 + vz_norm * vz_norm * vz_norm);
@@ -484,7 +594,7 @@ impl ZenerModel {
 pub struct ZenerRoot {
     pub model: ZenerModel,
     max_iter: usize,
-    prev_v: f64,
+    prev_v: crate::Wave,
 }
 
 impl ZenerRoot {
@@ -498,7 +608,7 @@ impl ZenerRoot {
 
     /// Compute zener current for given voltage.
     #[inline]
-    pub fn current(&self, v: f64) -> f64 {
+    pub fn current(&self, v: crate::Wave) -> crate::Wave {
         if v >= 0.0 {
             // Forward bias: standard Shockley diode
             let x = (v / self.model.n_vt_fwd).clamp(-500.0, 500.0);
@@ -518,7 +628,7 @@ impl ZenerRoot {
 
     /// Compute derivative of current w.r.t. voltage.
     #[inline]
-    fn current_derivative(&self, v: f64) -> f64 {
+    fn current_derivative(&self, v: crate::Wave) -> crate::Wave {
         if v >= 0.0 {
             // Forward bias
             let x = (v / self.model.n_vt_fwd).clamp(-500.0, 500.0);
@@ -540,7 +650,7 @@ impl ZenerRoot {
 impl WdfRoot for ZenerRoot {
     /// Solve for reflected wave using Newton-Raphson with warm-starting.
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let root = *self;
         let cold = if a > 0.0 {
             (a * 0.5).min(0.7)
@@ -554,6 +664,57 @@ impl WdfRoot for ZenerRoot {
             self.prev_v
         } else {
             cold
+        };
+        let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
+            (root.current(v), root.current_derivative(v))
+        });
+        self.prev_v = (a + b) * 0.5;
+        b
+    }
+}
+
+/// Anti-parallel zener pair at the tree root.
+///
+/// This models two zeners connected in opposite directions from the signal node
+/// to ground. The total port current is `i(v) = i_z(v) - i_z(-v)`.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ZenerPairRoot {
+    pub model: ZenerModel,
+    max_iter: usize,
+    prev_v: crate::Wave,
+}
+
+impl ZenerPairRoot {
+    pub fn new(model: ZenerModel) -> Self {
+        Self {
+            model,
+            max_iter: super::solver::NR_MAX_ITER,
+            prev_v: 0.0,
+        }
+    }
+
+    #[inline]
+    pub fn current(&self, v: crate::Wave) -> crate::Wave {
+        let z = ZenerRoot::new(self.model);
+        z.current(v) - z.current(-v)
+    }
+
+    #[inline]
+    fn current_derivative(&self, v: crate::Wave) -> crate::Wave {
+        let z = ZenerRoot::new(self.model);
+        z.current_derivative(v) + z.current_derivative(-v)
+    }
+}
+
+impl WdfRoot for ZenerPairRoot {
+    #[inline]
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
+        let root = *self;
+        let v0 = if self.prev_v != 0.0 && self.prev_v * a >= 0.0 && self.prev_v.abs() < 20.0 {
+            self.prev_v
+        } else {
+            a * 0.5
         };
         let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
             (root.current(v), root.current_derivative(v))
@@ -583,7 +744,7 @@ pub struct DiodePairRoot {
     /// Consecutive samples have very similar solutions, so reusing the
     /// previous voltage as initial guess typically converges in 2-3 iterations
     /// instead of 10-15.
-    prev_v: f64,
+    prev_v: crate::Wave,
 }
 
 impl DiodePairRoot {
@@ -607,13 +768,13 @@ impl WdfRoot for DiodePairRoot {
     /// The solver returns b_eff = 2*v_j - a, then we correct for Rs:
     /// b = b_eff + 2*i*Rs
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let rs = self.model.rs;
 
         // Analytic initial guess based on incident wave.
-        let cold_guess = |a: f64, rp: f64| -> f64 {
+        let cold_guess = |a: crate::Wave, rp: crate::Wave| -> crate::Wave {
             if a.abs() > 10.0 * nvt {
                 let log_arg = (a.abs() / (2.0 * rp * is)).max(1.0);
                 nvt * crate::math::ln(log_arg) * a.signum()
@@ -626,7 +787,7 @@ impl WdfRoot for DiodePairRoot {
         // the incident wave AND within a reasonable voltage range. This avoids
         // solver divergence at zero-crossings and operating-point jumps while
         // still giving fast convergence for audio-rate signals.
-        let warm_guess = |prev_v: f64, a: f64, rp: f64| -> f64 {
+        let warm_guess = |prev_v: crate::Wave, a: crate::Wave, rp: crate::Wave| -> crate::Wave {
             let cg = cold_guess(a, rp);
             if prev_v != 0.0 && prev_v * a > 0.0 && prev_v.abs() < 10.0 {
                 prev_v
@@ -706,7 +867,7 @@ impl WdfRoot for DiodePairRoot {
 pub struct DiodeRoot {
     pub model: DiodeModel,
     max_iter: usize,
-    prev_v: f64,
+    prev_v: crate::Wave,
 }
 
 impl DiodeRoot {
@@ -722,12 +883,12 @@ impl DiodeRoot {
 impl WdfRoot for DiodeRoot {
     /// Single diode with series resistance and warm-starting.
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let rs = self.model.rs;
 
-        let cold_guess = |a: f64, rp: f64| -> f64 {
+        let cold_guess = |a: crate::Wave, rp: crate::Wave| -> crate::Wave {
             if a > 10.0 * nvt {
                 let log_arg = (a / (2.0 * rp * is)).max(1.0);
                 nvt * crate::math::ln(log_arg)
@@ -737,7 +898,7 @@ impl WdfRoot for DiodeRoot {
         };
 
         // Warm-start: use prev_v only when reasonable (same sign, bounded magnitude).
-        let warm_guess = |prev_v: f64, a: f64, rp: f64| -> f64 {
+        let warm_guess = |prev_v: crate::Wave, a: crate::Wave, rp: crate::Wave| -> crate::Wave {
             let cg = cold_guess(a, rp);
             if prev_v != 0.0 && prev_v * a > 0.0 && prev_v.abs() < 10.0 {
                 prev_v
@@ -786,7 +947,7 @@ impl WdfRoot for DiodeRoot {
 
 impl NlDeviceIv for DiodeRoot {
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let x = (v / nvt).clamp(-500.0, 500.0);
@@ -797,7 +958,7 @@ impl NlDeviceIv for DiodeRoot {
     }
 
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         (-5.0, 5.0)
     }
 }
@@ -805,7 +966,7 @@ impl NlDeviceIv for DiodeRoot {
 impl NlDeviceIv for DiodePairRoot {
     /// Anti-parallel diode pair I-V: I = Is*(e^(V/nVt) - e^(-V/nVt)) = 2*Is*sinh(V/nVt)
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let x = (v / nvt).clamp(-500.0, 500.0);
@@ -825,7 +986,7 @@ impl NlDeviceIv for DiodePairRoot {
     }
 
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         (-5.0, 5.0)
     }
 }
@@ -858,7 +1019,7 @@ impl ExplicitDiodePairRoot {
 
 impl WdfRoot for ExplicitDiodePairRoot {
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let rs = self.model.rs;
@@ -881,7 +1042,7 @@ impl WdfRoot for ExplicitDiodePairRoot {
 impl NlDeviceIv for ExplicitDiodePairRoot {
     /// Anti-parallel diode pair I-V: I = Is·(e^(V/nVt) - e^(-V/nVt))
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let x = (v / nvt).clamp(-500.0, 500.0);
@@ -893,7 +1054,7 @@ impl NlDeviceIv for ExplicitDiodePairRoot {
     }
 
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         (-5.0, 5.0)
     }
 }
@@ -922,7 +1083,7 @@ impl ExplicitDiodeRoot {
 
 impl WdfRoot for ExplicitDiodeRoot {
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let rs = self.model.rs;
@@ -943,7 +1104,7 @@ impl WdfRoot for ExplicitDiodeRoot {
 impl NlDeviceIv for ExplicitDiodeRoot {
     /// Single diode I-V: I = Is·(e^(V/nVt) - 1)
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         let is = self.model.is;
         let nvt = self.model.n_vt;
         let x = (v / nvt).clamp(-500.0, 500.0);
@@ -954,7 +1115,7 @@ impl NlDeviceIv for ExplicitDiodeRoot {
     }
 
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         (-5.0, 5.0)
     }
 }
@@ -1011,7 +1172,7 @@ mod tests {
     #[test]
     fn wright_omega_large_positive() {
         // For large x, ω ≈ x - ln(x). Verify defining equation still holds.
-        for x in [10.0_f64, 20.0, 50.0, 100.0] {
+        for x in [10.0 as crate::Wave, 20.0, 50.0, 100.0] {
             let w = wright_omega(x);
             let residual = w + crate::math::ln(w) - x;
             assert!(
@@ -1030,12 +1191,12 @@ mod tests {
 
     // ── Explicit diode pair vs NR ───────────────────────────────────────────
 
-    fn nr_diode_pair_b(a: f64, rp: f64, model: DiodeModel) -> f64 {
+    fn nr_diode_pair_b(a: crate::Wave, rp: crate::Wave, model: DiodeModel) -> crate::Wave {
         let mut root = DiodePairRoot::new(model);
         root.process(a, rp)
     }
 
-    fn explicit_diode_pair_b(a: f64, rp: f64, model: DiodeModel) -> f64 {
+    fn explicit_diode_pair_b(a: crate::Wave, rp: crate::Wave, model: DiodeModel) -> crate::Wave {
         let mut root = ExplicitDiodePairRoot::new(model);
         root.process(a, rp)
     }
@@ -1063,7 +1224,7 @@ mod tests {
     fn explicit_diode_pair_matches_nr_germanium() {
         let model = DiodeModel::germanium();
         let rp = 4700.0;
-        for a in [-0.5_f64, -0.2, 0.0, 0.2, 0.5] {
+        for a in [-0.5 as crate::Wave, -0.2, 0.0, 0.2, 0.5] {
             let b_nr = nr_diode_pair_b(a, rp, model);
             let b_ex = explicit_diode_pair_b(a, rp, model);
             let err = (b_nr - b_ex).abs();
@@ -1076,12 +1237,12 @@ mod tests {
 
     // ── Explicit single diode vs NR ─────────────────────────────────────────
 
-    fn nr_single_diode_b(a: f64, rp: f64, model: DiodeModel) -> f64 {
+    fn nr_single_diode_b(a: crate::Wave, rp: crate::Wave, model: DiodeModel) -> crate::Wave {
         let mut root = DiodeRoot::new(model);
         root.process(a, rp)
     }
 
-    fn explicit_single_diode_b(a: f64, rp: f64, model: DiodeModel) -> f64 {
+    fn explicit_single_diode_b(a: crate::Wave, rp: crate::Wave, model: DiodeModel) -> crate::Wave {
         let mut root = ExplicitDiodeRoot::new(model);
         root.process(a, rp)
     }
@@ -1091,7 +1252,7 @@ mod tests {
         let model = DiodeModel::silicon();
         let rp_values = [100.0, 1000.0, 10_000.0, 47_000.0];
         // Single diode only conducts in forward direction; use positive a
-        let a_values = [0.0_f64, 0.05, 0.1, 0.3, 0.5, 0.8, 1.0];
+        let a_values = [0.0 as crate::Wave, 0.05, 0.1, 0.3, 0.5, 0.8, 1.0];
 
         for rp in rp_values {
             for a in a_values {

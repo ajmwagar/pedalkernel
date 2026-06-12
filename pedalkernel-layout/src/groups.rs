@@ -615,6 +615,8 @@ mod tests {
             subtitle: None,
             calibrate: false,
             subcircuits: vec![],
+            ports: vec![],
+            init_hints: vec![],
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);

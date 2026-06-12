@@ -12,7 +12,7 @@
 //!   loading between two cascaded pedals
 //! - [`CableModel`] — guitar cable capacitance (RC low-pass with pickup L)
 
-use crate::math;
+use crate::{math, Wave};
 
 /// Impedance characteristics for a pedal's input or output.
 ///
@@ -24,9 +24,9 @@ use crate::math;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ImpedanceModel {
     /// DC resistance (Ohm). Typical input: 500kOhm-1MOhm. Output: 1kOhm-10kOhm.
-    pub resistance: f64,
+    pub resistance: crate::Wave,
     /// Parallel capacitance (F). Models HF rolloff. Typical: 10pF-100pF.
-    pub capacitance: f64,
+    pub capacitance: crate::Wave,
 }
 
 impl ImpedanceModel {
@@ -103,23 +103,23 @@ pub struct InterstageLoading {
     /// Load (input) impedance model.
     load: ImpedanceModel,
     /// One-pole low-pass filter state for the combined RC loading.
-    lpf_state: f64,
+    lpf_state: Wave,
     /// Filter coefficient (computed from combined impedance).
-    lpf_coef: f64,
+    lpf_coef: Wave,
     /// DC attenuation factor: R_load / (R_src + R_load).
-    dc_gain: f64,
+    dc_gain: crate::Wave,
     /// Sample rate.
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl InterstageLoading {
     /// Create a new interstage loading model.
-    pub fn new(source: ImpedanceModel, load: ImpedanceModel, sample_rate: f64) -> Self {
+    pub fn new(source: ImpedanceModel, load: ImpedanceModel, sample_rate: crate::Wave) -> Self {
         let mut s = Self {
             source,
             load,
-            lpf_state: 0.0,
-            lpf_coef: 0.0,
+            lpf_state: 0.0 as Wave,
+            lpf_coef: 0.0 as Wave,
             dc_gain: 1.0,
             sample_rate,
         };
@@ -128,7 +128,7 @@ impl InterstageLoading {
     }
 
     /// Create a loading model that's effectively transparent (buffer -> buffer).
-    pub fn transparent(sample_rate: f64) -> Self {
+    pub fn transparent(sample_rate: crate::Wave) -> Self {
         Self::new(
             ImpedanceModel::low_z_output(),
             ImpedanceModel::high_z_input(),
@@ -149,10 +149,11 @@ impl InterstageLoading {
         let c_total = self.source.capacitance + self.load.capacitance;
 
         if c_total > 0.0 {
-            let fc = 1.0 / (2.0 * math::PI * r_parallel * c_total);
-            self.lpf_coef = math::exp(-2.0 * math::PI * fc / self.sample_rate);
+            let pi = math::PI as crate::Wave;
+            let fc = 1.0 / (2.0 * pi * r_parallel * c_total);
+            self.lpf_coef = math::exp((-2.0 * pi * fc / self.sample_rate) as Wave);
         } else {
-            self.lpf_coef = 0.0;
+            self.lpf_coef = 0.0 as Wave;
         }
     }
 
@@ -160,32 +161,33 @@ impl InterstageLoading {
     ///
     /// Applies DC attenuation and frequency-dependent rolloff.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
-        let attenuated = input * self.dc_gain;
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
+        let attenuated = input as Wave * self.dc_gain as Wave;
 
-        if self.lpf_coef > 0.0 {
+        if self.lpf_coef > 0.0 as Wave {
             // One-pole LPF for RC loading
-            self.lpf_state = self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * attenuated;
-            self.lpf_state
+            self.lpf_state =
+                self.lpf_coef * self.lpf_state + (1.0 as Wave - self.lpf_coef) * attenuated;
+            self.lpf_state as crate::Wave
         } else {
-            attenuated
+            attenuated as crate::Wave
         }
     }
 
     /// Get the DC gain (attenuation) of this loading stage.
-    pub fn dc_gain(&self) -> f64 {
+    pub fn dc_gain(&self) -> crate::Wave {
         self.dc_gain
     }
 
     /// Update sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.recompute();
     }
 
     /// Reset filter state.
     pub fn reset(&mut self) {
-        self.lpf_state = 0.0;
+        self.lpf_state = 0.0 as Wave;
     }
 }
 
@@ -206,15 +208,15 @@ impl InterstageLoading {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CableModel {
     /// Cable capacitance in Farads.
-    capacitance: f64,
+    capacitance: crate::Wave,
     /// Source resistance (pickup or buffer output impedance).
-    source_resistance: f64,
+    source_resistance: crate::Wave,
     /// One-pole filter state.
-    lpf_state: f64,
+    lpf_state: Wave,
     /// Filter coefficient.
-    lpf_coef: f64,
+    lpf_coef: Wave,
     /// Sample rate.
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl CableModel {
@@ -225,17 +227,17 @@ impl CableModel {
     /// - `source_resistance`: Output impedance of the driving source.
     /// - `sample_rate`: Audio sample rate.
     pub fn new(
-        length_feet: f64,
-        pf_per_foot: f64,
-        source_resistance: f64,
-        sample_rate: f64,
+        length_feet: crate::Wave,
+        pf_per_foot: crate::Wave,
+        source_resistance: crate::Wave,
+        sample_rate: crate::Wave,
     ) -> Self {
         let capacitance = length_feet * pf_per_foot * 1e-12;
         let mut s = Self {
             capacitance,
             source_resistance,
-            lpf_state: 0.0,
-            lpf_coef: 0.0,
+            lpf_state: 0.0 as Wave,
+            lpf_coef: 0.0 as Wave,
             sample_rate,
         };
         s.recompute();
@@ -243,60 +245,63 @@ impl CableModel {
     }
 
     /// Standard 10-foot guitar cable (~30 pF/ft).
-    pub fn standard_10ft(source_resistance: f64, sample_rate: f64) -> Self {
+    pub fn standard_10ft(source_resistance: crate::Wave, sample_rate: crate::Wave) -> Self {
         Self::new(10.0, 30.0, source_resistance, sample_rate)
     }
 
     /// Long 20-foot guitar cable (~30 pF/ft). Noticeable treble rolloff.
-    pub fn long_20ft(source_resistance: f64, sample_rate: f64) -> Self {
+    pub fn long_20ft(source_resistance: crate::Wave, sample_rate: crate::Wave) -> Self {
         Self::new(20.0, 30.0, source_resistance, sample_rate)
     }
 
     /// Cheap cable with higher capacitance (~40 pF/ft).
-    pub fn cheap_20ft(source_resistance: f64, sample_rate: f64) -> Self {
+    pub fn cheap_20ft(source_resistance: crate::Wave, sample_rate: crate::Wave) -> Self {
         Self::new(20.0, 40.0, source_resistance, sample_rate)
     }
 
     fn recompute(&mut self) {
         let tau = self.source_resistance * self.capacitance;
+        let pi = math::PI as crate::Wave;
         if tau > 0.0 {
-            let fc = 1.0 / (2.0 * math::PI * tau);
-            self.lpf_coef = math::exp(-2.0 * math::PI * fc / self.sample_rate);
+            let fc = 1.0 / (2.0 * pi * tau);
+            self.lpf_coef = math::exp((-2.0 * pi * fc / self.sample_rate) as Wave);
         } else {
-            self.lpf_coef = 0.0;
+            self.lpf_coef = 0.0 as Wave;
         }
     }
 
     /// Process one sample.
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
-        if self.lpf_coef > 0.0 {
-            self.lpf_state = self.lpf_coef * self.lpf_state + (1.0 - self.lpf_coef) * input;
-            self.lpf_state
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
+        let input = input as Wave;
+        if self.lpf_coef > 0.0 as Wave {
+            self.lpf_state = self.lpf_coef * self.lpf_state + (1.0 as Wave - self.lpf_coef) * input;
+            self.lpf_state as crate::Wave
         } else {
-            input
+            input as crate::Wave
         }
     }
 
     /// Get the -3dB cutoff frequency of this cable.
-    pub fn cutoff_hz(&self) -> f64 {
+    pub fn cutoff_hz(&self) -> crate::Wave {
         let tau = self.source_resistance * self.capacitance;
+        let pi = math::PI as crate::Wave;
         if tau > 0.0 {
-            1.0 / (2.0 * math::PI * tau)
+            1.0 / (2.0 * pi * tau)
         } else {
-            f64::INFINITY
+            crate::Wave::INFINITY
         }
     }
 
     /// Update sample rate.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.recompute();
     }
 
     /// Reset filter state.
     pub fn reset(&mut self) {
-        self.lpf_state = 0.0;
+        self.lpf_state = 0.0 as Wave;
     }
 }
 

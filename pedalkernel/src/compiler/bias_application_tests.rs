@@ -32,7 +32,8 @@ const SR: f64 = 48000.0;
 /// operating point; the op-amp's v_max should reflect the actual supply
 /// headroom, not a hardcoded ±12V.
 fn opamp_bias_peak(opamp_type: &str, r_top: &str, r_bot: &str, supply: &str) -> f64 {
-    let source = format!(r#"
+    let source = format!(
+        r#"
         pedal "test" {{ supply {supply}
             components {{
                 R_v1: resistor({r_top})
@@ -58,7 +59,8 @@ fn opamp_bias_peak(opamp_type: &str, r_top: &str, r_bot: &str, supply: &str) -> 
                 U1.out -> out
             }}
             controls {{}}
-        }}"#);
+        }}"#
+    );
 
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -70,9 +72,8 @@ fn opamp_bias_peak(opamp_type: &str, r_top: &str, r_bot: &str, supply: &str) -> 
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
     peak
@@ -88,7 +89,10 @@ fn jrc4558_bias_from_divider() {
     eprintln!("JRC4558 9V bias: peak={peak:.4}V");
     // Should clip — diode Vf ≈ 0.6V, gain=10
     assert!(peak > 0.1, "Should produce output: {peak:.4}V");
-    assert!(peak < 4.0, "Should NOT clip at ±12V (wrong v_max): {peak:.4}V");
+    assert!(
+        peak < 4.0,
+        "Should NOT clip at ±12V (wrong v_max): {peak:.4}V"
+    );
 }
 
 #[test]
@@ -169,16 +173,18 @@ fn opamp_9v_clips_at_supply_not_12v() {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
 
     eprintln!("OpAmp 9V no-diode: peak={peak:.4}V (should clip at ~3V, not pass 5V)");
     assert!(peak > 0.5, "Should produce significant output: {peak:.4}V");
     // Key assertion: output should be limited by 9V supply, not ±12V
-    assert!(peak < 4.5, "Should clip at 9V supply rails (~3V), not ±12V: {peak:.4}V");
+    assert!(
+        peak < 4.5,
+        "Should clip at 9V supply rails (~3V), not ±12V: {peak:.4}V"
+    );
 }
 
 // ── Asymmetric bias should produce asymmetric clipping ──────────────────
@@ -239,9 +245,8 @@ fn supply_18v_uses_actual_supply_not_hardcoded_9v() {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
 
@@ -259,11 +264,14 @@ fn asymmetric_rails_produce_asymmetric_clipping() {
     //
     // v_rail_pos = 5.0V, v_rail_neg = 1.0V
     // Drive with gain × input > both rails → output should clip asymmetrically.
-    use super::stage::BlackFeedbackStage;
     use super::component::NonIdealFx;
+    use super::stage::BlackFeedbackStage;
 
     let fx = vec![
-        NonIdealFx::OpAmpBandwidth { gbw: 3e6, slew_rate: 13.0 },
+        NonIdealFx::OpAmpBandwidth {
+            gbw: 3e6,
+            slew_rate: 13.0,
+        },
         NonIdealFx::RailSaturation { v_max: 3.0 }, // initial symmetric
     ];
     let mut stage = BlackFeedbackStage::new(100_000.0, 10_000.0, true, &fx, SR);
@@ -282,16 +290,26 @@ fn asymmetric_rails_produce_asymmetric_clipping() {
     for s in 0..500 {
         let input = 0.8 * (std::f64::consts::TAU * freq * s as f64 / SR).sin();
         let out = stage.process(input);
-        if out > pos_peak { pos_peak = out; }
-        if out < neg_peak { neg_peak = out; }
+        if out > pos_peak {
+            pos_peak = out;
+        }
+        if out < neg_peak {
+            neg_peak = out;
+        }
     }
 
     eprintln!("Asymmetric rails: pos={pos_peak:.4}V, neg={neg_peak:.4}V");
     let ratio = pos_peak / neg_peak.abs().max(0.001);
     eprintln!("  Ratio: {ratio:.2} (should be ~5.0 for 5V/1V rails)");
     // Positive clips at ~5V (tanh), negative clips at ~1V (tanh)
-    assert!(pos_peak > 2.0, "Positive should reach beyond 2V: {pos_peak:.4}V");
-    assert!(neg_peak.abs() < 1.5, "Negative should clip around 1V: {neg_peak:.4}V");
+    assert!(
+        pos_peak > 2.0,
+        "Positive should reach beyond 2V: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak.abs() < 1.5,
+        "Negative should clip around 1V: {neg_peak:.4}V"
+    );
     assert!(ratio > 2.0, "Should be asymmetric: ratio={ratio:.2}");
 }
 

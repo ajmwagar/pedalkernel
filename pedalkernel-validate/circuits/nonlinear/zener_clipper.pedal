@@ -1,6 +1,7 @@
 # Symmetric 5.1V zener clipper
 # Topology matches SPICE: C1 (100n) -> R1 (4.7k) -> back-to-back zeners -> RL (10k)
-# Clips at ±5.8V (Vz + Vf)
+# This direct anti-parallel-to-ground fixture clips near the lower conduction knee.
+# A series back-to-back zener limiter would clip near Vz + Vf and needs its own fixture.
 
 pedal "Zener Clipper" {
   components {
@@ -16,6 +17,7 @@ pedal "Zener Clipper" {
     R1.b -> Z1.a, Z2.b, RL.a
     Z1.b -> gnd
     Z2.a -> gnd
-    RL.b -> out
+    RL.b -> gnd
+    R1.b -> out
   }
 }

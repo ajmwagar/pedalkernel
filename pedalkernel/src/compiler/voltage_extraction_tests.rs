@@ -52,7 +52,7 @@ fn measure_gain(pedal_src: &str) -> f64 {
 fn measure_gain_with_control(pedal_src: &str, control: &str, value: f64) -> f64 {
     let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
-    compiled.set_control(control, value);
+    compiled.set_control_immediate(control, value);
 
     for s in 0..1000 {
         let input = AMPLITUDE * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin();

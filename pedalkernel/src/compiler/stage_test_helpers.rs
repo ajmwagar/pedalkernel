@@ -354,15 +354,7 @@ mod tests {
         opamp.set_gbw_gain(gain);
         opamp.set_v_max(3.0); // 9V supply / 2 - 1.5
 
-        OpAmpWdfAdaptor {
-            zi,
-            zf,
-            is_inverting: true,
-            opamp,
-            gbw_state: 0.0,
-            prev_out: 0.0,
-            feedback_pot_id: Some("Treble".into()),
-        }
+        OpAmpWdfAdaptor::new(zi, zf, true, opamp, Some("Treble".into()))
     }
 
     /// Measure RMS output at a given frequency through the adaptor.

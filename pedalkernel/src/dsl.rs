@@ -135,6 +135,39 @@ pub struct SidechainInfo {
     pub target: SidechainTarget,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Init block types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Named or explicit initial state for one NL device in an `init { ... }` block.
+///
+/// Named states expand to physics-based voltages at compile time:
+/// - BJT NPN: `saturated` → [Vbe=0.75, Vce=0.1], `cutoff` → [Vbe=0.0, Vce=supply],
+///            `active` → [Vbe=0.65, Vce=supply/2]
+/// - Diode: `forward` → Vd=0.7, `reverse` → Vd=-supply/2
+/// - PNP signs are flipped automatically.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InitState {
+    /// A human-readable alias: "saturated", "cutoff", "active", "forward", "reverse".
+    Named(String),
+}
+
+/// One device hint from the `init { ... }` block.
+///
+/// ```text
+/// init {
+///     Q1: saturated
+///     Q2: cutoff
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct InitHint {
+    /// Component label in the pedal (e.g., "Q1").
+    pub device_label: String,
+    /// Desired initial state.
+    pub state: InitState,
+}
+
 /// Top-level pedal definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PedalDef {
@@ -164,6 +197,35 @@ pub struct PedalDef {
     /// Subcircuit definitions. When non-empty, the top-level `components` and
     /// `nets` become the routing layer connecting subcircuits.
     pub subcircuits: Vec<SubcircuitDef>,
+    /// Named voltage port declarations (audio I/O, CV, gates, envelope taps).
+    /// Ports are voltage nodes in the circuit, drivable at audio rate.
+    /// When empty, implicit `in`/`out` ports are created by the compiler.
+    pub ports: Vec<PortDef>,
+    /// Optional initial NL device states from the `init { ... }` block.
+    /// Empty when no `init` block is present (the common case — all existing pedals).
+    /// Used by the compiler to seed the homotopy pre-convergence asymmetrically,
+    /// which is required for free-running oscillators (BJT astable multivibrators)
+    /// that would otherwise converge to a symmetric saddle point.
+    pub init_hints: Vec<InitHint>,
+}
+
+/// Named port declaration from the .pedal DSL.
+///
+/// ```text
+/// ports {
+///     audio_in: input
+///     cv_cutoff: input
+///     audio_out: output
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortDef {
+    pub name: String,
+    pub direction: pedalkernel_rt::PortDirection,
+    /// Optional source/load impedance in Ohms.
+    /// When set, the WDF VoltageSource gets this Rp instead of the default 1Ω.
+    /// Syntax: `audio_in: input(10k)` → impedance = Some(10_000.0)
+    pub impedance: Option<f64>,
 }
 
 /// A subcircuit block within a pedal/equipment definition.
@@ -607,6 +669,9 @@ pub enum WindingType {
 /// - Parasitic elements (DCR, capacitance) for accurate HF response
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformerConfig {
+    /// Optional model-library name. When present, library values seed the
+    /// electrical/core fields and explicit DSL fields override them.
+    pub model: Option<String>,
     /// Turns ratio (primary:secondary). 1.0 = 1:1, 10.0 = 10:1 step-down
     pub turns_ratio: f64,
     /// Primary winding inductance in Henries
@@ -623,6 +688,34 @@ pub struct TransformerConfig {
     pub capacitance: f64,
     /// Coupling coefficient (0-1), default 0.99 for audio transformers
     pub coupling: f64,
+    /// Optional explicit primary leakage inductance in Henries.
+    pub primary_leakage: Option<f64>,
+    /// Optional explicit secondary leakage inductance in Henries.
+    pub secondary_leakage: Option<f64>,
+    /// Optional explicit magnetizing inductance in Henries.
+    pub magnetizing_inductance: Option<f64>,
+    /// Optional core-loss resistance in Ohms.
+    pub core_loss_resistance: Option<f64>,
+    /// Optional primary turns for a nonlinear magnetizing core model.
+    pub core_primary_turns: Option<f64>,
+    /// Optional core cross-sectional area in square meters.
+    pub core_area: Option<f64>,
+    /// Optional magnetic path length in meters.
+    pub core_path_length: Option<f64>,
+    /// Optional air gap length in meters.
+    pub core_gap: Option<f64>,
+    /// Optional standing primary DC bias current in Amps.
+    pub dc_bias_current: Option<f64>,
+    /// Optional Jiles-Atherton saturation magnetization in A/m.
+    pub ja_ms: Option<f64>,
+    /// Optional Jiles-Atherton anhysteretic shape parameter in A/m.
+    pub ja_a: Option<f64>,
+    /// Optional Jiles-Atherton inter-domain coupling.
+    pub ja_alpha: Option<f64>,
+    /// Optional Jiles-Atherton domain-wall pinning parameter in A/m.
+    pub ja_k: Option<f64>,
+    /// Optional Jiles-Atherton reversible magnetization fraction.
+    pub ja_c: Option<f64>,
     /// Optional tertiary winding turns ratio (primary:tertiary).
     /// When present, the transformer is modeled as a 3-winding R-type adaptor.
     /// Used for transformers with NFB windings (e.g., Fairchild 670 sidechain output).
@@ -634,12 +727,27 @@ impl Default for TransformerConfig {
         Self {
             turns_ratio: 1.0,
             primary_inductance: 1.0,
+            model: None,
             primary_type: WindingType::Standard,
             secondary_type: WindingType::Standard,
             primary_dcr: 0.0,
             secondary_dcr: 0.0,
             capacitance: 0.0,
             coupling: 0.99,
+            primary_leakage: None,
+            secondary_leakage: None,
+            magnetizing_inductance: None,
+            core_loss_resistance: None,
+            core_primary_turns: None,
+            core_area: None,
+            core_path_length: None,
+            core_gap: None,
+            dc_bias_current: None,
+            ja_ms: None,
+            ja_a: None,
+            ja_alpha: None,
+            ja_k: None,
+            ja_c: None,
             tertiary_turns_ratio: None,
         }
     }
@@ -651,6 +759,17 @@ impl TransformerConfig {
         Self {
             turns_ratio,
             primary_inductance,
+            ..Default::default()
+        }
+    }
+
+    /// Create a transformer backed by an embedded model-library entry.
+    pub fn with_model(turns_ratio: f64, model: String) -> Self {
+        Self {
+            turns_ratio,
+            primary_inductance: 0.0,
+            coupling: 0.0,
+            model: Some(model),
             ..Default::default()
         }
     }
@@ -1524,15 +1643,18 @@ fn winding_modifier_primary(input: &str) -> IResult<&str, WindingType> {
     value(WindingType::CenterTap, tag("ct_primary"))(input)
 }
 
-/// `transformer(10:1, 2H)` — basic transformer
+/// `transformer(10:1, JT11P1)` — model-backed transformer
+/// `transformer(10:1, 2H)` — explicit generic transformer
 /// `transformer(1:4, 2H, 75, 200p)` — with positional DCR and parasitic cap
 /// `transformer(1:1, 4H, ct)` — center-tapped secondary
 /// `transformer(1:1, 4H, pp, ct)` — push-pull primary, center-tapped secondary
 /// `transformer(10:1, 10H, 150, 300p, ct_primary)` — center-tapped primary
 /// `transformer(10:1, 2H, dcr=75, Cp=200p)` — with named parasitics
+/// `transformer(10:1, JT11P1, Lm=8H, Rc=250k)` — model-backed with overrides
+/// `transformer(10:1, 2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k)` — linear T model
 ///
-/// Positional syntax: transformer(ratio, inductance [, dcr] [, cap] [, winding_mod])
-/// Named syntax: transformer(ratio, inductance [, dcr=val] [, Cp=val] [, k=val])
+/// Positional syntax: transformer(ratio, model|inductance [, dcr] [, cap] [, winding_mod])
+/// Named syntax: transformer(ratio, model|inductance [, dcr=val] [, Cp=val] [, k=val] [, Lp=val] [, Llp=val] [, Lls=val] [, Lm=val] [, Rc=val])
 fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("transformer")(input)?;
     let (input, _) = char('(')(input)?;
@@ -1551,12 +1673,16 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = char(',')(input)?;
     let (input, _) = ws_comments(input)?;
 
-    // Parse primary inductance
-    let (input, inductance) = eng_value(input)?;
+    // Parse either model name or explicit primary inductance.
+    let (input, mut config) = if let Ok((input, inductance)) = eng_value(input) {
+        (input, TransformerConfig::new(ratio, inductance))
+    } else {
+        let (input, model) = model_name_str(input)?;
+        (input, TransformerConfig::with_model(ratio, model))
+    };
     let (input, _) = ws_comments(input)?;
 
     // Parse optional modifiers and named parameters
-    let mut config = TransformerConfig::new(ratio, inductance);
     let mut positional_count = 0; // Track positional numeric args after inductance
 
     // Try to parse additional comma-separated options
@@ -1626,6 +1752,38 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
                 let (input, _) = ws_comments(input)?;
                 let (input, k) = double(input)?;
                 config.coupling = k;
+                remaining = input;
+                continue;
+            }
+
+            if let Ok((input, name)) = alt((
+                tag::<&str, &str, nom::error::Error<&str>>("Llp"),
+                tag("llp"),
+                tag("Lls"),
+                tag("lls"),
+                tag("Lm"),
+                tag("lm"),
+                tag("Lp"),
+                tag("lp"),
+                tag("Rc"),
+                tag("rc"),
+                tag("Idc"),
+                tag("idc"),
+            ))(remaining)
+            {
+                let (input, _) = ws_comments(input)?;
+                let (input, _) = char('=')(input)?;
+                let (input, _) = ws_comments(input)?;
+                let (input, value) = eng_value(input)?;
+                match name {
+                    "Llp" | "llp" => config.primary_leakage = Some(value),
+                    "Lls" | "lls" => config.secondary_leakage = Some(value),
+                    "Lm" | "lm" => config.magnetizing_inductance = Some(value),
+                    "Lp" | "lp" => config.primary_inductance = value,
+                    "Rc" | "rc" => config.core_loss_resistance = Some(value),
+                    "Idc" | "idc" => config.dc_bias_current = Some(value),
+                    _ => unreachable!(),
+                }
                 remaining = input;
                 continue;
             }
@@ -2192,6 +2350,47 @@ fn control_or_skip(input: &str) -> IResult<&str, Option<ControlDef>> {
     Ok((remaining, None))
 }
 
+// ---------------------------------------------------------------------------
+// Ports section parser
+// ---------------------------------------------------------------------------
+
+/// Parse a single port definition: `name: input` or `name: output`
+fn port_def(input: &str) -> IResult<&str, PortDef> {
+    let (input, _) = ws_comments(input)?;
+    let (input, name) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, dir_str) = alt((tag("input"), tag("output")))(input)?;
+    let direction = match dir_str {
+        "input" => pedalkernel_rt::PortDirection::Input,
+        "output" => pedalkernel_rt::PortDirection::Output,
+        _ => unreachable!(),
+    };
+    // Optional impedance: input(10k) or output(600)
+    let (input, impedance) = opt(delimited(char('('), eng_value, char(')')))(input)?;
+    Ok((
+        input,
+        PortDef {
+            name: name.to_string(),
+            direction,
+            impedance,
+        },
+    ))
+}
+
+/// Parse the `ports { ... }` section.
+fn ports_section(input: &str) -> IResult<&str, Vec<PortDef>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("ports")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+    let (input, ports) = many0(port_def)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, ports))
+}
+
 fn controls_section(input: &str) -> IResult<&str, Vec<ControlDef>> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("controls")(input)?;
@@ -2710,6 +2909,58 @@ fn parse_calibrate(input: &str) -> IResult<&str, ()> {
     Ok((input, ()))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Init block parser
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Valid named initial states for NL devices.
+const VALID_INIT_STATES: &[&str] = &["saturated", "cutoff", "active", "forward", "reverse"];
+
+/// Parse one `DeviceLabel: state_name` line inside an `init { ... }` block.
+fn parse_init_hint(input: &str) -> IResult<&str, InitHint> {
+    let (input, _) = ws_comments(input)?;
+    let (input, label) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, state_str) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    if !VALID_INIT_STATES.contains(&state_str) {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Tag,
+        )));
+    }
+
+    Ok((
+        input,
+        InitHint {
+            device_label: label.to_string(),
+            state: InitState::Named(state_str.to_string()),
+        },
+    ))
+}
+
+/// Parse the optional `init { ... }` block.
+///
+/// ```text
+/// init {
+///     Q1: saturated
+///     Q2: cutoff
+/// }
+/// ```
+fn init_section(input: &str) -> IResult<&str, Vec<InitHint>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("init")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+    let (input, hints) = many0(parse_init_hint)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, hints))
+}
+
 /// Parse a complete `.pedal` or `.synth` file.
 /// Both `pedal "Name" { ... }` and `synth "Name" { ... }` produce the same AST.
 pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
@@ -2741,6 +2992,10 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     // Parse optional subcircuit blocks (zero or more, before components)
     let (input, subcircuits) = many0(subcircuit_block)(input)?;
 
+    // Parse optional ports section (before components — ports declare
+    // named voltage nodes that can be referenced in nets)
+    let (input, ports) = opt(ports_section)(input)?;
+
     // When subcircuits are present, the top-level components/nets become
     // an optional routing layer. When absent, keep existing required behavior.
     let (input, (components, mirrors)) = if subcircuits.is_empty() {
@@ -2762,6 +3017,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, monitors) = opt(monitors_section)(input)?;
     let (input, sidechains) = opt(sidechains_section)(input)?;
     let (input, calibrate) = opt(parse_calibrate)(input)?;
+    let (input, init_hints) = opt(init_section)(input)?;
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -2780,6 +3036,8 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         mirrors,
         calibrate: calibrate.is_some(),
         subcircuits,
+        ports: ports.unwrap_or_default(),
+        init_hints: init_hints.unwrap_or_default(),
     };
     resolve_subcircuit_pins(&mut pedal);
     Ok((input, pedal))
@@ -4451,10 +4709,21 @@ synth "CV Test" {
         let (_, (c, _)) = component_def("T1: transformer(10:1, 2H)").unwrap();
         assert_eq!(c.id, "T1");
         let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert_eq!(cfg.model, None);
         assert!((cfg.turns_ratio - 10.0).abs() < 1e-6);
         assert!((cfg.primary_inductance - 2.0).abs() < 1e-6);
         assert_eq!(cfg.primary_type, WindingType::Standard);
         assert_eq!(cfg.secondary_type, WindingType::Standard);
+    }
+
+    #[test]
+    fn parse_transformer_with_model_name() {
+        let (_, (c, _)) = component_def("T1: transformer(10:1, JT11P1)").unwrap();
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert_eq!(cfg.model.as_deref(), Some("JT11P1"));
+        assert!((cfg.turns_ratio - 10.0).abs() < 1e-6);
+        assert_eq!(cfg.primary_inductance, 0.0);
+        assert_eq!(cfg.coupling, 0.0);
     }
 
     #[test]
@@ -4477,6 +4746,22 @@ synth "CV Test" {
         assert!((cfg.primary_dcr - 50.0).abs() < 1e-6);
         assert!((cfg.secondary_dcr - 50.0).abs() < 1e-6); // Both set to same value
         assert!((cfg.coupling - 0.98).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_transformer_with_linear_model_fields() {
+        let (_, (c, _)) = component_def(
+            "T4: transformer(10:1, JT11P1, Lp=2H, Llp=20m, Lls=200u, Lm=1.98H, Rc=100k, Idc=45m)",
+        )
+        .unwrap();
+        let cfg = c.kind.transformer_config().expect("expected Transformer");
+        assert_eq!(cfg.model.as_deref(), Some("JT11P1"));
+        assert!((cfg.primary_inductance - 2.0).abs() < 1e-9);
+        assert!((cfg.primary_leakage.unwrap() - 20e-3).abs() < 1e-9);
+        assert!((cfg.secondary_leakage.unwrap() - 200e-6).abs() < 1e-12);
+        assert!((cfg.magnetizing_inductance.unwrap() - 1.98).abs() < 1e-9);
+        assert!((cfg.core_loss_resistance.unwrap() - 100_000.0).abs() < 1e-6);
+        assert!((cfg.dc_bias_current.unwrap() - 45e-3).abs() < 1e-12);
     }
 
     #[test]
@@ -5291,5 +5576,131 @@ pedal "Simple" {
         let def = parse_pedal_file(src).unwrap();
         assert!(def.subcircuits.is_empty());
         assert_eq!(def.components.len(), 1);
+    }
+
+    // ── Ports parser ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_ports_section() {
+        let src = r#"pedal "test" {
+    supply 9V
+    ports {
+        audio_in: input
+        cv_cutoff: input
+        audio_out: output
+        env_out: output
+    }
+    components { R1: resistor(10k) }
+    nets { audio_in -> R1.a  R1.b -> audio_out }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.ports.len(), 4, "should have 4 ports");
+        assert_eq!(def.ports[0].name, "audio_in");
+        assert_eq!(def.ports[0].direction, pedalkernel_rt::PortDirection::Input);
+        assert_eq!(def.ports[1].name, "cv_cutoff");
+        assert_eq!(def.ports[1].direction, pedalkernel_rt::PortDirection::Input);
+        assert_eq!(def.ports[2].name, "audio_out");
+        assert_eq!(
+            def.ports[2].direction,
+            pedalkernel_rt::PortDirection::Output
+        );
+        assert_eq!(def.ports[3].name, "env_out");
+        assert_eq!(
+            def.ports[3].direction,
+            pedalkernel_rt::PortDirection::Output
+        );
+    }
+
+    #[test]
+    fn parse_no_ports_section() {
+        let src = r#"pedal "test" {
+    supply 9V
+    components { R1: resistor(10k) }
+    nets { in -> R1.a  R1.b -> out }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert!(
+            def.ports.is_empty(),
+            "should have no ports when section omitted"
+        );
+    }
+
+    #[test]
+    fn ports_used_in_nets() {
+        // Port names should be usable in nets as reserved nodes
+        let src = r#"pedal "test" {
+    supply 9V
+    ports {
+        audio_in: input
+        cv_cutoff: input
+        audio_out: output
+    }
+    components {
+        R1: resistor(10k)
+        R_cv: resistor(100k)
+    }
+    nets {
+        audio_in -> R1.a
+        cv_cutoff -> R_cv.a
+        R_cv.b -> R1.a
+        R1.b -> audio_out
+    }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.ports.len(), 3);
+        // Port names should appear in nets as reserved pins
+        let has_audio_in = def.nets.iter().any(|n| {
+            matches!(&n.from, Pin::Reserved(s) if s == "audio_in")
+                || n.to
+                    .iter()
+                    .any(|p| matches!(p, Pin::Reserved(s) if s == "audio_in"))
+        });
+        assert!(has_audio_in, "audio_in should be in nets as reserved pin");
+    }
+
+    // ── Port impedance syntax ───────────────────────────────────────────
+
+    #[test]
+    fn parse_port_with_impedance() {
+        let src = r#"pedal "test" {
+    supply 9V
+    ports {
+        audio_in: input(10k)
+        cv_cutoff: input(47k)
+        audio_out: output(600)
+    }
+    components { R1: resistor(10k) }
+    nets { audio_in -> R1.a  R1.b -> audio_out }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.ports.len(), 3);
+        assert_eq!(def.ports[0].name, "audio_in");
+        assert_eq!(def.ports[0].impedance, Some(10_000.0));
+        assert_eq!(def.ports[1].name, "cv_cutoff");
+        assert_eq!(def.ports[1].impedance, Some(47_000.0));
+        assert_eq!(def.ports[2].name, "audio_out");
+        assert_eq!(def.ports[2].impedance, Some(600.0));
+    }
+
+    #[test]
+    fn parse_port_without_impedance_backward_compat() {
+        let src = r#"pedal "test" {
+    supply 9V
+    ports {
+        audio_in: input
+        audio_out: output
+    }
+    components { R1: resistor(10k) }
+    nets { audio_in -> R1.a  R1.b -> audio_out }
+    controls {}
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.ports.len(), 2);
+        assert_eq!(def.ports[0].impedance, None);
+        assert_eq!(def.ports[1].impedance, None);
     }
 }

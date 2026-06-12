@@ -1,0 +1,15 @@
+# Literal three-terminal output level pot. Default Output = 0.5.
+
+pedal "Extraction Output Wiper Divider" {
+  components {
+    Output: pot(100k, b)
+  }
+  nets {
+    in -> Output.a
+    Output.b -> gnd
+    Output.w -> out
+  }
+  controls {
+    Output.position -> "Output" [0.0, 1.0] = 0.5
+  }
+}

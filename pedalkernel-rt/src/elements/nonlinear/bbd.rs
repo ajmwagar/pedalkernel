@@ -2,9 +2,9 @@
 //!
 //! Models MN3007, MN3207, MN3005 with companding, clock feedthrough, and leakage.
 
+use super::delay::{DelayLine, Interpolation};
 use alloc::vec;
 use alloc::vec::Vec;
-use super::delay::{DelayLine, Interpolation};
 
 // ---------------------------------------------------------------------------
 // BBD (Bucket-Brigade Device) Delay Line
@@ -31,27 +31,27 @@ pub struct BbdModel {
     /// Number of BBD stages. MN3207=1024, MN3007=1024, MN3005=4096.
     pub num_stages: usize,
     /// Minimum clock frequency (Hz). Determines maximum delay time.
-    pub clock_min: f64,
+    pub clock_min: crate::Wave,
     /// Maximum clock frequency (Hz). Determines minimum delay time.
-    pub clock_max: f64,
+    pub clock_max: crate::Wave,
     /// Signal bandwidth limit as fraction of clock (Nyquist ≈ 0.45 * fclk).
-    pub bandwidth_ratio: f64,
+    pub bandwidth_ratio: crate::Wave,
     /// Noise floor (linear amplitude). BBDs are noisy devices.
-    pub noise_floor: f64,
+    pub noise_floor: crate::Wave,
     /// Per-stage charge leakage rate (fraction lost per stage per clock period).
     /// Real BBDs lose charge through substrate leakage and junction capacitance.
     /// Typical: 0.0001–0.001 per stage, causing progressive HF loss at longer delays.
-    pub leakage_per_stage: f64,
+    pub leakage_per_stage: crate::Wave,
     /// Clock feedthrough amplitude (normalized).
     /// The switching clock couples into the analog signal path through parasitic
     /// capacitance in the MOSFET switches.  Audible as a high-pitched whine.
     /// Typical: -60 to -80 dB below signal = 0.001–0.0001.
-    pub clock_feedthrough: f64,
+    pub clock_feedthrough: crate::Wave,
     /// Compander tracking error.  Real BBD circuits use NE571/SA571 compander
     /// ICs to expand dynamic range.  The compressor (input) and expander (output)
     /// don't track perfectly — the rectifier time constants differ, causing
     /// "breathing" and pumping artifacts.  0.0 = perfect tracking, 1.0 = maximum error.
-    pub compander_error: f64,
+    pub compander_error: crate::Wave,
 }
 
 impl BbdModel {
@@ -116,17 +116,17 @@ impl BbdModel {
     ///
     /// BBD delay = num_stages / (2 * fclk)
     /// The factor of 2 is because samples advance one stage per half-clock.
-    pub fn delay_at_clock(&self, clock_hz: f64) -> f64 {
-        self.num_stages as f64 / (2.0 * clock_hz)
+    pub fn delay_at_clock(&self, clock_hz: crate::Wave) -> crate::Wave {
+        self.num_stages as crate::Wave / (2.0 * clock_hz)
     }
 
     /// Minimum delay time in seconds.
-    pub fn min_delay(&self) -> f64 {
+    pub fn min_delay(&self) -> crate::Wave {
         self.delay_at_clock(self.clock_max)
     }
 
     /// Maximum delay time in seconds.
-    pub fn max_delay(&self) -> f64 {
+    pub fn max_delay(&self) -> crate::Wave {
         self.delay_at_clock(self.clock_min)
     }
 }
@@ -162,47 +162,47 @@ pub struct BbdDelayLine {
     /// Inner delay line handling ring buffer, write position, and interpolation.
     inner: DelayLine,
     /// Current clock frequency (Hz).
-    clock_freq: f64,
+    clock_freq: crate::Wave,
     /// Anti-alias filter state (simple one-pole LPF).
-    lpf_state: f64,
+    lpf_state: crate::Wave,
     /// Anti-alias filter coefficient.
-    lpf_coef: f64,
+    lpf_coef: crate::Wave,
     /// Simple RNG state for noise injection.
     rng_state: u32,
     /// Feedback amount (0.0–1.0).
-    feedback: f64,
+    feedback: crate::Wave,
     /// Previous output for feedback path.
-    feedback_sample: f64,
+    feedback_sample: crate::Wave,
     /// Leakage LPF coefficient: models accumulated charge loss across all stages.
     /// More stages and lower clock = more leakage = darker output.
     /// This is a one-pole LPF whose cutoff decreases with delay time.
-    leakage_lpf_state: f64,
-    leakage_lpf_coef: f64,
+    leakage_lpf_state: crate::Wave,
+    leakage_lpf_coef: crate::Wave,
     /// Clock feedthrough oscillator phase (0..2π).
-    clock_phase: f64,
+    clock_phase: crate::Wave,
     /// Clock feedthrough phase increment per sample.
-    clock_phase_inc: f64,
+    clock_phase_inc: crate::Wave,
 
     // ── Compander state ───────────────────────────────────────────────────
     /// Compression envelope: tracks input signal level for compressor gain.
-    compander_env_in: f64,
+    compander_env_in: crate::Wave,
     /// Delayed compression envelope buffer: small ring buffer that delays
     /// the compression envelope to match the audio delay through the BBD.
     /// The expander uses this delayed envelope to restore dynamic range.
-    env_delay_buffer: Vec<f64>,
+    env_delay_buffer: Vec<crate::Wave>,
     /// Write position in envelope delay buffer.
     env_delay_write_pos: usize,
     /// Current envelope delay in samples (tracks audio delay).
     env_delay_samples: usize,
     /// Output envelope: tracks actual output level for computing tracking error.
     /// This is NOT used for expansion gain, only for artifact modeling.
-    compander_env_out: f64,
+    compander_env_out: crate::Wave,
 
     /// Compander attack/release coefficients.
-    compander_attack: f64,
-    compander_release: f64,
+    compander_attack: crate::Wave,
+    compander_release: crate::Wave,
     /// Sample rate (cached for envelope delay calculations).
-    sample_rate: f64,
+    sample_rate: crate::Wave,
 }
 
 impl BbdDelayLine {
@@ -210,7 +210,7 @@ impl BbdDelayLine {
     ///
     /// Buffer size is determined by the maximum delay time at the current
     /// sample rate, plus headroom for interpolation.
-    pub fn new(model: BbdModel, sample_rate: f64) -> Self {
+    pub fn new(model: BbdModel, sample_rate: crate::Wave) -> Self {
         // Derive delay range from the BBD clock range.
         // Max clock → min delay, min clock → max delay.
         let min_delay = model.delay_at_clock(model.clock_max);
@@ -223,7 +223,9 @@ impl BbdDelayLine {
 
         // Anti-alias LPF cutoff: bandwidth_ratio * clock_freq
         let lpf_cutoff = model.bandwidth_ratio * clock_freq;
-        let lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
+        let lpf_coef = crate::math::exp(
+            (-2.0 * crate::math::PI as crate::Wave * lpf_cutoff / sample_rate) as crate::Wave,
+        ) as crate::Wave;
 
         // Leakage LPF: models accumulated charge loss across all BBD stages.
         // Each stage loses `leakage_per_stage` of its charge per clock period.
@@ -232,13 +234,15 @@ impl BbdDelayLine {
         let leakage_lpf_coef = Self::compute_leakage_coef(&model, clock_freq, sample_rate);
 
         // Clock feedthrough: the BBD switching clock couples into the signal path.
-        let clock_phase_inc = 2.0 * crate::math::PI * clock_freq / sample_rate;
+        let clock_phase_inc = 2.0 * crate::math::PI as crate::Wave * clock_freq / sample_rate;
 
         // Compander: NE571-style attack/release time constants.
         // Attack ~5ms, release ~50ms (NE571 syllabic time constants).
         // The mismatch causes "breathing" artifacts.
-        let compander_attack = crate::math::exp(-1.0 / (0.005 * sample_rate));
-        let compander_release = crate::math::exp(-1.0 / (0.050 * sample_rate));
+        let compander_attack =
+            crate::math::exp((-1.0 / (0.005 * sample_rate)) as crate::Wave) as crate::Wave;
+        let compander_release =
+            crate::math::exp((-1.0 / (0.050 * sample_rate)) as crate::Wave) as crate::Wave;
 
         // Envelope delay buffer: sized for maximum BBD delay time.
         // This delays the compression envelope to match the audio delay.
@@ -277,23 +281,30 @@ impl BbdDelayLine {
     /// so more leaks.  The equivalent one-pole LPF cutoff is:
     ///   fc_leakage = -ln(1 - leakage_per_stage × N) × fclk / (2π)
     /// Clamped to prevent the cutoff from exceeding Nyquist.
-    fn compute_leakage_coef(model: &BbdModel, clock_freq: f64, sample_rate: f64) -> f64 {
-        let total_loss = (model.leakage_per_stage * model.num_stages as f64).min(0.99);
+    fn compute_leakage_coef(
+        model: &BbdModel,
+        clock_freq: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> crate::Wave {
+        let total_loss = (model.leakage_per_stage * model.num_stages as crate::Wave).min(0.99);
         // Map total charge retention to a LPF cutoff.
         // retention = 1 - total_loss = fraction of signal preserved.
         // Higher loss → lower cutoff → darker sound.
         let retention = 1.0 - total_loss;
         // Cutoff in Hz: scale with clock frequency (higher clock = shorter hold time = less leakage)
-        let fc_leakage = -(crate::math::ln(retention)) * clock_freq / (2.0 * crate::math::PI);
+        let fc_leakage = -(crate::math::ln(retention as crate::Wave) as crate::Wave) * clock_freq
+            / (2.0 * crate::math::PI as crate::Wave);
         let fc_clamped = fc_leakage.min(sample_rate * 0.45); // Never exceed Nyquist
-        crate::math::exp(-2.0 * crate::math::PI * fc_clamped / sample_rate)
+        crate::math::exp(
+            (-2.0 * crate::math::PI as crate::Wave * fc_clamped / sample_rate) as crate::Wave,
+        ) as crate::Wave
     }
 
     /// Set the clock frequency directly (Hz).
     ///
     /// This controls the delay time: delay = num_stages / (2 * fclk).
     /// Modulating this with an LFO creates chorus/flanger effects.
-    pub fn set_clock(&mut self, clock_hz: f64) {
+    pub fn set_clock(&mut self, clock_hz: crate::Wave) {
         self.clock_freq = clock_hz.clamp(self.model.clock_min, self.model.clock_max);
         self.inner
             .set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
@@ -302,36 +313,40 @@ impl BbdDelayLine {
 
         // Update anti-alias filter
         let lpf_cutoff = self.model.bandwidth_ratio * self.clock_freq;
-        self.lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
+        self.lpf_coef = crate::math::exp(
+            (-2.0 * crate::math::PI as crate::Wave * lpf_cutoff / sample_rate) as crate::Wave,
+        ) as crate::Wave;
 
         // Update leakage LPF (more leakage at lower clock = longer delays)
         self.leakage_lpf_coef =
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
 
         // Update clock feedthrough frequency
-        self.clock_phase_inc = 2.0 * crate::math::PI * self.clock_freq / sample_rate;
+        self.clock_phase_inc = 2.0 * crate::math::PI as crate::Wave * self.clock_freq / sample_rate;
 
         // Update envelope delay to match audio delay
         let delay_secs = self.model.delay_at_clock(self.clock_freq);
-        self.env_delay_samples =
-            crate::math::round(delay_secs * sample_rate) as usize % self.env_delay_buffer.len();
+        self.env_delay_samples = crate::math::round((delay_secs * sample_rate) as crate::Wave)
+            as usize
+            % self.env_delay_buffer.len();
     }
 
     /// Set delay time as a normalized value (0.0 = min delay, 1.0 = max delay).
     ///
     /// Maps logarithmically across the clock frequency range.
-    pub fn set_delay_normalized(&mut self, norm: f64) {
+    pub fn set_delay_normalized(&mut self, norm: crate::Wave) {
         let norm = norm.clamp(0.0, 1.0);
         // Logarithmic interpolation between min and max clock
         // norm=0 -> max clock (min delay), norm=1 -> min clock (max delay)
-        let log_min = crate::math::ln(self.model.clock_min);
-        let log_max = crate::math::ln(self.model.clock_max);
-        let clock = crate::math::exp(log_max - norm * (log_max - log_min));
+        let log_min = crate::math::ln(self.model.clock_min as crate::Wave) as crate::Wave;
+        let log_max = crate::math::ln(self.model.clock_max as crate::Wave) as crate::Wave;
+        let clock =
+            crate::math::exp((log_max - norm * (log_max - log_min)) as crate::Wave) as crate::Wave;
         self.set_clock(clock);
     }
 
     /// Set feedback amount (0.0 = no feedback, <1.0 for stability).
-    pub fn set_feedback(&mut self, feedback: f64) {
+    pub fn set_feedback(&mut self, feedback: crate::Wave) {
         self.feedback = feedback.clamp(0.0, 0.95);
     }
 
@@ -351,7 +366,7 @@ impl BbdDelayLine {
     /// 11. Expand using delayed envelope (restores original dynamics)
     /// 12. Apply tracking error as small modulation artifact
     #[inline]
-    pub fn process(&mut self, input: f64) -> f64 {
+    pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
         // ══════════════════════════════════════════════════════════════
         // COMPANDER INPUT (COMPRESSOR)
         // ══════════════════════════════════════════════════════════════
@@ -367,7 +382,7 @@ impl BbdDelayLine {
 
         // Model analog noise floor - prevents expansion from true zero which causes pops.
         // Real NE571 companders have finite noise that prevents infinite expansion gain.
-        const ANALOG_NOISE_FLOOR: f64 = 0.001; // ~-60dB
+        const ANALOG_NOISE_FLOOR: crate::Wave = 0.001; // ~-60dB
         self.compander_env_in = self.compander_env_in.max(ANALOG_NOISE_FLOOR);
 
         // Store compression envelope in delay buffer for expander to use later.
@@ -380,7 +395,7 @@ impl BbdDelayLine {
         // Compress: reduce dynamic range by 2:1 (typical NE571 ratio).
         // gain = 1/sqrt(envelope) — louder signals get compressed more.
         let comp_gain = if self.compander_env_in > 0.001 {
-            1.0 / crate::math::sqrt(self.compander_env_in)
+            1.0 / crate::math::sqrt(self.compander_env_in as crate::Wave) as crate::Wave
         } else {
             1.0
         };
@@ -416,10 +431,11 @@ impl BbdDelayLine {
 
         // Clock feedthrough
         self.clock_phase += self.clock_phase_inc;
-        if self.clock_phase > 2.0 * crate::math::PI {
-            self.clock_phase -= 2.0 * crate::math::PI;
+        if self.clock_phase > 2.0 * crate::math::PI as crate::Wave {
+            self.clock_phase -= 2.0 * crate::math::PI as crate::Wave;
         }
-        let clock_bleed = self.model.clock_feedthrough * crate::math::sin(self.clock_phase);
+        let clock_bleed = self.model.clock_feedthrough
+            * crate::math::sin(self.clock_phase as crate::Wave) as crate::Wave;
 
         // Noise injection
         let noise = self.next_noise() * self.model.noise_floor;
@@ -438,7 +454,7 @@ impl BbdDelayLine {
         // Base expansion gain from delayed compression envelope.
         // This restores the original dynamic range (ideally cancels compression).
         let base_exp_gain = if delayed_env > 0.001 {
-            crate::math::sqrt(delayed_env)
+            crate::math::sqrt(delayed_env as crate::Wave) as crate::Wave
         } else {
             1.0
         };
@@ -485,19 +501,23 @@ impl BbdDelayLine {
     }
 
     /// Update sample rate and resize buffer.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
         self.inner.set_sample_rate(sample_rate);
         self.inner
             .set_delay_seconds(self.model.delay_at_clock(self.clock_freq));
 
         let lpf_cutoff = self.model.bandwidth_ratio * self.clock_freq;
-        self.lpf_coef = crate::math::exp(-2.0 * crate::math::PI * lpf_cutoff / sample_rate);
+        self.lpf_coef = crate::math::exp(
+            (-2.0 * crate::math::PI as crate::Wave * lpf_cutoff / sample_rate) as crate::Wave,
+        ) as crate::Wave;
         self.leakage_lpf_coef =
             Self::compute_leakage_coef(&self.model, self.clock_freq, sample_rate);
-        self.clock_phase_inc = 2.0 * crate::math::PI * self.clock_freq / sample_rate;
-        self.compander_attack = crate::math::exp(-1.0 / (0.005 * sample_rate));
-        self.compander_release = crate::math::exp(-1.0 / (0.050 * sample_rate));
+        self.clock_phase_inc = 2.0 * crate::math::PI as crate::Wave * self.clock_freq / sample_rate;
+        self.compander_attack =
+            crate::math::exp((-1.0 / (0.005 * sample_rate)) as crate::Wave) as crate::Wave;
+        self.compander_release =
+            crate::math::exp((-1.0 / (0.050 * sample_rate)) as crate::Wave) as crate::Wave;
 
         // Resize envelope delay buffer for new sample rate
         let max_delay = self.model.delay_at_clock(self.model.clock_min);
@@ -525,25 +545,25 @@ impl BbdDelayLine {
     }
 
     /// Get current delay time in seconds.
-    pub fn delay_time(&self) -> f64 {
+    pub fn delay_time(&self) -> crate::Wave {
         self.inner.delay_time()
     }
 
     /// Get current clock frequency.
-    pub fn clock_freq(&self) -> f64 {
+    pub fn clock_freq(&self) -> crate::Wave {
         self.clock_freq
     }
 
     /// Simple fast PRNG for noise injection (xorshift).
     #[inline]
-    fn next_noise(&mut self) -> f64 {
+    fn next_noise(&mut self) -> crate::Wave {
         let mut x = self.rng_state;
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
         self.rng_state = x;
         // Convert to -1.0 to 1.0 range
-        (x as f64 / u32::MAX as f64) * 2.0 - 1.0
+        (x as crate::Wave / u32::MAX as crate::Wave) * 2.0 - 1.0
     }
 }
 
@@ -553,7 +573,7 @@ impl BbdDelayLine {
 /// They clip more gently than op-amps, with a gradual compression
 /// that adds warmth. We model this with a cubic soft clipper.
 #[inline]
-pub fn bbd_soft_clip(x: f64) -> f64 {
+pub fn bbd_soft_clip(x: crate::Wave) -> crate::Wave {
     if x.abs() < 1.0 {
         x - x * x * x / 3.0 // Cubic soft clip
     } else {
@@ -570,11 +590,11 @@ pub fn bbd_soft_clip(x: f64) -> f64 {
 /// `level` is the input amplitude at which the tape reaches ~90% saturation.
 /// Typical values: 0.6-0.8 for different tape formulations.
 #[inline]
-pub fn tape_saturation(x: f64, level: f64) -> f64 {
+pub fn tape_saturation(x: crate::Wave, level: crate::Wave) -> crate::Wave {
     // Scale input so that level corresponds to ~90% saturation
     // tanh(1.47) ≈ 0.9, so we scale accordingly
     let scaled = x * 1.47 / level;
-    level * crate::math::tanh(scaled) / 1.47
+    level * crate::math::tanh(scaled as crate::Wave) as crate::Wave / 1.47
 }
 
 // ===========================================================================
@@ -585,26 +605,31 @@ pub fn tape_saturation(x: f64, level: f64) -> f64 {
 mod tests {
     use super::*;
 
-    const SAMPLE_RATE: f64 = 48000.0;
+    const SAMPLE_RATE: crate::Wave = 48000.0;
 
     // -----------------------------------------------------------------------
     // Helper: measure RMS of a buffer
     // -----------------------------------------------------------------------
-    fn rms(buf: &[f64]) -> f64 {
+    fn rms(buf: &[crate::Wave]) -> crate::Wave {
         if buf.is_empty() {
             return 0.0;
         }
-        crate::math::sqrt(buf.iter().map(|x| x * x).sum::<f64>() / buf.len() as f64)
+        crate::math::sqrt(buf.iter().map(|x| x * x).sum::<crate::Wave>() / buf.len() as crate::Wave)
     }
 
     // -----------------------------------------------------------------------
     // Helper: generate sine wave
     // -----------------------------------------------------------------------
-    fn sine(freq_hz: f64, amplitude: f64, duration_secs: f64, sample_rate: f64) -> Vec<f64> {
+    fn sine(
+        freq_hz: crate::Wave,
+        amplitude: crate::Wave,
+        duration_secs: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> Vec<crate::Wave> {
         let n = (duration_secs * sample_rate) as usize;
         (0..n)
             .map(|i| {
-                let t = i as f64 / sample_rate;
+                let t = i as crate::Wave / sample_rate;
                 amplitude * crate::math::sin(2.0 * crate::math::PI * freq_hz * t)
             })
             .collect()
@@ -613,8 +638,12 @@ mod tests {
     // -----------------------------------------------------------------------
     // Helper: measure THD (harmonics 2-8 vs fundamental)
     // -----------------------------------------------------------------------
-    fn goertzel_power(buf: &[f64], sample_rate: f64, target_hz: f64) -> f64 {
-        let n = buf.len() as f64;
+    fn goertzel_power(
+        buf: &[crate::Wave],
+        sample_rate: crate::Wave,
+        target_hz: crate::Wave,
+    ) -> crate::Wave {
+        let n = buf.len() as crate::Wave;
         let k = crate::math::round(target_hz * n / sample_rate);
         let w = 2.0 * crate::math::PI * k / n;
         let coeff = 2.0 * crate::math::cos(w);
@@ -632,7 +661,11 @@ mod tests {
         power / (n * n / 4.0)
     }
 
-    fn thd(buf: &[f64], sample_rate: f64, fundamental_hz: f64) -> f64 {
+    fn thd(
+        buf: &[crate::Wave],
+        sample_rate: crate::Wave,
+        fundamental_hz: crate::Wave,
+    ) -> crate::Wave {
         let fund_power = goertzel_power(buf, sample_rate, fundamental_hz);
         if fund_power < 1e-30 {
             return 0.0;
@@ -640,7 +673,7 @@ mod tests {
 
         let mut harmonic_power = 0.0;
         for h in 2..=8 {
-            let freq = fundamental_hz * h as f64;
+            let freq = fundamental_hz * h as crate::Wave;
             if freq > sample_rate / 2.0 {
                 break;
             }
@@ -714,7 +747,7 @@ mod tests {
 
         // Now measure gain
         let input = sine(440.0, 0.3, 0.5, SAMPLE_RATE);
-        let output: Vec<f64> = input.iter().map(|&s| bbd.process(s)).collect();
+        let output: Vec<crate::Wave> = input.iter().map(|&s| bbd.process(s)).collect();
 
         let input_rms = rms(&input);
         let output_rms = rms(&output);
@@ -761,18 +794,18 @@ mod tests {
                                        // Sudden attack
         for i in 0..24000 {
             // 500ms of signal
-            let t = i as f64 / SAMPLE_RATE;
+            let t = i as crate::Wave / SAMPLE_RATE;
             let env = (1.0 - crate::math::exp(-t * 20.0)); // 50ms attack
             input.push(env * 0.5 * crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
         // Decay
         for i in 0..24000 {
-            let t = i as f64 / SAMPLE_RATE;
+            let t = i as crate::Wave / SAMPLE_RATE;
             let env = crate::math::exp(-t * 3.0); // ~300ms decay
             input.push(env * 0.5 * crate::math::sin(2.0 * crate::math::PI * 440.0 * t));
         }
 
-        let output: Vec<f64> = input.iter().map(|&s| bbd.process(s)).collect();
+        let output: Vec<crate::Wave> = input.iter().map(|&s| bbd.process(s)).collect();
 
         // Measure envelope deviation in chunks
         let chunk_size = 480; // 10ms
@@ -787,8 +820,8 @@ mod tests {
         }
 
         // Calculate envelope tracking error
-        let mut max_ratio = 0.0f64;
-        let mut min_ratio = f64::MAX;
+        let mut max_ratio = 0.0 as crate::Wave;
+        let mut min_ratio = crate::Wave::MAX;
 
         for (i, (&inp, &out)) in input_env.iter().zip(output_env.iter()).enumerate() {
             if inp > 0.01 {
@@ -841,7 +874,7 @@ mod tests {
 
             // Measure
             let input = sine(440.0, level, 0.5, SAMPLE_RATE);
-            let output: Vec<f64> = input.iter().map(|&s| bbd.process(s)).collect();
+            let output: Vec<crate::Wave> = input.iter().map(|&s| bbd.process(s)).collect();
 
             let output_thd = thd(&output, SAMPLE_RATE, 440.0);
             println!("{:.1}\t{:.2}%", level, output_thd * 100.0);
@@ -880,7 +913,7 @@ mod tests {
 
         // Measure single BBD
         let input = sine(440.0, 0.3, 1.0, SAMPLE_RATE);
-        let single_output: Vec<f64> = {
+        let single_output: Vec<crate::Wave> = {
             let mut bbd_single = BbdDelayLine::new(BbdModel::mn3005(), SAMPLE_RATE);
             bbd_single.set_clock(30000.0);
             // Warmup
@@ -891,7 +924,7 @@ mod tests {
         };
 
         // Measure cascaded
-        let cascade_output: Vec<f64> = input
+        let cascade_output: Vec<crate::Wave> = input
             .iter()
             .map(|&s| {
                 let mid = bbd1.process(s);
@@ -955,7 +988,7 @@ mod tests {
         for burst_num in 0..5 {
             // Burst of signal
             let burst = sine(440.0, 0.3, 0.2, SAMPLE_RATE);
-            let output: Vec<f64> = burst
+            let output: Vec<crate::Wave> = burst
                 .iter()
                 .map(|&s| {
                     let mid = bbd1.process(s);
@@ -978,8 +1011,14 @@ mod tests {
         }
 
         // Check gain consistency
-        let max_gain = gains.iter().cloned().fold(0.0f64, f64::max);
-        let min_gain = gains.iter().cloned().fold(f64::MAX, f64::min);
+        let max_gain = gains
+            .iter()
+            .cloned()
+            .fold(0.0 as crate::Wave, crate::Wave::max);
+        let min_gain = gains
+            .iter()
+            .cloned()
+            .fold(crate::Wave::MAX, crate::Wave::min);
         let gain_variation = max_gain / min_gain.max(0.001);
 
         println!(
@@ -1012,7 +1051,7 @@ mod tests {
             ("MN3007", BbdModel::mn3007()),
             ("MN3005", BbdModel::mn3005()),
         ] {
-            let total_loss = model.leakage_per_stage * model.num_stages as f64;
+            let total_loss = model.leakage_per_stage * model.num_stages as crate::Wave;
             let clamped_loss = total_loss.min(0.99);
             let retention = 1.0 - clamped_loss;
 
@@ -1070,9 +1109,9 @@ mod tests {
         bbd_long.set_clock(15000.0); // Long delay
 
         // Create harmonically rich input
-        let input: Vec<f64> = (0..48000)
+        let input: Vec<crate::Wave> = (0..48000)
             .map(|i| {
-                let t = i as f64 / SAMPLE_RATE;
+                let t = i as crate::Wave / SAMPLE_RATE;
                 let f = 220.0;
                 0.3 * (crate::math::sin(2.0 * crate::math::PI * f * t)
                     + 0.5 * crate::math::sin(2.0 * crate::math::PI * 2.0 * f * t)
@@ -1081,15 +1120,15 @@ mod tests {
             })
             .collect();
 
-        let short_out: Vec<f64> = input.iter().map(|&s| bbd_short.process(s)).collect();
-        let long_out: Vec<f64> = input.iter().map(|&s| bbd_long.process(s)).collect();
+        let short_out: Vec<crate::Wave> = input.iter().map(|&s| bbd_short.process(s)).collect();
+        let long_out: Vec<crate::Wave> = input.iter().map(|&s| bbd_long.process(s)).collect();
 
         // Measure power at harmonics
         println!("\n=== LEAKAGE SPECTRAL EFFECT ===");
         println!("Harmonic\tInput\tShort\tLong\tLong/Short");
 
         for h in 1..=4 {
-            let freq = 220.0 * h as f64;
+            let freq = 220.0 * h as crate::Wave;
             let input_p = goertzel_power(&input, SAMPLE_RATE, freq);
             let short_p = goertzel_power(&short_out, SAMPLE_RATE, freq);
             let long_p = goertzel_power(&long_out, SAMPLE_RATE, freq);
@@ -1126,7 +1165,7 @@ mod tests {
         let mut input = vec![0.5; 48]; // 1ms impulse
         input.extend(vec![0.0; 48000]); // 1 second silence for repeats
 
-        let output: Vec<f64> = input.iter().map(|&s| bbd.process(s)).collect();
+        let output: Vec<crate::Wave> = input.iter().map(|&s| bbd.process(s)).collect();
 
         // Find peaks (repeats)
         let mut peaks = Vec::new();
@@ -1150,7 +1189,7 @@ mod tests {
                     "Peak {}: pos={} ({:.1}ms), amp={:.4}",
                     i,
                     pos,
-                    pos as f64 / SAMPLE_RATE * 1000.0,
+                    pos as crate::Wave / SAMPLE_RATE * 1000.0,
                     amp
                 );
             }
@@ -1200,7 +1239,7 @@ mod tests {
         let mut input = sine(440.0, 0.3, 0.05, SAMPLE_RATE); // 50ms burst
         input.extend(vec![0.0; (SAMPLE_RATE * 1.0) as usize]); // 1s for repeats
 
-        let output: Vec<f64> = input.iter().map(|&s| bbd.process(s)).collect();
+        let output: Vec<crate::Wave> = input.iter().map(|&s| bbd.process(s)).collect();
 
         // Analyze THD in different time windows
         let window_size = 4800; // 100ms windows
@@ -1286,10 +1325,12 @@ mod tests {
             }
 
             // Measure
-            let output: Vec<f64> = input.iter().map(|&s| bbd.process(s)).collect();
+            let output: Vec<crate::Wave> = input.iter().map(|&s| bbd.process(s)).collect();
             let out_rms = rms(&output);
             let out_thd = thd(&output, SAMPLE_RATE, 440.0);
-            let out_peak = output.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            let out_peak = output
+                .iter()
+                .fold(0.0 as crate::Wave, |m, x| m.max(x.abs()));
 
             println!(
                 "{}\t{:.4}\t{:.2}%\t{:.4}",

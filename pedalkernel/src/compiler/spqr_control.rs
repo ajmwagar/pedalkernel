@@ -6,8 +6,9 @@
 //! Smoothing spreads parameter changes over ~32 samples to avoid zipper
 //! noise and CPU spikes from recomputation.
 
-use super::compiled::{CompiledPedal, ControlBinding, ControlTarget, Stage};
+use super::compiled::{CompiledPedal, ControlBinding, ControlTarget};
 use crate::dsl::{PedalDef, PotTaper};
+use std::collections::BTreeMap;
 
 /// Bind control declarations to compiled stages.
 ///
@@ -17,9 +18,9 @@ use crate::dsl::{PedalDef, PotTaper};
 /// gain, IIR recalcs coefficients.
 pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
     for ctrl in &pedal.controls {
-        if let Some(binding) = find_pot_binding(ctrl, pedal, compiled) {
-            compiled.controls.push(binding);
-        }
+        compiled
+            .controls
+            .extend(find_pot_bindings(ctrl, pedal, compiled));
     }
 
     // Detect output divider pots and create wiper dividers.
@@ -28,32 +29,64 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
     // - It's bound to a WDF stage (PotInStage)
     // The wiper divider applies `signal *= position` between stages,
     // bypassing the WDF tree output probe issue.
-    for (i, ctrl) in compiled.controls.iter().enumerate() {
+    let mut output_dividers = BTreeMap::new();
+    for ctrl in &compiled.controls {
         let label_lower = ctrl.label.to_lowercase();
         let is_output_divider = label_lower.contains("level")
             || label_lower.contains("volume")
             || label_lower.contains("output");
         if is_output_divider {
+            if pot_wiper_connects_directly_to_out(pedal, &ctrl.component_id) {
+                continue;
+            }
             if let super::compiled::ControlTarget::PotInStage(stage_idx) = &ctrl.target {
-                compiled.wiper_dividers.push(super::compiled::WiperDivider {
-                    after_stage_idx: *stage_idx,
-                    pot_comp_id: ctrl.component_id.clone(),
-                    position: ctrl.taper.apply(ctrl.range.0 + pedal.controls.iter()
-                        .find(|c| c.label == ctrl.label)
-                        .map(|c| c.default)
-                        .unwrap_or(0.5) * (ctrl.range.1 - ctrl.range.0)),
-                    taper: ctrl.taper,
-                });
+                let default = pedal
+                    .controls
+                    .iter()
+                    .find(|c| c.label == ctrl.label && c.component == ctrl.component_id)
+                    .map(|c| c.default)
+                    .unwrap_or(0.5);
+                let position = ctrl
+                    .taper
+                    .apply(ctrl.range.0 + default * (ctrl.range.1 - ctrl.range.0));
+                output_dividers
+                    .entry(ctrl.component_id.clone())
+                    .and_modify(|(existing_stage_idx, existing_position, existing_taper)| {
+                        if *stage_idx >= *existing_stage_idx {
+                            *existing_stage_idx = *stage_idx;
+                            *existing_position = position;
+                            *existing_taper = ctrl.taper;
+                        }
+                    })
+                    .or_insert((*stage_idx, position, ctrl.taper));
             }
         }
     }
+    compiled
+        .wiper_dividers
+        .extend(output_dividers.into_iter().map(
+            |(pot_comp_id, (after_stage_idx, position, taper))| super::compiled::WiperDivider {
+                after_stage_idx,
+                pot_comp_id,
+                position,
+                taper,
+            },
+        ));
 
     // Create pot smoothers (one per control) for zipper-free updates.
-    for (i, ctrl) in pedal.controls.iter().enumerate() {
-        if i < compiled.controls.len() {
-            compiled.pot_smoothers.push(
-                super::compiled::SmoothedParam::new(ctrl.default, i, compiled.sample_rate)
-            );
+    for (i, binding) in compiled.controls.iter().enumerate() {
+        if let Some(ctrl) = pedal
+            .controls
+            .iter()
+            .find(|ctrl| ctrl.label == binding.label && ctrl.component == binding.component_id)
+        {
+            compiled
+                .pot_smoothers
+                .push(super::compiled::SmoothedParam::new(
+                    ctrl.default,
+                    i,
+                    compiled.sample_rate,
+                ));
         }
     }
 
@@ -63,21 +96,45 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
     }
 }
 
-/// Find which stage owns a pot and create the binding.
+fn pot_wiper_connects_directly_to_out(pedal: &PedalDef, comp_id: &str) -> bool {
+    fn is_wiper(pin: &crate::dsl::Pin, comp_id: &str) -> bool {
+        matches!(
+            pin,
+            crate::dsl::Pin::ComponentPin { component, pin }
+                if component == comp_id && (pin == "w" || pin == "wiper")
+        )
+    }
+
+    fn is_out(pin: &crate::dsl::Pin) -> bool {
+        matches!(pin, crate::dsl::Pin::Reserved(name) if name == "out")
+    }
+
+    pedal.nets.iter().any(|net| {
+        (is_wiper(&net.from, comp_id) && net.to.iter().any(is_out))
+            || (is_out(&net.from) && net.to.iter().any(|pin| is_wiper(pin, comp_id)))
+    })
+}
+
+/// Find every stage that owns a pot and create bindings.
 ///
 /// Searches all stage types. The pot may be:
 /// - A WdfPot leaf in a WdfStage tree (tree.set_pot works)
 /// - Consumed by OpAmpRoot at compile time (needs gain recompute)
 /// - In a MultiNlStage (delta-update scattering matrix)
-fn find_pot_binding(
+///
+/// A split physical pot can appear in multiple passive branches/stages. Binding
+/// only the first owner leaves later PassiveRType extraction matrices stale.
+fn find_pot_bindings(
     ctrl: &crate::dsl::ControlDef,
     pedal: &PedalDef,
     compiled: &CompiledPedal,
-) -> Option<ControlBinding> {
+) -> Vec<ControlBinding> {
     let comp_id = &ctrl.component;
 
     // Get pot metadata
-    let pot_comp = pedal.components.iter().find(|c| c.id == *comp_id)?;
+    let Some(pot_comp) = pedal.components.iter().find(|c| c.id == *comp_id) else {
+        return Vec::new();
+    };
     let (max_r, taper) = pot_comp
         .kind
         .as_any()
@@ -85,109 +142,35 @@ fn find_pot_binding(
         .map(|p| (p.max_r, p.taper))
         .unwrap_or((100_000.0, PotTaper::B));
 
-    let aw_id = format!("{comp_id}__aw");
-    let wb_id = format!("{comp_id}__wb");
+    let mut bindings: Vec<_> = compiled
+        .stages
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, stage)| {
+            stage
+                .control_target_for_pot(idx, comp_id)
+                .map(|target| make_binding(ctrl, comp_id, max_r, taper, target))
+        })
+        .collect();
 
-    // Search all stages in the unified vec
-    for (idx, stage) in compiled.stages.iter().enumerate() {
-        match stage {
-            Stage::Wdf(wdf) => {
-                let in_tree = wdf.tree.get_pot_position(comp_id).is_some()
-                    || wdf.tree.get_pot_position(&aw_id).is_some()
-                    || wdf.tree.get_pot_position(&wb_id).is_some();
-                let in_children = wdf.opamp_children.iter().any(|c| {
-                    c.get_pot_position(comp_id).is_some()
-                        || c.get_pot_position(&aw_id).is_some()
-                        || c.get_pot_position(&wb_id).is_some()
-                });
-                let is_feedback_pot = wdf.feedback_pot_id.as_deref() == Some(comp_id);
-
-                if in_tree || in_children || is_feedback_pot {
-                    return Some(make_binding(
-                        ctrl,
-                        comp_id,
-                        &aw_id,
-                        &wb_id,
-                        max_r,
-                        taper,
-                        ControlTarget::PotInStage(idx),
-                    ));
-                }
-            }
-            Stage::MultiNl(mnl) => {
-                for (pi, child) in mnl.passive_children.iter().enumerate() {
-                    if child.get_pot_position(comp_id).is_some()
-                        || child.get_pot_position(&aw_id).is_some()
-                        || child.get_pot_position(&wb_id).is_some()
-                    {
-                        return Some(make_binding(
-                            ctrl,
-                            comp_id,
-                            &aw_id,
-                            &wb_id,
-                            max_r,
-                            taper,
-                            ControlTarget::PotInMultiNlStage(idx, pi),
-                        ));
-                    }
-                }
-                for child in &mnl.pot_children {
-                    if child.get_pot_position(comp_id).is_some()
-                        || child.get_pot_position(&aw_id).is_some()
-                        || child.get_pot_position(&wb_id).is_some()
-                    {
-                        return Some(make_binding(
-                            ctrl,
-                            comp_id,
-                            &aw_id,
-                            &wb_id,
-                            max_r,
-                            taper,
-                            ControlTarget::PotInMultiNlStage(idx, 0),
-                        ));
-                    }
-                }
-            }
-            Stage::Iir(iir) => {
-                if iir.has_pot(comp_id) {
-                    return Some(make_binding(
-                        ctrl,
-                        comp_id,
-                        &aw_id,
-                        &wb_id,
-                        max_r,
-                        taper,
-                        ControlTarget::PotInIirStage(idx),
-                    ));
-                }
-            }
-            Stage::BlackFeedback(bf) => {
-                if bf.has_pot(comp_id) {
-                    return Some(make_binding(
-                        ctrl,
-                        comp_id,
-                        &aw_id,
-                        &wb_id,
-                        max_r,
-                        taper,
-                        ControlTarget::PotInBlackFeedbackStage(idx),
-                    ));
-                }
-            }
-            Stage::StateSpace(_) => {
-                // TODO: StateSpaceStage G-matrix delta
-            }
-        }
+    if bindings.len() <= 1 {
+        return bindings;
     }
 
-    None
+    // One physical pot can be present in multiple extracted stages. Runtime
+    // control application fans out by component id to every owning stage, so a
+    // single UI/control binding is enough and avoids duplicate host parameters.
+    let label = ctrl.label.to_lowercase();
+    if label.contains("level") || label.contains("volume") || label.contains("output") {
+        bindings.pop().into_iter().collect()
+    } else {
+        bindings.into_iter().take(1).collect()
+    }
 }
 
 fn make_binding(
     ctrl: &crate::dsl::ControlDef,
     comp_id: &str,
-    aw_id: &str,
-    wb_id: &str,
     max_r: f64,
     taper: PotTaper,
     target: ControlTarget,

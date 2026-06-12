@@ -1,8 +1,8 @@
 //! CLI subcommand for listing and searching available component models.
 
 use pedalkernel::models::{
-    bjt_by_name, jfet_by_name, pentode_by_name, triode_by_name, BJT_MODELS, JFET_MODELS,
-    PENTODE_MODELS, TRIODE_MODELS,
+    bjt_by_name, jfet_by_name, opamp_by_name, pentode_by_name, transformer_by_name, triode_by_name,
+    BJT_MODELS, JFET_MODELS, OPAMP_MODELS, PENTODE_MODELS, TRANSFORMER_MODELS, TRIODE_MODELS,
 };
 
 /// Run the `models` subcommand.
@@ -22,9 +22,17 @@ pub fn run(type_filter: Option<&str>, search: Option<&str>) {
         Some("pentode") => {
             print_pentodes(search_upper.as_deref());
         }
+        Some("opamp") | Some("op-amp") | Some("ota") => {
+            print_opamps(search_upper.as_deref(), type_filter);
+        }
+        Some("transformer") | Some("xfmr") => {
+            print_transformers(search_upper.as_deref());
+        }
         Some(other) => {
             eprintln!("Unknown type filter: '{other}'");
-            eprintln!("Available types: bjt, npn, pnp, jfet, njf, pjf, triode, pentode");
+            eprintln!(
+                "Available types: bjt, npn, pnp, jfet, njf, pjf, triode, pentode, opamp, ota, transformer"
+            );
             std::process::exit(1);
         }
         None => {
@@ -36,6 +44,10 @@ pub fn run(type_filter: Option<&str>, search: Option<&str>) {
             print_triodes(search_upper.as_deref());
             println!();
             print_pentodes(search_upper.as_deref());
+            println!();
+            print_opamps(search_upper.as_deref(), None);
+            println!();
+            print_transformers(search_upper.as_deref());
         }
     }
 }
@@ -186,6 +198,86 @@ fn print_pentodes(search: Option<&str>) {
     }
 }
 
+fn print_opamps(search: Option<&str>, type_filter: Option<&str>) {
+    let mut models: Vec<_> = OPAMP_MODELS.values().collect();
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if let Some(tf) = type_filter {
+        if tf.eq_ignore_ascii_case("ota") {
+            models.retain(|m| m.is_ota);
+        } else if tf.eq_ignore_ascii_case("opamp") || tf.eq_ignore_ascii_case("op-amp") {
+            models.retain(|m| !m.is_ota);
+        }
+    }
+
+    if let Some(term) = search {
+        models.retain(|m| m.name.contains(term));
+    }
+
+    if models.is_empty() {
+        println!("No op-amp models found.");
+        return;
+    }
+
+    println!("Op-Amp Models ({} found)", models.len());
+    println!("{:-<88}", "");
+    println!(
+        "{:<12} {:>6} {:>10} {:>10} {:>8} {:>8} {:>8} {:>10}",
+        "Name", "Type", "A0", "GBW", "SR", "RO", "COUT", "GM"
+    );
+    println!("{:-<88}", "");
+
+    for m in &models {
+        println!(
+            "{:<12} {:>6} {:>10.1} {:>10.3e} {:>8.2} {:>8.1} {:>8.3e} {:>10.3e}",
+            m.name,
+            if m.is_ota { "OTA" } else { "OPAMP" },
+            m.open_loop_gain,
+            m.gbw,
+            m.slew_rate,
+            m.output_impedance,
+            m.output_capacitance,
+            m.ota_gm
+        );
+    }
+}
+
+fn print_transformers(search: Option<&str>) {
+    let mut models: Vec<_> = TRANSFORMER_MODELS.values().collect();
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if let Some(term) = search {
+        models.retain(|m| m.name.contains(term));
+    }
+
+    if models.is_empty() {
+        println!("No transformer models found.");
+        return;
+    }
+
+    println!("Transformer Models ({} found)", models.len());
+    println!("{:-<96}", "");
+    println!(
+        "{:<18} {:>10} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10}",
+        "Name", "LP (H)", "K", "RP", "RS", "LLP (H)", "LLS (H)", "CP (F)"
+    );
+    println!("{:-<96}", "");
+
+    for m in &models {
+        println!(
+            "{:<18} {:>10.3e} {:>8.4} {:>8.1} {:>8.1} {:>10.3e} {:>10.3e} {:>10.3e}",
+            m.name,
+            m.primary_inductance,
+            m.coupling,
+            m.primary_dcr,
+            m.secondary_dcr,
+            m.primary_leakage,
+            m.secondary_leakage,
+            m.capacitance
+        );
+    }
+}
+
 /// Print details for a specific model.
 pub fn show(name: &str) {
     let name_upper = name.to_uppercase();
@@ -283,6 +375,71 @@ pub fn show(name: &str) {
         println!(
             "  VG2  = {:.0} V     (default screen voltage)",
             m.vg2_default
+        );
+        return;
+    }
+
+    if let Some(m) = opamp_by_name(&name_upper) {
+        println!(
+            "Op-Amp: {} ({})",
+            m.name,
+            if m.is_ota { "OTA" } else { "voltage op-amp" }
+        );
+        println!("{:-<50}", "");
+        println!("  A0    = {:.2}       (open-loop gain)", m.open_loop_gain);
+        println!("  GBW   = {:.4e} Hz    (gain-bandwidth product)", m.gbw);
+        println!("  SR    = {:.3} V/us   (slew rate)", m.slew_rate);
+        println!(
+            "  VPOS  = {:.3} V      (positive output swing)",
+            m.v_rail_pos
+        );
+        println!(
+            "  VNEG  = {:.3} V      (negative output swing)",
+            m.v_rail_neg
+        );
+        println!(
+            "  RO    = {:.2} Ohm    (output impedance)",
+            m.output_impedance
+        );
+        println!(
+            "  COUT  = {:.4e} F   (output capacitance)",
+            m.output_capacitance
+        );
+        if m.is_ota {
+            println!("  IABC  = {:.4e} A     (bias current)", m.ota_iabc);
+            println!("  VT    = {:.4e} V     (thermal voltage)", m.ota_vt);
+            println!("  GM    = {:.4e} S     (transconductance)", m.ota_gm);
+            println!("  RLOAD = {:.2} Ohm    (nominal load)", m.ota_r_load);
+        }
+        return;
+    }
+
+    if let Some(m) = transformer_by_name(&name_upper) {
+        println!("Transformer: {}", m.name);
+        println!("{:-<50}", "");
+        println!(
+            "  LP   = {:.4e} H     (primary inductance)",
+            m.primary_inductance
+        );
+        println!("  K    = {:.5}        (coupling coefficient)", m.coupling);
+        println!("  RP   = {:.2} Ohm    (primary DCR)", m.primary_dcr);
+        println!("  RS   = {:.2} Ohm    (secondary DCR)", m.secondary_dcr);
+        println!("  LLP  = {:.4e} H     (primary leakage)", m.primary_leakage);
+        println!(
+            "  LLS  = {:.4e} H     (secondary leakage)",
+            m.secondary_leakage
+        );
+        println!(
+            "  LM   = {:.4e} H     (magnetizing inductance)",
+            m.magnetizing_inductance
+        );
+        println!(
+            "  RC   = {:.4e} Ohm   (core-loss resistance)",
+            m.core_loss_resistance
+        );
+        println!(
+            "  CP   = {:.4e} F     (interwinding capacitance)",
+            m.capacitance
         );
         return;
     }

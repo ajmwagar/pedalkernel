@@ -2,8 +2,185 @@
 
 use super::spqr_build::compile_via_spqr;
 use crate::dsl::parse_pedal_file;
+use crate::PedalProcessor;
+use std::f64::consts::PI;
 
 const SR: f64 = 48_000.0;
+
+const MFB_ACTIVE_VREF: &str = r#"pedal "MFB Active Vref LPF" {
+  supply 9V
+  components {
+    U1: opamp(tl072)
+    Rb1: resistor(100k)
+    Rb2: resistor(100k)
+    C_vref: cap(47u, electrolytic)
+    R_in: resistor(10k)
+    Cutoff_R1: pot(100k, b)
+    Cutoff_R3: pot(100k, b)
+    C1: cap(10n)
+    C2: cap(10n)
+    R_q_floor: resistor(10k)
+    Resonance: pot(100k, b)
+    R_out: resistor(10k)
+  }
+  nets {
+    vcc -> Rb1.a
+    Rb1.b -> Rb2.a, C_vref.a, vref
+    Rb2.b -> gnd
+    C_vref.b -> gnd
+    vref -> U1.pos
+    in -> R_in.a
+    R_in.b -> Cutoff_R1.a
+    Cutoff_R1.b -> C1.a
+    C1.b -> gnd
+    Cutoff_R1.b -> R_q_floor.a
+    R_q_floor.b -> Resonance.a
+    Resonance.b -> U1.neg
+    U1.neg -> Cutoff_R3.a
+    Cutoff_R3.b -> U1.out
+    U1.neg -> C2.a
+    C2.b -> U1.out
+    U1.out -> R_out.a
+    R_out.b -> out
+  }
+  controls {
+    Cutoff_R1.position -> "Cutoff" [1.0, 0.05] = 0.5
+    Cutoff_R3.position -> "Cutoff" [1.0, 0.05] = 0.5
+    Resonance.position -> "Resonance" [1.0, 0.05] = 0.0
+  }
+}"#;
+
+fn iir_stage_is_stable(stage: &super::compiled::Stage) -> bool {
+    let super::compiled::Stage::Iir(iir) = stage else {
+        return true;
+    };
+    let b = &iir.iir.b_coeffs;
+    let a = &iir.iir.a_coeffs;
+    if b.is_empty()
+        || a.len() < 2
+        || !b.iter().all(|v| v.is_finite())
+        || !a.iter().all(|v| v.is_finite())
+    {
+        return false;
+    }
+    if a.len() >= 3 {
+        let a1 = a[1];
+        let a2 = a[2];
+        a2.abs() < 1.0 && 1.0 + a1 + a2 > 0.0 && 1.0 - a1 + a2 > 0.0
+    } else {
+        a[1].abs() < 1.0
+    }
+}
+
+#[test]
+fn active_mfb_with_decoupled_vref_emits_finite_controlled_linear_stage() {
+    let pedal = parse_pedal_file(MFB_ACTIVE_VREF).unwrap();
+    let mut compiled = compile_via_spqr(&pedal, SR).unwrap();
+
+    assert!(
+        compiled.stages.iter().any(|stage| matches!(
+            stage,
+            super::compiled::Stage::Iir(_) | super::compiled::Stage::StateSpace(_)
+        )),
+        "active MFB should compile to a controlled active-linear stage, got {:?}",
+        compiled.stages
+    );
+
+    for cutoff in [0.05, 0.5, 1.0] {
+        for resonance in [0.0, 0.5, 1.0] {
+            compiled.set_control("Cutoff", cutoff);
+            compiled.set_control("Resonance", resonance);
+
+            for (idx, stage) in compiled.stages.iter().enumerate() {
+                assert!(
+                    iir_stage_is_stable(stage),
+                    "stage {idx} should keep finite stable IIR coefficients after cutoff={cutoff}, resonance={resonance}: {stage:?}"
+                );
+            }
+
+            for i in 0..4096 {
+                let input = if i == 0 {
+                    0.5
+                } else {
+                    (2.0 * PI * 1_000.0 * i as f64 / SR).sin() * 0.5
+                };
+                let out = compiled.process(input);
+                assert!(
+                    out.is_finite(),
+                    "active MFB produced non-finite output at cutoff={cutoff}, resonance={resonance}"
+                );
+            }
+        }
+    }
+}
+
+fn gain_db_at(
+    compiled: &mut impl PedalProcessor,
+    freq_hz: f64,
+    cutoff: f64,
+    resonance: f64,
+) -> f64 {
+    compiled.set_control("Cutoff", cutoff);
+    compiled.set_control("Resonance", resonance);
+    for _ in 0..2048 {
+        compiled.process(0.0);
+    }
+
+    let mut peak = 0.0f64;
+    for i in 0..16_384 {
+        let input = (2.0 * PI * freq_hz * i as f64 / SR).sin();
+        let out = compiled.process(input);
+        if i >= 8192 {
+            peak = peak.max(out.abs());
+        }
+    }
+    assert!(peak.is_finite(), "active MFB response became non-finite");
+    20.0 * peak.max(1e-12).log10()
+}
+
+#[test]
+fn active_mfb_with_decoupled_vref_cutoff_moves_response() {
+    let pedal = parse_pedal_file(MFB_ACTIVE_VREF).unwrap();
+    let low_cutoff = gain_db_at(
+        &mut compile_via_spqr(&pedal, SR).unwrap(),
+        5_000.0,
+        0.1,
+        0.0,
+    );
+    let high_cutoff = gain_db_at(
+        &mut compile_via_spqr(&pedal, SR).unwrap(),
+        5_000.0,
+        0.9,
+        0.0,
+    );
+
+    assert!(
+        high_cutoff > low_cutoff + 12.0,
+        "active MFB cutoff should open at 5 kHz: low={low_cutoff:.2} dB high={high_cutoff:.2} dB"
+    );
+}
+
+#[test]
+fn active_mfb_with_decoupled_vref_resonance_moves_response() {
+    let pedal = parse_pedal_file(MFB_ACTIVE_VREF).unwrap();
+    let low_res = gain_db_at(
+        &mut compile_via_spqr(&pedal, SR).unwrap(),
+        1_000.0,
+        0.5,
+        0.0,
+    );
+    let high_res = gain_db_at(
+        &mut compile_via_spqr(&pedal, SR).unwrap(),
+        1_000.0,
+        0.5,
+        0.9,
+    );
+
+    assert!(
+        (high_res - low_res).abs() > 3.0,
+        "active MFB resonance should alter response near cutoff: res=0 {low_res:.2} dB, res=0.9 {high_res:.2} dB"
+    );
+}
 
 /// MFB with pots — the broken version.
 const MFB_POT: &str = r#"pedal "MFB Pot LPF" {
@@ -78,13 +255,28 @@ fn trace_mfb_pot_compilation() {
     for (i, s) in compiled.stages.iter().enumerate() {
         let kind = match s {
             super::compiled::Stage::Wdf(w) => {
-                let fb = if w.feedback_opamp.is_some() { "+OpAmp" } else { "" };
+                let fb = if w.feedback_opamp.is_some() {
+                    "+OpAmp"
+                } else {
+                    ""
+                };
                 format!("WDF{fb}")
             }
             super::compiled::Stage::Iir(iir) => format!("IIR label={:?}", iir.debug_label),
             super::compiled::Stage::BlackFeedback(bf) => format!("BF gain={:.2}", bf.gain()),
             super::compiled::Stage::MultiNl(_) => "MultiNL".to_string(),
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
+            super::compiled::Stage::Blockwise(bk) => {
+                format!("BKM dist={}", bk.signal_flow_distance)
+            }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                format!(
+                    "SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                )
+            }
+            super::compiled::Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  [{i}] {kind}");
     }
@@ -134,13 +326,28 @@ fn trace_mfb_hpf_compilation() {
     for (i, s) in compiled.stages.iter().enumerate() {
         let kind = match s {
             super::compiled::Stage::Wdf(w) => {
-                let fb = if w.feedback_opamp.is_some() { "+OpAmp" } else { "" };
+                let fb = if w.feedback_opamp.is_some() {
+                    "+OpAmp"
+                } else {
+                    ""
+                };
                 format!("WDF{fb}")
             }
             super::compiled::Stage::Iir(iir) => format!("IIR label={:?}", iir.debug_label),
             super::compiled::Stage::BlackFeedback(bf) => format!("BF gain={:.2}", bf.gain()),
             super::compiled::Stage::MultiNl(_) => "MultiNL".to_string(),
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
+            super::compiled::Stage::Blockwise(bk) => {
+                format!("BKM dist={}", bk.signal_flow_distance)
+            }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                format!(
+                    "SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                )
+            }
+            super::compiled::Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  [{i}] {kind}");
     }
@@ -154,7 +361,9 @@ fn trace_mfb_hpf_compilation() {
         for i in 0..9600 {
             let input = (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
             let out = proc.process(input);
-            if i >= 4800 { peak = peak.max(out.abs()); }
+            if i >= 4800 {
+                peak = peak.max(out.abs());
+            }
         }
         let db = 20.0 * peak.max(1e-12).log10();
         eprintln!("  {freq:.0}Hz: {db:+.1}dB");
@@ -203,13 +412,28 @@ fn trace_mfb_hpf_fixed_compilation() {
     for (i, s) in compiled.stages.iter().enumerate() {
         let kind = match s {
             super::compiled::Stage::Wdf(w) => {
-                let fb = if w.feedback_opamp.is_some() { "+OpAmp" } else { "" };
+                let fb = if w.feedback_opamp.is_some() {
+                    "+OpAmp"
+                } else {
+                    ""
+                };
                 format!("WDF{fb}")
             }
             super::compiled::Stage::Iir(iir) => format!("IIR label={:?}", iir.debug_label),
             super::compiled::Stage::BlackFeedback(bf) => format!("BF gain={:.2}", bf.gain()),
             super::compiled::Stage::MultiNl(_) => "MultiNL".to_string(),
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
+            super::compiled::Stage::Blockwise(bk) => {
+                format!("BKM dist={}", bk.signal_flow_distance)
+            }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                format!(
+                    "SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                )
+            }
+            super::compiled::Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  [{i}] {kind}");
     }
@@ -221,11 +445,57 @@ fn trace_mfb_hpf_fixed_compilation() {
         for i in 0..9600 {
             let input = (2.0 * std::f64::consts::PI * freq * i as f64 / SR).sin();
             let out = proc.process(input);
-            if i >= 4800 { peak = peak.max(out.abs()); }
+            if i >= 4800 {
+                peak = peak.max(out.abs());
+            }
         }
         let db = 20.0 * peak.max(1e-12).log10();
         eprintln!("  {freq:.0}Hz: {db:+.1}dB");
     }
+}
+
+/// Bead pedalkernel-5sft repro: Rauch/MFB HPF with the C-C input path
+/// terminating at U1.neg and a resistive feedback path from neg to out.
+const MFB_HPF_BEAD_REPRO: &str = r#"pedal "MFB HPF Bead Repro" {
+  supply 9V
+  components {
+    U1: opamp(tl072)
+    C1: cap(10n)
+    C2: cap(10n)
+    Cutoff_R1: pot(100k, b)
+    R_fb: resistor(47k)
+    R_out: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> C2.a
+    C2.b -> U1.neg
+    C1.b -> Cutoff_R1.a
+    Cutoff_R1.b -> gnd
+    U1.neg -> R_fb.a
+    R_fb.b -> U1.out
+    U1.pos -> gnd
+    U1.out -> R_out.a
+    R_out.b -> out
+  }
+  controls {
+    Cutoff_R1.position -> "Cutoff" [1.0, 0.05] = 0.5
+  }
+}"#;
+
+#[test]
+fn mfb_hpf_bead_repro_is_12db_highpass() {
+    let pedal = parse_pedal_file(MFB_HPF_BEAD_REPRO).unwrap();
+    let mut proc = compile_via_spqr(&pedal, SR).unwrap();
+
+    let low = gain_db_at(&mut proc, 100.0, 0.5, 0.0);
+    let high = gain_db_at(&mut proc, 10_000.0, 0.5, 0.0);
+
+    eprintln!("MFB HPF bead repro: 100Hz={low:+.2}dB 10kHz={high:+.2}dB");
+    assert!(
+        high > low + 24.0,
+        "MFB HPF should reject low frequencies with a 2-pole high-pass slope: 100Hz={low:.2}dB, 10kHz={high:.2}dB"
+    );
 }
 
 #[test]
@@ -237,13 +507,28 @@ fn trace_mfb_fixed_compilation() {
     for (i, s) in compiled.stages.iter().enumerate() {
         let kind = match s {
             super::compiled::Stage::Wdf(w) => {
-                let fb = if w.feedback_opamp.is_some() { "+OpAmp" } else { "" };
+                let fb = if w.feedback_opamp.is_some() {
+                    "+OpAmp"
+                } else {
+                    ""
+                };
                 format!("WDF{fb}")
             }
             super::compiled::Stage::Iir(iir) => format!("IIR label={:?}", iir.debug_label),
             super::compiled::Stage::BlackFeedback(bf) => format!("BF gain={:.2}", bf.gain()),
             super::compiled::Stage::MultiNl(_) => "MultiNL".to_string(),
             super::compiled::Stage::StateSpace(ss) => format!("SS label={:?}", ss.debug_label),
+            super::compiled::Stage::Blockwise(bk) => {
+                format!("BKM dist={}", bk.signal_flow_distance)
+            }
+            super::compiled::Stage::SerialDelayedFeedback(s) => {
+                format!(
+                    "SerialFB rungs={} dist={}",
+                    s.stages.len(),
+                    s.signal_flow_distance
+                )
+            }
+            super::compiled::Stage::KMethod { .. } => "KMethod".to_string(),
         };
         eprintln!("  [{i}] {kind}");
     }

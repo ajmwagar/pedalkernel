@@ -37,7 +37,7 @@ pub use nonlinear::{
 /// the wave domain through incident (`a`) and reflected (`b`) waves.
 pub trait WdfLeaf {
     /// Port resistance seen looking into this element (Ω).
-    fn port_resistance(&self) -> f64;
+    fn port_resistance(&self) -> crate::Wave;
 
     /// Produce the reflected wave given the current state.
     ///
@@ -45,15 +45,15 @@ pub trait WdfLeaf {
     /// For capacitors: `b = z⁻¹ a` (previous incident)
     /// For inductors: `b = -z⁻¹ a`
     /// For voltage sources: `b = 2*Vs - a`
-    fn reflected(&self) -> f64;
+    fn reflected(&self) -> crate::Wave;
 
     /// Accept the incident wave after scatter_down phase.
     ///
     /// Reactive elements (C, L) latch this value as state for next sample.
-    fn set_incident(&mut self, a: f64);
+    fn set_incident(&mut self, a: crate::Wave);
 
     /// Update sample rate (for reactive elements C, L).
-    fn set_sample_rate(&mut self, _sample_rate: f64) {}
+    fn set_sample_rate(&mut self, _sample_rate: crate::Wave) {}
 
     /// Reset internal state to zero.
     fn reset(&mut self) {}
@@ -68,7 +68,7 @@ pub trait WdfRoot {
     ///
     /// The WDF constraint is: `b = a - 2*Rp*i(v)` where `v = (a+b)/2`.
     /// Implementation uses Newton-Raphson bounded to fixed iterations for RT safety.
-    fn process(&mut self, incident: f64, port_resistance: f64) -> f64;
+    fn process(&mut self, incident: crate::Wave, port_resistance: crate::Wave) -> crate::Wave;
 }
 
 /// Modulation source that generates control signals.
@@ -79,19 +79,19 @@ pub trait Modulator {
     /// Generate the next modulation sample.
     ///
     /// Returns a value typically in [-1, 1] (bipolar) or [0, 1] (unipolar).
-    fn tick(&mut self) -> f64;
+    fn tick(&mut self) -> crate::Wave;
 
     /// Reset the modulator to its initial state.
     fn reset(&mut self);
 
     /// Set the modulation rate in Hz (for periodic modulators).
-    fn set_rate(&mut self, hz: f64);
+    fn set_rate(&mut self, hz: crate::Wave);
 
     /// Get current rate in Hz.
-    fn rate(&self) -> f64;
+    fn rate(&self) -> crate::Wave;
 
     /// Update sample rate when audio engine changes.
-    fn set_sample_rate(&mut self, sample_rate: f64);
+    fn set_sample_rate(&mut self, sample_rate: crate::Wave);
 }
 
 /// Element with externally-controlled resistance.
@@ -102,10 +102,10 @@ pub trait ControlledResistance: WdfLeaf {
     /// Set the control value (0.0 = minimum effect, 1.0 = maximum effect).
     ///
     /// For photocouplers: 0 = dark (high R), 1 = full illumination (low R).
-    fn set_control(&mut self, value: f64);
+    fn set_control(&mut self, value: crate::Wave);
 
     /// Get the current effective control level (after any internal filtering).
-    fn effective_control(&self) -> f64;
+    fn effective_control(&self) -> crate::Wave;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,12 +317,12 @@ mod tests {
         let mut diode = DiodeRoot::new(DiodeModel::silicon());
         let rp = 10_000.0;
 
-        let mut v_max = f64::NEG_INFINITY;
-        let mut v_min = f64::INFINITY;
+        let mut v_max = crate::Wave::NEG_INFINITY;
+        let mut v_min = crate::Wave::INFINITY;
 
         // Process sine-like inputs
         for i in 0..100 {
-            let a = 5.0 * (i as f64 * 0.0628).sin(); // ~1Hz at "100 samples"
+            let a = 5.0 * (i as crate::Wave * 0.0628).sin(); // ~1Hz at "100 samples"
             let b = diode.process(a, rp);
             let v = (a + b) / 2.0;
             v_max = v_max.max(v);
@@ -430,9 +430,15 @@ mod tests {
     fn lfo_triangle_symmetry() {
         let mut lfo = Lfo::new(LfoWaveform::Triangle, 48000.0);
         lfo.set_rate(1.0);
-        let samples: Vec<f64> = (0..48000).map(|_| lfo.tick()).collect();
-        let max = samples.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let min = samples.iter().cloned().fold(f64::INFINITY, f64::min);
+        let samples: Vec<crate::Wave> = (0..48000).map(|_| lfo.tick()).collect();
+        let max = samples
+            .iter()
+            .cloned()
+            .fold(crate::Wave::NEG_INFINITY, crate::Wave::max);
+        let min = samples
+            .iter()
+            .cloned()
+            .fold(crate::Wave::INFINITY, crate::Wave::min);
         assert!((max - 1.0).abs() < 0.01, "triangle max should be ~1.0");
         assert!((min + 1.0).abs() < 0.01, "triangle min should be ~-1.0");
     }
@@ -457,8 +463,8 @@ mod tests {
         lfo_up.set_rate(1.0);
         lfo_down.set_rate(1.0);
 
-        let up_samples: Vec<f64> = (0..48000).map(|_| lfo_up.tick()).collect();
-        let down_samples: Vec<f64> = (0..48000).map(|_| lfo_down.tick()).collect();
+        let up_samples: Vec<crate::Wave> = (0..48000).map(|_| lfo_up.tick()).collect();
+        let down_samples: Vec<crate::Wave> = (0..48000).map(|_| lfo_down.tick()).collect();
 
         // Up saw should start near -1 and rise to +1
         assert!(up_samples[0] < -0.9, "saw up should start near -1");
@@ -1158,10 +1164,12 @@ mod tests {
         // = 0.002764 V/µs, well below 0.3 V/µs. Should pass through clean.
         let mut slew = SlewRateLimiter::new(0.3, 48000.0);
         let n = 4800;
-        let input: Vec<f64> = (0..n)
-            .map(|i| (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin())
+        let input: Vec<crate::Wave> = (0..n)
+            .map(|i| {
+                (2.0 * std::crate::Wave::consts::PI * 440.0 * i as crate::Wave / 48000.0).sin()
+            })
             .collect();
-        let output: Vec<f64> = input.iter().map(|&x| slew.process(x)).collect();
+        let output: Vec<crate::Wave> = input.iter().map(|&x| slew.process(x)).collect();
 
         // Should be nearly identical (correlation > 0.999)
         let corr = correlation_f64(&input[100..], &output[100..]);
@@ -1213,10 +1221,13 @@ mod tests {
         // max_dv = 13e6/48000 ≈ 270 V/sample — way above any audio signal.
         let mut slew = SlewRateLimiter::new(13.0, 48000.0);
         let n = 4800;
-        let input: Vec<f64> = (0..n)
-            .map(|i| 5.0 * (2.0 * std::f64::consts::PI * 10_000.0 * i as f64 / 48000.0).sin())
+        let input: Vec<crate::Wave> = (0..n)
+            .map(|i| {
+                5.0 * (2.0 * std::crate::Wave::consts::PI * 10_000.0 * i as crate::Wave / 48000.0)
+                    .sin()
+            })
             .collect();
-        let output: Vec<f64> = input.iter().map(|&x| slew.process(x)).collect();
+        let output: Vec<crate::Wave> = input.iter().map(|&x| slew.process(x)).collect();
 
         let corr = correlation_f64(&input[10..], &output[10..]);
         assert!(corr > 0.9999, "TL072 should be transparent: corr={corr:.6}");
@@ -1449,7 +1460,7 @@ mod tests {
 
         let mut found_peak = false;
         let mut peak_idx = 0;
-        let mut peak_val = 0.0f64;
+        let mut peak_val = 0.0 as crate::Wave;
         for i in 1..delay_samples + 100 {
             let out = bbd.process(0.0);
             if out.abs() > peak_val {
@@ -1522,7 +1533,7 @@ mod tests {
         // BBD soft clip should limit amplitude
         let clipped = bbd_soft_clip(0.5);
         assert!(
-            (clipped - (0.5 - 0.5_f64.powi(3) / 3.0)).abs() < 1e-10,
+            (clipped - (0.5 - 0.5 as crate::Wave.powi(3) / 3.0)).abs() < 1e-10,
             "Below threshold: cubic soft clip"
         );
 
@@ -1767,13 +1778,13 @@ mod tests {
 
     // ── Phase 3 helper ──────────────────────────────────────────────────
 
-    fn correlation_f64(a: &[f64], b: &[f64]) -> f64 {
+    fn correlation_f64(a: &[crate::Wave], b: &[crate::Wave]) -> crate::Wave {
         let n = a.len().min(b.len());
         if n == 0 {
             return 0.0;
         }
-        let mean_a: f64 = a[..n].iter().sum::<f64>() / n as f64;
-        let mean_b: f64 = b[..n].iter().sum::<f64>() / n as f64;
+        let mean_a: crate::Wave = a[..n].iter().sum::<crate::Wave>() / n as crate::Wave;
+        let mean_b: crate::Wave = b[..n].iter().sum::<crate::Wave>() / n as crate::Wave;
         let mut cov = 0.0;
         let mut var_a = 0.0;
         let mut var_b = 0.0;

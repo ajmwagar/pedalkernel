@@ -4,7 +4,7 @@
 //! the multi-port Newton-Raphson grouped solver. The legacy single-port
 //! Ebers-Moll roots (`BjtNpnRoot`, `BjtPnpRoot`, `BjtModel`) have been removed.
 
-use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv};
+use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv, LEAKAGE_CONDUCTANCE};
 
 // ---------------------------------------------------------------------------
 // Gummel-Poon BJT Model
@@ -34,78 +34,78 @@ use super::solver::{newton_raphson_solve, NlDeviceGroupIv, NlDeviceIv};
 pub struct GummelPoonModel {
     // --- DC parameters ---
     /// Saturation current (A). Typically 1e-15 to 1e-12.
-    pub is: f64,
+    pub is: crate::Wave,
     /// Forward current gain (beta_F, hFE). Typically 100-500.
-    pub bf: f64,
+    pub bf: crate::Wave,
     /// Reverse current gain (beta_R). Typically 1-20.
-    pub br: f64,
+    pub br: crate::Wave,
     /// Forward ideality factor (typically 1.0).
-    pub nf: f64,
+    pub nf: crate::Wave,
     /// Reverse ideality factor (typically 1.0).
-    pub nr: f64,
+    pub nr: crate::Wave,
     /// Thermal voltage (V). kT/q ≈ 25.85mV at 25°C.
-    pub vt: f64,
+    pub vt: crate::Wave,
 
     // --- Early effect parameters ---
     /// Forward Early voltage (V). Models base-width modulation in forward-active.
-    /// Typically 50-200V. Set to f64::INFINITY to disable.
-    pub vaf: f64,
+    /// Typically 50-200V. Set to crate::Wave::INFINITY to disable.
+    pub vaf: crate::Wave,
     /// Reverse Early voltage (V). Models base-width modulation in reverse-active.
-    /// Typically 5-50V. Set to f64::INFINITY to disable.
-    pub var: f64,
+    /// Typically 5-50V. Set to crate::Wave::INFINITY to disable.
+    pub var: crate::Wave,
 
     // --- High injection parameters ---
     /// Forward knee current (A). High-injection corner for forward gain.
-    /// Typically 0.01-1A. Set to f64::INFINITY to disable.
-    pub ikf: f64,
+    /// Typically 0.01-1A. Set to crate::Wave::INFINITY to disable.
+    pub ikf: crate::Wave,
     /// Reverse knee current (A). High-injection corner for reverse gain.
-    /// Typically 0.001-0.1A. Set to f64::INFINITY to disable.
-    pub ikr: f64,
+    /// Typically 0.001-0.1A. Set to crate::Wave::INFINITY to disable.
+    pub ikr: crate::Wave,
 
     // --- Base-emitter leakage ---
     /// B-E leakage saturation current (A). Typically 0 or 1e-14.
-    pub ise: f64,
+    pub ise: crate::Wave,
     /// B-E leakage ideality factor. Typically 1.5-2.0.
-    pub ne: f64,
+    pub ne: crate::Wave,
 
     // --- Base-collector leakage ---
     /// B-C leakage saturation current (A). Typically 0 or 1e-13.
-    pub isc: f64,
+    pub isc: crate::Wave,
     /// B-C leakage ideality factor. Typically 1.5-2.0.
-    pub nc: f64,
+    pub nc: crate::Wave,
 
     // --- Junction capacitances ---
     /// Zero-bias B-E junction capacitance (F).
-    pub cje: f64,
+    pub cje: crate::Wave,
     /// B-E built-in potential (V). Typically 0.7-0.9V.
-    pub vje: f64,
+    pub vje: crate::Wave,
     /// B-E grading coefficient. Typically 0.33-0.5.
-    pub mje: f64,
+    pub mje: crate::Wave,
     /// Zero-bias B-C junction capacitance (F).
-    pub cjc: f64,
+    pub cjc: crate::Wave,
     /// B-C built-in potential (V). Typically 0.5-0.75V.
-    pub vjc: f64,
+    pub vjc: crate::Wave,
     /// B-C grading coefficient. Typically 0.33-0.5.
-    pub mjc: f64,
+    pub mjc: crate::Wave,
 
     // --- Terminal ohmic resistances ---
     /// Base spreading resistance (Ω). Models ohmic loss in base region.
     /// Typical range: 1–40 Ω. Causes negative feedback and limits gain.
-    pub rb: f64,
+    pub rb: crate::Wave,
     /// Emitter ohmic resistance (Ω).
     /// Typical range: 0.1–2 Ω. Contributes degeneration / gain reduction.
-    pub re: f64,
+    pub re: crate::Wave,
     /// Collector ohmic resistance (Ω).
     /// Typical range: 0.1–4 Ω.
-    pub rc: f64,
+    pub rc: crate::Wave,
 
     // --- Transit time ---
     /// Forward transit time (s). Affects high-frequency response via diffusion capacitance.
     /// C_diff_be = TF * gm = TF * Ic / Vt.
-    pub tf: f64,
+    pub tf: crate::Wave,
     /// Reverse transit time (s). Contributes to B-C diffusion capacitance.
     /// C_diff_bc = TR * gm_r = TR * Ie / Vt.
-    pub tr: f64,
+    pub tr: crate::Wave,
 
     /// Whether this is a PNP (vs NPN) transistor.
     pub is_pnp: bool,
@@ -132,15 +132,23 @@ impl GummelPoonModel {
     /// Qb = q1/2 * (1 + sqrt(1 + 4*q2))
     /// ```
     #[inline]
-    pub fn base_charge(&self, vbe: f64, vbc: f64) -> f64 {
-        let exp_vbe = crate::math::exp((vbe / (self.nf * self.vt)).min(40.0));
-        let exp_vbc = crate::math::exp((vbc / (self.nr * self.vt)).min(40.0));
+    pub fn base_charge(&self, vbe: crate::Wave, vbc: crate::Wave) -> crate::Wave {
+        let exp_vbe =
+            crate::math::exp((vbe / (self.nf * self.vt)).min(40.0) as crate::Wave) as crate::Wave;
+        let exp_vbc =
+            crate::math::exp((vbc / (self.nr * self.vt)).min(40.0) as crate::Wave) as crate::Wave;
         self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc)
     }
 
     /// Compute base charge from pre-computed exponentials (avoids redundant exp calls).
     #[inline]
-    fn base_charge_from_exp(&self, vbe: f64, vbc: f64, exp_vbe: f64, exp_vbc: f64) -> f64 {
+    fn base_charge_from_exp(
+        &self,
+        vbe: crate::Wave,
+        vbc: crate::Wave,
+        exp_vbe: crate::Wave,
+        exp_vbc: crate::Wave,
+    ) -> crate::Wave {
         // q1: Early effect term
         let q1 =
             1.0 + if self.vaf.is_finite() {
@@ -167,17 +175,20 @@ impl GummelPoonModel {
         let q2 = q2_f + q2_r;
 
         // Qb from quadratic formula (always >= 1)
-        (q1 / 2.0) * (1.0 + crate::math::sqrt((1.0 + 4.0 * q2).max(0.0)))
+        (q1 / 2.0)
+            * (1.0 + crate::math::sqrt((1.0 + 4.0 * q2).max(0.0) as crate::Wave) as crate::Wave)
     }
 
     /// Compute collector current using Gummel-Poon transport equations.
     ///
     /// Returns (Ic, Ib) tuple.
     #[inline]
-    pub fn currents(&self, vbe: f64, vbc: f64) -> (f64, f64) {
+    pub fn currents(&self, vbe: crate::Wave, vbc: crate::Wave) -> (crate::Wave, crate::Wave) {
         // Compute all exponentials once — shared between base_charge and transport
-        let exp_vbe = crate::math::exp((vbe / (self.nf * self.vt)).min(40.0));
-        let exp_vbc = crate::math::exp((vbc / (self.nr * self.vt)).min(40.0));
+        let exp_vbe =
+            crate::math::exp((vbe / (self.nf * self.vt)).min(40.0) as crate::Wave) as crate::Wave;
+        let exp_vbc =
+            crate::math::exp((vbc / (self.nr * self.vt)).min(40.0) as crate::Wave) as crate::Wave;
 
         let qb = self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc);
 
@@ -192,12 +203,18 @@ impl GummelPoonModel {
         let ib_f = icc / self.bf; // Forward base current
         let ib_r = iec / self.br; // Reverse base current
         let ib_leak_e = if self.ise > 0.0 {
-            self.ise * (crate::math::exp((vbe / (self.ne * self.vt)).min(40.0)) - 1.0)
+            self.ise
+                * (crate::math::exp((vbe / (self.ne * self.vt)).min(40.0) as crate::Wave)
+                    as crate::Wave
+                    - 1.0)
         } else {
             0.0
         };
         let ib_leak_c = if self.isc > 0.0 {
-            self.isc * (crate::math::exp((vbc / (self.nc * self.vt)).min(40.0)) - 1.0)
+            self.isc
+                * (crate::math::exp((vbc / (self.nc * self.vt)).min(40.0) as crate::Wave)
+                    as crate::Wave
+                    - 1.0)
         } else {
             0.0
         };
@@ -214,12 +231,16 @@ impl GummelPoonModel {
     /// Caller must chain-rule for (vbe, vce): ∂f/∂vce = -∂f/∂vbc
     /// since vbc = vbe - vce.
     #[inline]
-    pub fn currents_and_jacobian(&self, vbe: f64, vbc: f64) -> (f64, f64, [f64; 4]) {
+    pub fn currents_and_jacobian(
+        &self,
+        vbe: crate::Wave,
+        vbc: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, [crate::Wave; 4]) {
         // Exponentials (shared with currents computation)
         let arg_vbe = (vbe / (self.nf * self.vt)).min(40.0);
         let arg_vbc = (vbc / (self.nr * self.vt)).min(40.0);
-        let exp_vbe = crate::math::exp(arg_vbe);
-        let exp_vbc = crate::math::exp(arg_vbc);
+        let exp_vbe = crate::math::exp(arg_vbe as crate::Wave) as crate::Wave;
+        let exp_vbc = crate::math::exp(arg_vbc as crate::Wave) as crate::Wave;
         let vbe_clamped = arg_vbe >= 40.0;
         let vbc_clamped = arg_vbc >= 40.0;
 
@@ -284,7 +305,7 @@ impl GummelPoonModel {
 
         // qb = (q1/2) * (1 + sqrt(1 + 4*q2))
         let inner = (1.0 + 4.0 * q2).max(0.0);
-        let sqrt_inner = crate::math::sqrt(inner);
+        let sqrt_inner = crate::math::sqrt(inner as crate::Wave) as crate::Wave;
         let qb = (q1 / 2.0) * (1.0 + sqrt_inner);
 
         // d(qb)/d(vbe) = (dq1/dvbe / 2) * (1 + sqrt_inner) + (q1/2) * (4 * dq2/dvbe) / (2 * sqrt_inner)
@@ -345,7 +366,7 @@ impl GummelPoonModel {
         // Leakage: ise * (exp(vbe/(ne*vt)) - 1)
         let (ib_leak_e, dleak_e_dvbe) = if self.ise > 0.0 {
             let arg = (vbe / (self.ne * self.vt)).min(40.0);
-            let e = crate::math::exp(arg);
+            let e = crate::math::exp(arg as crate::Wave) as crate::Wave;
             let clamped = arg >= 40.0;
             (
                 self.ise * (e - 1.0),
@@ -361,7 +382,7 @@ impl GummelPoonModel {
 
         let (ib_leak_c, dleak_c_dvbc) = if self.isc > 0.0 {
             let arg = (vbc / (self.nc * self.vt)).min(40.0);
-            let e = crate::math::exp(arg);
+            let e = crate::math::exp(arg as crate::Wave) as crate::Wave;
             let clamped = arg >= 40.0;
             (
                 self.isc * (e - 1.0),
@@ -404,17 +425,28 @@ impl GummelPoonModel {
     /// into its Newton-Raphson solver; a future task should add sample-rate
     /// and state tracking analogous to `BjtGummelPoonRoot::cap_be_state`.
     #[inline]
-    pub fn capacitance_be(&self, vbe: f64, ic: f64) -> f64 {
+    pub fn capacitance_be(&self, vbe: crate::Wave, ic: crate::Wave) -> crate::Wave {
         // Depletion capacitance
         let c_depletion = if self.cje > 0.0 {
             // Avoid singularity: linearize for Vbe > 0.8*Vje
             let fc = 0.8;
             if vbe < fc * self.vje {
-                self.cje / crate::math::powf(1.0 - vbe / self.vje, self.mje)
+                self.cje
+                    / crate::math::powf(
+                        (1.0 - vbe / self.vje) as crate::Wave,
+                        self.mje as crate::Wave,
+                    ) as crate::Wave
             } else {
                 // Linear extrapolation for forward bias
-                let cje_fc = self.cje / crate::math::powf(1.0 - fc, self.mje);
-                let dcje = self.cje * self.mje / (self.vje * crate::math::powf(1.0 - fc, self.mje + 1.0));
+                let cje_fc = self.cje
+                    / crate::math::powf((1.0 - fc) as crate::Wave, self.mje as crate::Wave)
+                        as crate::Wave;
+                let dcje = self.cje * self.mje
+                    / (self.vje
+                        * crate::math::powf(
+                            (1.0 - fc) as crate::Wave,
+                            (self.mje + 1.0) as crate::Wave,
+                        ) as crate::Wave);
                 cje_fc + dcje * (vbe - fc * self.vje)
             }
         } else {
@@ -439,15 +471,26 @@ impl GummelPoonModel {
     /// # Note
     /// See note on `capacitance_be` regarding integration into `BjtTwoPort`.
     #[inline]
-    pub fn capacitance_bc(&self, vbc: f64, ie: f64) -> f64 {
+    pub fn capacitance_bc(&self, vbc: crate::Wave, ie: crate::Wave) -> crate::Wave {
         // Depletion capacitance
         let c_depletion = if self.cjc > 0.0 {
             let fc = 0.8;
             if vbc < fc * self.vjc {
-                self.cjc / crate::math::powf(1.0 - vbc / self.vjc, self.mjc)
+                self.cjc
+                    / crate::math::powf(
+                        (1.0 - vbc / self.vjc) as crate::Wave,
+                        self.mjc as crate::Wave,
+                    ) as crate::Wave
             } else {
-                let cjc_fc = self.cjc / crate::math::powf(1.0 - fc, self.mjc);
-                let dcjc = self.cjc * self.mjc / (self.vjc * crate::math::powf(1.0 - fc, self.mjc + 1.0));
+                let cjc_fc = self.cjc
+                    / crate::math::powf((1.0 - fc) as crate::Wave, self.mjc as crate::Wave)
+                        as crate::Wave;
+                let dcjc = self.cjc * self.mjc
+                    / (self.vjc
+                        * crate::math::powf(
+                            (1.0 - fc) as crate::Wave,
+                            (self.mjc + 1.0) as crate::Wave,
+                        ) as crate::Wave);
                 cjc_fc + dcjc * (vbc - fc * self.vjc)
             }
         } else {
@@ -487,21 +530,21 @@ impl GummelPoonModel {
 pub struct BjtGummelPoonRoot {
     pub model: GummelPoonModel,
     /// Port resistances [Rb, Rc, Re]
-    port_resistances: [f64; 3],
+    port_resistances: [crate::Wave; 3],
     /// Cached voltages for warm-starting Newton iteration
-    vbe_prev: f64,
-    vce_prev: f64,
+    vbe_prev: crate::Wave,
+    vce_prev: crate::Wave,
     /// Last computed currents for external access
-    ic: f64,
-    ib: f64,
+    ic: crate::Wave,
+    ib: crate::Wave,
     /// Sample rate for junction capacitances
-    sample_rate: f64,
+    sample_rate: crate::Wave,
     /// Junction capacitor states (for reactive elements)
-    cap_be_state: f64,
-    cap_bc_state: f64,
+    cap_be_state: crate::Wave,
+    cap_bc_state: crate::Wave,
     /// Newton-Raphson parameters
     max_iter: usize,
-    tolerance: f64,
+    tolerance: crate::Wave,
 }
 
 impl BjtGummelPoonRoot {
@@ -510,7 +553,11 @@ impl BjtGummelPoonRoot {
     /// * `model` — Gummel-Poon parameters
     /// * `port_resistances` — [R_base, R_collector, R_emitter]
     /// * `sample_rate` — for junction capacitance discretization
-    pub fn new(model: GummelPoonModel, port_resistances: [f64; 3], sample_rate: f64) -> Self {
+    pub fn new(
+        model: GummelPoonModel,
+        port_resistances: [crate::Wave; 3],
+        sample_rate: crate::Wave,
+    ) -> Self {
         Self {
             model,
             port_resistances,
@@ -528,19 +575,19 @@ impl BjtGummelPoonRoot {
 
     /// Get last computed collector current.
     #[inline]
-    pub fn collector_current(&self) -> f64 {
+    pub fn collector_current(&self) -> crate::Wave {
         self.ic
     }
 
     /// Get last computed base current.
     #[inline]
-    pub fn base_current(&self) -> f64 {
+    pub fn base_current(&self) -> crate::Wave {
         self.ib
     }
 
     /// Get emitter current (Ie = Ic + Ib by KCL).
     #[inline]
-    pub fn emitter_current(&self) -> f64 {
+    pub fn emitter_current(&self) -> crate::Wave {
         self.ic + self.ib
     }
 
@@ -560,7 +607,7 @@ impl BjtGummelPoonRoot {
     /// returns reflected waves [b_b, b_c, b_e].
     ///
     /// The emitter port is adapted (S_ee = 0).
-    pub fn process_3port(&mut self, a: [f64; 3]) -> [f64; 3] {
+    pub fn process_3port(&mut self, a: [crate::Wave; 3]) -> [crate::Wave; 3] {
         let [rb, rc, re] = self.port_resistances;
         let [ab, ac, ae] = a;
 
@@ -737,10 +784,10 @@ impl BjtGummelPoonRoot {
 pub struct BjtTwoPort {
     pub model: GummelPoonModel,
     pub is_pnp: bool,
-    v_max: f64,
+    v_max: crate::Wave,
     /// IS-dependent Vbe clamp: NF * VT * ln(I_max / IS).
     /// Prevents exponential blow-up at forward bias for high-IS devices (Ge).
-    vbe_max: f64,
+    vbe_max: crate::Wave,
     /// Whether to use analytical Jacobian (validated at construction).
     /// Falls back to numerical if analytical produces poor NR convergence.
     use_analytical_jac: bool,
@@ -748,9 +795,10 @@ pub struct BjtTwoPort {
 
 impl BjtTwoPort {
     /// Compute IS-dependent Vbe clamp for max 100mA collector current.
-    fn compute_vbe_max(model: &GummelPoonModel) -> f64 {
+    fn compute_vbe_max(model: &GummelPoonModel) -> crate::Wave {
         let i_max = 0.1; // 100mA — generous bound for small-signal BJTs
-        let vbe_max = model.nf * model.vt * crate::math::ln(i_max / model.is);
+        let vbe_max =
+            model.nf * model.vt * crate::math::ln((i_max / model.is) as crate::Wave) as crate::Wave;
         vbe_max.clamp(0.3, 1.0) // At least 0.3V, at most 1.0V
     }
 
@@ -775,7 +823,7 @@ impl BjtTwoPort {
         };
 
         let sign = if is_pnp { -1.0 } else { 1.0 };
-        let test_points: &[[f64; 2]] = &[
+        let test_points: &[[crate::Wave; 2]] = &[
             [sign * 0.3, sign * 5.0],
             [sign * 0.5, sign * 2.0],
             [sign * 0.6, sign * 10.0],
@@ -834,7 +882,7 @@ impl BjtTwoPort {
 
     /// Set the maximum Vce (supply voltage).
     #[inline]
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         self.v_max = v_max.max(1.0);
     }
 }
@@ -844,14 +892,15 @@ impl NlDeviceGroupIv for BjtTwoPort {
         2
     }
 
-    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let sign = if self.is_pnp { -1.0 } else { 1.0 };
         let vbe_ext = sign * v[0];
         let vce_ext = sign * v[1];
 
         // Clamp Vbc to prevent catastrophic BC junction forward bias.
-        const VBC_MAX: f64 = 0.4;
-        let clamp_vbc = |vbe: f64, vce: f64| -> f64 { (vbe - vce).min(VBC_MAX) };
+        const VBC_MAX: crate::Wave = 0.4;
+        let clamp_vbc =
+            |vbe: crate::Wave, vce: crate::Wave| -> crate::Wave { (vbe - vce).min(VBC_MAX) };
 
         let rb = self.model.rb;
         let re = self.model.re;
@@ -860,23 +909,24 @@ impl NlDeviceGroupIv for BjtTwoPort {
 
         if !self.use_analytical_jac {
             // Numerical Jacobian fallback (validated at construction as needed)
-            let eval_with_parasitics = |vbe_ext: f64, vce_ext: f64| -> (f64, f64) {
-                if !has_parasitics {
-                    let vbc = clamp_vbc(vbe_ext, vce_ext);
-                    return self.model.currents(vbe_ext, vbc);
-                }
-                let mut vbe_int = vbe_ext;
-                let mut vce_int = vce_ext;
-                for _ in 0..4 {
+            let eval_with_parasitics =
+                |vbe_ext: crate::Wave, vce_ext: crate::Wave| -> (crate::Wave, crate::Wave) {
+                    if !has_parasitics {
+                        let vbc = clamp_vbc(vbe_ext, vce_ext);
+                        return self.model.currents(vbe_ext, vbc);
+                    }
+                    let mut vbe_int = vbe_ext;
+                    let mut vce_int = vce_ext;
+                    for _ in 0..4 {
+                        let vbc_int = clamp_vbc(vbe_int, vce_int);
+                        let (ic, ib) = self.model.currents(vbe_int, vbc_int);
+                        let ie_out = ic + ib;
+                        vbe_int = vbe_ext - ib * rb - ie_out * re;
+                        vce_int = vce_ext - ic * rc - ie_out * re;
+                    }
                     let vbc_int = clamp_vbc(vbe_int, vce_int);
-                    let (ic, ib) = self.model.currents(vbe_int, vbc_int);
-                    let ie_out = ic + ib;
-                    vbe_int = vbe_ext - ib * rb - ie_out * re;
-                    vce_int = vce_ext - ic * rc - ie_out * re;
-                }
-                let vbc_int = clamp_vbc(vbe_int, vce_int);
-                self.model.currents(vbe_int, vbc_int)
-            };
+                    self.model.currents(vbe_int, vbc_int)
+                };
 
             let (ic, ib) = eval_with_parasitics(vbe_ext, vce_ext);
             currents[0] = sign * ib;
@@ -999,7 +1049,7 @@ impl NlDeviceGroupIv for BjtTwoPort {
         }
     }
 
-    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+    fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
         match port {
             0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent (Ge ~0.32V, Si ~0.83V)
             _ => (-self.v_max, self.v_max),     // Vce: full swing
@@ -1037,29 +1087,29 @@ impl NlDeviceGroupIv for BjtTwoPort {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EbersMollTwoPort {
     /// Saturation current (A). Typically 1e-15 to 1e-12.
-    pub is: f64,
+    pub is: crate::Wave,
     /// Forward current gain (beta_F, hFE). Typically 100-500.
-    pub bf: f64,
+    pub bf: crate::Wave,
     /// Reverse current gain (beta_R). Typically 1-20.
-    pub br: f64,
+    pub br: crate::Wave,
     /// NF * VT — forward thermal voltage denominator.
-    pub nf_vt: f64,
+    pub nf_vt: crate::Wave,
     /// NR * VT — reverse thermal voltage denominator.
-    pub nr_vt: f64,
+    pub nr_vt: crate::Wave,
     /// Whether this is a PNP (vs NPN) transistor.
     pub is_pnp: bool,
     /// IS-dependent Vbe clamp: prevents exp blow-up at forward bias.
     /// Same logic as `BjtTwoPort::compute_vbe_max`.
-    vbe_max: f64,
+    vbe_max: crate::Wave,
     /// Vce/Vbc swing limit.
-    v_max: f64,
+    v_max: crate::Wave,
 }
 
 impl EbersMollTwoPort {
     /// Compute the IS-dependent Vbe clamp (same logic as `BjtTwoPort`).
-    fn compute_vbe_max(is: f64, nf: f64, vt: f64) -> f64 {
+    fn compute_vbe_max(is: crate::Wave, nf: crate::Wave, vt: crate::Wave) -> crate::Wave {
         let i_max = 0.1; // 100 mA generous bound
-        let vbe_max = nf * vt * crate::math::ln(i_max / is);
+        let vbe_max = nf * vt * crate::math::ln((i_max / is) as crate::Wave) as crate::Wave;
         vbe_max.clamp(0.3, 1.0)
     }
 
@@ -1090,7 +1140,7 @@ impl EbersMollTwoPort {
 
     /// Set the maximum Vce (supply voltage).
     #[inline]
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         self.v_max = v_max.max(1.0);
     }
 
@@ -1114,13 +1164,13 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
     ///
     /// PNP devices negate all voltages before evaluation and negate
     /// currents before writing back.
-    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let sign = if self.is_pnp { -1.0 } else { 1.0 };
         let vbe = sign * v[0];
         let vce = sign * v[1];
 
         // Clamp Vbc to prevent catastrophic BC junction forward bias.
-        const VBC_MAX: f64 = 0.4;
+        const VBC_MAX: crate::Wave = 0.4;
         let vbc_raw = vbe - vce;
         let vbc_was_clamped = vbc_raw > VBC_MAX;
         let vbc = vbc_raw.min(VBC_MAX);
@@ -1128,8 +1178,8 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         // Clamp exponential arguments to prevent overflow (same limit as GP).
         let arg_be = (vbe / self.nf_vt).min(40.0);
         let arg_bc = (vbc / self.nr_vt).min(40.0);
-        let exp_be = crate::math::exp(arg_be);
-        let exp_bc = crate::math::exp(arg_bc);
+        let exp_be = crate::math::exp(arg_be as crate::Wave) as crate::Wave;
+        let exp_bc = crate::math::exp(arg_bc as crate::Wave) as crate::Wave;
         let be_clamped = arg_be >= 40.0;
         let bc_clamped = arg_bc >= 40.0;
 
@@ -1171,7 +1221,7 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         jacobian[3] = -der_dvbc * dvbc_dvce / self.br; // ∂Ic/∂Vce
     }
 
-    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+    fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
         match port {
             0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent
             _ => (-self.v_max, self.v_max),     // Vce: full swing
@@ -1199,13 +1249,19 @@ pub struct BjtRoot {
     pub is_pnp: bool,
     /// DC base-emitter bias voltage, set at compile time from circuit analysis.
     /// The runtime input signal modulates around this operating point.
-    vbe_bias: f64,
+    vbe_bias: crate::Wave,
     /// Current base-emitter voltage (bias + AC signal).
-    vbe: f64,
+    vbe: crate::Wave,
     /// Maximum collector-emitter voltage (from supply rail).
-    v_max: f64,
+    v_max: crate::Wave,
     /// Previous sample's Vce for NR warm-starting.
-    prev_v: f64,
+    prev_v: crate::Wave,
+    /// Initial Vce warm-start, restored on reset().
+    ///
+    /// Set from `init { }` block hints (e.g. `Q1: saturated` → 0.1 V).
+    /// For circuits without an init block, this is 0.0 and reset() preserves
+    /// the existing behavior (NR falls back to `a*0.5` cold start).
+    initial_prev_v: crate::Wave,
 }
 
 impl BjtRoot {
@@ -1217,10 +1273,11 @@ impl BjtRoot {
             vbe: 0.0,
             v_max: 50.0,
             prev_v: 0.0,
+            initial_prev_v: 0.0,
         }
     }
 
-    pub fn new_with_v_max(model: GummelPoonModel, is_pnp: bool, v_max: f64) -> Self {
+    pub fn new_with_v_max(model: GummelPoonModel, is_pnp: bool, v_max: crate::Wave) -> Self {
         Self {
             model,
             is_pnp,
@@ -1228,41 +1285,66 @@ impl BjtRoot {
             vbe: 0.0,
             v_max: v_max.max(1.0),
             prev_v: 0.0,
+            initial_prev_v: 0.0,
         }
+    }
+
+    /// Get the initial Vce warm-start (for diagnostics and testing).
+    pub fn initial_prev_v(&self) -> crate::Wave {
+        self.initial_prev_v
+    }
+
+    /// Set the initial Vce warm-start from an `init { }` hint.
+    ///
+    /// Called once at compile time. On reset(), `prev_v` is restored to this
+    /// value, giving the NR solver an asymmetric starting point that can kick
+    /// free-running oscillators (e.g. BJT astable multivibrators) out of the
+    /// symmetric DC fixed point.
+    pub fn set_initial_prev_v(&mut self, vce: crate::Wave) {
+        self.initial_prev_v = vce;
+        self.prev_v = vce;
+    }
+
+    /// Restore `prev_v` to the compile-time initial value.
+    ///
+    /// Called by WdfStage::reset() for Bjt roots so that DAW resets return
+    /// to the hint-specified asymmetric state rather than to 0.0.
+    pub fn reset(&mut self) {
+        self.prev_v = self.initial_prev_v;
     }
 
     /// Set the DC bias operating point from circuit analysis.
     /// Called at compile time, not per-sample.
-    pub fn set_bias(&mut self, vbe_bias: f64) {
+    pub fn set_bias(&mut self, vbe_bias: crate::Wave) {
         self.vbe_bias = vbe_bias;
         self.vbe = vbe_bias; // Initialize runtime Vbe to bias point
     }
 
     /// Get the DC bias operating point.
-    pub fn vbe_bias(&self) -> f64 {
+    pub fn vbe_bias(&self) -> crate::Wave {
         self.vbe_bias
     }
 
     /// Set the base-emitter voltage (external control from input signal).
     #[inline]
-    pub fn set_vbe(&mut self, vbe: f64) {
+    pub fn set_vbe(&mut self, vbe: crate::Wave) {
         self.vbe = vbe;
     }
 
     /// Get current Vbe.
     #[inline]
-    pub fn vbe(&self) -> f64 {
+    pub fn vbe(&self) -> crate::Wave {
         self.vbe
     }
 
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         self.v_max = v_max.max(1.0);
     }
 
     /// Collector current Ic as a function of Vce, with Vbe held constant.
     /// This is the I-V characteristic seen at the WDF port.
     #[inline]
-    pub fn collector_current(&self, vce: f64) -> f64 {
+    pub fn collector_current(&self, vce: crate::Wave) -> crate::Wave {
         let sign = if self.is_pnp { -1.0 } else { 1.0 };
         let vbe = sign * self.vbe;
         let vce = sign * vce;
@@ -1273,16 +1355,23 @@ impl BjtRoot {
 
     /// Derivative dIc/dVce for Newton-Raphson.
     #[inline]
-    pub fn collector_current_derivative(&self, vce: f64) -> f64 {
+    pub fn collector_current_derivative(&self, vce: crate::Wave) -> crate::Wave {
         // Numerical derivative (simple, robust)
         let h = 1e-6;
         let ic_plus = self.collector_current(vce + h);
         let ic_minus = self.collector_current(vce - h);
-        (ic_plus - ic_minus) / (2.0 * h)
+        let d = (ic_plus - ic_minus) / (2.0 * h);
+        // When Vbc is clamped, both samples may land in the flat region,
+        // giving d ≈ 0. Return a small conductance so NR has a valid gradient.
+        if d.abs() < 1e-12 {
+            LEAKAGE_CONDUCTANCE
+        } else {
+            d
+        }
     }
 
     /// WDF NR solve: incident wave → reflected wave.
-    pub fn process(&mut self, a: f64, rp: f64) -> f64 {
+    pub fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let v_max = self.v_max;
         let cold = a * 0.5;
         let v0 = if self.prev_v != 0.0
@@ -1300,9 +1389,14 @@ impl BjtRoot {
             v0,
             super::solver::NR_MAX_ITER,
             1e-6,
-            Some((-1.0, v_max)),
+            Some((-v_max, v_max)),
             None,
-            |v| (root.collector_current(v), root.collector_current_derivative(v)),
+            |v| {
+                (
+                    root.collector_current(v),
+                    root.collector_current_derivative(v),
+                )
+            },
         );
         self.prev_v = (a + b) * 0.5;
         b
@@ -1311,13 +1405,163 @@ impl BjtRoot {
 
 impl NlDeviceIv for BjtRoot {
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
-        (self.collector_current(v), self.collector_current_derivative(v))
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
+        (
+            self.collector_current(v),
+            self.collector_current_derivative(v),
+        )
     }
 
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
-        (-1.0, self.v_max)
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
+        (-self.v_max, self.v_max)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DiffPairRoot: ladder filter stage macromodel
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Diff-pair macromodel for ladder filter stages (Moog/303/Korg).
+///
+/// Models one stage of a transistor ladder as a differential pair with
+/// tanh transfer characteristic:
+///
+///   I_out = α · I_tail · tanh(V_in / (2 · n · V_t))
+///
+/// where:
+/// - `α = β/(β+1)` from SPICE BF parameter (collector current fraction)
+/// - `I_tail` = tail current, modulated by cutoff CV (this IS the cutoff control)
+/// - `n` = forward ideality factor (SPICE NF, usually ~1.0)
+/// - `V_t` = thermal voltage (kT/q ≈ 25.85mV at 25°C)
+///
+/// The cap in the WDF tree is loaded by 1/gm = 2·n·Vt / (α·I_tail),
+/// giving cutoff frequency f_c = α·I_tail / (4π·n·Vt·C).
+///
+/// K-table: 2D lookup on (b_tree, I_tail). The I_tail axis maps to the
+/// cutoff control CV. Monotonic, bounded, memoryless — ideal for K-method.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DiffPairRoot {
+    /// α = BF / (BF + 1), collector current fraction.
+    pub alpha: crate::Wave,
+    /// n · Vt: scaled thermal voltage (NF * kT/q).
+    pub n_vt: crate::Wave,
+    /// Current tail current (modulated by cutoff CV).
+    pub i_tail: crate::Wave,
+    /// DC bias tail current (quiescent operating point).
+    pub i_tail_bias: crate::Wave,
+    /// Max tail current (sets cutoff range).
+    pub i_tail_max: crate::Wave,
+    /// Previous sample's voltage for NR warm-start.
+    pub prev_v: crate::Wave,
+}
+
+impl DiffPairRoot {
+    /// Create from SPICE Gummel-Poon parameters.
+    pub fn from_gummel_poon(model: &GummelPoonModel, i_tail_bias: crate::Wave) -> Self {
+        let alpha = model.bf / (model.bf + 1.0);
+        let n_vt = model.nf * model.vt;
+        Self {
+            alpha,
+            n_vt,
+            i_tail: i_tail_bias,
+            i_tail_bias,
+            i_tail_max: i_tail_bias * 10.0, // 10× range for cutoff sweep
+            prev_v: 0.0,
+        }
+    }
+
+    /// Create with explicit parameters.
+    pub fn new(alpha: crate::Wave, n_vt: crate::Wave, i_tail: crate::Wave) -> Self {
+        Self {
+            alpha,
+            n_vt,
+            i_tail,
+            i_tail_bias: i_tail,
+            i_tail_max: i_tail * 10.0,
+            prev_v: 0.0,
+        }
+    }
+
+    /// Set the tail current (cutoff control, audio rate).
+    #[inline]
+    pub fn set_i_tail(&mut self, i_tail: crate::Wave) {
+        self.i_tail = i_tail.max(1e-9); // prevent division by zero
+    }
+
+    /// Get the DC bias tail current.
+    pub fn i_tail_bias(&self) -> crate::Wave {
+        self.i_tail_bias
+    }
+
+    /// Transconductance gm = α · I_tail / (2 · n · Vt).
+    #[inline]
+    pub fn gm(&self) -> crate::Wave {
+        self.alpha * self.i_tail / (2.0 * self.n_vt)
+    }
+
+    /// Output current of the diff pair at voltage V.
+    /// I = α · I_tail · tanh(V / (2 · n · Vt))
+    #[inline]
+    pub fn current(&self, v: crate::Wave) -> crate::Wave {
+        let x = (v / (2.0 * self.n_vt)).clamp(-20.0, 20.0);
+        self.alpha * self.i_tail * crate::math::tanh(x as crate::Wave) as crate::Wave
+    }
+
+    /// Derivative dI/dV = α · I_tail / (2 · n · Vt) · sech²(V / (2·n·Vt))
+    #[inline]
+    pub fn current_derivative(&self, v: crate::Wave) -> crate::Wave {
+        let x = (v / (2.0 * self.n_vt)).clamp(-20.0, 20.0);
+        let sech2 = {
+            let t = crate::math::tanh(x as crate::Wave) as crate::Wave;
+            1.0 - t * t
+        };
+        self.alpha * self.i_tail / (2.0 * self.n_vt) * sech2
+    }
+
+    /// WDF NR solve: incident wave → reflected wave.
+    pub fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
+        let v0 = if self.prev_v != 0.0 {
+            self.prev_v
+        } else {
+            a * 0.5
+        };
+        let root = self.clone();
+        let b = newton_raphson_solve(
+            a,
+            rp,
+            v0,
+            super::solver::NR_MAX_ITER,
+            1e-6,
+            Some((-2.0, 2.0)), // tanh saturates well within ±2V
+            None,
+            |v| (root.current(v), root.current_derivative(v)),
+        );
+        self.prev_v = (a + b) * 0.5;
+        b
+    }
+
+    /// Reset NR warm-start state.
+    pub fn reset_nr_state(&mut self) {
+        self.prev_v = 0.0;
+    }
+
+    /// K-method candidacy: 2D (b_tree × I_tail).
+    pub fn k_method_candidacy(&self) -> (bool, usize) {
+        (true, 2) // 2D: wave × tail current
+    }
+}
+
+impl NlDeviceIv for DiffPairRoot {
+    #[inline]
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
+        (self.current(v), self.current_derivative(v))
+    }
+
+    #[inline]
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
+        (-2.0, 2.0)
     }
 }
 
@@ -1481,19 +1725,19 @@ mod gummel_poon_tests {
         let bjt_no_rb = BjtTwoPort::new(model_no_rb);
         let bjt_rb = BjtTwoPort::new(model_rb);
 
-        let vbe_ext = 0.65_f64; // external Vbe in forward active
-        let vce_ext = 5.0_f64;
+        let vbe_ext = 0.65 as crate::Wave; // external Vbe in forward active
+        let vce_ext = 5.0 as crate::Wave;
 
-        let mut currents_no_rb = [0.0_f64; 2];
-        let mut jacobian_no_rb = [0.0_f64; 4];
+        let mut currents_no_rb = [0.0 as crate::Wave; 2];
+        let mut jacobian_no_rb = [0.0 as crate::Wave; 4];
         bjt_no_rb.eval(
             &[vbe_ext, vce_ext],
             &mut currents_no_rb,
             &mut jacobian_no_rb,
         );
 
-        let mut currents_rb = [0.0_f64; 2];
-        let mut jacobian_rb = [0.0_f64; 4];
+        let mut currents_rb = [0.0 as crate::Wave; 2];
+        let mut jacobian_rb = [0.0 as crate::Wave; 4];
         bjt_rb.eval(&[vbe_ext, vce_ext], &mut currents_rb, &mut jacobian_rb);
 
         let ib_no_rb = currents_no_rb[0];
@@ -1535,15 +1779,15 @@ mod gummel_poon_tests {
         let bjt_no_re = BjtTwoPort::new(model_no_re);
         let bjt_re = BjtTwoPort::new(model_re);
 
-        let vbe_ext = 0.65_f64;
-        let vce_ext = 5.0_f64;
+        let vbe_ext = 0.65 as crate::Wave;
+        let vce_ext = 5.0 as crate::Wave;
 
-        let mut c0 = [0.0_f64; 2];
-        let mut j0 = [0.0_f64; 4];
+        let mut c0 = [0.0 as crate::Wave; 2];
+        let mut j0 = [0.0 as crate::Wave; 4];
         bjt_no_re.eval(&[vbe_ext, vce_ext], &mut c0, &mut j0);
 
-        let mut c1 = [0.0_f64; 2];
-        let mut j1 = [0.0_f64; 4];
+        let mut c1 = [0.0 as crate::Wave; 2];
+        let mut j1 = [0.0 as crate::Wave; 4];
         bjt_re.eval(&[vbe_ext, vce_ext], &mut c1, &mut j1);
 
         // RE causes degeneration: transconductance (gm = ∂Ic/∂Vbe) should decrease
@@ -1603,7 +1847,11 @@ mod gummel_poon_tests {
     // -----------------------------------------------------------------------
 
     /// Helper: compute numerical Jacobian of currents() via central differences.
-    fn numerical_jacobian(model: &GummelPoonModel, vbe: f64, vbc: f64) -> [f64; 4] {
+    fn numerical_jacobian(
+        model: &GummelPoonModel,
+        vbe: crate::Wave,
+        vbc: crate::Wave,
+    ) -> [crate::Wave; 4] {
         let delta = 1e-7;
         let (ic_p, ib_p) = model.currents(vbe + delta, vbc);
         let (ic_m, ib_m) = model.currents(vbe - delta, vbc);
@@ -1987,7 +2235,7 @@ mod ebers_moll_tests {
     #[test]
     fn ebers_moll_jacobian_matches_numerical() {
         let em = em_2n3904();
-        let test_points: &[[f64; 2]] = &[
+        let test_points: &[[crate::Wave; 2]] = &[
             [0.0, 0.0],   // zero bias
             [0.6, 5.0],   // forward active
             [0.65, 10.0], // high Vce
@@ -2047,10 +2295,10 @@ mod ebers_moll_tests {
     fn ebers_moll_matches_gp_when_advanced_params_zeroed() {
         // Build a GP model with all advanced effects disabled
         let mut gp = GummelPoonModel::by_name("2N3904");
-        gp.vaf = f64::INFINITY;
-        gp.var = f64::INFINITY;
-        gp.ikf = f64::INFINITY;
-        gp.ikr = f64::INFINITY;
+        gp.vaf = crate::Wave::INFINITY;
+        gp.var = crate::Wave::INFINITY;
+        gp.ikf = crate::Wave::INFINITY;
+        gp.ikr = crate::Wave::INFINITY;
         gp.ise = 0.0;
         gp.isc = 0.0;
         gp.rb = 0.0;
@@ -2060,7 +2308,7 @@ mod ebers_moll_tests {
         let bjt_gp = BjtTwoPort::new(gp);
         let em = EbersMollTwoPort::from_gp(&gp);
 
-        let test_points: &[[f64; 2]] =
+        let test_points: &[[crate::Wave; 2]] =
             &[[0.6, 5.0], [0.65, 10.0], [0.3, 1.0], [0.0, 5.0], [0.5, 0.3]];
 
         for v in test_points {
@@ -2143,7 +2391,7 @@ mod ebers_moll_tests {
     #[test]
     fn ebers_moll_eval_all_finite() {
         let em = em_2n3904();
-        let test_points: &[[f64; 2]] = &[
+        let test_points: &[[crate::Wave; 2]] = &[
             [0.0, 0.0],
             [0.7, 15.0],
             [-1.0, -1.0],

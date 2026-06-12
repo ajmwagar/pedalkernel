@@ -6,15 +6,31 @@ use super::super::component::{EdgeKind, StampContext};
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use crate::tree::MnaSystem;
+use pedalkernel_rt::boundary_math::{
+    MnaNodeId, MnaOnePort, MnaPortTerminals, OnePort, OnePortKind,
+};
+use std::collections::{HashMap, VecDeque};
 
 /// Result of building an MNA system from a set of edges.
 pub(super) struct BuiltMna {
     pub mna: MnaSystem,
-    pub cap_stamps: Vec<(Option<usize>, Option<usize>, f64)>,
+    pub reactive_one_ports: Vec<MnaOnePort>,
     pub node_set: Vec<NodeId>,
     pub vs_idx: usize,
     pub injection_mna: Option<usize>,
     pub output_mna: Option<usize>,
+}
+
+impl BuiltMna {
+    pub(super) fn injection_node_id(&self) -> Option<usize> {
+        self.injection_mna
+            .and_then(|idx| self.node_set.get(idx).copied())
+    }
+
+    pub(super) fn output_node_id(&self) -> Option<usize> {
+        self.output_mna
+            .and_then(|idx| self.node_set.get(idx).copied())
+    }
 }
 
 /// Build an MNA system from a set of edges.
@@ -35,7 +51,10 @@ pub(super) fn build_mna(
     // ── Step 1: Collect unique MNA nodes ─────────────────────────────
     let mut node_set: Vec<NodeId> = Vec::new();
     let mut add_node = |node: NodeId| {
-        if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
+        if node == graph.gnd_node
+            || graph.supply_nodes.contains(&node)
+            || graph.ac_ground_nodes.contains(&node)
+        {
             return;
         }
         if !node_set.contains(&node) {
@@ -47,6 +66,13 @@ pub(super) fn build_mna(
         let e = &graph.edges[eidx];
         add_node(e.node_a);
         add_node(e.node_b);
+        if graph.effective_edge_kind(eidx) == EdgeKind::Vccs {
+            let comp = &graph.components[e.comp_idx];
+            let out_key = format!("{}.out", comp.id);
+            if let Some(&out_node) = graph.node_names.get(&out_key) {
+                add_node(out_node);
+            }
+        }
     }
     for (_, attach) in pendant_trees {
         add_node(*attach);
@@ -69,7 +95,10 @@ pub(super) fn build_mna(
     }
 
     let node_to_mna = |node: NodeId| -> Option<usize> {
-        if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
+        if node == graph.gnd_node
+            || graph.supply_nodes.contains(&node)
+            || graph.ac_ground_nodes.contains(&node)
+        {
             None
         } else {
             node_set.iter().position(|&n| n == node)
@@ -94,7 +123,7 @@ pub(super) fn build_mna(
 
     // ── Step 3: Build MNA and stamp components ──────────────────────
     let mut mna = MnaSystem::new(num_nodes, num_vsources);
-    let mut cap_stamps: Vec<(Option<usize>, Option<usize>, f64)> = Vec::new();
+    let mut reactive_one_ports: Vec<MnaOnePort> = Vec::new();
 
     // Track multi-port components to avoid double-stamping.
     // Components with >1 port use stamp_mna_multi() once.
@@ -128,7 +157,7 @@ pub(super) fn build_mna(
                     vsrc_base: 0,
                     internal_node_base: 0,
                     sample_rate,
-                    cap_stamps: None,
+                    reactive_one_ports: None,
                 };
                 comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
             }
@@ -137,16 +166,34 @@ pub(super) fn build_mna(
 
         match edge_kind {
             EdgeKind::Linear => {
-                if let Some(r) = comp.kind.resistance() {
+                if comp.kind.is_pot() {
+                    comp.kind.stamp_mna(&comp.id, n1, n2, &mut mna, sample_rate);
+                } else if let Some(r) = comp.kind.resistance() {
                     mna.stamp_resistor(n1, n2, r);
                 }
             }
             EdgeKind::Reactive => {
                 if let Some(c) = comp.kind.capacitance() {
-                    cap_stamps.push((n1, n2, c));
+                    if n1.is_some() || n2.is_some() {
+                        reactive_one_ports.push(OnePort::new(
+                            MnaPortTerminals::maybe_differential(
+                                n1.map(MnaNodeId::new),
+                                n2.map(MnaNodeId::new),
+                            ),
+                            OnePortKind::Capacitor(c),
+                        ));
+                    }
                 }
                 if let Some(l) = comp.kind.inductance() {
-                    cap_stamps.push((n1, n2, -l)); // Negative = inductor convention
+                    if n1.is_some() || n2.is_some() {
+                        reactive_one_ports.push(OnePort::new(
+                            MnaPortTerminals::maybe_differential(
+                                n1.map(MnaNodeId::new),
+                                n2.map(MnaNodeId::new),
+                            ),
+                            OnePortKind::Inductor(l),
+                        ));
+                    }
                 }
             }
             EdgeKind::Vcvs => {
@@ -166,11 +213,20 @@ pub(super) fn build_mna(
                     vsrc_base,
                     internal_node_base: 0,
                     sample_rate,
-                    cap_stamps: None,
+                    reactive_one_ports: None,
                 };
                 comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
             }
-            _ => {} // Skip NL, Vccs, Behavioral
+            EdgeKind::Vccs => {
+                let pin_fn = |pin: &str| -> Option<usize> {
+                    let key = format!("{}.{}", comp.id, pin);
+                    let node = graph.node_names.get(&key)?;
+                    node_to_mna(*node)
+                };
+                let gm = linear_ota_transconductance(comp.kind.op_amp_type());
+                mna.stamp_vccs(pin_fn("out"), None, pin_fn("pos"), pin_fn("neg"), gm);
+            }
+            _ => {} // Skip NL, Behavioral
         }
     }
 
@@ -187,17 +243,19 @@ pub(super) fn build_mna(
     // Prefer graph.in_node if it's in this stage's MNA. Otherwise, fall
     // back to the VCVS neg node (for multi-stage pedals where the global
     // input is in a different stage).
-    let injection_mna = node_to_mna(graph.in_node).or_else(|| {
-        graph
-            .nullor_pins
-            .iter()
-            .find(|rec| {
-                edge_indices
-                    .iter()
-                    .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
-            })
-            .and_then(|rec| node_to_mna(rec.neg_node))
-    });
+    let injection_mna = node_to_mna(graph.in_node)
+        .or_else(|| nearest_stage_input_node(&node_set, graph).and_then(node_to_mna))
+        .or_else(|| {
+            graph
+                .nullor_pins
+                .iter()
+                .find(|rec| {
+                    edge_indices
+                        .iter()
+                        .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+                })
+                .and_then(|rec| node_to_mna(rec.neg_node))
+        });
     mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
     // Output node: if this rigid group contains the circuit's named `out`
@@ -221,10 +279,54 @@ pub(super) fn build_mna(
 
     Ok(BuiltMna {
         mna,
-        cap_stamps,
+        reactive_one_ports,
         node_set,
         vs_idx,
         injection_mna,
         output_mna,
     })
+}
+
+fn linear_ota_transconductance(op_type: Option<crate::dsl::OpAmpType>) -> f64 {
+    op_type
+        .and_then(|op_type| crate::model_lookup::ota_gm_from_type(&op_type))
+        .unwrap_or(0.0)
+}
+
+fn nearest_stage_input_node(node_set: &[NodeId], graph: &CircuitGraph) -> Option<NodeId> {
+    let mut dist: HashMap<NodeId, usize> = HashMap::new();
+    let mut queue = VecDeque::new();
+    dist.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+
+    while let Some(node) = queue.pop_front() {
+        let next_dist = dist[&node] + 1;
+        for (eidx, edge) in graph.edges.iter().enumerate() {
+            if graph.effective_edge_kind(eidx) == EdgeKind::Vcvs {
+                continue;
+            }
+            let next = if edge.node_a == node {
+                edge.node_b
+            } else if edge.node_b == node {
+                edge.node_a
+            } else {
+                continue;
+            };
+            if next == graph.gnd_node
+                || graph.supply_nodes.contains(&next)
+                || graph.ac_ground_nodes.contains(&next)
+            {
+                continue;
+            }
+            if dist.insert(next, next_dist).is_none() {
+                queue.push_back(next);
+            }
+        }
+    }
+
+    node_set
+        .iter()
+        .filter_map(|node| dist.get(node).map(|distance| (*distance, *node)))
+        .min_by_key(|(distance, node)| (*distance, *node))
+        .map(|(_, node)| node)
 }

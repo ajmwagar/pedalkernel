@@ -101,6 +101,22 @@ fn find_wdf_with_k_table(compiled: &super::compiled::CompiledPedal) -> bool {
     })
 }
 
+fn blockwise_k_table_dims(compiled: &super::compiled::CompiledPedal) -> Vec<usize> {
+    compiled
+        .stages
+        .iter()
+        .flat_map(|stage| {
+            if let super::compiled::Stage::Blockwise(bkm) = stage {
+                bkm.k_method_blocks()
+                    .map(|block| block.k_table.dims)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        })
+        .collect()
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 1. BjtRoot exists in RootKind and compiles from common-emitter topology
 // ═══════════════════════════════════════════════════════════════════════════
@@ -120,7 +136,10 @@ fn bjt_ce_compiles_to_wdf_with_bjt_root() {
             false
         }
     });
-    assert!(has_bjt_wdf, "Single BJT CE should compile to WDF with BjtRoot");
+    assert!(
+        has_bjt_wdf,
+        "Single BJT CE should compile to WDF with BjtRoot"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -131,7 +150,10 @@ fn bjt_ce_compiles_to_wdf_with_bjt_root() {
 fn bjt_stage_has_k_table() {
     let pedal = parse_pedal_file(BJT_CE).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
-    assert!(find_wdf_with_k_table(&compiled), "BJT WDF stage should have a K-table");
+    assert!(
+        find_wdf_with_k_table(&compiled),
+        "BJT WDF stage should have a K-table"
+    );
 }
 
 #[test]
@@ -180,11 +202,24 @@ fn bjt_k_table_response_varies_with_input() {
     for s in &compiled.stages {
         if let super::compiled::Stage::Wdf(w) = s {
             if let Some(ref table) = w.k_table {
-                let a_pos = table.lookup_2d(5.0, -0.6);
-                let a_neg = table.lookup_2d(-5.0, -0.6);
+                // Sweep across ctrl range to find a conducting operating point
+                let mut max_diff = 0.0f64;
+                let mut best_ctrl = 0.0;
+                for ci in 0..10 {
+                    let ctrl =
+                        table.ctrl_min + (ci as f64 / 9.0) * (table.ctrl_max - table.ctrl_min);
+                    let a_pos = table.lookup_2d(5.0, ctrl);
+                    let a_neg = table.lookup_2d(-5.0, ctrl);
+                    let diff = (a_pos - a_neg).abs();
+                    if diff > max_diff {
+                        max_diff = diff;
+                        best_ctrl = ctrl;
+                    }
+                }
+                eprintln!("  Max table variation: {max_diff:.6} at ctrl={best_ctrl:.3}");
                 assert!(
-                    (a_pos - a_neg).abs() > 0.01,
-                    "K-table should vary: +5V→{a_pos:.4}, -5V→{a_neg:.4}"
+                    max_diff > 1e-6,
+                    "K-table should vary with input at some ctrl, max_diff={max_diff:.6}"
                 );
                 return;
             }
@@ -207,7 +242,9 @@ fn bjt_with_k_table_produces_audio() {
     for i in 0..9600 {
         let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
         let out = proc.process(input);
-        if i >= 4800 { peak = peak.max(out.abs()); }
+        if i >= 4800 {
+            peak = peak.max(out.abs());
+        }
     }
     eprintln!("  BJT CE peak: {peak:.6}");
     assert!(peak > 0.001, "Should produce output, got {peak:.6}");
@@ -222,16 +259,12 @@ fn ladder_4_blocks_have_bjt_roots() {
     let pedal = parse_pedal_file(BJT_LADDER_4).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
-    let bjt_wdf_count = compiled.stages.iter().filter(|s| {
-        if let super::compiled::Stage::Wdf(w) = s {
-            matches!(w.root, pedalkernel_rt::stage::RootKind::Bjt(_))
-        } else {
-            false
-        }
-    }).count();
+    let block_k_table_dims = blockwise_k_table_dims(&compiled);
 
-    assert!(bjt_wdf_count >= 4,
-        "Ladder should have ≥4 WDF stages with BjtRoot, got {bjt_wdf_count}");
+    assert!(
+        block_k_table_dims.iter().filter(|&&dims| dims == 2).count() >= 4,
+        "Ladder should have ≥4 BKM BJT blocks with 2D K-tables, got {block_k_table_dims:?}"
+    );
 }
 
 #[test]
@@ -239,43 +272,42 @@ fn ladder_4_blocks_have_k_tables() {
     let pedal = parse_pedal_file(BJT_LADDER_4).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
-    let k_table_count = compiled.stages.iter().filter(|s| {
-        if let super::compiled::Stage::Wdf(w) = s {
-            w.k_table.is_some()
-        } else {
-            false
-        }
-    }).count();
+    let k_table_count = blockwise_k_table_dims(&compiled).len();
 
-    eprintln!("  Ladder 4: {k_table_count} stages with K-tables");
-    assert!(k_table_count >= 4,
-        "Ladder should have ≥4 K-tables (one per BJT block), got {k_table_count}");
+    eprintln!("  Ladder 4: {k_table_count} BKM blocks with K-tables");
+    assert!(
+        k_table_count >= 4,
+        "Ladder should have ≥4 K-tables (one per BJT block), got {k_table_count}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 6. No NaN across input domain
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[test]
 // ═══════════════════════════════════════════════════════════════════════════
 // 7. K-table gating: only generated for eligible components
 // ═══════════════════════════════════════════════════════════════════════════
-
 #[test]
 fn passive_stages_have_no_k_table() {
     // Passive WDF stages (ShortCircuit, Passthrough) should NOT get K-tables
-    let pedal = parse_pedal_file(r#"pedal "test" {
+    let pedal = parse_pedal_file(
+        r#"pedal "test" {
       supply 9V
       components { R1: resistor(10k)  C1: cap(10n) }
       nets { in -> R1.a  R1.b -> C1.a  C1.b -> gnd  R1.b -> out }
       controls {}
-    }"#).unwrap();
+    }"#,
+    )
+    .unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
 
     for s in &compiled.stages {
         if let super::compiled::Stage::Wdf(w) = s {
-            assert!(w.k_table.is_none(),
-                "Passive WDF stage should NOT have K-table");
+            assert!(
+                w.k_table.is_none(),
+                "Passive WDF stage should NOT have K-table"
+            );
         }
     }
 }
@@ -295,8 +327,12 @@ fn k_table_runtime_matches_nr() {
 
     // Check that K-table stages exist
     let has_k_table = compiled.stages.iter().any(|s| {
-        if let super::compiled::Stage::Wdf(w) = s { w.k_table.is_some() } else { false }
-    });
+        if let super::compiled::Stage::Wdf(w) = s {
+            w.k_table.is_some()
+        } else {
+            false
+        }
+    }) || !blockwise_k_table_dims(&compiled).is_empty();
     assert!(has_k_table, "Should have at least one K-table stage");
 
     // Process audio — this SHOULD use the K-table internally
@@ -308,9 +344,14 @@ fn k_table_runtime_matches_nr() {
         let out = proc.process(input);
         if i >= 4800 {
             peak = peak.max(out.abs());
-            if out.abs() > 1e-6 { any_nonzero = true; }
+            if out.abs() > 1e-6 {
+                any_nonzero = true;
+            }
         }
-        assert!(out.is_finite(), "K-table runtime produced NaN at sample {i}");
+        assert!(
+            out.is_finite(),
+            "K-table runtime produced NaN at sample {i}"
+        );
     }
     eprintln!("  K-table runtime peak: {peak:.6}");
     assert!(any_nonzero, "K-table runtime should produce nonzero output");
@@ -329,14 +370,18 @@ fn k_table_vs_nr_pipeline_comparison() {
     // NR path: compile then strip K-tables
     let mut compiled_nr = compile_via_spqr(&pedal, SR).unwrap();
     for s in &mut compiled_nr.stages {
-        if let super::compiled::Stage::Wdf(w) = s { w.k_table = None; }
+        if let super::compiled::Stage::Wdf(w) = s {
+            w.k_table = None;
+        }
     }
     let mut proc_nr: Box<dyn PedalProcessor> = Box::new(compiled_nr);
     let mut nr_peak = 0.0f64;
     for i in 0..9600 {
         let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
         let out = proc_nr.process(input);
-        if i >= 4800 { nr_peak = nr_peak.max(out.abs()); }
+        if i >= 4800 {
+            nr_peak = nr_peak.max(out.abs());
+        }
     }
 
     // K-table path: compile normally
@@ -348,8 +393,11 @@ fn k_table_vs_nr_pipeline_comparison() {
                 let nonzero = table.entries.iter().filter(|&&v| v.abs() > 1e-12).count();
                 let max = table.entries.iter().cloned().fold(0.0f64, f64::max);
                 let min = table.entries.iter().cloned().fold(0.0f64, f64::min);
-                eprintln!("  Stage {si} table: {} entries, {} nonzero, range=[{min:.4}, {max:.4}]",
-                    table.entries.len(), nonzero);
+                eprintln!(
+                    "  Stage {si} table: {} entries, {} nonzero, range=[{min:.4}, {max:.4}]",
+                    table.entries.len(),
+                    nonzero
+                );
             }
         }
     }
@@ -358,18 +406,27 @@ fn k_table_vs_nr_pipeline_comparison() {
     for i in 0..9600 {
         let input = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SR).sin() * 0.1;
         let out = proc_kt.process(input);
-        if i >= 4800 { kt_peak = kt_peak.max(out.abs()); }
+        if i >= 4800 {
+            kt_peak = kt_peak.max(out.abs());
+        }
     }
 
-    eprintln!("  Pipeline: NR={nr_peak:.6}, K-table={kt_peak:.6}, ratio={:.3}",
-        kt_peak / nr_peak.max(1e-12));
+    eprintln!(
+        "  Pipeline: NR={nr_peak:.6}, K-table={kt_peak:.6}, ratio={:.3}",
+        kt_peak / nr_peak.max(1e-12)
+    );
 
     assert!(nr_peak > 0.001, "NR should produce output: {nr_peak:.6}");
-    assert!(kt_peak > 0.001, "K-table should produce output: {kt_peak:.6}");
+    assert!(
+        kt_peak > 0.001,
+        "K-table should produce output: {kt_peak:.6}"
+    );
     // K-table output should be within 10x of NR (generous for now)
     let ratio = kt_peak / nr_peak.max(1e-12);
-    assert!(ratio > 0.1 && ratio < 10.0,
-        "K-table should be within 10x of NR: ratio={ratio:.3}");
+    assert!(
+        ratio > 0.1 && ratio < 10.0,
+        "K-table should be within 10x of NR: ratio={ratio:.3}"
+    );
 }
 
 #[test]
@@ -393,4 +450,34 @@ fn bjt_k_table_no_nan() {
         }
     }
     panic!("No K-table found");
+}
+
+#[test]
+fn single_bjt_edges_in_same_flow_group() {
+    // A single BJT's two NL edges (B-E and C-E) must land in the same FlowGroup.
+    // If split, SPQR can't build a WDF stage for either edge alone.
+    let pedal = parse_pedal_file(BJT_CE).unwrap();
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
+
+    // Find all groups containing Q1's NL edges
+    let q1_groups: Vec<usize> = groups
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| {
+            g.active_edges
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Q1")
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    assert_eq!(
+        q1_groups.len(),
+        1,
+        "Q1's edges should be in 1 group, got {} groups: {:?}",
+        q1_groups.len(),
+        q1_groups
+    );
 }

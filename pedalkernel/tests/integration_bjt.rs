@@ -320,8 +320,7 @@ fn big_muff_sustain_control_affects_output() {
 fn fuzz_face_ac128_model_params() {
     use pedalkernel::model_lookup::bjt_try_by_name;
 
-    let gp =
-        bjt_try_by_name("ac128").expect("AC128 model should exist in SPICE library");
+    let gp = bjt_try_by_name("ac128").expect("AC128 model should exist in SPICE library");
 
     eprintln!("=== AC128 Gummel-Poon Model ===");
     eprintln!("IS  = {:.4e} A", gp.is);

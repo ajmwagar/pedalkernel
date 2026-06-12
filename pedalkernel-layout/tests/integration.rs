@@ -289,6 +289,8 @@ fn tube_screamer_pedal() -> PedalDef {
         subtitle: None,
         calibrate: false,
         subcircuits: vec![],
+        ports: vec![],
+        init_hints: vec![],
     }
 }
 
@@ -439,6 +441,8 @@ fn triode_gain_stage() -> PedalDef {
         subtitle: None,
         calibrate: false,
         subcircuits: vec![],
+        ports: vec![],
+        init_hints: vec![],
     }
 }
 
@@ -665,6 +669,8 @@ fn empty_pedal_produces_empty_layout() {
         subtitle: None,
         calibrate: false,
         subcircuits: vec![],
+        ports: vec![],
+        init_hints: vec![],
     };
 
     let layout = generate_layout(&pedal, 1024.0, 512.0);

@@ -45,9 +45,29 @@ pub(super) fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
             let model = pentode_model(model_name);
             Some(NlDeviceKind::Pentode(PentodeRoot::new(model)))
         }
-        NonlinearKind::Jfet { model_name, is_n_channel, .. } => {
+        NonlinearKind::Jfet {
+            model_name,
+            is_n_channel,
+            ..
+        } => {
             let model = crate::model_lookup::jfet_model_by_name(model_name);
             Some(NlDeviceKind::Jfet(JfetRoot::new(model)))
+        }
+        NonlinearKind::BjtNpn {
+            model_name,
+            base_node,
+            collector_node,
+            ..
+        }
+        | NonlinearKind::BjtPnp {
+            model_name,
+            base_node,
+            collector_node,
+            ..
+        } if base_node == collector_node => {
+            let model = gummel_poon_model(model_name);
+            let diode_model = DiodeModel::from_bjt_base_emitter(&model);
+            Some(NlDeviceKind::Diode(DiodeRoot::new(diode_model)))
         }
         NonlinearKind::Ota => {
             let model = OtaModel::ca3080();
@@ -66,17 +86,26 @@ pub(super) fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
 ///
 /// `use_jfet_vr` overrides JFET creation: when true, builds a
 /// `JfetVr` (variable resistance, no NR) instead of `Jfet` (full NR solver).
-pub(super) fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind, Option<DiodeModel>) {
+pub(super) fn create_root(
+    kind: &NonlinearKind,
+    use_jfet_vr: bool,
+) -> (RootKind, Option<DiodeModel>) {
     match kind {
         NonlinearKind::DiodePair(dt) => {
             let model = diode_model(*dt);
             // Use Wright Omega explicit solver (O(1), no iteration)
-            (RootKind::ExplicitDiodePair(ExplicitDiodePairRoot::new(model)), Some(model))
+            (
+                RootKind::ExplicitDiodePair(ExplicitDiodePairRoot::new(model)),
+                Some(model),
+            )
         }
         NonlinearKind::SingleDiode(dt) => {
             let model = diode_model(*dt);
             // Use Wright Omega explicit solver (O(1), no iteration)
-            (RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(model)), Some(model))
+            (
+                RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(model)),
+                Some(model),
+            )
         }
         NonlinearKind::Jfet {
             model_name,
@@ -130,13 +159,44 @@ pub(super) fn create_root(kind: &NonlinearKind, use_jfet_vr: bool) -> (RootKind,
             let model = OtaModel::ca3080();
             (RootKind::Ota(OtaRoot::new(model)), None)
         }
-        NonlinearKind::BjtNpn { model_name, .. } => {
+        NonlinearKind::BjtNpn {
+            model_name,
+            base_node,
+            collector_node,
+            ..
+        } => {
             let model = gummel_poon_model(model_name);
-            (RootKind::Bjt(BjtRoot::new(model, false)), None)
+            if base_node == collector_node {
+                // Diode-connected BJT: base=collector → functions as a diode.
+                // Use DiodeRoot with the BJT's junction parameters (IS, NF·Vt).
+                // BjtRoot computes Ic(Vce) at fixed Vbe → flat b-axis (no signal
+                // response). DiodeRoot computes Id(Vd) = Is·(exp(V/nVt)-1) where
+                // V IS the port voltage — signal enters through b_tree naturally.
+                let diode_model = DiodeModel::from_bjt_base_emitter(&model);
+                (
+                    RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(diode_model)),
+                    Some(diode_model),
+                )
+            } else {
+                (RootKind::Bjt(BjtRoot::new(model, false)), None)
+            }
         }
-        NonlinearKind::BjtPnp { model_name, .. } => {
+        NonlinearKind::BjtPnp {
+            model_name,
+            base_node,
+            collector_node,
+            ..
+        } => {
             let model = gummel_poon_model(model_name);
-            (RootKind::Bjt(BjtRoot::new(model, true)), None)
+            if base_node == collector_node {
+                let diode_model = DiodeModel::from_bjt_base_emitter(&model);
+                (
+                    RootKind::ExplicitSingleDiode(ExplicitDiodeRoot::new(diode_model)),
+                    Some(diode_model),
+                )
+            } else {
+                (RootKind::Bjt(BjtRoot::new(model, true)), None)
+            }
         }
     }
 }

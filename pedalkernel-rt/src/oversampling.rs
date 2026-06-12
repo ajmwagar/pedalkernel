@@ -12,9 +12,9 @@
 //! The filters use half-band IIR designs (Butterworth) for minimal latency
 //! and CPU cost while providing strong alias rejection (~80 dB).
 
+use crate::{math, Wave};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::math;
 
 /// Oversampling factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,9 +46,9 @@ impl OversamplingFactor {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct HalfBandFilter {
     /// Biquad coefficients [b0, b1, b2, a1, a2] for each section.
-    sections: Vec<[f64; 5]>,
+    sections: Vec<[Wave; 5]>,
     /// State [x1, x2, y1, y2] for each section.
-    state: Vec<[f64; 4]>,
+    state: Vec<[Wave; 4]>,
 }
 
 impl HalfBandFilter {
@@ -79,17 +79,18 @@ impl HalfBandFilter {
     ///
     /// `order` must be even. `fc_normalized` is fc/fs (0 to 0.5).
     /// Returns vec of [b0, b1, b2, a1, a2] sections.
-    fn design_butterworth(order: usize, fc_normalized: f64) -> Vec<[f64; 5]> {
+    fn design_butterworth(order: usize, fc_normalized: crate::Wave) -> Vec<[Wave; 5]> {
         let num_sections = order / 2;
-        let wc = math::tan(math::PI * fc_normalized);
+        let wc = math::tan((math::PI as crate::Wave * fc_normalized) as Wave);
         let wc2 = wc * wc;
 
         let mut sections = Vec::with_capacity(num_sections);
         for k in 0..num_sections {
             // Pole angle for Butterworth: (2k + 1) * pi / (2 * order)
-            let theta = (2 * k + 1) as f64 * math::PI / (2.0 * order as f64);
+            let theta =
+                (2 * k + 1) as crate::Wave * math::PI as crate::Wave / (2.0 * order as crate::Wave);
             // Butterworth pole bandwidth: 2*cos(theta)
-            let bw = 2.0 * math::cos(theta);
+            let bw = 2.0 * math::cos(theta as Wave);
 
             // Bilinear transform: s = (2/T)(z-1)/(z+1), T=1
             // For unit-delay normalized: s = 2*(z-1)/(z+1)
@@ -101,14 +102,21 @@ impl HalfBandFilter {
             let b1 = 2.0 * wc2 / a0;
             let b2 = wc2 / a0;
 
-            sections.push([b0, b1, b2, a1_coef, a2_coef]);
+            sections.push([
+                b0 as Wave,
+                b1 as Wave,
+                b2 as Wave,
+                a1_coef as Wave,
+                a2_coef as Wave,
+            ]);
         }
         sections
     }
 
     /// Process one sample through the cascade.
     #[inline]
-    fn process(&mut self, input: f64) -> f64 {
+    fn process(&mut self, input: crate::Wave) -> crate::Wave {
+        let input = input as Wave;
         let mut x = input;
         for (i, coef) in self.sections.iter().enumerate() {
             let [b0, b1, b2, a1, a2] = *coef;
@@ -119,7 +127,7 @@ impl HalfBandFilter {
             self.state[i] = [x, x1, y, y1];
             x = y;
         }
-        x
+        x as crate::Wave
     }
 
     /// Reset filter state.
@@ -174,9 +182,9 @@ impl Oversampler {
     ///
     /// Returns one output sample at the base sample rate.
     #[inline]
-    pub fn process<F>(&mut self, input: f64, mut f: F) -> f64
+    pub fn process<F>(&mut self, input: crate::Wave, mut f: F) -> crate::Wave
     where
-        F: FnMut(f64) -> f64,
+        F: FnMut(crate::Wave) -> crate::Wave,
     {
         let ratio = self.factor.ratio();
         if ratio == 1 {
@@ -185,7 +193,7 @@ impl Oversampler {
 
         // Upsample: insert zeros between samples, then filter.
         // The gain factor compensates for zero-stuffing energy loss.
-        let gain = ratio as f64;
+        let gain = ratio as crate::Wave;
         let mut last_out = 0.0;
 
         for i in 0..ratio {
@@ -218,7 +226,7 @@ mod tests {
     fn oversampler_x1_is_passthrough() {
         let mut os = Oversampler::new(OversamplingFactor::X1);
         for i in 0..100 {
-            let input = (i as f64 * 0.1).sin();
+            let input = (i as crate::Wave * 0.1).sin();
             let output = os.process(input, |x| x);
             assert!(
                 (output - input).abs() < 1e-10,
@@ -254,26 +262,26 @@ mod tests {
         let freq = 8000.0;
         let n = 4096;
 
-        let input: Vec<f64> = (0..n)
-            .map(|i| 0.8 * (2.0 * math::PI * freq * i as f64 / fs).sin())
+        let input: Vec<crate::Wave> = (0..n)
+            .map(|i| 0.8 * (2.0 * math::PI * freq * i as crate::Wave / fs).sin())
             .collect();
 
-        let no_os: Vec<f64> = input.iter().map(|&x| x.clamp(-0.3, 0.3)).collect();
+        let no_os: Vec<crate::Wave> = input.iter().map(|&x| x.clamp(-0.3, 0.3)).collect();
 
         let mut os = Oversampler::new(OversamplingFactor::X4);
-        let with_os: Vec<f64> = input
+        let with_os: Vec<crate::Wave> = input
             .iter()
             .map(|&x| os.process(x, |s| s.clamp(-0.3, 0.3)))
             .collect();
 
-        let diff_energy: f64 = no_os
+        let diff_energy: crate::Wave = no_os
             .iter()
             .zip(with_os.iter())
             .skip(500)
             .map(|(a, b)| (a - b).powi(2))
             .sum();
 
-        let signal_energy: f64 = with_os.iter().skip(500).map(|x| x.powi(2)).sum();
+        let signal_energy: crate::Wave = with_os.iter().skip(500).map(|x| x.powi(2)).sum();
 
         assert!(
             diff_energy > signal_energy * 0.001,
@@ -286,7 +294,7 @@ mod tests {
         let mut os = Oversampler::new(OversamplingFactor::X4);
 
         for i in 0..100 {
-            os.process((i as f64 * 0.3).sin(), |x| x);
+            os.process((i as crate::Wave * 0.3).sin(), |x| x);
         }
 
         os.reset();
@@ -305,10 +313,10 @@ mod tests {
         let freq = 440.0;
         let n = 4800;
 
-        let input: Vec<f64> = (0..n)
-            .map(|i| (2.0 * math::PI * freq * i as f64 / fs).sin())
+        let input: Vec<crate::Wave> = (0..n)
+            .map(|i| (2.0 * math::PI * freq * i as crate::Wave / fs).sin())
             .collect();
-        let output: Vec<f64> = input.iter().map(|&x| os.process(x, |s| s)).collect();
+        let output: Vec<crate::Wave> = input.iter().map(|&x| os.process(x, |s| s)).collect();
 
         let skip = 500;
         let corr = correlation(&input[skip..], &output[skip..]);
@@ -318,13 +326,13 @@ mod tests {
         );
     }
 
-    fn correlation(a: &[f64], b: &[f64]) -> f64 {
+    fn correlation(a: &[crate::Wave], b: &[crate::Wave]) -> crate::Wave {
         let n = a.len().min(b.len());
         if n == 0 {
             return 0.0;
         }
-        let mean_a: f64 = a[..n].iter().sum::<f64>() / n as f64;
-        let mean_b: f64 = b[..n].iter().sum::<f64>() / n as f64;
+        let mean_a: crate::Wave = a[..n].iter().sum::<crate::Wave>() / n as crate::Wave;
+        let mean_b: crate::Wave = b[..n].iter().sum::<crate::Wave>() / n as crate::Wave;
         let mut cov = 0.0;
         let mut var_a = 0.0;
         let mut var_b = 0.0;

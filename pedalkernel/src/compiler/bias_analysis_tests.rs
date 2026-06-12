@@ -47,7 +47,8 @@ fn vcc_divider_is_static_bias() {
     // R_v1/R_v2/C_v from VCC to GND creates a 4.5V reference.
     // This group's only inputs are VCC and GND — pure DC, no audio.
     // Need an active element so find_flow_groups doesn't merge everything.
-    let (graph, groups) = parse_and_group(r#"
+    let (graph, groups) = parse_and_group(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_v1: resistor(10k)
@@ -70,12 +71,18 @@ fn vcc_divider_is_static_bias() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     // Find the group containing R_v1
-    let bias_group_idx = groups.iter().position(|g| {
-        g.all_edges().iter().any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_v1")
-    }).expect("should find bias group");
+    let bias_group_idx = groups
+        .iter()
+        .position(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_v1")
+        })
+        .expect("should find bias group");
 
     let kind = classify_group_bias(&groups[bias_group_idx], &graph);
     assert!(
@@ -91,7 +98,8 @@ fn vcc_divider_is_static_bias() {
 #[test]
 fn static_bias_voltage_is_correct() {
     // R_v1=10k from 9V, R_v2=10k to GND → vb = 4.5V
-    let (graph, groups) = parse_and_group(r#"
+    let (graph, groups) = parse_and_group(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_v1: resistor(10k)
@@ -114,17 +122,26 @@ fn static_bias_voltage_is_correct() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
-    let bias_group_idx = groups.iter().position(|g| {
-        g.all_edges().iter().any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_v1")
-    }).expect("should find bias group");
+    let bias_group_idx = groups
+        .iter()
+        .position(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_v1")
+        })
+        .expect("should find bias group");
 
     let kind = classify_group_bias(&groups[bias_group_idx], &graph);
     match kind {
         GroupBiasKind::StaticBias { dc_voltages } => {
             // The junction node (R_v1.b = R_v2.a = C_v.a) should be at 4.5V
-            assert!(!dc_voltages.is_empty(), "Should compute at least one DC voltage");
+            assert!(
+                !dc_voltages.is_empty(),
+                "Should compute at least one DC voltage"
+            );
             let vb = dc_voltages.values().next().unwrap();
             assert!(
                 (vb - 4.5).abs() < 0.1,
@@ -142,7 +159,8 @@ fn static_bias_voltage_is_correct() {
 #[test]
 fn asymmetric_divider_voltage() {
     // R_top=20k from 9V, R_bot=10k to GND → vb = 9 * 10/(20+10) = 3.0V
-    let (graph, groups) = parse_and_group(r#"
+    let (graph, groups) = parse_and_group(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_top: resistor(20k)
@@ -163,11 +181,17 @@ fn asymmetric_divider_voltage() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
-    let bias_group_idx = groups.iter().position(|g| {
-        g.all_edges().iter().any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_top")
-    }).expect("should find bias group");
+    let bias_group_idx = groups
+        .iter()
+        .position(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_top")
+        })
+        .expect("should find bias group");
 
     let kind = classify_group_bias(&groups[bias_group_idx], &graph);
     match kind {
@@ -188,7 +212,8 @@ fn asymmetric_divider_voltage() {
 
 #[test]
 fn input_coupling_is_signal_path() {
-    let (graph, groups) = parse_and_group(r#"
+    let (graph, groups) = parse_and_group(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_v1: resistor(10k)
@@ -211,12 +236,18 @@ fn input_coupling_is_signal_path() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     // Find the group containing Cin
-    let input_group_idx = groups.iter().position(|g| {
-        g.all_edges().iter().any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Cin")
-    }).expect("should find input group");
+    let input_group_idx = groups
+        .iter()
+        .position(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "Cin")
+        })
+        .expect("should find input group");
 
     let kind = classify_group_bias(&groups[input_group_idx], &graph);
     assert!(
@@ -231,7 +262,8 @@ fn input_coupling_is_signal_path() {
 
 #[test]
 fn opamp_clipping_is_signal_path() {
-    let (graph, groups) = parse_and_group(r#"
+    let (graph, groups) = parse_and_group(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -250,12 +282,18 @@ fn opamp_clipping_is_signal_path() {
                 U1.out -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     // Find the group containing U1
-    let clipping_group_idx = groups.iter().position(|g| {
-        g.all_edges().iter().any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "U1")
-    }).expect("should find clipping group");
+    let clipping_group_idx = groups
+        .iter()
+        .position(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "U1")
+        })
+        .expect("should find clipping group");
 
     let kind = classify_group_bias(&groups[clipping_group_idx], &graph);
     assert!(
@@ -270,7 +308,8 @@ fn opamp_clipping_is_signal_path() {
 
 #[test]
 fn screamer_bias_group_is_static() {
-    let (graph, groups) = parse_and_group(r#"
+    let (graph, groups) = parse_and_group(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_v1: resistor(10k)
@@ -304,12 +343,18 @@ fn screamer_bias_group_is_static() {
                 R_out.b -> out
             }
             controls {}
-        }"#);
+        }"#,
+    );
 
     // Find the group containing R_v1 (bias network)
-    let bias_group_idx = groups.iter().position(|g| {
-        g.all_edges().iter().any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_v1")
-    }).expect("should find bias group");
+    let bias_group_idx = groups
+        .iter()
+        .position(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "R_v1")
+        })
+        .expect("should find bias group");
 
     let kind = classify_group_bias(&groups[bias_group_idx], &graph);
     assert!(
@@ -318,9 +363,14 @@ fn screamer_bias_group_is_static() {
     );
 
     // The clipping group should be SignalPath
-    let clipping_group_idx = groups.iter().position(|g| {
-        g.all_edges().iter().any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "U1")
-    }).expect("should find clipping group");
+    let clipping_group_idx = groups
+        .iter()
+        .position(|g| {
+            g.all_edges()
+                .iter()
+                .any(|&eidx| graph.components[graph.edges[eidx].comp_idx].id == "U1")
+        })
+        .expect("should find clipping group");
 
     let clipping_kind = classify_group_bias(&groups[clipping_group_idx], &graph);
     assert!(
@@ -338,7 +388,8 @@ fn bypassing_bias_stage_produces_audio() {
     // Full screamer-like circuit with bias network.
     // When the bias stage is bypassed in the serial chain,
     // the clipping stage's output should reach the circuit output.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_v1: resistor(10k)
@@ -372,7 +423,8 @@ fn bypassing_bias_stage_produces_audio() {
                 R_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -386,16 +438,18 @@ fn bypassing_bias_stage_produces_audio() {
     // Measure
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
 
     eprintln!("Bypass bias test: peak={peak:.4}V");
     // The bias network must not kill the signal. Any non-trivial output proves
     // the bypass works. Gain accuracy is tested separately.
-    assert!(peak > 0.001, "Signal should survive past bias network: {peak:.6}V");
+    assert!(
+        peak > 0.001,
+        "Signal should survive past bias network: {peak:.6}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -419,9 +473,8 @@ fn sd1_legend_audio_with_bias_bypass() {
     }
     let mut peak = 0.0f64;
     for s in 0..500 {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * freq * (4000 + s) as f64 / SR).sin()
-        );
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * freq * (4000 + s) as f64 / SR).sin());
         peak = peak.max(out.abs());
     }
 

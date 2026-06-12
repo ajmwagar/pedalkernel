@@ -32,29 +32,29 @@ use crate::elements::WdfRoot;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PentodeModel {
     /// Amplification factor (mu), screen-referenced. EF86 ≈ 38, EL84 ≈ 19.
-    pub mu: f64,
+    pub mu: crate::Wave,
     /// Plate resistance factor. Affects output impedance.
-    pub kp: f64,
+    pub kp: crate::Wave,
     /// Knee voltage constant for the screen-referenced Koren equation.
-    pub kvb: f64,
+    pub kvb: crate::Wave,
     /// Exponent (typically 1.3-1.5). Affects transfer curve shape.
-    pub ex: f64,
+    pub ex: crate::Wave,
     /// Knee voltage for pentode plate saturation (V).
     /// Controls how quickly plate current saturates with Vpk.
     /// Smaller = sharper knee. EF86 ≈ 12, EL84 ≈ 20.
-    pub kvb2: f64,
+    pub kvb2: crate::Wave,
     /// Default screen grid voltage (V) for typical operating point.
-    pub vg2_default: f64,
+    pub vg2_default: crate::Wave,
     /// Plate current scaling factor (KG1). Scales the absolute plate current
     /// magnitude in the Koren equation.
-    pub kg1: f64,
+    pub kg1: crate::Wave,
     /// Screen current scaling factor (KG2). Reserved for future screen
     /// current modeling (requires separate WDF current source).
-    pub kg2: f64,
+    pub kg2: crate::Wave,
     /// Plate resistance at typical operating point (Ω).
     /// Used as virtual resistance in WDF tree construction.
     /// Power pentodes: 15k–50kΩ. Signal pentodes (EF86): ~2.5MΩ.
-    pub rp: f64,
+    pub rp: crate::Wave,
 }
 
 impl PentodeModel {
@@ -87,14 +87,14 @@ impl PentodeModel {
 pub struct PentodeRoot {
     pub model: PentodeModel,
     /// DC control grid bias voltage, set from circuit analysis.
-    vg1k_bias: f64,
+    vg1k_bias: crate::Wave,
     /// Current control grid voltage (bias + AC signal).
-    vg1k: f64,
+    vg1k: crate::Wave,
     /// Current screen grid voltage (g2-cathode). Typically fixed at operating point.
-    vg2k: f64,
+    vg2k: crate::Wave,
     /// Maximum plate voltage (determined by supply rail B+).
     /// Pentode plate can swing from 0V (saturated) to B+ (cutoff).
-    v_max: f64,
+    v_max: crate::Wave,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
 }
@@ -113,7 +113,7 @@ impl PentodeRoot {
     }
 
     /// Create a pentode root with a specific supply voltage (B+).
-    pub fn new_with_v_max(model: PentodeModel, v_max: f64) -> Self {
+    pub fn new_with_v_max(model: PentodeModel, v_max: crate::Wave) -> Self {
         let vg2k = model.vg2_default;
         Self {
             model,
@@ -130,49 +130,49 @@ impl PentodeRoot {
     /// For tube circuits, the plate voltage can swing from 0V (tube saturated)
     /// to B+ (tube in cutoff). This sets the upper bound for Newton-Raphson.
     #[inline]
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         self.v_max = v_max.max(1.0); // Minimum 1V to avoid degeneracy
     }
 
     /// Get the current v_max setting.
     #[inline]
-    pub fn v_max(&self) -> f64 {
+    pub fn v_max(&self) -> crate::Wave {
         self.v_max
     }
 
     /// Set the DC bias operating point from circuit analysis.
-    pub fn set_bias(&mut self, vg1k_bias: f64) {
+    pub fn set_bias(&mut self, vg1k_bias: crate::Wave) {
         self.vg1k_bias = vg1k_bias;
         self.vg1k = vg1k_bias;
     }
 
     /// Get the DC bias operating point.
-    pub fn vg1k_bias(&self) -> f64 {
+    pub fn vg1k_bias(&self) -> crate::Wave {
         self.vg1k_bias
     }
 
     /// Set the control grid voltage (g1-cathode). External modulation.
     #[inline]
-    pub fn set_vg1k(&mut self, vg1k: f64) {
+    pub fn set_vg1k(&mut self, vg1k: crate::Wave) {
         self.vg1k = vg1k;
     }
 
     /// Get current control grid voltage.
     #[inline]
-    pub fn vg1k(&self) -> f64 {
+    pub fn vg1k(&self) -> crate::Wave {
         self.vg1k
     }
 
     /// Set the screen grid voltage (g2-cathode).
     /// Usually fixed at the operating point, but can be modulated for sag effects.
     #[inline]
-    pub fn set_vg2k(&mut self, vg2k: f64) {
+    pub fn set_vg2k(&mut self, vg2k: crate::Wave) {
         self.vg2k = vg2k;
     }
 
     /// Get current screen grid voltage.
     #[inline]
-    pub fn vg2k(&self) -> f64 {
+    pub fn vg2k(&self) -> crate::Wave {
         self.vg2k
     }
 
@@ -185,7 +185,7 @@ impl PentodeRoot {
     /// Ip = (Ip_base / KG1) * atan(Vpk / KVB)
     /// ```
     #[inline]
-    pub fn plate_current(&self, vpk: f64) -> f64 {
+    pub fn plate_current(&self, vpk: crate::Wave) -> crate::Wave {
         let mu = self.model.mu;
         let kp = self.model.kp;
         let kvb = self.model.kvb;
@@ -223,7 +223,7 @@ impl PentodeRoot {
     /// only the plate saturation factor contributes:
     /// `dIp/dVpk = (Ip_base / KG1) * (1 / (1 + (Vpk/KVB)^2)) * (1/KVB)`
     #[inline]
-    fn plate_current_derivative(&self, vpk: f64) -> f64 {
+    fn plate_current_derivative(&self, vpk: crate::Wave) -> crate::Wave {
         let mu = self.model.mu;
         let kp = self.model.kp;
         let kvb = self.model.kvb;
@@ -255,12 +255,12 @@ impl PentodeRoot {
 
 impl super::solver::NlDeviceIv for PentodeRoot {
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         (self.plate_current(v), self.plate_current_derivative(v))
     }
 
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         // Minimum 1V: pentode plate_current(0) = 0 with zero derivative,
         // which traps the NR solver at v=0. Physical pentode plate voltage
         // is always positive in normal operation.
@@ -271,7 +271,7 @@ impl super::solver::NlDeviceIv for PentodeRoot {
 impl WdfRoot for PentodeRoot {
     /// Pentode plate-cathode path: `i = Ip(Vpk, Vg1k, Vg2k)`
     #[inline]
-    fn process(&mut self, a: f64, rp: f64) -> f64 {
+    fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let root = *self;
         let v_max = self.v_max;
         newton_raphson_solve(
@@ -313,13 +313,13 @@ impl WdfRoot for PentodeRoot {
 pub struct PentodeThreePort {
     pub model: PentodeModel,
     /// Maximum plate voltage (B+ supply rail).
-    v_max: f64,
+    v_max: crate::Wave,
     /// Screen grid voltage (external parameter).
-    vg2k: f64,
+    vg2k: crate::Wave,
     /// Grid emission current (saturation current for grid diode).
-    grid_is: f64,
+    grid_is: crate::Wave,
     /// Grid thermal voltage.
-    grid_vt: f64,
+    grid_vt: crate::Wave,
 }
 
 impl PentodeThreePort {
@@ -334,33 +334,33 @@ impl PentodeThreePort {
         }
     }
 
-    pub fn new_with_v_max(model: PentodeModel, v_max: f64) -> Self {
+    pub fn new_with_v_max(model: PentodeModel, v_max: crate::Wave) -> Self {
         Self {
             v_max: v_max.max(1.0),
             ..Self::new(model)
         }
     }
 
-    pub fn set_v_max(&mut self, v_max: f64) {
+    pub fn set_v_max(&mut self, v_max: crate::Wave) {
         self.v_max = v_max.max(1.0);
     }
 
-    pub fn v_max(&self) -> f64 {
+    pub fn v_max(&self) -> crate::Wave {
         self.v_max
     }
 
-    pub fn set_vg2k(&mut self, vg2k: f64) {
+    pub fn set_vg2k(&mut self, vg2k: crate::Wave) {
         self.vg2k = vg2k;
     }
 
-    pub fn vg2k(&self) -> f64 {
+    pub fn vg2k(&self) -> crate::Wave {
         self.vg2k
     }
 
     /// Grid current (diode model): i_g = I_gs × (exp(Vgk/Vt) - 1).
     /// Returns (current, di_g/dv_gk).
     #[inline]
-    fn grid_iv(&self, vgk: f64) -> (f64, f64) {
+    fn grid_iv(&self, vgk: crate::Wave) -> (crate::Wave, crate::Wave) {
         let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
         let ev = crate::math::exp(x);
         let ig = self.grid_is * (ev - 1.0);
@@ -372,7 +372,11 @@ impl PentodeThreePort {
     /// Takes both Vg1k and Vpk as inputs (Vg2k is external).
     /// Returns (Ip, ∂Ip/∂Vpk, ∂Ip/∂Vg1k).
     #[inline]
-    fn plate_iv(&self, vg1k: f64, vpk: f64) -> (f64, f64, f64) {
+    fn plate_iv(
+        &self,
+        vg1k: crate::Wave,
+        vpk: crate::Wave,
+    ) -> (crate::Wave, crate::Wave, crate::Wave) {
         let m = &self.model;
         let vg2k = self.vg2k;
 
@@ -428,7 +432,8 @@ impl PentodeThreePort {
             exp_e1 / (1.0 + exp_e1)
         };
 
-        let dip_dvg1k = (m.ex * crate::math::powf(base, m.ex - 1.0) * sigmoid_e1 / m.kg1) * plate_factor.max(0.0);
+        let dip_dvg1k = (m.ex * crate::math::powf(base, m.ex - 1.0) * sigmoid_e1 / m.kg1)
+            * plate_factor.max(0.0);
 
         (ip, dip_dvpk, dip_dvg1k)
     }
@@ -439,7 +444,7 @@ impl NlDeviceGroupIv for PentodeThreePort {
         2
     }
 
-    fn eval(&self, v: &[f64], currents: &mut [f64], jacobian: &mut [f64]) {
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let vg1k = v[0]; // Port 0: grid-cathode
 
         // Port 1: plate-cathode. In the R-type adaptor, the supply node (B+)
@@ -460,7 +465,7 @@ impl NlDeviceGroupIv for PentodeThreePort {
         jacobian[3] = dip_dvpk; // ∂ip/∂vpk
     }
 
-    fn v_clamp_port(&self, port: usize) -> (f64, f64) {
+    fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
         match port {
             // Grid: wide range to allow coupling cap charging in 3-port push-pull.
             // When input has large DC (e.g., preamp plate voltage ~150V), the
@@ -483,7 +488,12 @@ mod tests {
     use super::*;
 
     /// Helper: create a PentodeRoot at a given bias point and measure plate current.
-    fn plate_current_at(model: PentodeModel, vg1k: f64, vg2k: f64, vpk: f64) -> f64 {
+    fn plate_current_at(
+        model: PentodeModel,
+        vg1k: crate::Wave,
+        vg2k: crate::Wave,
+        vpk: crate::Wave,
+    ) -> crate::Wave {
         let mut root = PentodeRoot::new(model);
         root.set_vg1k(vg1k);
         root.set_vg2k(vg2k);

@@ -456,6 +456,9 @@ fn compile_via_spqr_808_kick_v2_bjt_sweep_compiles() {
             Stage::Iir(stage) => !stage.bypass_serial,
             Stage::StateSpace(stage) => !stage.bypass_serial,
             Stage::BlackFeedback(stage) => !stage.bypass_serial,
+            Stage::Blockwise(_) => true,
+            Stage::SerialDelayedFeedback(stage) => !stage.bypass_serial,
+            Stage::KMethod { .. } => false,
         })
         .collect();
     assert!(
@@ -987,6 +990,26 @@ fn compile_via_spqr_state_space_active_filter() {
     let mut compiled =
         compile_via_spqr(&pedal, 48000.0).expect("Should compile active filter via StateSpace");
 
+    let state_space = compiled
+        .stages
+        .iter()
+        .find_map(|stage| {
+            if let Stage::StateSpace(ss) = stage {
+                Some(ss)
+            } else {
+                None
+            }
+        })
+        .expect("active filter should compile a StateSpace stage");
+    assert!(
+        !state_space.ins().is_empty(),
+        "compiled StateSpace stage should expose graph input binding"
+    );
+    assert!(
+        !state_space.outs().is_empty(),
+        "compiled StateSpace stage should expose graph output binding"
+    );
+
     // Should produce filtered output (not silence)
     for _ in 0..100 {
         compiled.process(0.1);
@@ -1107,7 +1130,7 @@ pedal "12AX7 Common Cathode" {
         match s {
             super::compiled::Stage::MultiNl(m) => {
                 eprintln!("  stage {si}: MultiNl n_nl={} n_passive={} output_port={}",
-                    m.n_nl, m.passive_children.len(), m.output_port);
+                    m.n_nl, m.passive_one_ports.len(), m.output_port);
                 eprintln!("    dc_bias={:.4?}", m.dc_bias);
                 eprintln!("    vcc_bias_all={:.4?}", m.vcc_bias_all);
                 eprintln!("    nl_port_resistances={:.1?}", m.nl_port_resistances);
@@ -1116,8 +1139,8 @@ pedal "12AX7 Common Cathode" {
                 eprintln!("    s_nl_passive={:.6?}", m.scattering.s_nl_passive);
                 eprintln!("    initial_v_prev={:.4?}", m.initial_v_prev);
                 // Dump scatter_all row for each passive port (to verify DC fixed-point)
-                let n_total = m.n_nl + m.passive_children.len() + 1;
-                for passive_k in 0..m.passive_children.len() {
+                let n_total = m.n_nl + m.passive_one_ports.len() + 1;
+                for passive_k in 0..m.passive_one_ports.len() {
                     let port_idx = m.n_nl + passive_k;
                     // Probe scatter_all with unit vector at each port
                     let mut b_probe = vec![0.0f64; n_total];
@@ -1135,6 +1158,8 @@ pedal "12AX7 Common Cathode" {
             super::compiled::Stage::Iir(_) => eprintln!("  stage {si}: IIR"),
             super::compiled::Stage::StateSpace(_) => eprintln!("  stage {si}: StateSpace"),
             super::compiled::Stage::BlackFeedback(_) => eprintln!("  stage {si}: BlackFeedback"),
+            // Branch added Blockwise / KMethod / SerialDelayedFeedback variants.
+            other => eprintln!("  stage {si}: {other:?}"),
         }
     }
 }
@@ -1242,11 +1267,15 @@ pedal "12AX7 Common Cathode" {
     eprintln!("initial_v_prev of MultiNL stage:");
     for (si, s) in compiled.stages.iter().enumerate() {
         if let crate::compiler::compiled::Stage::MultiNl(m) = s {
-            eprintln!("  stage {si}: initial_v_prev={:.4?}, n_passive={}", m.initial_v_prev, m.passive_children.len());
-            // Check passive child initial state
-            for (k, child) in m.passive_children.iter().enumerate() {
-                if let pedalkernel_rt::dyn_node::DynNode::Leaf(pedalkernel_rt::wdf_leaf::LeafKind::Capacitor(ref cap)) = child {
-                    eprintln!("  passive_child[{k}] cap state={:.4}, last_b={:.4}", cap.state, cap.last_b);
+            eprintln!("  stage {si}: initial_v_prev={:.4?}, n_passive={}", m.initial_v_prev, m.passive_one_ports.len());
+            // Check passive one-port initial state (branch runtime-state API).
+            for (k, one_port) in m.passive_one_ports.iter().enumerate() {
+                if matches!(
+                    one_port.spec.kind,
+                    pedalkernel_rt::boundary_math::OnePortKind::Capacitor(_)
+                ) {
+                    let v = one_port.wdf_leaf_voltage(&m.passive_runtime_state);
+                    eprintln!("  passive_one_port[{k}] cap voltage={:.4}", v);
                 }
             }
         }
@@ -1324,9 +1353,13 @@ pedal "12AX7 Common Cathode" {
             eprintln!("=== After DC warmup ===");
             eprintln!("  stage {si}: v_prev={:.4?}", m.v_prev);
             eprintln!("  stage {si}: dc_bias={:.4?}", m.dc_bias);
-            for (k, child) in m.passive_children.iter().enumerate() {
-                if let pedalkernel_rt::dyn_node::DynNode::Leaf(pedalkernel_rt::wdf_leaf::LeafKind::Capacitor(ref cap)) = child {
-                    eprintln!("  passive_child[{k}] cap state={:.6}, last_b={:.6}", cap.state, cap.last_b);
+            for (k, one_port) in m.passive_one_ports.iter().enumerate() {
+                if matches!(
+                    one_port.spec.kind,
+                    pedalkernel_rt::boundary_math::OnePortKind::Capacitor(_)
+                ) {
+                    let v = one_port.wdf_leaf_voltage(&m.passive_runtime_state);
+                    eprintln!("  passive_one_port[{k}] cap voltage={:.6}", v);
                 }
             }
         }
@@ -1392,7 +1425,7 @@ pedal "12AX7 Common Cathode" {
             }
             crate::compiler::compiled::Stage::MultiNl(m) => {
                 eprintln!("  stage {si}: MultiNl n_nl={} n_passive={} output_port={}",
-                    m.n_nl, m.passive_children.len(), m.output_port);
+                    m.n_nl, m.passive_one_ports.len(), m.output_port);
             }
             _ => eprintln!("  stage {si}: other"),
         }

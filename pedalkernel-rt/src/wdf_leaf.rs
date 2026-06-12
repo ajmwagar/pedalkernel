@@ -7,11 +7,14 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 
+use crate::boundary_math::{
+    OnePort, OnePortKind, OnePortState, PortTerminals, RuntimeOnePort, StateSlot,
+};
 use crate::pot_taper::PotTaper;
 // Import the elements::WdfLeaf trait to call port_resistance/set_sample_rate/reset
 // on Photocoupler and JfetVariableResistor. Renamed to avoid conflict with our WdfLeaf.
 use crate::elements::WdfLeaf as ElementsWdfLeaf;
-use crate::elements::{JfetVariableResistor, Photocoupler as PhotocouplerInner};
+use crate::elements::{JfetVariableResistor, Photocoupler as PhotocouplerInner, WdfJaMagnetizing};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WdfLeaf trait
@@ -24,11 +27,11 @@ use crate::elements::{JfetVariableResistor, Photocoupler as PhotocouplerInner};
 pub trait WdfLeaf: Send {
     // ── Hot path (per-sample) ────────────────────────────────────────────
     /// Scatter-up: compute reflected wave from current state.
-    fn reflected(&mut self) -> f64;
+    fn reflected(&mut self) -> crate::Wave;
     /// Scatter-down: accept incident wave and update state.
-    fn set_incident(&mut self, a: f64);
+    fn set_incident(&mut self, a: crate::Wave);
     /// Port resistance (Ω).
-    fn port_resistance(&self) -> f64;
+    fn port_resistance(&self) -> crate::Wave;
 
     // ── Identity ─────────────────────────────────────────────────────────
     /// Component ID (e.g., "R1", "Gain__aw"). None for anonymous leaves.
@@ -43,26 +46,26 @@ pub trait WdfLeaf: Send {
 
     // ── Voltage extraction (after down-sweep) ────────────────────────────
     /// Voltage at this leaf after the WDF cycle.
-    fn leaf_voltage(&self) -> f64 {
+    fn leaf_voltage(&self) -> crate::Wave {
         0.0
     }
 
     // ── Control/mutation (not per-sample) ────────────────────────────────
     /// Generic control: pot position, LED drive, Vgs, switch position, etc.
     /// Returns true if this leaf handled the control.
-    fn set_control(&mut self, _id: &str, _value: f64) -> bool {
+    fn set_control(&mut self, _id: &str, _value: crate::Wave) -> bool {
         false
     }
     /// Direct resistance override. Returns true if handled.
-    fn set_resistance(&mut self, _ohms: f64) -> bool {
+    fn set_resistance(&mut self, _ohms: crate::Wave) -> bool {
         false
     }
     /// Voltage source update. Returns true if handled.
-    fn set_voltage(&mut self, _v: f64) -> bool {
+    fn set_voltage(&mut self, _v: crate::Wave) -> bool {
         false
     }
     /// Reactive element sample rate update.
-    fn update_sample_rate(&mut self, _fs: f64) {}
+    fn update_sample_rate(&mut self, _fs: crate::Wave) {}
     /// Reset state (caps/inductors clear to 0).
     fn reset(&mut self) {}
 
@@ -75,26 +78,40 @@ pub trait WdfLeaf: Send {
     fn is_reactive(&self) -> bool {
         false
     }
-    fn editable_info(&self) -> Option<(&'static str, f64)> {
+
+    /// Export this leaf's runtime one-port state, when it has explicit reactive memory.
+    ///
+    /// This is the bridge toward shared `Vec<OnePortState>` ownership. Some
+    /// legacy WDF leaves still store wave-delay memory internally, so callers
+    /// should treat this as the physical-state view of the current leaf state.
+    fn one_port_state(&self) -> Option<OnePortState> {
+        None
+    }
+
+    /// Import a shared one-port state into this leaf.
+    fn set_one_port_state(&mut self, _state: OnePortState) -> bool {
+        false
+    }
+    fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
         None
     }
     fn debug_info(&self) -> String;
 
     // ── Specialized queries ─────────────────────────────────────────────
     /// For UnitDelay: return the outgoing state.
-    fn unit_delay_state(&self) -> Option<f64> {
+    fn unit_delay_state(&self) -> Option<crate::Wave> {
         None
     }
     /// For UnitDelay: set the incoming partner state.
-    fn set_unit_delay_partner(&mut self, _val: f64) -> bool {
+    fn set_unit_delay_partner(&mut self, _val: crate::Wave) -> bool {
         false
     }
     /// For Pot: return the current position (0.0..1.0).
-    fn pot_position(&self) -> Option<f64> {
+    fn pot_position(&self) -> Option<crate::Wave> {
         None
     }
     /// For Pot: return the max resistance.
-    fn pot_max_resistance(&self) -> Option<f64> {
+    fn pot_max_resistance(&self) -> Option<crate::Wave> {
         None
     }
     /// For Pot: return whether this half uses complement (1-position).
@@ -120,18 +137,18 @@ impl Clone for Box<dyn WdfLeaf> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfResistor {
     pub comp_id: Option<String>,
-    pub rp: f64,
-    pub last_a: f64,
+    pub rp: crate::Wave,
+    pub last_a: crate::Wave,
 }
 
 impl WdfLeaf for WdfResistor {
-    fn reflected(&mut self) -> f64 {
+    fn reflected(&mut self) -> crate::Wave {
         0.0
     }
-    fn set_incident(&mut self, a: f64) {
+    fn set_incident(&mut self, a: crate::Wave) {
         self.last_a = a;
     }
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.rp
     }
     fn comp_id(&self) -> Option<&str> {
@@ -140,14 +157,14 @@ impl WdfLeaf for WdfResistor {
     fn type_tag(&self) -> &'static str {
         "resistor"
     }
-    fn leaf_voltage(&self) -> f64 {
+    fn leaf_voltage(&self) -> crate::Wave {
         self.last_a / 2.0
     }
-    fn set_resistance(&mut self, ohms: f64) -> bool {
+    fn set_resistance(&mut self, ohms: crate::Wave) -> bool {
         self.rp = ohms;
         true
     }
-    fn editable_info(&self) -> Option<(&'static str, f64)> {
+    fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
         if self.comp_id.is_some() {
             Some(("resistor", self.rp))
         } else {
@@ -164,78 +181,11 @@ impl WdfLeaf for WdfResistor {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// WdfCapacitor
+// Runtime one-port WDF helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct WdfCapacitor {
-    pub comp_id: Option<String>,
-    pub capacitance: f64,
-    pub rp: f64,
-    pub state: f64,
-    /// Last reflected wave (captured before state update, for voltage extraction)
-    pub last_b: f64,
-}
-
-impl WdfLeaf for WdfCapacitor {
-    fn reflected(&mut self) -> f64 {
-        self.state
-    }
-    fn set_incident(&mut self, a: f64) {
-        self.last_b = self.state;
-        self.state = a;
-    }
-    fn port_resistance(&self) -> f64 {
-        self.rp
-    }
-    fn comp_id(&self) -> Option<&str> {
-        self.comp_id.as_deref()
-    }
-    fn type_tag(&self) -> &'static str {
-        "capacitor"
-    }
-    fn leaf_voltage(&self) -> f64 {
-        (self.state + self.last_b) / 2.0
-    }
-    fn is_reactive(&self) -> bool {
-        true
-    }
-    fn update_sample_rate(&mut self, fs: f64) {
-        self.rp = 1.0 / (2.0 * fs * self.capacitance);
-    }
-    fn reset(&mut self) {
-        self.state = 0.0;
-        self.last_b = 0.0;
-    }
-    fn editable_info(&self) -> Option<(&'static str, f64)> {
-        if self.comp_id.is_some() {
-            Some(("capacitor", self.capacitance))
-        } else {
-            None
-        }
-    }
-    fn debug_info(&self) -> String {
-        let id = self.comp_id.as_deref().unwrap_or("?");
-        format!(
-            "Capacitor(id=\"{id}\", C={:.3e}F, Rp={:.1}Ω, state={:.6})",
-            self.capacitance, self.rp, self.state
-        )
-    }
-    fn clone_box(&self) -> Box<dyn WdfLeaf> {
-        Box::new(self.clone())
-    }
-
-    fn set_control(&mut self, id: &str, value: f64) -> bool {
-        // Support capacitance changes via set_control
-        if self.comp_id.as_deref() == Some(id) {
-            self.capacitance = value;
-            // Note: rp must be updated via update_sample_rate after this
-            true
-        } else {
-            false
-        }
-    }
+fn runtime_one_port(kind: OnePortKind, state_slot: Option<StateSlot>) -> RuntimeOnePort<()> {
+    RuntimeOnePort::new(OnePort::new(PortTerminals::grounded(), kind), state_slot)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -246,17 +196,17 @@ impl WdfLeaf for WdfCapacitor {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfLeakyCapacitor {
     pub comp_id: Option<String>,
-    pub capacitance: f64,
-    pub rp: f64,
-    pub state: f64,
-    pub leakage_decay: f64,
-    pub da_coef: Option<f64>,
-    pub da_state: f64,
-    pub da_rate: f64,
+    pub capacitance: crate::Wave,
+    pub rp: crate::Wave,
+    pub state: crate::Wave,
+    pub leakage_decay: crate::Wave,
+    pub da_coef: Option<crate::Wave>,
+    pub da_state: crate::Wave,
+    pub da_rate: crate::Wave,
 }
 
 impl WdfLeaf for WdfLeakyCapacitor {
-    fn reflected(&mut self) -> f64 {
+    fn reflected(&mut self) -> crate::Wave {
         let b = self.state;
         if let Some(da) = self.da_coef {
             b + da * (self.da_state - self.state)
@@ -264,13 +214,13 @@ impl WdfLeaf for WdfLeakyCapacitor {
             b
         }
     }
-    fn set_incident(&mut self, a: f64) {
+    fn set_incident(&mut self, a: crate::Wave) {
         self.state = a * self.leakage_decay;
         if self.da_coef.is_some() {
             self.da_state += (self.state - self.da_state) * self.da_rate;
         }
     }
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.rp
     }
     fn comp_id(&self) -> Option<&str> {
@@ -279,16 +229,16 @@ impl WdfLeaf for WdfLeakyCapacitor {
     fn type_tag(&self) -> &'static str {
         "leaky_capacitor"
     }
-    fn leaf_voltage(&self) -> f64 {
+    fn leaf_voltage(&self) -> crate::Wave {
         self.state
     }
     fn is_reactive(&self) -> bool {
         true
     }
-    fn update_sample_rate(&mut self, fs: f64) {
+    fn update_sample_rate(&mut self, fs: crate::Wave) {
         self.rp = 1.0 / (2.0 * fs * self.capacitance);
         if self.da_coef.is_some() {
-            const DA_TIME_CONSTANT: f64 = 0.5;
+            const DA_TIME_CONSTANT: crate::Wave = 0.5;
             self.da_rate = 1.0 / (fs * DA_TIME_CONSTANT);
         }
     }
@@ -296,7 +246,7 @@ impl WdfLeaf for WdfLeakyCapacitor {
         self.state = 0.0;
         self.da_state = 0.0;
     }
-    fn editable_info(&self) -> Option<(&'static str, f64)> {
+    fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
         if self.comp_id.is_some() {
             Some(("capacitor", self.capacitance))
         } else {
@@ -316,85 +266,32 @@ impl WdfLeaf for WdfLeakyCapacitor {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// WdfInductor
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[derive(Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct WdfInductor {
-    pub comp_id: Option<String>,
-    pub inductance: f64,
-    pub rp: f64,
-    pub state: f64,
-}
-
-impl WdfLeaf for WdfInductor {
-    fn reflected(&mut self) -> f64 {
-        -self.state
-    }
-    fn set_incident(&mut self, a: f64) {
-        self.state = a;
-    }
-    fn port_resistance(&self) -> f64 {
-        self.rp
-    }
-    fn comp_id(&self) -> Option<&str> {
-        self.comp_id.as_deref()
-    }
-    fn type_tag(&self) -> &'static str {
-        "inductor"
-    }
-    fn leaf_voltage(&self) -> f64 {
-        self.state / 2.0
-    }
-    fn is_reactive(&self) -> bool {
-        true
-    }
-    fn update_sample_rate(&mut self, fs: f64) {
-        self.rp = 2.0 * fs * self.inductance;
-    }
-    fn reset(&mut self) {
-        self.state = 0.0;
-    }
-    fn editable_info(&self) -> Option<(&'static str, f64)> {
-        if self.comp_id.is_some() {
-            Some(("inductor", self.inductance))
-        } else {
-            None
-        }
-    }
-    fn debug_info(&self) -> String {
-        let id = self.comp_id.as_deref().unwrap_or("?");
-        format!(
-            "Inductor(id=\"{id}\", L={:.3e}H, Rp={:.1}Ω, state={:.6})",
-            self.inductance, self.rp, self.state
-        )
-    }
-    fn clone_box(&self) -> Box<dyn WdfLeaf> {
-        Box::new(self.clone())
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // WdfVoltageSource
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfVoltageSource {
-    pub voltage: f64,
-    pub rp: f64,
+    pub voltage: crate::Wave,
+    pub rp: crate::Wave,
     /// If true, set_voltage is a no-op (cathode bias behavior).
     pub is_cathode_bias: bool,
+    /// Port name for named voltage ports (CV inputs).
+    /// When set, this VS can be addressed by name via `set_voltage_by_port`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub port_name: Option<alloc::string::String>,
 }
 
 impl WdfLeaf for WdfVoltageSource {
-    fn reflected(&mut self) -> f64 {
+    fn reflected(&mut self) -> crate::Wave {
         2.0 * self.voltage
     }
-    fn set_incident(&mut self, _a: f64) {}
-    fn port_resistance(&self) -> f64 {
+    fn set_incident(&mut self, _a: crate::Wave) {}
+    fn port_resistance(&self) -> crate::Wave {
         self.rp
+    }
+    fn comp_id(&self) -> Option<&str> {
+        self.port_name.as_deref()
     }
     fn type_tag(&self) -> &'static str {
         if self.is_cathode_bias {
@@ -403,11 +300,16 @@ impl WdfLeaf for WdfVoltageSource {
             "voltage_source"
         }
     }
-    fn set_resistance(&mut self, ohms: f64) -> bool {
+    fn set_resistance(&mut self, ohms: crate::Wave) -> bool {
         self.rp = ohms;
         true
     }
-    fn set_voltage(&mut self, v: f64) -> bool {
+    fn set_voltage(&mut self, v: crate::Wave) -> bool {
+        // Port-named VS leaves are set independently via set_voltage_by_port.
+        // The global set_voltage() (main input) should not overwrite them.
+        if self.port_name.is_some() {
+            return false;
+        }
         if !self.is_cathode_bias {
             self.voltage = v;
             true
@@ -438,11 +340,11 @@ impl WdfLeaf for WdfVoltageSource {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfPot {
     pub comp_id: String,
-    pub max_resistance: f64,
-    pub position: f64,
+    pub max_resistance: crate::Wave,
+    pub position: crate::Wave,
     pub taper: PotTaper,
-    pub rp: f64,
-    pub last_a: f64,
+    pub rp: crate::Wave,
+    pub last_a: crate::Wave,
     /// When true, this half uses the complement of the control position
     /// (1 - value). For a 3-terminal pot split into two halves, one half
     /// tracks position and the other tracks 1-position so their
@@ -451,13 +353,13 @@ pub struct WdfPot {
 }
 
 impl WdfLeaf for WdfPot {
-    fn reflected(&mut self) -> f64 {
+    fn reflected(&mut self) -> crate::Wave {
         0.0
     }
-    fn set_incident(&mut self, a: f64) {
+    fn set_incident(&mut self, a: crate::Wave) {
         self.last_a = a;
     }
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.rp
     }
     fn comp_id(&self) -> Option<&str> {
@@ -475,11 +377,11 @@ impl WdfLeaf for WdfPot {
         let tapered = self.taper.apply(self.position);
         self.rp = (tapered * self.max_resistance).max(1.0);
     }
-    fn leaf_voltage(&self) -> f64 {
+    fn leaf_voltage(&self) -> crate::Wave {
         self.last_a / 2.0
     }
 
-    fn set_control(&mut self, id: &str, value: f64) -> bool {
+    fn set_control(&mut self, id: &str, value: crate::Wave) -> bool {
         // Match by exact ID or by prefix with __ separator (split pots)
         if self.comp_id == id
             || (self.comp_id.starts_with(id) && self.comp_id[id.len()..].starts_with("__"))
@@ -498,19 +400,19 @@ impl WdfLeaf for WdfPot {
         }
     }
 
-    fn set_resistance(&mut self, ohms: f64) -> bool {
+    fn set_resistance(&mut self, ohms: crate::Wave) -> bool {
         self.rp = ohms;
         true
     }
 
-    fn editable_info(&self) -> Option<(&'static str, f64)> {
+    fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
         Some(("pot", self.rp))
     }
 
-    fn pot_position(&self) -> Option<f64> {
+    fn pot_position(&self) -> Option<crate::Wave> {
         Some(self.position)
     }
-    fn pot_max_resistance(&self) -> Option<f64> {
+    fn pot_max_resistance(&self) -> Option<crate::Wave> {
         Some(self.max_resistance)
     }
     fn is_complement(&self) -> bool {
@@ -530,15 +432,15 @@ impl WdfLeaf for WdfPot {
 
 impl WdfPot {
     /// Read the pot's current resistance.
-    pub fn get_resistance(&self) -> f64 {
+    pub fn get_resistance(&self) -> crate::Wave {
         self.rp
     }
     /// Read the pot's current position.
-    pub fn get_position(&self) -> f64 {
+    pub fn get_position(&self) -> crate::Wave {
         self.position
     }
     /// Read the pot's max resistance.
-    pub fn max_resistance(&self) -> f64 {
+    pub fn max_resistance(&self) -> crate::Wave {
         self.max_resistance
     }
 }
@@ -553,15 +455,15 @@ pub struct WdfPhotocoupler {
     pub comp_id: String,
     pub inner: PhotocouplerInner,
     #[allow(dead_code)]
-    pub prev_resistance: f64,
+    pub prev_resistance: crate::Wave,
 }
 
 impl WdfLeaf for WdfPhotocoupler {
-    fn reflected(&mut self) -> f64 {
+    fn reflected(&mut self) -> crate::Wave {
         0.0
     }
-    fn set_incident(&mut self, _a: f64) {}
-    fn port_resistance(&self) -> f64 {
+    fn set_incident(&mut self, _a: crate::Wave) {}
+    fn port_resistance(&self) -> crate::Wave {
         self.inner.port_resistance()
     }
     fn comp_id(&self) -> Option<&str> {
@@ -574,7 +476,7 @@ impl WdfLeaf for WdfPhotocoupler {
         true
     }
 
-    fn set_control(&mut self, id: &str, value: f64) -> bool {
+    fn set_control(&mut self, id: &str, value: crate::Wave) -> bool {
         if self.comp_id == id {
             self.inner.set_led_drive(value);
             true
@@ -583,7 +485,7 @@ impl WdfLeaf for WdfPhotocoupler {
         }
     }
 
-    fn update_sample_rate(&mut self, fs: f64) {
+    fn update_sample_rate(&mut self, fs: crate::Wave) {
         self.inner.set_sample_rate(fs);
     }
 
@@ -613,15 +515,15 @@ pub struct WdfJfetVr {
     pub comp_id: String,
     pub inner: JfetVariableResistor,
     #[allow(dead_code)]
-    pub prev_rds: f64,
+    pub prev_rds: crate::Wave,
 }
 
 impl WdfLeaf for WdfJfetVr {
-    fn reflected(&mut self) -> f64 {
+    fn reflected(&mut self) -> crate::Wave {
         0.0
     }
-    fn set_incident(&mut self, _a: f64) {}
-    fn port_resistance(&self) -> f64 {
+    fn set_incident(&mut self, _a: crate::Wave) {}
+    fn port_resistance(&self) -> crate::Wave {
         self.inner.port_resistance()
     }
     fn comp_id(&self) -> Option<&str> {
@@ -634,7 +536,7 @@ impl WdfLeaf for WdfJfetVr {
         true
     }
 
-    fn set_control(&mut self, id: &str, value: f64) -> bool {
+    fn set_control(&mut self, id: &str, value: crate::Wave) -> bool {
         if self.comp_id == id {
             self.inner.set_vgs(value);
             true
@@ -643,7 +545,7 @@ impl WdfLeaf for WdfJfetVr {
         }
     }
 
-    fn update_sample_rate(&mut self, fs: f64) {
+    fn update_sample_rate(&mut self, fs: crate::Wave) {
         self.inner.set_sample_rate(fs);
     }
 
@@ -665,11 +567,58 @@ impl WdfLeaf for WdfJfetVr {
 }
 
 impl WdfJfetVr {
-    pub fn vgs(&self) -> f64 {
+    pub fn vgs(&self) -> crate::Wave {
         self.inner.vgs()
     }
-    pub fn rds(&self) -> f64 {
+    pub fn rds(&self) -> crate::Wave {
         self.inner.rds()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WdfJaMagnetizing
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl WdfLeaf for WdfJaMagnetizing {
+    fn reflected(&mut self) -> crate::Wave {
+        self.last_b
+    }
+
+    fn set_incident(&mut self, a: crate::Wave) {
+        self.last_b = self.root.process(a);
+    }
+
+    fn port_resistance(&self) -> crate::Wave {
+        self.root.port_resistance()
+    }
+
+    fn comp_id(&self) -> Option<&str> {
+        self.comp_id.as_deref()
+    }
+
+    fn type_tag(&self) -> &'static str {
+        "ja_magnetizing"
+    }
+
+    fn reset(&mut self) {
+        self.last_b = 0.0;
+        self.root.reset();
+    }
+
+    fn debug_info(&self) -> String {
+        let id = self.comp_id.as_deref().unwrap_or("?");
+        let st = self.root.state();
+        format!(
+            "JaMagnetizing(id=\"{id}\", Rp={:.1}Ω, H={:.3}, M={:.3}, B={:.6}T)",
+            self.root.port_resistance(),
+            st.h,
+            st.m,
+            self.root.flux_density()
+        )
+    }
+
+    fn clone_box(&self) -> Box<dyn WdfLeaf> {
+        Box::new(self.clone())
     }
 }
 
@@ -684,24 +633,24 @@ pub struct WdfSwitchedResistor {
     pub path_index: usize,
     #[allow(dead_code)]
     pub num_paths: usize,
-    pub r_active: f64,
-    pub r_inactive: f64,
+    pub r_active: crate::Wave,
+    pub r_inactive: crate::Wave,
     pub position: usize,
-    pub rp: f64,
-    pub last_a: f64,
+    pub rp: crate::Wave,
+    pub last_a: crate::Wave,
 }
 
 impl WdfLeaf for WdfSwitchedResistor {
-    fn reflected(&mut self) -> f64 {
+    fn reflected(&mut self) -> crate::Wave {
         0.0
     }
-    fn set_incident(&mut self, a: f64) {
+    fn set_incident(&mut self, a: crate::Wave) {
         self.last_a = a;
     }
-    fn leaf_voltage(&self) -> f64 {
+    fn leaf_voltage(&self) -> crate::Wave {
         self.last_a / 2.0
     }
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.rp
     }
     fn comp_id(&self) -> Option<&str> {
@@ -714,7 +663,7 @@ impl WdfLeaf for WdfSwitchedResistor {
         true
     }
 
-    fn set_control(&mut self, id: &str, value: f64) -> bool {
+    fn set_control(&mut self, id: &str, value: crate::Wave) -> bool {
         if self.switch_id == id {
             let new_position = value as usize;
             self.position = new_position;
@@ -747,19 +696,19 @@ impl WdfLeaf for WdfSwitchedResistor {
 #[derive(Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WdfUnitDelay {
-    pub rp: f64,
-    pub state: f64,
-    pub partner_state: f64,
+    pub rp: crate::Wave,
+    pub state: crate::Wave,
+    pub partner_state: crate::Wave,
 }
 
 impl WdfLeaf for WdfUnitDelay {
-    fn reflected(&mut self) -> f64 {
+    fn reflected(&mut self) -> crate::Wave {
         self.partner_state
     }
-    fn set_incident(&mut self, a: f64) {
+    fn set_incident(&mut self, a: crate::Wave) {
         self.state = a;
     }
-    fn port_resistance(&self) -> f64 {
+    fn port_resistance(&self) -> crate::Wave {
         self.rp
     }
     fn type_tag(&self) -> &'static str {
@@ -769,10 +718,10 @@ impl WdfLeaf for WdfUnitDelay {
         self.state = 0.0;
         self.partner_state = 0.0;
     }
-    fn unit_delay_state(&self) -> Option<f64> {
+    fn unit_delay_state(&self) -> Option<crate::Wave> {
         Some(self.state)
     }
-    fn set_unit_delay_partner(&mut self, val: f64) -> bool {
+    fn set_unit_delay_partner(&mut self, val: crate::Wave) -> bool {
         self.partner_state = val;
         true
     }
@@ -788,10 +737,10 @@ impl WdfLeaf for WdfUnitDelay {
 }
 
 impl WdfUnitDelay {
-    pub fn get_state(&self) -> f64 {
+    pub fn get_state(&self) -> crate::Wave {
         self.state
     }
-    pub fn set_partner_state(&mut self, val: f64) {
+    pub fn set_partner_state(&mut self, val: crate::Wave) {
         self.partner_state = val;
     }
 }
@@ -809,28 +758,107 @@ impl WdfUnitDelay {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LeafKind {
     Resistor(WdfResistor),
-    Capacitor(WdfCapacitor),
+    OnePort {
+        comp_id: Option<String>,
+        runtime: RuntimeOnePort<()>,
+        sample_rate: crate::Wave,
+    },
     LeakyCapacitor(WdfLeakyCapacitor),
-    Inductor(WdfInductor),
     VoltageSource(WdfVoltageSource),
     Pot(WdfPot),
     Photocoupler(WdfPhotocoupler),
     JfetVr(WdfJfetVr),
+    JaMagnetizing(WdfJaMagnetizing),
     SwitchedResistor(WdfSwitchedResistor),
     UnitDelay(WdfUnitDelay),
+}
+
+impl LeafKind {
+    pub fn one_port(comp_id: Option<String>, kind: OnePortKind, sample_rate: crate::Wave) -> Self {
+        Self::one_port_with_slot(comp_id, kind, sample_rate, None)
+    }
+
+    pub fn one_port_with_slot(
+        comp_id: Option<String>,
+        kind: OnePortKind,
+        sample_rate: crate::Wave,
+        state_slot: Option<StateSlot>,
+    ) -> Self {
+        let runtime = runtime_one_port(kind, state_slot);
+        Self::OnePort {
+            comp_id,
+            runtime,
+            sample_rate,
+        }
+    }
+
+    pub fn capacitor(
+        comp_id: Option<String>,
+        capacitance: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> Self {
+        Self::one_port(comp_id, OnePortKind::Capacitor(capacitance), sample_rate)
+    }
+
+    pub fn capacitor_from_rp(
+        comp_id: Option<String>,
+        capacitance: crate::Wave,
+        rp: crate::Wave,
+    ) -> Self {
+        let kind = OnePortKind::Capacitor(capacitance);
+        Self::one_port(comp_id, kind, kind.sample_rate_for_rp(rp))
+    }
+
+    pub fn inductor(
+        comp_id: Option<String>,
+        inductance: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> Self {
+        Self::one_port(comp_id, OnePortKind::Inductor(inductance), sample_rate)
+    }
+
+    pub fn inductor_from_rp(
+        comp_id: Option<String>,
+        inductance: crate::Wave,
+        rp: crate::Wave,
+    ) -> Self {
+        let kind = OnePortKind::Inductor(inductance);
+        Self::one_port(comp_id, kind, kind.sample_rate_for_rp(rp))
+    }
+
+    pub fn one_port_value(&self) -> Option<crate::Wave> {
+        match self {
+            Self::OnePort { runtime, .. } => Some(runtime.physical_value()),
+            _ => None,
+        }
+    }
+
+    pub fn one_port_runtime(&self) -> Option<&RuntimeOnePort<()>> {
+        match self {
+            Self::OnePort { runtime, .. } => Some(runtime),
+            _ => None,
+        }
+    }
+
+    pub fn one_port_runtime_mut(&mut self) -> Option<&mut RuntimeOnePort<()>> {
+        match self {
+            Self::OnePort { runtime, .. } => Some(runtime),
+            _ => None,
+        }
+    }
 }
 
 macro_rules! delegate_leaf {
     ($self:ident, $method:ident $(, $arg:expr)*) => {
         match $self {
             LeafKind::Resistor(x) => x.$method($($arg),*),
-            LeafKind::Capacitor(x) => x.$method($($arg),*),
+            LeafKind::OnePort { .. } => unreachable!(),
             LeafKind::LeakyCapacitor(x) => x.$method($($arg),*),
-            LeafKind::Inductor(x) => x.$method($($arg),*),
             LeafKind::VoltageSource(x) => x.$method($($arg),*),
             LeafKind::Pot(x) => x.$method($($arg),*),
             LeafKind::Photocoupler(x) => x.$method($($arg),*),
             LeafKind::JfetVr(x) => x.$method($($arg),*),
+            LeafKind::JaMagnetizing(x) => x.$method($($arg),*),
             LeafKind::SwitchedResistor(x) => x.$method($($arg),*),
             LeafKind::UnitDelay(x) => x.$method($($arg),*),
         }
@@ -838,68 +866,201 @@ macro_rules! delegate_leaf {
 }
 
 impl WdfLeaf for LeafKind {
-    fn reflected(&mut self) -> f64 {
-        delegate_leaf!(self, reflected)
+    fn reflected(&mut self) -> crate::Wave {
+        match self {
+            LeafKind::OnePort { .. } => 0.0,
+            _ => delegate_leaf!(self, reflected),
+        }
     }
-    fn set_incident(&mut self, a: f64) {
-        delegate_leaf!(self, set_incident, a)
+    fn set_incident(&mut self, a: crate::Wave) {
+        match self {
+            LeafKind::OnePort { .. } => {}
+            _ => delegate_leaf!(self, set_incident, a),
+        }
     }
-    fn port_resistance(&self) -> f64 {
-        delegate_leaf!(self, port_resistance)
+    fn port_resistance(&self) -> crate::Wave {
+        match self {
+            LeafKind::OnePort {
+                runtime,
+                sample_rate,
+                ..
+            } => runtime.rp(*sample_rate),
+            _ => delegate_leaf!(self, port_resistance),
+        }
     }
     fn comp_id(&self) -> Option<&str> {
-        delegate_leaf!(self, comp_id)
+        match self {
+            LeafKind::OnePort { comp_id, .. } => comp_id.as_deref(),
+            _ => delegate_leaf!(self, comp_id),
+        }
     }
     fn type_tag(&self) -> &'static str {
-        delegate_leaf!(self, type_tag)
+        match self {
+            LeafKind::OnePort { runtime, .. } => runtime.type_tag(),
+            _ => delegate_leaf!(self, type_tag),
+        }
     }
     fn set_complement(&mut self) {
-        delegate_leaf!(self, set_complement)
+        match self {
+            LeafKind::OnePort { .. } => {}
+            _ => delegate_leaf!(self, set_complement),
+        }
     }
-    fn leaf_voltage(&self) -> f64 {
-        delegate_leaf!(self, leaf_voltage)
+    fn leaf_voltage(&self) -> crate::Wave {
+        match self {
+            LeafKind::OnePort { .. } => 0.0,
+            _ => delegate_leaf!(self, leaf_voltage),
+        }
     }
-    fn set_control(&mut self, id: &str, value: f64) -> bool {
-        delegate_leaf!(self, set_control, id, value)
+    fn set_control(&mut self, id: &str, value: crate::Wave) -> bool {
+        match self {
+            LeafKind::OnePort {
+                comp_id, runtime, ..
+            } => {
+                if comp_id.as_deref() == Some(id) {
+                    match runtime.spec.kind {
+                        OnePortKind::Capacitor(_) => {
+                            runtime.spec.kind = OnePortKind::Capacitor(value);
+                            true
+                        }
+                        OnePortKind::Inductor(_) => {
+                            runtime.spec.kind = OnePortKind::Inductor(value);
+                            true
+                        }
+                        OnePortKind::Resistor(_) => {
+                            runtime.spec.kind = OnePortKind::Resistor(value);
+                            true
+                        }
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => delegate_leaf!(self, set_control, id, value),
+        }
     }
-    fn set_resistance(&mut self, ohms: f64) -> bool {
-        delegate_leaf!(self, set_resistance, ohms)
+    fn set_resistance(&mut self, ohms: crate::Wave) -> bool {
+        match self {
+            LeafKind::OnePort { runtime, .. } => match runtime.spec.kind {
+                OnePortKind::Resistor(_) => {
+                    runtime.spec.kind = OnePortKind::Resistor(ohms);
+                    true
+                }
+                _ => false,
+            },
+            _ => delegate_leaf!(self, set_resistance, ohms),
+        }
     }
-    fn set_voltage(&mut self, v: f64) -> bool {
-        delegate_leaf!(self, set_voltage, v)
+    fn set_voltage(&mut self, v: crate::Wave) -> bool {
+        match self {
+            LeafKind::OnePort { .. } => false,
+            _ => delegate_leaf!(self, set_voltage, v),
+        }
     }
-    fn update_sample_rate(&mut self, fs: f64) {
-        delegate_leaf!(self, update_sample_rate, fs)
+    fn update_sample_rate(&mut self, fs: crate::Wave) {
+        match self {
+            LeafKind::OnePort { sample_rate, .. } => *sample_rate = fs,
+            _ => delegate_leaf!(self, update_sample_rate, fs),
+        }
     }
     fn reset(&mut self) {
-        delegate_leaf!(self, reset)
+        match self {
+            LeafKind::OnePort { .. } => {}
+            _ => delegate_leaf!(self, reset),
+        }
     }
     fn is_dynamic(&self) -> bool {
-        delegate_leaf!(self, is_dynamic)
+        match self {
+            LeafKind::OnePort { .. } => false,
+            _ => delegate_leaf!(self, is_dynamic),
+        }
     }
     fn is_reactive(&self) -> bool {
-        delegate_leaf!(self, is_reactive)
+        match self {
+            LeafKind::OnePort { runtime, .. } => runtime.spec.kind.is_stateful(),
+            _ => delegate_leaf!(self, is_reactive),
+        }
     }
-    fn editable_info(&self) -> Option<(&'static str, f64)> {
-        delegate_leaf!(self, editable_info)
+    fn one_port_state(&self) -> Option<OnePortState> {
+        match self {
+            LeafKind::OnePort { .. } => None,
+            _ => delegate_leaf!(self, one_port_state),
+        }
+    }
+    fn set_one_port_state(&mut self, state: OnePortState) -> bool {
+        match self {
+            LeafKind::OnePort { .. } => false,
+            _ => delegate_leaf!(self, set_one_port_state, state),
+        }
+    }
+    fn editable_info(&self) -> Option<(&'static str, crate::Wave)> {
+        match self {
+            LeafKind::OnePort {
+                comp_id, runtime, ..
+            } => comp_id
+                .as_ref()
+                .map(|_| (runtime.type_tag(), runtime.physical_value())),
+            _ => delegate_leaf!(self, editable_info),
+        }
     }
     fn debug_info(&self) -> String {
-        delegate_leaf!(self, debug_info)
+        match self {
+            LeafKind::OnePort {
+                comp_id,
+                runtime,
+                sample_rate,
+            } => {
+                let id = comp_id.as_deref().unwrap_or("?");
+                let value = runtime.physical_value();
+                match runtime.spec.kind {
+                    OnePortKind::Resistor(_) => {
+                        format!(
+                            "OnePort::Resistor(id=\"{id}\", Rp={:.1}Ω)",
+                            runtime.rp(*sample_rate)
+                        )
+                    }
+                    OnePortKind::Capacitor(_) => format!(
+                        "OnePort::Capacitor(id=\"{id}\", C={value:.3e}F, Rp={:.1}Ω)",
+                        runtime.rp(*sample_rate)
+                    ),
+                    OnePortKind::Inductor(_) => format!(
+                        "OnePort::Inductor(id=\"{id}\", L={value:.3e}H, Rp={:.1}Ω)",
+                        runtime.rp(*sample_rate)
+                    ),
+                }
+            }
+            _ => delegate_leaf!(self, debug_info),
+        }
     }
-    fn unit_delay_state(&self) -> Option<f64> {
-        delegate_leaf!(self, unit_delay_state)
+    fn unit_delay_state(&self) -> Option<crate::Wave> {
+        match self {
+            LeafKind::OnePort { .. } => None,
+            _ => delegate_leaf!(self, unit_delay_state),
+        }
     }
-    fn set_unit_delay_partner(&mut self, val: f64) -> bool {
-        delegate_leaf!(self, set_unit_delay_partner, val)
+    fn set_unit_delay_partner(&mut self, val: crate::Wave) -> bool {
+        match self {
+            LeafKind::OnePort { .. } => false,
+            _ => delegate_leaf!(self, set_unit_delay_partner, val),
+        }
     }
-    fn pot_position(&self) -> Option<f64> {
-        delegate_leaf!(self, pot_position)
+    fn pot_position(&self) -> Option<crate::Wave> {
+        match self {
+            LeafKind::OnePort { .. } => None,
+            _ => delegate_leaf!(self, pot_position),
+        }
     }
-    fn pot_max_resistance(&self) -> Option<f64> {
-        delegate_leaf!(self, pot_max_resistance)
+    fn pot_max_resistance(&self) -> Option<crate::Wave> {
+        match self {
+            LeafKind::OnePort { .. } => None,
+            _ => delegate_leaf!(self, pot_max_resistance),
+        }
     }
     fn is_complement(&self) -> bool {
-        delegate_leaf!(self, is_complement)
+        match self {
+            LeafKind::OnePort { .. } => false,
+            _ => delegate_leaf!(self, is_complement),
+        }
     }
     fn clone_box(&self) -> Box<dyn WdfLeaf> {
         Box::new(self.clone())
@@ -918,5 +1079,85 @@ pub fn leaf_matches_id(leaf: &dyn WdfLeaf, target_id: &str) -> bool {
                 || (id.starts_with(target_id) && id[target_id.len()..].starts_with("__"))
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dyn_node::DynNode;
+
+    fn runtime_one_port_fixture<'a>(node: &'a DynNode, target_id: &str) -> &'a RuntimeOnePort<()> {
+        node.one_port_runtime_binding(target_id)
+            .expect("reactive one-port must be bound to runtime state")
+    }
+
+    #[test]
+    fn capacitor_exports_and_imports_one_port_voltage_state() {
+        let mut cap = DynNode::Capacitor(Some(String::from("C1")), 100e-9, 1_000.0);
+        let mut runtime_state = cap.bind_runtime_state();
+
+        cap.set_incident_with_state(0.6, &mut runtime_state);
+        let runtime = runtime_one_port_fixture(&cap, "C1");
+        let slot = runtime.state_slot().unwrap().0;
+        assert_eq!(
+            runtime_state.states[slot],
+            Some(OnePortState::CapacitorVoltage(0.3)).unwrap()
+        );
+        assert_eq!(runtime_state.wave_cache[slot].wave_state, 0.6);
+        assert_eq!(cap.leaf_voltage_with_state("C1", &runtime_state), Some(0.3));
+
+        let runtime = runtime_one_port_fixture(&cap, "C1");
+        assert!(
+            runtime.wdf_set_one_port_state(OnePortState::CapacitorVoltage(0.5), &mut runtime_state)
+        );
+        assert_eq!(
+            runtime.wdf_one_port_state(&runtime_state),
+            Some(OnePortState::CapacitorVoltage(0.5))
+        );
+        assert!(!runtime
+            .wdf_set_one_port_state(OnePortState::InductorScaledCurrent(0.1), &mut runtime_state));
+    }
+
+    #[test]
+    fn inductor_exports_and_imports_scaled_current_state() {
+        let mut inductor = DynNode::Inductor(Some(String::from("L1")), 1e-3, 96.0);
+        let mut runtime_state = inductor.bind_runtime_state();
+
+        inductor.set_incident_with_state(0.25, &mut runtime_state);
+        let runtime = runtime_one_port_fixture(&inductor, "L1");
+        let slot = runtime.state_slot().unwrap().0;
+        assert_eq!(
+            runtime_state.states[slot],
+            OnePortState::InductorScaledCurrent(0.25)
+        );
+        assert_eq!(runtime_state.wave_cache[slot].wave_state, 0.25);
+        assert_eq!(
+            inductor.leaf_voltage_with_state("L1", &runtime_state),
+            Some(0.125)
+        );
+
+        let runtime = runtime_one_port_fixture(&inductor, "L1");
+        assert!(runtime.wdf_set_one_port_state(
+            OnePortState::InductorScaledCurrent(-0.4),
+            &mut runtime_state
+        ));
+        assert_eq!(
+            runtime.wdf_one_port_state(&runtime_state),
+            Some(OnePortState::InductorScaledCurrent(-0.4))
+        );
+        assert!(!runtime
+            .wdf_set_one_port_state(OnePortState::CapacitorVoltage(0.2), &mut runtime_state));
+    }
+
+    #[test]
+    fn resistor_has_no_one_port_runtime_state() {
+        let resistor = WdfResistor {
+            comp_id: Some(String::from("R1")),
+            rp: 1_000.0,
+            last_a: 0.0,
+        };
+
+        assert_eq!(resistor.one_port_state(), None);
     }
 }

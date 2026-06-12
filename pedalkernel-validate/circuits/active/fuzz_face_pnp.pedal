@@ -15,7 +15,7 @@ pedal "Fuzz Face PNP" {
     C1: cap(2.2u)           # Input coupling (large for bass response)
 
     # Q1 - Driver stage
-    R1: resistor(33k)       # Q1 collector load
+    R1: resistor(33k)       # Supply-to-ground bias/load resistor
     R2: resistor(8.2k)      # Feedback from Q2 collector to Q1 base
     Q1: pnp(ac128)          # Germanium PNP (low hfe ~70)
 
@@ -33,10 +33,10 @@ pedal "Fuzz Face PNP" {
     in -> C1.a
     C1.b -> Q1.base
 
-    # Q1 stage (PNP: emitter to Vcc, collector toward gnd)
+    # Q1 stage (PNP: emitter to Vcc)
     vcc -> Q1.emitter
-    Q1.collector -> R1.a
-    R1.b -> gnd
+    gnd -> R1.a
+    R1.b -> vcc
 
     # Feedback network: Q2 collector -> Q1 base
     Q2.collector -> R2.a

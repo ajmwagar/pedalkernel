@@ -1,0 +1,12 @@
+* Goldenrod-style inverting active-feedback treble shelf.
+* Treble pot fixed at default 0.5: 5k from cap node to wiper, 5k from wiper to output.
+
+Rin v_in v_neg 10k
+Rfb v_neg v_op 10k
+Ctone v_neg n_tone_a 3.9n
+Rtreb_aw n_tone_a n_tone_w 5k
+Rtreb_wb n_tone_w v_op 5k
+Rshelf n_tone_w v_op 4.7k
+Rout v_op v_out 1k
+
+Eop v_op 0 0 v_neg 100000

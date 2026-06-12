@@ -4,10 +4,10 @@
 //! to a lock-free ring buffer. The UI thread reads the latest complete frame
 //! at 60fps and applies visual ballistics (smoothing) before uploading to GPU.
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::math;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use crate::math;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Maximum number of tube stages that can be monitored.
 pub const MAX_TUBES: usize = 12;
@@ -98,6 +98,32 @@ pub struct UiMetrics {
     pub stage_count: u8,
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Nonlinear solver diagnostics — for compiler/runtime regression harnesses
+    // ═══════════════════════════════════════════════════════════════════════════
+    /// Total nonlinear/coupled solve calls observed in this metrics block.
+    pub nr_solve_count: u32,
+    /// Total Newton/fixed-point iterations across solve calls in this block.
+    pub nr_total_iterations: u32,
+    /// Maximum iterations used by any solve in this block.
+    pub nr_max_iterations: u16,
+    /// Number of solves that did not converge in this block.
+    pub nr_nonconverged_count: u16,
+    /// Maximum final residual observed in this block.
+    pub nr_max_residual: f32,
+    /// Per-stage maximum iterations observed in this block.
+    pub stage_nr_iterations: [u16; MAX_STAGES],
+    /// Per-stage maximum final residual observed in this block.
+    pub stage_nr_residual: [f32; MAX_STAGES],
+    /// Per-stage non-convergence counts, saturated at u8::MAX.
+    pub stage_nr_nonconverged: [u8; MAX_STAGES],
+    /// Non-finite inputs, intermediate values, or outputs observed this block.
+    pub nonfinite_count: u32,
+    /// Samples whose magnitude exceeded a conservative blowup threshold.
+    pub blowup_count: u32,
+    /// Largest absolute signal magnitude observed this block.
+    pub max_abs_sample: f32,
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Timing
     // ═══════════════════════════════════════════════════════════════════════════
     /// Block counter (monotonic, wraps at u32::MAX).
@@ -129,16 +155,29 @@ pub struct MetricsAccumulator {
     block_counter: u32,
 
     // Running accumulators
-    input_sum_sq: f64,
-    output_sum_sq: f64,
-    input_peak: f64,
-    output_peak: f64,
-    signal_min: f64,
-    signal_max: f64,
+    input_sum_sq: crate::Wave,
+    output_sum_sq: crate::Wave,
+    input_peak: crate::Wave,
+    output_peak: crate::Wave,
+    signal_min: crate::Wave,
+    signal_max: crate::Wave,
 
     // Per-stage level accumulators
-    stage_sum_sq: [f64; MAX_STAGES],
+    stage_sum_sq: [crate::Wave; MAX_STAGES],
     stage_count: usize,
+
+    // Solver diagnostics
+    nr_solve_count: u32,
+    nr_total_iterations: u32,
+    nr_max_iterations: u16,
+    nr_nonconverged_count: u16,
+    nr_max_residual: f32,
+    stage_nr_iterations: [u16; MAX_STAGES],
+    stage_nr_residual: [f32; MAX_STAGES],
+    stage_nr_nonconverged: [u8; MAX_STAGES],
+    nonfinite_count: u32,
+    blowup_count: u32,
+    max_abs_sample: f32,
 
     // Tube state (sampled, not accumulated)
     tube_plate_current: [f32; MAX_TUBES],
@@ -171,6 +210,17 @@ impl MetricsAccumulator {
             signal_max: 0.0,
             stage_sum_sq: [0.0; MAX_STAGES],
             stage_count: 0,
+            nr_solve_count: 0,
+            nr_total_iterations: 0,
+            nr_max_iterations: 0,
+            nr_nonconverged_count: 0,
+            nr_max_residual: 0.0,
+            stage_nr_iterations: [0; MAX_STAGES],
+            stage_nr_residual: [0.0; MAX_STAGES],
+            stage_nr_nonconverged: [0; MAX_STAGES],
+            nonfinite_count: 0,
+            blowup_count: 0,
+            max_abs_sample: 0.0,
             tube_plate_current: [0.0; MAX_TUBES],
             tube_dissipation: [0.0; MAX_TUBES],
             tube_count: 0,
@@ -189,12 +239,24 @@ impl MetricsAccumulator {
 
     /// Accumulate input/output levels for one sample.
     #[inline]
-    pub fn accumulate_levels(&mut self, input: f64, output: f64) {
+    pub fn accumulate_levels(&mut self, input: crate::Wave, output: crate::Wave) {
+        if !input.is_finite() || !output.is_finite() {
+            self.nonfinite_count = self.nonfinite_count.saturating_add(1);
+        }
+        let input = if input.is_finite() { input } else { 0.0 };
+        let output = if output.is_finite() { output } else { 0.0 };
         self.input_sum_sq += input * input;
         self.output_sum_sq += output * output;
 
-        let abs_in = math::abs(input);
-        let abs_out = math::abs(output);
+        let abs_in = input.abs();
+        let abs_out = output.abs();
+        let max_abs = abs_in.max(abs_out);
+        self.max_abs_sample = self
+            .max_abs_sample
+            .max(max_abs.min(f32::MAX as crate::Wave) as f32);
+        if max_abs > 32.0 {
+            self.blowup_count = self.blowup_count.saturating_add(1);
+        }
         if abs_in > self.input_peak {
             self.input_peak = abs_in;
         }
@@ -214,12 +276,66 @@ impl MetricsAccumulator {
 
     /// Record a stage level (call after each WDF stage processes).
     #[inline]
-    pub fn accumulate_stage(&mut self, stage_idx: usize, level: f64) {
+    pub fn accumulate_stage(&mut self, stage_idx: usize, level: crate::Wave) {
         if stage_idx < MAX_STAGES {
             self.stage_sum_sq[stage_idx] += level * level;
             if stage_idx >= self.stage_count {
                 self.stage_count = stage_idx + 1;
             }
+        }
+    }
+
+    /// Record one nonlinear/coupled solver call for a stage.
+    #[inline]
+    pub fn record_stage_solver(
+        &mut self,
+        stage_idx: usize,
+        iterations: u32,
+        residual: crate::Wave,
+        converged: bool,
+    ) {
+        self.nr_solve_count = self.nr_solve_count.saturating_add(1);
+        self.nr_total_iterations = self.nr_total_iterations.saturating_add(iterations);
+        self.nr_max_iterations = self
+            .nr_max_iterations
+            .max(iterations.min(u16::MAX as u32) as u16);
+        if !converged {
+            self.nr_nonconverged_count = self.nr_nonconverged_count.saturating_add(1);
+        }
+        if residual.is_finite() {
+            self.nr_max_residual = self.nr_max_residual.max(residual as f32);
+        }
+
+        if stage_idx < MAX_STAGES {
+            self.stage_nr_iterations[stage_idx] =
+                self.stage_nr_iterations[stage_idx].max(iterations.min(u16::MAX as u32) as u16);
+            if residual.is_finite() {
+                self.stage_nr_residual[stage_idx] =
+                    self.stage_nr_residual[stage_idx].max(residual as f32);
+            }
+            if !converged {
+                self.stage_nr_nonconverged[stage_idx] =
+                    self.stage_nr_nonconverged[stage_idx].saturating_add(1);
+            }
+            if stage_idx >= self.stage_count {
+                self.stage_count = stage_idx + 1;
+            }
+        }
+    }
+
+    /// Record a runtime signal fault caught outside normal level metering.
+    #[inline]
+    pub fn record_signal_fault(&mut self, value: crate::Wave) {
+        if !value.is_finite() {
+            self.nonfinite_count = self.nonfinite_count.saturating_add(1);
+            return;
+        }
+        let abs = math::abs(value);
+        self.max_abs_sample = self
+            .max_abs_sample
+            .max(abs.min(f32::MAX as crate::Wave) as f32);
+        if abs > 32.0 {
+            self.blowup_count = self.blowup_count.saturating_add(1);
         }
     }
 
@@ -263,13 +379,13 @@ impl MetricsAccumulator {
     ///
     /// Call this every `block_size` samples. Returns the reduced metrics.
     pub fn reduce(&mut self) -> UiMetrics {
-        let n = self.sample_count.max(1) as f64;
+        let n = self.sample_count.max(1) as crate::Wave;
 
         // RMS to dB (reference: 1.0 = 0 dB)
         let input_rms = math::sqrt(self.input_sum_sq / n);
         let output_rms = math::sqrt(self.output_sum_sq / n);
 
-        let to_db = |x: f64| -> f32 {
+        let to_db = |x: crate::Wave| -> f32 {
             if x > 1e-10 {
                 (20.0 * math::log10(x)) as f32
             } else {
@@ -310,6 +426,17 @@ impl MetricsAccumulator {
             supply_sag,
             stage_levels,
             stage_count: self.stage_count as u8,
+            nr_solve_count: self.nr_solve_count,
+            nr_total_iterations: self.nr_total_iterations,
+            nr_max_iterations: self.nr_max_iterations,
+            nr_nonconverged_count: self.nr_nonconverged_count,
+            nr_max_residual: self.nr_max_residual,
+            stage_nr_iterations: self.stage_nr_iterations,
+            stage_nr_residual: self.stage_nr_residual,
+            stage_nr_nonconverged: self.stage_nr_nonconverged,
+            nonfinite_count: self.nonfinite_count,
+            blowup_count: self.blowup_count,
+            max_abs_sample: self.max_abs_sample,
             block_counter: self.block_counter,
         };
 
@@ -325,6 +452,17 @@ impl MetricsAccumulator {
         for i in 0..MAX_STAGES {
             self.stage_sum_sq[i] = 0.0;
         }
+        self.nr_solve_count = 0;
+        self.nr_total_iterations = 0;
+        self.nr_max_iterations = 0;
+        self.nr_nonconverged_count = 0;
+        self.nr_max_residual = 0.0;
+        self.stage_nr_iterations = [0; MAX_STAGES];
+        self.stage_nr_residual = [0.0; MAX_STAGES];
+        self.stage_nr_nonconverged = [0; MAX_STAGES];
+        self.nonfinite_count = 0;
+        self.blowup_count = 0;
+        self.max_abs_sample = 0.0;
 
         metrics
     }
@@ -446,6 +584,24 @@ mod tests {
 
         let latest = buffer.read_latest();
         assert_eq!(latest.block_counter, 9);
+    }
+
+    #[test]
+    fn test_solver_diagnostics_reduce() {
+        let mut acc = MetricsAccumulator::new(2);
+        acc.accumulate_levels(0.0, 0.0);
+        acc.record_stage_solver(1, 3, 2.0e-5, true);
+        acc.accumulate_levels(0.0, 0.0);
+        acc.record_stage_solver(1, 8, 4.0e-4, false);
+
+        let metrics = acc.reduce();
+        assert_eq!(metrics.nr_solve_count, 2);
+        assert_eq!(metrics.nr_total_iterations, 11);
+        assert_eq!(metrics.nr_max_iterations, 8);
+        assert_eq!(metrics.nr_nonconverged_count, 1);
+        assert_eq!(metrics.stage_nr_iterations[1], 8);
+        assert_eq!(metrics.stage_nr_nonconverged[1], 1);
+        assert!(metrics.nr_max_residual >= 4.0e-4);
     }
 
     #[test]

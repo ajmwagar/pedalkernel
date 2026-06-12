@@ -548,6 +548,8 @@ mod tests {
             mirrors: hashbrown::HashMap::new(),
             calibrate: false,
             subcircuits: vec![],
+            ports: vec![],
+            init_hints: vec![],
         };
 
         let netlist = export_kicad_netlist(&pedal);

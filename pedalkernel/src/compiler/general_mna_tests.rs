@@ -15,7 +15,8 @@ use crate::PedalProcessor;
 fn general_mna_bjt_produces_gain() {
     // Common-emitter NPN: input at base, output at collector.
     // Should amplify small signal by Rc/Re ≈ 10.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 C_in: cap(1u)
@@ -37,7 +38,8 @@ fn general_mna_bjt_produces_gain() {
                 C_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -65,7 +67,8 @@ fn general_mna_bjt_produces_gain() {
 #[test]
 fn general_mna_bjt_stable_on_large_signal() {
     // NR solver should not diverge on loud input.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 C_in: cap(1u)
@@ -87,7 +90,8 @@ fn general_mna_bjt_stable_on_large_signal() {
                 C_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -128,7 +132,8 @@ fn general_mna_bjt_stable_on_large_signal() {
 fn general_mna_fuzz_face_produces_audio() {
     // Two coupled BJTs: Q2.emitter → R4 → Q1.base (feedback).
     // Should produce heavily distorted output.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 C1: cap(2.2u)
@@ -155,7 +160,8 @@ fn general_mna_fuzz_face_produces_audio() {
                 C2.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile Fuzz Face");
@@ -187,7 +193,8 @@ fn general_mna_fuzz_face_produces_audio() {
 #[test]
 fn general_mna_fuzz_face_clips_symmetrically() {
     // Fuzz Face should produce roughly symmetric clipping
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 C1: cap(2.2u)
@@ -214,7 +221,8 @@ fn general_mna_fuzz_face_clips_symmetrically() {
                 C2.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
@@ -252,7 +260,8 @@ fn general_mna_fuzz_face_clips_symmetrically() {
 fn general_mna_vcvs_plus_nl_compiles() {
     // Op-amp with diodes in feedback (handled by General when multi-VCVS)
     // This verifies the blues pedal path works.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R1: resistor(10k)
@@ -277,11 +286,11 @@ fn general_mna_vcvs_plus_nl_compiles() {
                 U2.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
-    let mut compiled = compile_via_spqr(&pedal, 48000.0)
-        .expect("Should compile multi-VCVS + NL");
+    let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("Should compile multi-VCVS + NL");
 
     // Should produce output (second op-amp stage has IIR dc_gain=0 issue
     // when going through SPQR decomposition — real blues pedal works via legends).
@@ -301,7 +310,8 @@ fn general_mna_vcvs_plus_nl_compiles() {
 #[test]
 fn general_mna_silence_in_silence_out() {
     // Zero input → zero output (no DC leak)
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 C_in: cap(1u)
@@ -323,7 +333,8 @@ fn general_mna_silence_in_silence_out() {
                 C_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");

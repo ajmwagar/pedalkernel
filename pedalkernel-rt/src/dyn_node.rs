@@ -12,13 +12,14 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use crate::wdf_leaf::{
-    leaf_matches_id, LeafKind, WdfCapacitor, WdfInductor, WdfJfetVr, WdfLeaf, WdfLeakyCapacitor,
-    WdfPhotocoupler, WdfPot, WdfResistor, WdfSwitchedResistor, WdfUnitDelay, WdfVoltageSource,
-};
+use crate::boundary_math::{OnePortKind, RuntimeOnePort, RuntimeState};
+use crate::elements::{JaCoreModel, JfetVariableResistor, Photocoupler, WdfJaMagnetizing};
 use crate::pot_taper::PotTaper;
-use crate::elements::{JfetVariableResistor, Photocoupler};
 use crate::tree::RTypeAdaptor;
+use crate::wdf_leaf::{
+    leaf_matches_id, LeafKind, WdfJfetVr, WdfLeaf, WdfLeakyCapacitor, WdfPhotocoupler, WdfPot,
+    WdfResistor, WdfSwitchedResistor, WdfUnitDelay, WdfVoltageSource,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Dynamic WDF tree node
@@ -46,10 +47,10 @@ pub enum DynNode {
         kind: BinaryKind,
         left: Box<DynNode>,
         right: Box<DynNode>,
-        rp: f64,
-        gamma: f64,
-        b1: f64,
-        b2: f64,
+        rp: crate::Wave,
+        gamma: crate::Wave,
+        b1: crate::Wave,
+        b2: crate::Wave,
         /// True when a descendant leaf has changed and adaptor coefficients need recompute.
         dirty: bool,
         /// True when any descendant leaf is dynamic (pot, photocoupler, etc.).
@@ -59,9 +60,9 @@ pub enum DynNode {
     /// Ideal transformer adaptor.
     Transformer {
         secondary: Box<DynNode>,
-        turns_ratio: f64,
-        rp: f64,
-        b_sec: f64,
+        turns_ratio: crate::Wave,
+        rp: crate::Wave,
+        b_sec: crate::Wave,
         /// True when a descendant leaf has changed and adaptor coefficients need recompute.
         dirty: bool,
         /// True when any descendant leaf is dynamic (pot, photocoupler, etc.).
@@ -123,13 +124,198 @@ impl Clone for DynNode {
     }
 }
 
+impl DynNode {
+    /// Return the structural WDF node.
+    pub fn structural(&self) -> &Self {
+        self
+    }
+
+    /// Mutable counterpart to [`DynNode::structural`].
+    pub fn structural_mut(&mut self) -> &mut Self {
+        self
+    }
+
+    pub fn one_port_runtime_binding(&self, target_id: &str) -> Option<&RuntimeOnePort<()>> {
+        match self {
+            Self::Leaf(LeafKind::OnePort {
+                comp_id, runtime, ..
+            }) if comp_id.as_deref() == Some(target_id) => Some(runtime),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => left
+                .one_port_runtime_binding(target_id)
+                .or_else(|| right.one_port_runtime_binding(target_id)),
+            Self::Transformer { secondary, .. } => secondary.one_port_runtime_binding(target_id),
+            Self::RType { children, .. } => children
+                .iter()
+                .find_map(|child| child.one_port_runtime_binding(target_id)),
+        }
+    }
+
+    pub fn one_port_runtime_binding_mut(
+        &mut self,
+        target_id: &str,
+    ) -> Option<&mut RuntimeOnePort<()>> {
+        match self {
+            Self::Leaf(LeafKind::OnePort {
+                comp_id, runtime, ..
+            }) if comp_id.as_deref() == Some(target_id) => Some(runtime),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => {
+                if left.one_port_runtime_binding(target_id).is_some() {
+                    left.one_port_runtime_binding_mut(target_id)
+                } else {
+                    right.one_port_runtime_binding_mut(target_id)
+                }
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.one_port_runtime_binding_mut(target_id)
+            }
+            Self::RType { children, .. } => {
+                let child = children
+                    .iter_mut()
+                    .find(|child| child.one_port_runtime_binding(target_id).is_some())?;
+                child.one_port_runtime_binding_mut(target_id)
+            }
+        }
+    }
+
+    pub fn one_port_runtime_state_with_store<'a>(
+        &'a self,
+        target_id: &str,
+        runtime_state: &'a RuntimeState,
+    ) -> Option<(&'a RuntimeOnePort<()>, &'a RuntimeState)> {
+        match self {
+            Self::Leaf(LeafKind::OnePort {
+                comp_id, runtime, ..
+            }) if comp_id.as_deref() == Some(target_id) => Some((runtime, runtime_state)),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => left
+                .one_port_runtime_state_with_store(target_id, runtime_state)
+                .or_else(|| right.one_port_runtime_state_with_store(target_id, runtime_state)),
+            Self::Transformer { secondary, .. } => {
+                secondary.one_port_runtime_state_with_store(target_id, runtime_state)
+            }
+            Self::RType { children, .. } => children.iter().find_map(|child| {
+                child.one_port_runtime_state_with_store(target_id, runtime_state)
+            }),
+        }
+    }
+
+    pub fn one_port_runtime_state_mut_with_store<'a>(
+        &'a self,
+        target_id: &str,
+        runtime_state: &'a mut RuntimeState,
+    ) -> Option<(&'a RuntimeOnePort<()>, &'a mut RuntimeState)> {
+        match self {
+            Self::Leaf(LeafKind::OnePort {
+                comp_id, runtime, ..
+            }) if comp_id.as_deref() == Some(target_id) => Some((runtime, runtime_state)),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => {
+                if left
+                    .one_port_runtime_state_with_store(target_id, runtime_state)
+                    .is_some()
+                {
+                    left.one_port_runtime_state_mut_with_store(target_id, runtime_state)
+                } else {
+                    right.one_port_runtime_state_mut_with_store(target_id, runtime_state)
+                }
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.one_port_runtime_state_mut_with_store(target_id, runtime_state)
+            }
+            Self::RType { children, .. } => {
+                let child = children.iter().find(|child| {
+                    child
+                        .one_port_runtime_state_with_store(target_id, runtime_state)
+                        .is_some()
+                })?;
+                child.one_port_runtime_state_mut_with_store(target_id, runtime_state)
+            }
+        }
+    }
+
+    /// Bind every stateful one-port leaf to a dense slot and return the owning state store.
+    ///
+    /// DynNode is topology only. Capacitor/inductor leaves carry an unbound
+    /// `RuntimeOnePort`; this method assigns slots in traversal order so
+    /// stages can own the physical state and WDF wave sidecar explicitly.
+    pub fn bind_runtime_state(&mut self) -> RuntimeState {
+        let mut runtime_state = RuntimeState::new();
+        self.bind_runtime_state_slots(&mut runtime_state);
+        runtime_state
+    }
+
+    fn bind_runtime_state_slots(&mut self, runtime_state: &mut RuntimeState) {
+        match self {
+            Self::Leaf(LeafKind::OnePort { runtime, .. }) => {
+                runtime.state_slot = runtime_state.allocate_one_port(runtime.spec.kind);
+            }
+            Self::Leaf(_) => {}
+            Self::Binary { left, right, .. } => {
+                left.bind_runtime_state_slots(runtime_state);
+                right.bind_runtime_state_slots(runtime_state);
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.bind_runtime_state_slots(runtime_state)
+            }
+            Self::RType { children, .. } => {
+                for child in children {
+                    child.bind_runtime_state_slots(runtime_state);
+                }
+            }
+        }
+    }
+}
+
+fn projected_leaf_voltage(leaf: &LeafKind, incident: crate::Wave) -> crate::Wave {
+    match leaf {
+        LeafKind::Resistor(_) | LeafKind::Pot(_) | LeafKind::SwitchedResistor(_) => incident / 2.0,
+        LeafKind::OnePort { .. } => 0.0,
+        LeafKind::LeakyCapacitor(cap) => incident * cap.leakage_decay,
+        LeafKind::VoltageSource(_)
+        | LeafKind::Photocoupler(_)
+        | LeafKind::JfetVr(_)
+        | LeafKind::JaMagnetizing(_) => 0.0,
+        LeafKind::UnitDelay(_) => 0.0,
+    }
+}
+
+fn projected_leaf_voltage_with_state(
+    leaf: &LeafKind,
+    incident: crate::Wave,
+    runtime_state: &RuntimeState,
+) -> crate::Wave {
+    match leaf {
+        LeafKind::OnePort { runtime, .. } => {
+            runtime.wdf_projected_leaf_voltage(incident, runtime_state)
+        }
+        _ => projected_leaf_voltage(leaf, incident),
+    }
+}
+
+fn projected_leaf_voltage_incident_gain(leaf: &LeafKind) -> crate::Wave {
+    match leaf {
+        LeafKind::Resistor(_)
+        | LeafKind::Pot(_)
+        | LeafKind::SwitchedResistor(_)
+        | LeafKind::OnePort { .. } => 0.5,
+        LeafKind::LeakyCapacitor(cap) => cap.leakage_decay,
+        LeafKind::VoltageSource(_)
+        | LeafKind::Photocoupler(_)
+        | LeafKind::JfetVr(_)
+        | LeafKind::JaMagnetizing(_) => 0.0,
+        LeafKind::UnitDelay(_) => 0.0,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Constructors — backward-compatible factory methods
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[allow(non_snake_case)]
 impl DynNode {
-    pub fn Resistor(comp_id: Option<String>, rp: f64) -> Self {
+    pub fn Resistor(comp_id: Option<String>, rp: crate::Wave) -> Self {
         Self::Leaf(LeafKind::Resistor(WdfResistor {
             comp_id,
             rp,
@@ -137,24 +323,19 @@ impl DynNode {
         }))
     }
 
-    pub fn Capacitor(comp_id: Option<String>, capacitance: f64, rp: f64) -> Self {
-        Self::Leaf(LeafKind::Capacitor(WdfCapacitor {
-            comp_id,
-            capacitance,
-            rp,
-            state: 0.0,
-            last_b: 0.0,
-        }))
+    pub fn Capacitor(comp_id: Option<String>, capacitance: crate::Wave, rp: crate::Wave) -> Self {
+        let kind = OnePortKind::Capacitor(capacitance);
+        Self::OnePort(comp_id, kind, kind.sample_rate_for_rp(rp))
     }
 
     pub fn LeakyCapacitor(
         comp_id: Option<String>,
-        capacitance: f64,
-        rp: f64,
-        leakage_decay: f64,
-        da_coef: Option<f64>,
-        da_state: f64,
-        da_rate: f64,
+        capacitance: crate::Wave,
+        rp: crate::Wave,
+        leakage_decay: crate::Wave,
+        da_coef: Option<crate::Wave>,
+        da_state: crate::Wave,
+        da_rate: crate::Wave,
     ) -> Self {
         Self::Leaf(LeafKind::LeakyCapacitor(WdfLeakyCapacitor {
             comp_id,
@@ -168,32 +349,59 @@ impl DynNode {
         }))
     }
 
-    pub fn Inductor(comp_id: Option<String>, inductance: f64, rp: f64) -> Self {
-        Self::Leaf(LeafKind::Inductor(WdfInductor {
-            comp_id,
-            inductance,
-            rp,
-            state: 0.0,
-        }))
+    pub fn Inductor(comp_id: Option<String>, inductance: crate::Wave, rp: crate::Wave) -> Self {
+        let kind = OnePortKind::Inductor(inductance);
+        Self::OnePort(comp_id, kind, kind.sample_rate_for_rp(rp))
     }
 
-    pub fn VoltageSource(voltage: f64, rp: f64) -> Self {
+    pub fn JaMagnetizing(
+        comp_id: Option<String>,
+        model: JaCoreModel,
+        sample_rate: crate::Wave,
+        rp: crate::Wave,
+    ) -> Self {
+        Self::JaMagnetizingWithDcBias(comp_id, model, sample_rate, rp, 0.0)
+    }
+
+    pub fn JaMagnetizingWithDcBias(
+        comp_id: Option<String>,
+        model: JaCoreModel,
+        sample_rate: crate::Wave,
+        rp: crate::Wave,
+        dc_bias_current: crate::Wave,
+    ) -> Self {
+        Self::Leaf(LeafKind::JaMagnetizing(WdfJaMagnetizing::new_with_dc_bias(
+            comp_id,
+            model,
+            sample_rate,
+            rp,
+            dc_bias_current,
+        )))
+    }
+
+    pub fn OnePort(comp_id: Option<String>, kind: OnePortKind, sample_rate: crate::Wave) -> Self {
+        Self::Leaf(LeafKind::one_port(comp_id, kind, sample_rate))
+    }
+
+    pub fn VoltageSource(voltage: crate::Wave, rp: crate::Wave) -> Self {
         Self::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
             voltage,
             rp,
             is_cathode_bias: false,
+            port_name: None,
         }))
     }
 
-    pub fn CathodeBiasSource(voltage: f64, rp: f64) -> Self {
+    pub fn CathodeBiasSource(voltage: crate::Wave, rp: crate::Wave) -> Self {
         Self::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
             voltage,
             rp,
             is_cathode_bias: true,
+            port_name: None,
         }))
     }
 
-    pub fn UnitDelay(rp: f64) -> Self {
+    pub fn UnitDelay(rp: crate::Wave) -> Self {
         Self::Leaf(LeafKind::UnitDelay(WdfUnitDelay {
             rp,
             state: 0.0,
@@ -201,7 +409,12 @@ impl DynNode {
         }))
     }
 
-    pub fn Pot(comp_id: String, max_resistance: f64, position: f64, taper: PotTaper) -> Self {
+    pub fn Pot(
+        comp_id: String,
+        max_resistance: crate::Wave,
+        position: crate::Wave,
+        taper: PotTaper,
+    ) -> Self {
         let tapered_pos = taper.apply(position);
         let rp = (tapered_pos * max_resistance).max(max_resistance * 0.001);
         Self::Leaf(LeafKind::Pot(WdfPot {
@@ -235,8 +448,8 @@ impl DynNode {
         switch_id: String,
         path_index: usize,
         num_paths: usize,
-        r_active: f64,
-        r_inactive: f64,
+        r_active: crate::Wave,
+        r_inactive: crate::Wave,
     ) -> Self {
         let position = 0;
         let rp = if path_index == position {
@@ -293,7 +506,7 @@ impl DynNode {
         }
     }
 
-    pub fn TransformerNode(secondary: Box<DynNode>, turns_ratio: f64) -> Self {
+    pub fn TransformerNode(secondary: Box<DynNode>, turns_ratio: crate::Wave) -> Self {
         let r_sec = secondary.port_resistance();
         let rp = turns_ratio * turns_ratio * r_sec;
         Self::Transformer {
@@ -366,7 +579,7 @@ impl DynNode {
 // ═══════════════════════════════════════════════════════════════════════════
 
 impl DynNode {
-    pub fn port_resistance(&self) -> f64 {
+    pub fn port_resistance(&self) -> crate::Wave {
         match self {
             Self::Leaf(leaf) => leaf.port_resistance(),
             Self::Binary { rp, .. } | Self::Transformer { rp, .. } => *rp,
@@ -392,7 +605,7 @@ impl DynNode {
 
     /// Find a capacitor's voltage by component ID.
     /// Searches the tree recursively via `find_leaf`. Returns None if not found.
-    pub fn find_cap_state(&self, target_id: &str) -> Option<f64> {
+    pub fn find_cap_state(&self, target_id: &str) -> Option<crate::Wave> {
         self.find_leaf(&|leaf| {
             if leaf.comp_id() == Some(target_id)
                 && (leaf.type_tag() == "capacitor" || leaf.type_tag() == "leaky_capacitor")
@@ -406,8 +619,18 @@ impl DynNode {
 
     /// Scatter-up: compute reflected wave (bottom → root), caching child waves.
     #[inline]
-    pub fn reflected(&mut self) -> f64 {
+    pub fn reflected(&mut self) -> crate::Wave {
+        self.reflected_with_state(&mut RuntimeState::new())
+    }
+
+    #[inline]
+    /// Scatter-up using an explicit runtime state owner.
+    ///
+    /// This is the stateful form used by stage-owned runtime state and by
+    /// compiler helpers that operate on a cloned tree plus cloned state.
+    pub fn reflected_with_state(&mut self, runtime_state: &mut RuntimeState) -> crate::Wave {
         match self {
+            Self::Leaf(LeafKind::OnePort { runtime, .. }) => runtime.wdf_reflected(runtime_state),
             Self::Leaf(leaf) => leaf.reflected(),
             Self::Binary {
                 kind,
@@ -418,8 +641,8 @@ impl DynNode {
                 b2,
                 ..
             } => {
-                *b1 = left.reflected();
-                *b2 = right.reflected();
+                *b1 = left.reflected_with_state(runtime_state);
+                *b2 = right.reflected_with_state(runtime_state);
                 match kind {
                     BinaryKind::Series => -(*b1 + *b2),
                     BinaryKind::Parallel => *b1 + *gamma * (*b2 - *b1),
@@ -431,20 +654,73 @@ impl DynNode {
                 b_sec,
                 ..
             } => {
-                *b_sec = secondary.reflected();
+                *b_sec = secondary.reflected_with_state(runtime_state);
                 *turns_ratio * *b_sec
             }
             Self::RType { adaptor, children } => {
-                let b_children: Vec<f64> = children.iter_mut().map(|c| c.reflected()).collect();
+                let b_children: Vec<crate::Wave> = children
+                    .iter_mut()
+                    .map(|c| c.reflected_with_state(runtime_state))
+                    .collect();
                 adaptor.scatter_up(&b_children)
+            }
+        }
+    }
+
+    /// Derivative of this node's reflected wave with respect to a global
+    /// `set_voltage()` call on the tree's unnamed voltage source. This lets
+    /// coupled BKM build a Jacobian without finite-differencing each block.
+    pub fn reflected_voltage_gain(&self) -> crate::Wave {
+        match self.structural() {
+            Self::Leaf(leaf) => match leaf {
+                LeafKind::VoltageSource(vs) if vs.port_name.is_none() && !vs.is_cathode_bias => 2.0,
+                _ => 0.0,
+            },
+            Self::Binary {
+                kind,
+                left,
+                right,
+                gamma,
+                ..
+            } => {
+                let g1 = left.reflected_voltage_gain();
+                let g2 = right.reflected_voltage_gain();
+                match kind {
+                    BinaryKind::Series => -(g1 + g2),
+                    BinaryKind::Parallel => (1.0 - *gamma) * g1 + *gamma * g2,
+                }
+            }
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                ..
+            } => *turns_ratio * secondary.reflected_voltage_gain(),
+            Self::RType { adaptor, children } => {
+                let gains: Vec<crate::Wave> = children
+                    .iter()
+                    .map(|child| child.reflected_voltage_gain())
+                    .collect();
+                adaptor.scatter_up_gain(&gains)
             }
         }
     }
 
     /// Scatter-down + state update: propagate incident wave (root → leaves).
     #[inline]
-    pub fn set_incident(&mut self, a: f64) {
+    pub fn set_incident(&mut self, a: crate::Wave) {
+        self.set_incident_with_state(a, &mut RuntimeState::new());
+    }
+
+    #[inline]
+    /// Scatter-down using an explicit runtime state owner.
+    ///
+    /// Call this after `reflected_with_state` when the tree has state-slot
+    /// bindings but no embedded `Runtime` wrapper.
+    pub fn set_incident_with_state(&mut self, a: crate::Wave, runtime_state: &mut RuntimeState) {
         match self {
+            Self::Leaf(LeafKind::OnePort { runtime, .. }) => {
+                runtime.wdf_set_incident(a, runtime_state)
+            }
             Self::Leaf(leaf) => leaf.set_incident(a),
             Self::Binary {
                 kind,
@@ -459,15 +735,15 @@ impl DynNode {
                     let sum = *b1 + *b2 + a;
                     let a1 = *b1 - *gamma * sum;
                     let a2 = *b2 - (1.0 - *gamma) * sum;
-                    left.set_incident(a1);
-                    right.set_incident(a2);
+                    left.set_incident_with_state(a1, runtime_state);
+                    right.set_incident_with_state(a2, runtime_state);
                 }
                 BinaryKind::Parallel => {
                     let diff = *b2 - *b1;
                     let a1 = a + *gamma * diff;
                     let a2 = a - (1.0 - *gamma) * diff;
-                    left.set_incident(a1);
-                    right.set_incident(a2);
+                    left.set_incident_with_state(a1, runtime_state);
+                    right.set_incident_with_state(a2, runtime_state);
                 }
             },
             Self::Transformer {
@@ -476,30 +752,208 @@ impl DynNode {
                 ..
             } => {
                 let a_sec = a / *turns_ratio;
-                secondary.set_incident(a_sec);
+                secondary.set_incident_with_state(a_sec, runtime_state);
             }
             Self::RType { adaptor, children } => {
                 let a_children = adaptor.scatter_down(a);
                 for (child, &a_i) in children.iter_mut().zip(a_children.iter()) {
-                    child.set_incident(a_i);
+                    child.set_incident_with_state(a_i, runtime_state);
                 }
             }
         }
     }
 
-    /// Set the voltage source value (searches recursively).
-    /// CathodeBiasSource leaves return false from set_voltage, maintaining fixed DC.
-    pub fn set_voltage(&mut self, v: f64) {
+    /// Set the main voltage source value.
+    ///
+    /// Fast path: the VS is always the left child of the root Binary (Series)
+    /// node, placed there by `with_voltage_source()`. We access it directly
+    /// instead of walking the entire tree via `for_each_leaf_mut`.
+    ///
+    /// Falls back to full tree walk if the fast path doesn't find a VS.
+    pub fn set_voltage(&mut self, v: crate::Wave) {
+        // Fast path: root is Binary(Series), left child is Leaf(VoltageSource)
+        if let DynNode::Binary { ref mut left, .. } = self {
+            if let DynNode::Leaf(ref mut leaf) = **left {
+                if leaf.set_voltage(v) {
+                    return;
+                }
+            }
+        }
+        // Fallback: walk the tree (handles unusual topologies)
         self.for_each_leaf_mut(&mut |leaf| leaf.set_voltage(v));
     }
 
+    /// Set the VS leaf's port resistance (source impedance) and recompute
+    /// all cached gamma/rp values up the tree.
+    ///
+    /// Used by blockwise K-method: the Thevenin impedance at each block's
+    /// coupling port determines the VS source impedance. This affects the
+    /// Series adaptor's gamma and thus the filter's frequency response.
+    ///
+    /// After calling this, the tree's port_resistance() will change,
+    /// so K-tables must be regenerated.
+    pub fn set_vs_port_resistance(&mut self, rp: crate::Wave) {
+        // Fast path: root is Binary(Series), left child is Leaf(VoltageSource).
+        // This is the standard WDF tree topology from with_voltage_source().
+        if let DynNode::Binary { ref mut left, .. } = self {
+            if let DynNode::Leaf(LeafKind::VoltageSource(ref mut vs)) = **left {
+                vs.rp = rp;
+            }
+        }
+        // Recompute all cached gamma/rp values in the tree
+        self.recompute();
+    }
+
+    /// Set a specific port's voltage source by port name.
+    /// Returns true if found. Used for CV input ports.
+    /// Bypasses the set_voltage guard (which blocks port-named VS from
+    /// being overwritten by the global set_voltage call).
+    ///
+    /// NOTE: Prefer `resolve_port_vs_ptr` + direct pointer write for hot paths.
+    /// This method walks the tree recursively with string comparison.
+    pub fn set_voltage_by_port(&mut self, port_name: &str, v: crate::Wave) -> bool {
+        match self.structural_mut() {
+            DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
+                if vs.port_name.as_deref() == Some(port_name) {
+                    vs.voltage = v; // Direct set, bypasses trait guard
+                    true
+                } else {
+                    false
+                }
+            }
+            DynNode::Leaf(_) => false,
+            DynNode::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            } => left.set_voltage_by_port(port_name, v) || right.set_voltage_by_port(port_name, v),
+            _ => false,
+        }
+    }
+
+    /// Resolve the main (non-port) VS leaf's `voltage` field pointer.
+    ///
+    /// Walks the tree once to find the first `WdfVoltageSource` without a
+    /// `port_name` and that is not a cathode bias source. Returns a raw
+    /// pointer to its `voltage: crate::Wave` field. The pointer is stable because
+    /// all non-root DynNode children are heap-allocated via `Box`.
+    ///
+    /// # Safety
+    /// The returned pointer is valid as long as the tree is not dropped or
+    /// structurally modified (which never happens after construction).
+    pub fn resolve_main_vs_ptr(&mut self) -> Option<*mut crate::Wave> {
+        match self.structural_mut() {
+            DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
+                if vs.port_name.is_none() && !vs.is_cathode_bias {
+                    Some(&mut vs.voltage as *mut crate::Wave)
+                } else {
+                    None
+                }
+            }
+            DynNode::Leaf(_) => None,
+            DynNode::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            } => left
+                .resolve_main_vs_ptr()
+                .or_else(|| right.resolve_main_vs_ptr()),
+            DynNode::Transformer {
+                ref mut secondary, ..
+            } => secondary.resolve_main_vs_ptr(),
+            DynNode::RType {
+                ref mut children, ..
+            } => {
+                for c in children.iter_mut() {
+                    if let Some(p) = c.resolve_main_vs_ptr() {
+                        return Some(p);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Resolve a named port VS leaf's `voltage` field pointer.
+    ///
+    /// Walks the tree once to find the `WdfVoltageSource` with matching
+    /// `port_name`. Returns a raw pointer to its `voltage: crate::Wave` field.
+    ///
+    /// # Safety
+    /// Same as `resolve_main_vs_ptr` — valid as long as tree is not dropped.
+    pub fn resolve_port_vs_ptr(&mut self, port_name: &str) -> Option<*mut crate::Wave> {
+        match self.structural_mut() {
+            DynNode::Leaf(LeafKind::VoltageSource(vs)) => {
+                if vs.port_name.as_deref() == Some(port_name) {
+                    Some(&mut vs.voltage as *mut crate::Wave)
+                } else {
+                    None
+                }
+            }
+            DynNode::Leaf(_) => None,
+            DynNode::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            } => left
+                .resolve_port_vs_ptr(port_name)
+                .or_else(|| right.resolve_port_vs_ptr(port_name)),
+            DynNode::Transformer {
+                ref mut secondary, ..
+            } => secondary.resolve_port_vs_ptr(port_name),
+            DynNode::RType {
+                ref mut children, ..
+            } => {
+                for c in children.iter_mut() {
+                    if let Some(p) = c.resolve_port_vs_ptr(port_name) {
+                        return Some(p);
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// Wrap a specific leaf (found by comp_id) with a named VS in series.
+    /// The VS represents a voltage port driving current through the leaf.
+    /// Returns true if the leaf was found and wrapped.
+    pub fn wrap_leaf_with_vs(&mut self, target_comp_id: &str, port_name: &str) -> bool {
+        match self.structural_mut() {
+            DynNode::Leaf(ref leaf) => {
+                if leaf.comp_id() == Some(target_comp_id) {
+                    // Found the target leaf — wrap self with Series(VS, self)
+                    let port_vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
+                        voltage: 0.0,
+                        rp: 1.0,
+                        is_cathode_bias: false,
+                        port_name: Some(alloc::string::String::from(port_name)),
+                    }));
+                    let old = core::mem::replace(self, DynNode::VoltageSource(0.0, 1.0));
+                    *self = DynNode::Series(Box::new(port_vs), Box::new(old));
+                    true
+                } else {
+                    false
+                }
+            }
+            DynNode::Binary {
+                ref mut left,
+                ref mut right,
+                ..
+            } => {
+                left.wrap_leaf_with_vs(target_comp_id, port_name)
+                    || right.wrap_leaf_with_vs(target_comp_id, port_name)
+            }
+            _ => false, // Transformer, RType — not expected for port injection
+        }
+    }
+
     /// Update a pot's position. Returns true if found.
-    pub fn set_pot(&mut self, target_id: &str, pos: f64) -> bool {
+    pub fn set_pot(&mut self, target_id: &str, pos: crate::Wave) -> bool {
         self.for_each_leaf_mut(&mut |leaf| leaf.set_control(target_id, pos))
     }
 
     /// Update a resistor's resistance by component ID. Returns true if found.
-    pub fn set_resistor(&mut self, target_id: &str, new_ohms: f64) -> bool {
+    pub fn set_resistor(&mut self, target_id: &str, new_ohms: crate::Wave) -> bool {
         self.for_each_leaf_mut(&mut |leaf| {
             if leaf.comp_id() == Some(target_id) && leaf.type_tag() == "resistor" {
                 leaf.set_resistance(new_ohms)
@@ -510,7 +964,12 @@ impl DynNode {
     }
 
     /// Update a capacitor's value and port resistance by component ID.
-    pub fn set_capacitor(&mut self, target_id: &str, new_farads: f64, sample_rate: f64) -> bool {
+    pub fn set_capacitor(
+        &mut self,
+        target_id: &str,
+        new_farads: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> bool {
         self.for_each_leaf_mut(&mut |leaf| {
             let tag = leaf.type_tag();
             if leaf.comp_id() == Some(target_id) && (tag == "capacitor" || tag == "leaky_capacitor")
@@ -525,14 +984,16 @@ impl DynNode {
     }
 
     /// Update an inductor's value and port resistance by component ID.
-    pub fn set_inductor(&mut self, target_id: &str, new_henries: f64, sample_rate: f64) -> bool {
+    pub fn set_inductor(
+        &mut self,
+        target_id: &str,
+        new_henries: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> bool {
         self.for_each_leaf_mut(&mut |leaf| {
             if leaf.comp_id() == Some(target_id) && leaf.type_tag() == "inductor" {
-                // Update inductance value — inductors don't use set_control for value changes
-                // but we need to update rp. We use set_resistance as a proxy for now.
-                // In practice this would need a dedicated method, but for API compat
-                // we use the fact that inductor rp = 2*fs*L.
-                leaf.set_resistance(2.0 * sample_rate * new_henries);
+                leaf.set_control(target_id, new_henries);
+                leaf.update_sample_rate(sample_rate);
                 true
             } else {
                 false
@@ -541,7 +1002,7 @@ impl DynNode {
     }
 
     /// List all editable passive leaves in the tree.
-    pub fn list_editable_leaves(&self) -> Vec<(String, &'static str, f64)> {
+    pub fn list_editable_leaves(&self) -> Vec<(String, &'static str, crate::Wave)> {
         let mut result = Vec::new();
         self.for_each_leaf(&mut |leaf| {
             if let Some((kind, value)) = leaf.editable_info() {
@@ -554,7 +1015,7 @@ impl DynNode {
     }
 
     /// Read a pot's current resistance by component ID.
-    pub fn get_pot_resistance(&self, target_id: &str) -> Option<f64> {
+    pub fn get_pot_resistance(&self, target_id: &str) -> Option<crate::Wave> {
         self.find_leaf(&|leaf| {
             if leaf.type_tag() == "pot" && leaf_matches_id(leaf, target_id) {
                 Some(leaf.port_resistance())
@@ -565,7 +1026,7 @@ impl DynNode {
     }
 
     /// Read a pot's current position (0.0..1.0) by component ID.
-    pub fn get_pot_position(&self, target_id: &str) -> Option<f64> {
+    pub fn get_pot_position(&self, target_id: &str) -> Option<crate::Wave> {
         self.find_leaf(&|leaf| {
             if leaf.type_tag() == "pot" && leaf_matches_id(leaf, target_id) {
                 leaf.pot_position()
@@ -576,43 +1037,217 @@ impl DynNode {
     }
 
     /// Extract voltage at a named leaf after the down-sweep.
-    /// Visit all leaves (non-short-circuiting).
-    fn visit_leaves(&self, f: &impl Fn(&dyn WdfLeaf)) {
+    pub fn leaf_voltage(&self, target_id: &str) -> Option<crate::Wave> {
+        self.leaf_voltage_with_state(target_id, &RuntimeState::new())
+    }
+
+    /// Extract a named leaf voltage using an explicit runtime state owner.
+    pub fn leaf_voltage_with_state(
+        &self,
+        target_id: &str,
+        runtime_state: &RuntimeState,
+    ) -> Option<crate::Wave> {
+        // For pots: prefer the non-complement (GND-side) half.
+        // Its voltage = V_wiper (voltage from wiper to GND).
+        // The complement half gives V_in - V_wiper (wrong for output).
+        let best: Cell<Option<(crate::Wave, bool)>> = Cell::new(None);
+        self.visit_leaf_voltage(target_id, runtime_state, &best);
+        best.get().map(|(v, _)| v)
+    }
+
+    fn visit_leaf_voltage(
+        &self,
+        target_id: &str,
+        runtime_state: &RuntimeState,
+        best: &Cell<Option<(crate::Wave, bool)>>,
+    ) {
         match self {
-            Self::Leaf(leaf) => f(leaf),
-            Self::Binary { left, right, .. } => {
-                left.visit_leaves(f);
-                right.visit_leaves(f);
+            Self::Leaf(leaf) => {
+                if leaf_matches_id(leaf, target_id) {
+                    let v = match leaf {
+                        LeafKind::OnePort { runtime, .. } => {
+                            runtime.wdf_leaf_voltage(runtime_state)
+                        }
+                        _ => leaf.leaf_voltage(),
+                    };
+                    let is_preferred = leaf.type_tag() == "pot" && !leaf.is_complement();
+                    match best.get() {
+                        None => best.set(Some((v, is_preferred))),
+                        Some((_, false)) if is_preferred => best.set(Some((v, true))),
+                        _ => {}
+                    }
+                }
             }
-            Self::Transformer { secondary, .. } => secondary.visit_leaves(f),
+            Self::Binary { left, right, .. } => {
+                left.visit_leaf_voltage(target_id, runtime_state, best);
+                right.visit_leaf_voltage(target_id, runtime_state, best);
+            }
+            Self::Transformer { secondary, .. } => {
+                secondary.visit_leaf_voltage(target_id, runtime_state, best);
+            }
             Self::RType { children, .. } => {
-                for c in children { c.visit_leaves(f); }
+                for child in children {
+                    child.visit_leaf_voltage(target_id, runtime_state, best);
+                }
             }
         }
     }
 
-    pub fn leaf_voltage(&self, target_id: &str) -> Option<f64> {
-        // For pots: prefer the non-complement (GND-side) half.
-        // Its voltage = V_wiper (voltage from wiper to GND).
-        // The complement half gives V_in - V_wiper (wrong for output).
-        let best: Cell<Option<(f64, bool)>> = Cell::new(None);
-        self.visit_leaves(&|leaf| {
-            if leaf_matches_id(leaf, target_id) {
-                let v = leaf.leaf_voltage();
-                let is_preferred = leaf.type_tag() == "pot" && !leaf.is_complement();
-                match best.get() {
-                    None => best.set(Some((v, is_preferred))),
-                    Some((_, false)) if is_preferred => best.set(Some((v, true))),
-                    _ => {}
+    /// Project the voltage at a named leaf for a root incident wave without
+    /// mutating leaf state. This is used by implicit solvers that need a
+    /// probe voltage during Newton iteration before the final down-sweep.
+    pub fn leaf_voltage_for_incident(
+        &self,
+        target_id: &str,
+        a_root: crate::Wave,
+    ) -> Option<crate::Wave> {
+        self.leaf_voltage_for_incident_with_state(target_id, a_root, &RuntimeState::new())
+    }
+
+    pub fn leaf_voltage_for_incident_with_state(
+        &self,
+        target_id: &str,
+        a_root: crate::Wave,
+        runtime_state: &RuntimeState,
+    ) -> Option<crate::Wave> {
+        let best: Cell<Option<(crate::Wave, bool)>> = Cell::new(None);
+        self.visit_leaf_voltage_for_incident(target_id, a_root, runtime_state, &best);
+        best.get().map(|(v, _)| v)
+    }
+
+    /// Derivative of `leaf_voltage_for_incident(target_id, a_root)` with
+    /// respect to `a_root`, holding cached reflected waves constant.
+    pub fn leaf_voltage_for_incident_gain(&self, target_id: &str) -> Option<crate::Wave> {
+        let best: Cell<Option<(crate::Wave, bool)>> = Cell::new(None);
+        self.visit_leaf_voltage_for_incident_gain(target_id, 1.0, &best);
+        best.get().map(|(v, _)| v)
+    }
+
+    fn visit_leaf_voltage_for_incident(
+        &self,
+        target_id: &str,
+        a: crate::Wave,
+        runtime_state: &RuntimeState,
+        best: &Cell<Option<(crate::Wave, bool)>>,
+    ) {
+        match self {
+            Self::Leaf(leaf) => {
+                if leaf_matches_id(leaf, target_id) {
+                    let v = projected_leaf_voltage_with_state(leaf, a, runtime_state);
+                    let is_preferred = leaf.type_tag() == "pot" && !leaf.is_complement();
+                    match best.get() {
+                        None => best.set(Some((v, is_preferred))),
+                        Some((_, false)) if is_preferred => best.set(Some((v, true))),
+                        _ => {}
+                    }
                 }
             }
-        });
-        best.get().map(|(v, _)| v)
+            Self::Binary {
+                kind,
+                left,
+                right,
+                gamma,
+                b1,
+                b2,
+                ..
+            } => match kind {
+                BinaryKind::Series => {
+                    let sum = *b1 + *b2 + a;
+                    let a1 = *b1 - *gamma * sum;
+                    let a2 = *b2 - (1.0 - *gamma) * sum;
+                    left.visit_leaf_voltage_for_incident(target_id, a1, runtime_state, best);
+                    right.visit_leaf_voltage_for_incident(target_id, a2, runtime_state, best);
+                }
+                BinaryKind::Parallel => {
+                    let diff = *b2 - *b1;
+                    let a1 = a + *gamma * diff;
+                    let a2 = a - (1.0 - *gamma) * diff;
+                    left.visit_leaf_voltage_for_incident(target_id, a1, runtime_state, best);
+                    right.visit_leaf_voltage_for_incident(target_id, a2, runtime_state, best);
+                }
+            },
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                ..
+            } => {
+                secondary.visit_leaf_voltage_for_incident(
+                    target_id,
+                    a / *turns_ratio,
+                    runtime_state,
+                    best,
+                );
+            }
+            Self::RType { adaptor, children } => {
+                let a_children = adaptor.scatter_down(a);
+                for (child, &a_i) in children.iter().zip(a_children.iter()) {
+                    child.visit_leaf_voltage_for_incident(target_id, a_i, runtime_state, best);
+                }
+            }
+        }
+    }
+
+    fn visit_leaf_voltage_for_incident_gain(
+        &self,
+        target_id: &str,
+        a_gain: crate::Wave,
+        best: &Cell<Option<(crate::Wave, bool)>>,
+    ) {
+        match self.structural() {
+            Self::Leaf(leaf) => {
+                if leaf_matches_id(leaf, target_id) {
+                    let gain = projected_leaf_voltage_incident_gain(leaf) * a_gain;
+                    let is_preferred = leaf.type_tag() == "pot" && !leaf.is_complement();
+                    match best.get() {
+                        None => best.set(Some((gain, is_preferred))),
+                        Some((_, false)) if is_preferred => best.set(Some((gain, true))),
+                        _ => {}
+                    }
+                }
+            }
+            Self::Binary {
+                kind,
+                left,
+                right,
+                gamma,
+                ..
+            } => match kind {
+                BinaryKind::Series => {
+                    left.visit_leaf_voltage_for_incident_gain(target_id, -*gamma * a_gain, best);
+                    right.visit_leaf_voltage_for_incident_gain(
+                        target_id,
+                        -(1.0 - *gamma) * a_gain,
+                        best,
+                    );
+                }
+                BinaryKind::Parallel => {
+                    left.visit_leaf_voltage_for_incident_gain(target_id, a_gain, best);
+                    right.visit_leaf_voltage_for_incident_gain(target_id, a_gain, best);
+                }
+            },
+            Self::Transformer {
+                secondary,
+                turns_ratio,
+                ..
+            } => {
+                secondary.visit_leaf_voltage_for_incident_gain(
+                    target_id,
+                    a_gain / *turns_ratio,
+                    best,
+                );
+            }
+            Self::RType { adaptor, children } => {
+                let child_gains = adaptor.scatter_down_parent_gains();
+                for (child, gain) in children.iter().zip(child_gains.iter()) {
+                    child.visit_leaf_voltage_for_incident_gain(target_id, a_gain * *gain, best);
+                }
+            }
+        }
     }
 
     /// Return this leaf's component ID (only if this node is a leaf).
     pub fn leaf_comp_id(&self) -> Option<String> {
-        match self {
+        match self.structural() {
             Self::Leaf(leaf) => leaf.comp_id().map(|s| s.to_string()),
             _ => None,
         }
@@ -620,7 +1255,7 @@ impl DynNode {
 
     /// Tag the deepest Resistor leaf as a Pot for output probe identification.
     pub fn tag_as_probe(&mut self, tag: &str) -> bool {
-        match self {
+        match self.structural_mut() {
             Self::Leaf(leaf) => {
                 if leaf.type_tag() == "resistor" {
                     let rp = leaf.port_resistance();
@@ -646,7 +1281,7 @@ impl DynNode {
     /// Recompute all adaptor coefficients bottom-up (call after pot changes).
     /// Also clears dirty flags so incremental recompute starts clean.
     pub fn recompute(&mut self) {
-        match self {
+        match self.structural_mut() {
             Self::Binary {
                 kind,
                 left,
@@ -704,7 +1339,7 @@ impl DynNode {
     /// Post-construction pass: sets `has_dynamic` based on whether any descendant
     /// leaf is dynamic. Call once after tree construction.
     pub fn compute_dynamic_flags(&mut self) -> bool {
-        match self {
+        match self.structural_mut() {
             Self::Leaf(leaf) => leaf.is_dynamic(),
             Self::Binary {
                 left,
@@ -745,14 +1380,11 @@ impl DynNode {
     ///
     /// Uses bitwise OR (not short-circuit) so split pots (__aw/__wb) that
     /// appear in both subtrees are both updated.
-    pub fn set_pot_dirty(&mut self, target_id: &str, pos: f64) -> bool {
-        match self {
+    pub fn set_pot_dirty(&mut self, target_id: &str, pos: crate::Wave) -> bool {
+        match self.structural_mut() {
             Self::Leaf(leaf) => leaf.set_control(target_id, pos),
             Self::Binary {
-                left,
-                right,
-                dirty,
-                ..
+                left, right, dirty, ..
             } => {
                 let a = left.set_pot_dirty(target_id, pos);
                 let b = right.set_pot_dirty(target_id, pos);
@@ -783,16 +1415,14 @@ impl DynNode {
 
     /// Recompute only dirty subtrees. Skips entirely-static subtrees.
     pub fn recompute_incremental(&mut self) {
-        match self {
+        match self.structural_mut() {
             Self::Leaf(_) => {}
             Self::Binary {
                 has_dynamic: false, ..
             } => {
                 // All static — nothing ever changes.
             }
-            Self::Binary {
-                dirty: false, ..
-            } => {
+            Self::Binary { dirty: false, .. } => {
                 // Children haven't changed since last recompute.
             }
             Self::Binary {
@@ -827,9 +1457,7 @@ impl DynNode {
             } => {
                 // All static.
             }
-            Self::Transformer {
-                dirty: false, ..
-            } => {
+            Self::Transformer { dirty: false, .. } => {
                 // Children haven't changed.
             }
             Self::Transformer {
@@ -854,7 +1482,7 @@ impl DynNode {
     }
 
     /// Update sample rate for all reactive elements.
-    pub fn set_sample_rate(&mut self, sample_rate: f64) {
+    pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.for_each_leaf_mut(&mut |leaf| {
             leaf.update_sample_rate(sample_rate);
             false // don't stop
@@ -862,7 +1490,7 @@ impl DynNode {
     }
 
     /// Update sample rate for all elements (including photocoupler/JFET) with recompute.
-    pub fn update_sample_rate(&mut self, fs: f64) {
+    pub fn update_sample_rate(&mut self, fs: crate::Wave) {
         self.for_each_leaf_mut(&mut |leaf| {
             leaf.update_sample_rate(fs);
             false
@@ -873,7 +1501,12 @@ impl DynNode {
 
     /// Reset all state.
     pub fn reset(&mut self) {
+        self.reset_with_state(&mut RuntimeState::new());
+    }
+
+    pub(crate) fn reset_with_state(&mut self, runtime_state: &mut RuntimeState) {
         match self {
+            Self::Leaf(LeafKind::OnePort { runtime, .. }) => runtime.wdf_reset(runtime_state),
             Self::Leaf(leaf) => leaf.reset(),
             Self::Binary {
                 left,
@@ -884,19 +1517,19 @@ impl DynNode {
             } => {
                 *b1 = 0.0;
                 *b2 = 0.0;
-                left.reset();
-                right.reset();
+                left.reset_with_state(runtime_state);
+                right.reset_with_state(runtime_state);
             }
             Self::Transformer {
                 secondary, b_sec, ..
             } => {
                 *b_sec = 0.0;
-                secondary.reset();
+                secondary.reset_with_state(runtime_state);
             }
             Self::RType { adaptor, children } => {
                 adaptor.reset();
                 for child in children {
-                    child.reset();
+                    child.reset_with_state(runtime_state);
                 }
             }
         }
@@ -904,18 +1537,31 @@ impl DynNode {
 
     /// Extract voltage from the first reactive element in the tree.
     #[allow(dead_code)]
-    pub fn reactive_voltage(&self) -> Option<f64> {
-        self.find_leaf(&|leaf| {
-            if leaf.is_reactive() {
-                Some(leaf.leaf_voltage())
-            } else {
-                None
+    pub fn reactive_voltage(&self) -> Option<crate::Wave> {
+        self.reactive_voltage_with_state(&RuntimeState::new())
+    }
+
+    fn reactive_voltage_with_state(&self, runtime_state: &RuntimeState) -> Option<crate::Wave> {
+        match self {
+            Self::Leaf(LeafKind::OnePort { runtime, .. }) => {
+                Some(runtime.wdf_leaf_voltage(runtime_state))
             }
-        })
+            Self::Leaf(leaf) if leaf.is_reactive() => Some(leaf.leaf_voltage()),
+            Self::Leaf(_) => None,
+            Self::Binary { left, right, .. } => left
+                .reactive_voltage_with_state(runtime_state)
+                .or_else(|| right.reactive_voltage_with_state(runtime_state)),
+            Self::Transformer { secondary, .. } => {
+                secondary.reactive_voltage_with_state(runtime_state)
+            }
+            Self::RType { children, .. } => children
+                .iter()
+                .find_map(|child| child.reactive_voltage_with_state(runtime_state)),
+        }
     }
 
     /// Compute output voltage for passive WDF stages using resistive termination.
-    pub fn resistive_termination_voltage(&self, b_tree: f64) -> Option<f64> {
+    pub fn resistive_termination_voltage(&self, b_tree: crate::Wave) -> Option<crate::Wave> {
         match self {
             Self::Binary {
                 kind: BinaryKind::Parallel,
@@ -946,7 +1592,7 @@ impl DynNode {
     }
 
     /// Compute junction voltage for series filters.
-    pub fn series_junction_voltage(&self, a_root: f64) -> Option<f64> {
+    pub fn series_junction_voltage(&self, a_root: crate::Wave) -> Option<crate::Wave> {
         match self {
             Self::Binary {
                 kind: BinaryKind::Series,
@@ -978,7 +1624,7 @@ impl DynNode {
     }
 
     /// Extract junction voltage for short-circuit terminated passive filters.
-    pub fn short_circuit_junction_voltage(&self, a_root: f64) -> Option<f64> {
+    pub fn short_circuit_junction_voltage(&self, a_root: crate::Wave) -> Option<crate::Wave> {
         match self {
             Self::Binary {
                 kind: BinaryKind::Series,
@@ -1028,13 +1674,16 @@ impl DynNode {
     /// Extract voltage at the output element in a filter subtree.
     /// For short-circuit terminated filters, the output is at the element
     /// nearest to ground — the right child of the innermost series adaptor.
-    fn extract_load_voltage(&self, a_parent: f64) -> Option<f64> {
+    fn extract_load_voltage(&self, a_parent: crate::Wave) -> Option<crate::Wave> {
         match self {
             Self::Leaf(leaf) => {
                 let tag = leaf.type_tag();
                 // Any passive leaf can be the output: resistor, pot, cap, inductor
-                if tag == "resistor" || tag == "pot" || tag == "capacitor"
-                    || tag == "leaky_capacitor" || tag == "inductor"
+                if tag == "resistor"
+                    || tag == "pot"
+                    || tag == "capacitor"
+                    || tag == "leaky_capacitor"
+                    || tag == "inductor"
                 {
                     Some(a_parent / 2.0)
                 } else {
@@ -1095,7 +1744,8 @@ impl DynNode {
                     // Recurse into children for complex parallel trees
                     let a2 = *b2 - (1.0 - *gamma) * sum;
                     let a1 = *b1 - *gamma * sum;
-                    right.extract_load_voltage(a2)
+                    right
+                        .extract_load_voltage(a2)
                         .or_else(|| left.extract_load_voltage(a1))
                 }
             }
@@ -1124,7 +1774,7 @@ impl DynNode {
     }
 
     /// Set LED drive level for a photocoupler. Returns true if found.
-    pub fn set_photocoupler_led(&mut self, target_id: &str, led_drive: f64) -> bool {
+    pub fn set_photocoupler_led(&mut self, target_id: &str, led_drive: crate::Wave) -> bool {
         self.for_each_leaf_mut(&mut |leaf| {
             if leaf.type_tag() == "photocoupler" && leaf.comp_id() == Some(target_id) {
                 leaf.set_control(target_id, led_drive)
@@ -1135,7 +1785,7 @@ impl DynNode {
     }
 
     /// Set Vgs for a JFET variable resistor leaf. Returns true if found.
-    pub fn set_jfet_vr_vgs(&mut self, target_id: &str, vgs: f64) -> bool {
+    pub fn set_jfet_vr_vgs(&mut self, target_id: &str, vgs: crate::Wave) -> bool {
         self.for_each_leaf_mut(&mut |leaf| {
             if leaf.type_tag() == "jfet_vr" && leaf.comp_id() == Some(target_id) {
                 leaf.set_control(target_id, vgs)
@@ -1150,7 +1800,7 @@ impl DynNode {
         let mut count = 0usize;
         self.for_each_leaf_mut(&mut |leaf| {
             if leaf.type_tag() == "switched_resistor" && leaf.comp_id() == Some(target_switch) {
-                leaf.set_control(target_switch, new_position as f64);
+                leaf.set_control(target_switch, new_position as crate::Wave);
                 count += 1;
                 true
             } else {
@@ -1212,19 +1862,26 @@ impl DynNode {
     }
 
     /// Get the UnitDelay's outgoing state.
-    pub fn get_unit_delay_state(&self) -> f64 {
+    pub fn get_unit_delay_state(&self) -> crate::Wave {
         self.find_leaf(&|leaf| leaf.unit_delay_state())
             .unwrap_or(0.0)
     }
 
     /// Set the UnitDelay's incoming partner state.
-    pub fn set_unit_delay_partner(&mut self, val: f64) -> bool {
+    pub fn set_unit_delay_partner(&mut self, val: crate::Wave) -> bool {
         self.for_each_leaf_mut(&mut |leaf| leaf.set_unit_delay_partner(val))
+    }
+
+    /// Check hybrid linear/nonlinear devices for operating region violations.
+    #[cfg(feature = "runtime-warnings")]
+    pub fn check_hybrid_warnings(&mut self, _v_port: crate::Wave, _sample_index: u64) {
+        // Runtime warnings for JfetVr and Photocoupler need access to inner types.
+        // This is feature-gated diagnostic code; will need concrete downcast support.
     }
 
     /// Count total nodes in tree (for statistics).
     pub fn node_count(&self) -> usize {
-        match self {
+        match self.structural() {
             Self::Leaf(_) => 1,
             Self::Binary { left, right, .. } => 1 + left.node_count() + right.node_count(),
             Self::Transformer { secondary, .. } => 1 + secondary.node_count(),
@@ -1232,5 +1889,212 @@ impl DynNode {
                 1 + children.iter().map(|c| c.node_count()).sum::<usize>()
             }
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::String;
+
+    /// Build a typical WDF tree: Series(VS, Parallel(R, C))
+    fn make_simple_tree() -> DynNode {
+        let vs = DynNode::VoltageSource(0.0, 1.0);
+        let r = DynNode::Resistor(Some(String::from("R1")), 1000.0);
+        let c = DynNode::Capacitor(Some(String::from("C1")), 1e-6, 3316.0);
+        let rc = DynNode::Parallel(Box::new(r), Box::new(c));
+        let mut tree = DynNode::Series(Box::new(vs), Box::new(rc));
+        tree.recompute();
+        tree
+    }
+
+    /// Build a tree with a port VS: Series(VS_main, Series(VS_port, R))
+    fn make_port_tree() -> DynNode {
+        let vs_main = DynNode::VoltageSource(0.0, 1.0);
+        let r = DynNode::Resistor(Some(String::from("R_cv")), 47000.0);
+        // Wrap R_cv with a port VS
+        let port_vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
+            voltage: 0.0,
+            rp: 1.0,
+            is_cathode_bias: false,
+            port_name: Some(String::from("cv_cutoff")),
+        }));
+        let inner = DynNode::Series(Box::new(port_vs), Box::new(r));
+        let mut tree = DynNode::Series(Box::new(vs_main), Box::new(inner));
+        tree.recompute();
+        tree
+    }
+
+    #[test]
+    fn resolve_main_vs_ptr_simple() {
+        let mut tree = make_simple_tree();
+        let mut runtime_state = tree.bind_runtime_state();
+        let ptr = tree.resolve_main_vs_ptr();
+        assert!(ptr.is_some(), "should find main VS");
+
+        // Write via pointer, verify via set_voltage
+        let ptr = ptr.unwrap();
+        unsafe {
+            *ptr = 3.14;
+        }
+
+        // Verify the VS reflects the new voltage
+        let b = tree.reflected_with_state(&mut runtime_state);
+        // reflected() on a VS returns 2*voltage, so with 3.14 the tree
+        // should propagate a non-zero reflected wave
+        assert!(
+            b.abs() > 0.01,
+            "reflected wave should be non-zero after ptr write, got {b}"
+        );
+    }
+
+    #[test]
+    fn resolve_main_vs_ptr_not_port() {
+        let mut tree = make_port_tree();
+        let ptr = tree.resolve_main_vs_ptr();
+        assert!(ptr.is_some(), "should find main (non-port) VS");
+
+        // The main VS is the one WITHOUT port_name
+        unsafe {
+            *ptr.unwrap() = 1.0;
+        }
+
+        // Verify port VS was NOT modified
+        let port_ptr = tree.resolve_port_vs_ptr("cv_cutoff");
+        assert!(port_ptr.is_some());
+        let port_v = unsafe { *port_ptr.unwrap() };
+        assert_eq!(port_v, 0.0, "port VS should be untouched");
+    }
+
+    #[test]
+    fn resolve_port_vs_ptr_found() {
+        let mut tree = make_port_tree();
+        let ptr = tree.resolve_port_vs_ptr("cv_cutoff");
+        assert!(ptr.is_some(), "should find port VS 'cv_cutoff'");
+
+        // Write and read back
+        unsafe {
+            *ptr.unwrap() = 2.5;
+        }
+        let readback = unsafe { *ptr.unwrap() };
+        assert_eq!(readback, 2.5);
+    }
+
+    #[test]
+    fn resolve_port_vs_ptr_not_found() {
+        let mut tree = make_port_tree();
+        let ptr = tree.resolve_port_vs_ptr("nonexistent_port");
+        assert!(ptr.is_none(), "should not find nonexistent port");
+    }
+
+    #[test]
+    fn resolve_port_vs_ptr_independent_of_main() {
+        let mut tree = make_port_tree();
+        let main_ptr = tree.resolve_main_vs_ptr().unwrap();
+        let port_ptr = tree.resolve_port_vs_ptr("cv_cutoff").unwrap();
+
+        // They should point to different locations
+        assert_ne!(
+            main_ptr, port_ptr,
+            "main and port VS should be different pointers"
+        );
+
+        // Write to both independently
+        unsafe {
+            *main_ptr = 1.0;
+            *port_ptr = 5.0;
+        }
+        let main_v = unsafe { *main_ptr };
+        let port_v = unsafe { *port_ptr };
+        assert_eq!(main_v, 1.0);
+        assert_eq!(port_v, 5.0);
+    }
+
+    #[test]
+    fn set_voltage_by_port_matches_ptr() {
+        let mut tree = make_port_tree();
+
+        // Set via tree walk
+        tree.set_voltage_by_port("cv_cutoff", 7.7);
+
+        // Read via cached pointer
+        let ptr = tree.resolve_port_vs_ptr("cv_cutoff").unwrap();
+        let v = unsafe { *ptr };
+        assert_eq!(v, 7.7, "ptr should read value set by tree walk");
+    }
+
+    #[test]
+    fn leaf_voltage_for_incident_matches_downsweep_without_mutating() {
+        let mut tree = make_simple_tree();
+        let mut runtime_state = tree.bind_runtime_state();
+        tree.set_voltage(1.0);
+        let _ = tree.reflected_with_state(&mut runtime_state);
+
+        let before = tree.leaf_voltage_with_state("C1", &runtime_state).unwrap();
+        let projected = tree
+            .leaf_voltage_for_incident_with_state("C1", 0.25, &runtime_state)
+            .unwrap();
+
+        let mut clone = tree.clone();
+        let mut clone_runtime_state = runtime_state.clone();
+        clone.set_incident_with_state(0.25, &mut clone_runtime_state);
+        let expected = clone
+            .leaf_voltage_with_state("C1", &clone_runtime_state)
+            .unwrap();
+
+        assert!(
+            (projected - expected).abs() < 1e-12,
+            "projected voltage should match a real down-sweep: projected={projected}, expected={expected}"
+        );
+        assert_eq!(
+            tree.leaf_voltage_with_state("C1", &runtime_state).unwrap(),
+            before,
+            "projection must not update original leaf state"
+        );
+    }
+
+    #[test]
+    fn ptr_write_visible_via_tree_walk() {
+        let mut tree = make_port_tree();
+        let ptr = tree.resolve_port_vs_ptr("cv_cutoff").unwrap();
+
+        // Write via pointer
+        unsafe {
+            *ptr = 3.3;
+        }
+
+        // Verify set_voltage_by_port (tree walk) overwrites what ptr sees
+        tree.set_voltage_by_port("cv_cutoff", 99.0);
+        let v = unsafe { *ptr };
+        assert_eq!(v, 99.0, "tree walk write should be visible via ptr");
+
+        // And ptr write should be visible via another tree walk
+        unsafe {
+            *ptr = 42.0;
+        }
+        // set_voltage_by_port with same name should find the updated value
+        // (it overwrites, but the point is the memory is shared)
+        tree.set_voltage_by_port("cv_cutoff", 0.0);
+        let v2 = unsafe { *ptr };
+        assert_eq!(v2, 0.0);
+    }
+
+    #[test]
+    fn cathode_bias_excluded_from_main() {
+        // Cathode bias VS should NOT be returned by resolve_main_vs_ptr
+        let cb = DynNode::CathodeBiasSource(10.0, 100.0);
+        let r = DynNode::Resistor(Some(String::from("R1")), 1000.0);
+        let mut tree = DynNode::Series(Box::new(cb), Box::new(r));
+        tree.recompute();
+
+        let ptr = tree.resolve_main_vs_ptr();
+        assert!(
+            ptr.is_none(),
+            "cathode bias should not be returned as main VS"
+        );
     }
 }

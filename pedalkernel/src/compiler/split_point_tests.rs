@@ -24,14 +24,23 @@ fn opamp_output_is_voltage_source() {
     use super::components::OpAmp;
     use crate::dsl::OpAmpType;
 
-    let tl072 = OpAmp { op_type: OpAmpType::Tl072 };
-    assert_eq!(tl072.output_impedance(), OutputImpedance::VoltageSource,
-        "Op-amp output is a voltage source (zero impedance via feedback)");
+    let tl072 = OpAmp {
+        op_type: OpAmpType::Tl072,
+    };
+    assert_eq!(
+        tl072.output_impedance(),
+        OutputImpedance::VoltageSource,
+        "Op-amp output is a voltage source (zero impedance via feedback)"
+    );
 
-    let lm308 = OpAmp { op_type: OpAmpType::Lm308 };
+    let lm308 = OpAmp {
+        op_type: OpAmpType::Lm308,
+    };
     assert_eq!(lm308.output_impedance(), OutputImpedance::VoltageSource);
 
-    let jrc4558 = OpAmp { op_type: OpAmpType::Jrc4558 };
+    let jrc4558 = OpAmp {
+        op_type: OpAmpType::Jrc4558,
+    };
     assert_eq!(jrc4558.output_impedance(), OutputImpedance::VoltageSource);
 }
 
@@ -40,20 +49,27 @@ fn ota_output_is_finite() {
     use super::components::OpAmp;
     use crate::dsl::OpAmpType;
 
-    let ca3080 = OpAmp { op_type: OpAmpType::Ca3080 };
-    assert_eq!(ca3080.output_impedance(), OutputImpedance::Finite,
-        "OTA output is a current source (high impedance)");
+    let ca3080 = OpAmp {
+        op_type: OpAmpType::Ca3080,
+    };
+    assert_eq!(
+        ca3080.output_impedance(),
+        OutputImpedance::Finite,
+        "OTA output is a current source (high impedance)"
+    );
 }
 
 #[test]
 fn passive_components_are_finite() {
-    use super::components::{Resistor, Capacitor, Inductor};
+    use super::components::{Capacitor, Inductor, Resistor};
     use crate::dsl::CapConfig;
 
     let r = Resistor { value: 10_000.0 };
     assert_eq!(r.output_impedance(), OutputImpedance::Finite);
 
-    let c = Capacitor { config: CapConfig::new(100e-9) };
+    let c = Capacitor {
+        config: CapConfig::new(100e-9),
+    };
     assert_eq!(c.output_impedance(), OutputImpedance::Finite);
 
     let l = Inductor { value: 0.1 };
@@ -65,7 +81,9 @@ fn diode_is_finite() {
     use super::components::Diode;
     use crate::dsl::DiodeType;
 
-    let d = Diode { diode_type: DiodeType::Silicon };
+    let d = Diode {
+        diode_type: DiodeType::Silicon,
+    };
     assert_eq!(d.output_impedance(), OutputImpedance::Finite);
 }
 
@@ -73,9 +91,14 @@ fn diode_is_finite() {
 fn bjt_is_finite() {
     use super::components::Npn;
 
-    let q = Npn { model: "2n3904".to_string() };
-    assert_eq!(q.output_impedance(), OutputImpedance::Finite,
-        "BJT collector is a current source (high impedance)");
+    let q = Npn {
+        model: "2n3904".to_string(),
+    };
+    assert_eq!(
+        q.output_impedance(),
+        OutputImpedance::Finite,
+        "BJT collector is a current source (high impedance)"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -95,9 +118,26 @@ fn rat_has_few_stages_not_many() {
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
     let total_stages = compiled.stages.len();
-    eprintln!("RAT v1a: {} total stages (wdf={}, iir={}, ss={}, mnl={})",
-        total_stages, compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(),
-        compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count(), compiled.stages.iter().filter(|s| matches!(s, Stage::MultiNl(_))).count());
+    eprintln!(
+        "RAT v1a: {} total stages (wdf={}, iir={}, ss={}, mnl={})",
+        total_stages,
+        compiled.stages.len(),
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::Iir(_)))
+            .count(),
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::StateSpace(_)))
+            .count(),
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::MultiNl(_)))
+            .count()
+    );
 
     // With proper splitting at op-amp outputs, should be ~3-5 stages:
     // 1. Input network (C1, R1, R2) as passive WDF or IIR
@@ -146,7 +186,9 @@ fn rat_no_hpf_regression() {
 
     // 200Hz
     let mut lo = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { lo.process(0.0); }
+    for _ in 0..2000 {
+        lo.process(0.0);
+    }
     let mut peak_lo = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 200.0 * s as f64 / 48000.0).sin();
@@ -155,18 +197,30 @@ fn rat_no_hpf_regression() {
 
     // 5kHz
     let mut hi = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { hi.process(0.0); }
+    for _ in 0..2000 {
+        hi.process(0.0);
+    }
     let mut peak_hi = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 5000.0 * s as f64 / 48000.0).sin();
         peak_hi = peak_hi.max(hi.process(input).abs());
     }
 
-    let ratio = if peak_lo > 1e-10 { peak_hi / peak_lo } else { f64::INFINITY };
+    let ratio = if peak_lo > 1e-10 {
+        peak_hi / peak_lo
+    } else {
+        f64::INFINITY
+    };
     eprintln!("RAT HPF check: 200Hz={peak_lo:.4}, 5kHz={peak_hi:.4}, ratio={ratio:.1}x");
 
-    assert!(peak_lo > 0.001, "200Hz should produce audible output: {peak_lo:.6}");
-    assert!(ratio < 10.0, "HPF regression: 5kHz/200Hz={ratio:.1}x (should be <10x)");
+    assert!(
+        peak_lo > 0.001,
+        "200Hz should produce audible output: {peak_lo:.6}"
+    );
+    assert!(
+        ratio < 10.0,
+        "HPF regression: 5kHz/200Hz={ratio:.1}x (should be <10x)"
+    );
 }
 
 #[test]
@@ -179,7 +233,9 @@ fn screamer_no_hpf_regression() {
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
 
     let mut lo = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { lo.process(0.0); }
+    for _ in 0..2000 {
+        lo.process(0.0);
+    }
     let mut peak_lo = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 200.0 * s as f64 / 48000.0).sin();
@@ -187,18 +243,30 @@ fn screamer_no_hpf_regression() {
     }
 
     let mut hi = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { hi.process(0.0); }
+    for _ in 0..2000 {
+        hi.process(0.0);
+    }
     let mut peak_hi = 0.0f64;
     for s in 0..4800 {
         let input = 0.05 * (2.0 * std::f64::consts::PI * 5000.0 * s as f64 / 48000.0).sin();
         peak_hi = peak_hi.max(hi.process(input).abs());
     }
 
-    let ratio = if peak_lo > 1e-10 { peak_hi / peak_lo } else { f64::INFINITY };
+    let ratio = if peak_lo > 1e-10 {
+        peak_hi / peak_lo
+    } else {
+        f64::INFINITY
+    };
     eprintln!("Screamer HPF check: 200Hz={peak_lo:.4}, 5kHz={peak_hi:.4}, ratio={ratio:.1}x");
 
-    assert!(peak_lo > 0.001, "200Hz should produce audible output: {peak_lo:.6}");
-    assert!(ratio < 10.0, "HPF regression: 5kHz/200Hz={ratio:.1}x (should be <10x)");
+    assert!(
+        peak_lo > 0.001,
+        "200Hz should produce audible output: {peak_lo:.6}"
+    );
+    assert!(
+        ratio < 10.0,
+        "HPF regression: 5kHz/200Hz={ratio:.1}x (should be <10x)"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -210,7 +278,8 @@ fn simple_rc_opamp_groups_input_with_stage() {
     // C1 → R1 → U1.neg [feedback Rf] → U1.out → R_out → out
     // C1 and R1 should be in the same stage as U1 (or at least grouped
     // together as a single passive stage), not two separate stages.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 C1: cap(100n)
@@ -230,13 +299,26 @@ fn simple_rc_opamp_groups_input_with_stage() {
                 R_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
     let total = compiled.stages.len();
-    eprintln!("Simple RC+opamp: {total} stages (wdf={}, iir={}, ss={})",
-        compiled.stages.len(), compiled.stages.iter().filter(|s| matches!(s, Stage::Iir(_))).count(), compiled.stages.iter().filter(|s| matches!(s, Stage::StateSpace(_))).count());
+    eprintln!(
+        "Simple RC+opamp: {total} stages (wdf={}, iir={}, ss={})",
+        compiled.stages.len(),
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::Iir(_)))
+            .count(),
+        compiled
+            .stages
+            .iter()
+            .filter(|s| matches!(s, Stage::StateSpace(_)))
+            .count()
+    );
 
     // Should be ≤3 stages: input network, opamp, output
     // NOT 5 stages (C1, R1, opamp, Rf, R_out each separate)
@@ -257,7 +339,8 @@ fn passive_rc_chain_becomes_wdf_not_rigid() {
     //
     // The test verifies the stage produces correct frequency response:
     // RC lowpass should pass DC and attenuate high frequencies.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 C1: cap(100n)
@@ -275,13 +358,16 @@ fn passive_rc_chain_becomes_wdf_not_rigid() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
     // Settle
-    for _ in 0..2000 { compiled.process(0.0); }
+    for _ in 0..2000 {
+        compiled.process(0.0);
+    }
 
     // 200Hz should pass through (well below RC cutoff of ~160Hz)
     let mut peak = 0.0f64;
@@ -292,14 +378,18 @@ fn passive_rc_chain_becomes_wdf_not_rigid() {
 
     eprintln!("RC+opamp: 200Hz peak={peak:.6}");
     // With gain=10 from the op-amp, 200Hz should produce significant output
-    assert!(peak > 0.01, "200Hz should pass through RC+opamp: peak={peak:.6}");
+    assert!(
+        peak > 0.01,
+        "200Hz should pass through RC+opamp: peak={peak:.6}"
+    );
 }
 
 #[test]
 fn passive_tone_stack_produces_output() {
     // Tone stack (R + C + pot) as a standalone passive group after an op-amp.
     // Should attenuate but still pass signal — not zero output.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -322,11 +412,14 @@ fn passive_tone_stack_produces_output() {
                 R_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { compiled.process(0.0); }
+    for _ in 0..2000 {
+        compiled.process(0.0);
+    }
 
     let mut peak = 0.0f64;
     for s in 0..4800 {
@@ -335,7 +428,10 @@ fn passive_tone_stack_produces_output() {
     }
 
     eprintln!("Tone stack: 1kHz peak={peak:.6}");
-    assert!(peak > 0.001, "Tone stack should pass signal: peak={peak:.6}");
+    assert!(
+        peak > 0.001,
+        "Tone stack should pass signal: peak={peak:.6}"
+    );
 }
 
 #[test]
@@ -343,7 +439,8 @@ fn passive_group_between_opamps_passes_signal() {
     // Two op-amps with an RC coupling network between them.
     // The RC network is a passive group between two voltage-source barriers.
     // It MUST pass signal — not produce b=[0,0,0].
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -369,11 +466,14 @@ fn passive_group_between_opamps_passes_signal() {
                 U2.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
-    for _ in 0..2000 { compiled.process(0.0); }
+    for _ in 0..2000 {
+        compiled.process(0.0);
+    }
 
     let mut peak = 0.0f64;
     for s in 0..4800 {
@@ -383,5 +483,8 @@ fn passive_group_between_opamps_passes_signal() {
 
     eprintln!("Two opamps + RC couple: 440Hz peak={peak:.6}");
     // gain1=10 × coupling × gain2=10 → significant output
-    assert!(peak > 0.01, "Coupled op-amps should produce output: peak={peak:.6}");
+    assert!(
+        peak > 0.01,
+        "Coupled op-amps should produce output: peak={peak:.6}"
+    );
 }

@@ -158,9 +158,11 @@ impl SpqrNode {
             SpqrNode::S { children, .. } | SpqrNode::P { children, .. } => {
                 children.iter().map(|c| c.edge_count()).sum()
             }
-            SpqrNode::R { edge_indices, children, .. } => {
-                edge_indices.len() + children.iter().map(|c| c.edge_count()).sum::<usize>()
-            }
+            SpqrNode::R {
+                edge_indices,
+                children,
+                ..
+            } => edge_indices.len() + children.iter().map(|c| c.edge_count()).sum::<usize>(),
         }
     }
 
@@ -205,7 +207,11 @@ impl SpqrNode {
                     child.collect_edges(result);
                 }
             }
-            SpqrNode::R { edge_indices, children, .. } => {
+            SpqrNode::R {
+                edge_indices,
+                children,
+                ..
+            } => {
                 result.extend(edge_indices);
                 for child in children {
                     child.collect_edges(result);
@@ -233,6 +239,13 @@ pub(super) fn spqr_decompose(
     graph: &CircuitGraph,
     gnd_node: NodeId,
 ) -> SpqrNode {
+    // Guard: detect infinite recursion from non-reducing decompositions
+    if edge_indices.len() > 100 {
+        eprintln!(
+            "  SPQR: large edge set ({} edges), terminals={terminals:?}",
+            edge_indices.len()
+        );
+    }
     if edge_indices.is_empty() {
         return SpqrNode::R {
             edge_indices: Vec::new(),
@@ -251,56 +264,54 @@ pub(super) fn spqr_decompose(
     }
 
     // Build adjacency: node → [(edge_idx, other_node)]
-    let mut adj: hashbrown::HashMap<NodeId, Vec<(usize, NodeId)>> =
-        hashbrown::HashMap::new();
+    let mut adj: std::collections::BTreeMap<NodeId, Vec<(usize, NodeId)>> =
+        std::collections::BTreeMap::new();
     for &eidx in edge_indices {
         let e = &graph.edges[eidx];
         adj.entry(e.node_a).or_default().push((eidx, e.node_b));
         adj.entry(e.node_b).or_default().push((eidx, e.node_a));
     }
 
-    let terminal_set: std::collections::HashSet<NodeId> =
-        terminals.iter().copied().collect();
+    let terminal_set: std::collections::HashSet<NodeId> = terminals.iter().copied().collect();
 
     // Extract pendant edges (dead-ends) before SP reduction.
     // Pendants reduce junction degree, enabling series detection.
     // E.g., T-junction: R1→junction→(C1→gnd, R2→out)
     // → extract C1 pendant → junction becomes degree 2 → series(R1, R2).
-    let (remaining_edges, pendant_children) =
-        extract_pendants(edge_indices, &terminal_set, graph);
+    let (remaining_edges, pendant_children) = extract_pendants(edge_indices, &terminal_set, graph);
 
     if remaining_edges.len() < edge_indices.len() {
-        // Pendants found — decompose the core and combine
+        // Pendants found — decompose the core, then insert each pendant
+        // as a parallel element at its junction node in the core tree.
         if remaining_edges.is_empty() {
-            return if pendant_children.len() == 1 {
-                pendant_children.into_iter().next().unwrap()
-            } else {
-                SpqrNode::S {
-                    children: pendant_children,
-                    cut_vertices: (terminals.first().copied().unwrap_or(0),
-                                  terminals.last().copied().unwrap_or(0)),
-                }
+            // All edges are pendants — group by junction, parallel at same junction
+            if pendant_children.len() == 1 {
+                return pendant_children.into_iter().next().unwrap().0;
+            }
+            // Multiple pendants: just wrap as S (they connect different junctions)
+            let children: Vec<SpqrNode> = pendant_children.into_iter().map(|(n, _)| n).collect();
+            return SpqrNode::S {
+                children,
+                cut_vertices: (
+                    terminals.first().copied().unwrap_or(0),
+                    terminals.last().copied().unwrap_or(0),
+                ),
             };
         }
-        let core = spqr_decompose(&remaining_edges, terminals, graph, gnd_node);
-        let mut children = vec![core];
-        children.extend(pendant_children);
-        return if children.len() == 1 {
-            children.into_iter().next().unwrap()
-        } else {
-            SpqrNode::S {
-                children,
-                cut_vertices: (terminals.first().copied().unwrap_or(0),
-                              terminals.last().copied().unwrap_or(0)),
-            }
-        };
+        let mut tree = spqr_decompose(&remaining_edges, terminals, graph, gnd_node);
+        for (pendant, junction) in pendant_children {
+            tree = insert_pendant_at_junction(tree, pendant, junction, graph);
+        }
+        return tree;
     }
     // No pendants — continue with SP reduction below
     // (adj was already built above for the full set, still valid if no pendants)
 
     // Check for parallel edges: multiple edges between the same pair
-    let mut edge_pairs: hashbrown::HashMap<(NodeId, NodeId), Vec<usize>> =
-        hashbrown::HashMap::new();
+    // BTreeMap: deterministic iteration order prevents non-deterministic
+    // SPQR tree structure, which would break pot binding stage indices.
+    let mut edge_pairs: std::collections::BTreeMap<(NodeId, NodeId), Vec<usize>> =
+        std::collections::BTreeMap::new();
     for &eidx in edge_indices {
         let e = &graph.edges[eidx];
         let key = if e.node_a <= e.node_b {
@@ -347,9 +358,14 @@ pub(super) fn spqr_decompose(
 
         // Walk from the first series node to build the chain
         if let Some(&start_node) = series_nodes.first() {
-            // Walk backward to find chain start (terminal or branch)
+            // Walk backward to find chain start (terminal or branch).
+            // Use a visited set to prevent infinite loops in degree-2 cycles
+            // where no terminal breaks the chain.
             let mut cur = start_node;
             let mut prev = NodeId::MAX;
+            let mut visited_back: std::collections::HashSet<NodeId> =
+                std::collections::HashSet::new();
+            visited_back.insert(cur);
             loop {
                 if let Some(neighbors) = adj.get(&cur) {
                     if neighbors.len() != 2 || terminal_set.contains(&cur) || cur == gnd_node {
@@ -361,6 +377,12 @@ pub(super) fn spqr_decompose(
                     } else {
                         neighbors[0].1
                     };
+                    if visited_back.contains(&next) {
+                        // Cycle detected — use current node as chain start
+                        chain_start = cur;
+                        break;
+                    }
+                    visited_back.insert(next);
                     prev = cur;
                     cur = next;
                 } else {
@@ -421,7 +443,13 @@ pub(super) fn spqr_decompose(
                 };
             }
 
-            // Recurse on remaining edges
+            // Recurse on remaining edges — must be strictly fewer
+            assert!(
+                remaining.len() < edge_indices.len(),
+                "SPQR series: remaining ({}) not smaller than input ({})",
+                remaining.len(),
+                edge_indices.len()
+            );
             let remaining_node = spqr_decompose(&remaining, terminals, graph, gnd_node);
             children.push(remaining_node);
             return SpqrNode::S {
@@ -454,15 +482,18 @@ pub(super) fn spqr_decompose(
                 };
             }
 
-            // Mix of parallel and other — this is an R-node
-            // (or the parallel is a sub-node of a larger structure)
+            // Mix of parallel and other — recurse on remaining (strictly smaller)
             let mut r_children = vec![SpqrNode::P {
                 children: parallel_children,
                 endpoints: (*a, *b),
             }];
-            if !remaining.is_empty() {
-                r_children.push(spqr_decompose(&remaining, terminals, graph, gnd_node));
-            }
+            assert!(
+                remaining.len() < edge_indices.len(),
+                "SPQR parallel: remaining ({}) not smaller than input ({})",
+                remaining.len(),
+                edge_indices.len()
+            );
+            r_children.push(spqr_decompose(&remaining, terminals, graph, gnd_node));
             return SpqrNode::R {
                 edge_indices: Vec::new(),
                 boundary_nodes: terminals.to_vec(),
@@ -527,9 +558,9 @@ fn extract_pendants(
     edge_indices: &[usize],
     terminal_set: &std::collections::HashSet<NodeId>,
     graph: &CircuitGraph,
-) -> (Vec<usize>, Vec<SpqrNode>) {
+) -> (Vec<usize>, Vec<(SpqrNode, NodeId)>) {
     let mut remaining: Vec<usize> = edge_indices.to_vec();
-    let mut pendants: Vec<SpqrNode> = Vec::new();
+    let mut pendants: Vec<(SpqrNode, NodeId)> = Vec::new();
 
     // Rail nodes are always considered pendant endpoints — multiple edges
     // connecting to GND/VCC don't create a signal path between them.
@@ -546,8 +577,8 @@ fn extract_pendants(
 
     loop {
         // Build degree map — exclude rail nodes (they're always "dead ends")
-        let mut degree: hashbrown::HashMap<NodeId, usize> =
-            hashbrown::HashMap::new();
+        let mut degree: std::collections::BTreeMap<NodeId, usize> =
+            std::collections::BTreeMap::new();
         for &eidx in &remaining {
             let e = &graph.edges[eidx];
             if !rail_nodes.contains(&e.node_a) {
@@ -583,15 +614,141 @@ fn extract_pendants(
         let found_set: std::collections::HashSet<usize> = found.iter().copied().collect();
         for &eidx in &found {
             let e = &graph.edges[eidx];
-            pendants.push(SpqrNode::Q {
-                edge_idx: eidx,
-                endpoints: (e.node_a, e.node_b),
-            });
+            let a_is_rail = rail_nodes.contains(&e.node_a);
+            let b_is_rail = rail_nodes.contains(&e.node_b);
+            // Junction is the non-rail, non-degree-1 endpoint (the node
+            // that connects to the rest of the circuit).
+            let junction = if a_is_rail {
+                e.node_b
+            } else if b_is_rail {
+                e.node_a
+            } else if degree.get(&e.node_a).copied().unwrap_or(0) == 1 {
+                e.node_b
+            } else {
+                e.node_a
+            };
+            pendants.push((
+                SpqrNode::Q {
+                    edge_idx: eidx,
+                    endpoints: (e.node_a, e.node_b),
+                },
+                junction,
+            ));
         }
         remaining.retain(|e| !found_set.contains(e));
     }
 
     (remaining, pendants)
+}
+
+/// Insert a pendant into an SPQR tree as a parallel element at its junction.
+///
+/// The pendant is a ground shunt — it branches off an internal node of the
+/// core tree. This function finds the S-node child where `junction` is an
+/// endpoint and wraps that child + pendant in a P-node.
+fn insert_pendant_at_junction(
+    core: SpqrNode,
+    pendant: SpqrNode,
+    junction: NodeId,
+    graph: &CircuitGraph,
+) -> SpqrNode {
+    match core {
+        SpqrNode::S {
+            children,
+            cut_vertices,
+        } => {
+            // In series chain [A→J, J→B, B→C], prefer the child where
+            // junction is its "a" endpoint (J→B) — the downstream child.
+            // Prefer passive children over NL children to avoid wrapping
+            // NL edges in pendant P-nodes (which confuses find_nl_blocks).
+            let is_passive_child = |c: &SpqrNode| -> bool {
+                match c {
+                    SpqrNode::Q { edge_idx, .. } => !matches!(
+                        graph.effective_edge_kind(*edge_idx),
+                        super::component::EdgeKind::Nonlinear | super::component::EdgeKind::Vcvs
+                    ),
+                    _ => true, // non-Q children (nested S/P) are fine to wrap
+                }
+            };
+
+            // First: passive child with a == junction
+            let target = children
+                .iter()
+                .position(|c| c.endpoints().0 == junction && is_passive_child(c))
+                // Then: any child with a == junction
+                .or_else(|| children.iter().position(|c| c.endpoints().0 == junction))
+                // Then: passive child with b == junction
+                .or_else(|| {
+                    children
+                        .iter()
+                        .rposition(|c| c.endpoints().1 == junction && is_passive_child(c))
+                })
+                // Last resort: any child with b == junction
+                .or_else(|| children.iter().rposition(|c| c.endpoints().1 == junction));
+
+            let mut new_children: Vec<SpqrNode> = Vec::with_capacity(children.len());
+            for (i, child) in children.into_iter().enumerate() {
+                if Some(i) == target {
+                    let ep = child.endpoints();
+                    new_children.push(SpqrNode::P {
+                        children: vec![child, pendant.clone()],
+                        endpoints: ep,
+                    });
+                } else {
+                    new_children.push(child);
+                }
+            }
+
+            // Last resort: junction not found, append as series sibling
+            if target.is_none() {
+                new_children.push(pendant);
+            }
+
+            SpqrNode::S {
+                children: new_children,
+                cut_vertices,
+            }
+        }
+
+        SpqrNode::P {
+            mut children,
+            endpoints,
+        } => {
+            children.push(pendant);
+            SpqrNode::P {
+                children,
+                endpoints,
+            }
+        }
+
+        SpqrNode::Q {
+            edge_idx,
+            endpoints,
+        } => SpqrNode::P {
+            children: vec![
+                SpqrNode::Q {
+                    edge_idx,
+                    endpoints,
+                },
+                pendant,
+            ],
+            endpoints,
+        },
+
+        SpqrNode::R {
+            edge_indices,
+            boundary_nodes,
+            children,
+        } => {
+            let mut all_edges = edge_indices;
+            all_edges.extend(pendant.all_edge_indices());
+            SpqrNode::R {
+                edge_indices: all_edges,
+                boundary_nodes,
+                children,
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -644,7 +801,9 @@ pub(super) fn classify_sp_subtree(node: &SpqrNode, graph: &CircuitGraph) -> SpCl
     if nl_comp_indices.len() == 1 {
         // Single NL component (possibly multi-edge like BJT).
         // Use the first NL edge as the representative for create_root().
-        SpClassification::SingleNl { nl_edge_idx: nl_edges[0] }
+        SpClassification::SingleNl {
+            nl_edge_idx: nl_edges[0],
+        }
     } else {
         SpClassification::Complex
     }
@@ -672,7 +831,11 @@ fn collect_non_passive_edges(
                 collect_non_passive_edges(child, graph, nl_edges, has_vcvs);
             }
         }
-        SpqrNode::R { edge_indices, children, .. } => {
+        SpqrNode::R {
+            edge_indices,
+            children,
+            ..
+        } => {
             for &eidx in edge_indices {
                 let edge_kind = graph.effective_edge_kind(eidx);
                 match edge_kind {
@@ -701,7 +864,10 @@ use super::wdf_leaf::WdfLeaf;
 ///
 /// Shared by series and parallel tree building. Folds right:
 /// `fold([a, b, c], Series) → Series(a, Series(b, c))`
-fn fold_binary(mut nodes: Vec<DynNode>, ctor: fn(Box<DynNode>, Box<DynNode>) -> DynNode) -> Option<DynNode> {
+fn fold_binary(
+    mut nodes: Vec<DynNode>,
+    ctor: fn(Box<DynNode>, Box<DynNode>) -> DynNode,
+) -> Option<DynNode> {
     match nodes.len() {
         0 => None,
         1 => Some(nodes.remove(0)),
@@ -728,23 +894,20 @@ pub(super) fn spqr_to_dyn_node(
             let e = &graph.edges[*edge_idx];
             let comp = &graph.components[e.comp_idx];
             let mut leaf = comp.kind.make_leaf(&comp.id, sample_rate)?;
-            // For 3-terminal pots (two edges, same comp_idx): the half
-            // NOT touching ground is the complement (uses 1-position).
-            // R_aw = (1-pos) * max_R (signal to wiper), R_wb = pos * max_R (wiper to gnd).
-            // At pos=1.0: R_aw=0 (short), R_wb=max (high Z to gnd) → full signal at wiper.
+            // For 3-terminal pots (two edges, same comp_idx): the a-w half
+            // is the complement (uses 1-position), and the w-b half tracks
+            // position. Use terminal identity rather than "touches ground"
+            // because tone/blend pots often connect b through a cap.
             if comp.kind.is_pot() {
-                let is_3term = graph.edges.iter()
+                let is_3term = graph
+                    .edges
+                    .iter()
                     .filter(|other| other.comp_idx == e.comp_idx)
-                    .count() > 1;
-                if is_3term {
-                    let touches_gnd = e.node_a == graph.gnd_node
-                        || e.node_b == graph.gnd_node
-                        || graph.ac_ground_nodes.contains(&e.node_a)
-                        || graph.ac_ground_nodes.contains(&e.node_b);
-                    if touches_gnd {
-                        if let DynNode::Leaf(ref mut l) = leaf {
-                            l.set_complement();
-                        }
+                    .count()
+                    > 1;
+                if is_3term && pot_edge_is_aw_half(graph, &comp.id, e.node_a, e.node_b) {
+                    if let DynNode::Leaf(ref mut l) = leaf {
+                        l.set_complement();
                     }
                 }
             }
@@ -766,6 +929,20 @@ pub(super) fn spqr_to_dyn_node(
         }
         SpqrNode::R { .. } => None,
     }
+}
+
+fn pot_edge_is_aw_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId) -> bool {
+    let Some(&w_node) = graph
+        .node_names
+        .get(&format!("{comp_id}.w"))
+        .or_else(|| graph.node_names.get(&format!("{comp_id}.wiper")))
+    else {
+        return false;
+    };
+    let Some(&a_node) = graph.node_names.get(&format!("{comp_id}.a")) else {
+        return false;
+    };
+    (a == w_node && b == a_node) || (a == a_node && b == w_node)
 }
 
 /// Convert an S/P/Q subtree to a WDF DynNode, skipping one NL edge.
@@ -846,18 +1023,32 @@ pub(super) enum SpqrStage {
 impl std::fmt::Debug for SpqrStage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SpqrStage::PassiveWdf { edge_indices, order, .. } => f
+            SpqrStage::PassiveWdf {
+                edge_indices,
+                order,
+                ..
+            } => f
                 .debug_struct("PassiveWdf")
                 .field("edge_indices", edge_indices)
                 .field("order", order)
                 .finish(),
-            SpqrStage::NlWdf { nl_edge_idx, edge_indices, order, .. } => f
+            SpqrStage::NlWdf {
+                nl_edge_idx,
+                edge_indices,
+                order,
+                ..
+            } => f
                 .debug_struct("NlWdf")
                 .field("nl_edge_idx", nl_edge_idx)
                 .field("edge_indices", edge_indices)
                 .field("order", order)
                 .finish(),
-            SpqrStage::Rigid { edge_indices, boundary_nodes, pendant_trees, order } => f
+            SpqrStage::Rigid {
+                edge_indices,
+                boundary_nodes,
+                pendant_trees,
+                order,
+            } => f
                 .debug_struct("Rigid")
                 .field("edge_indices", edge_indices)
                 .field("boundary_nodes", boundary_nodes)
@@ -917,7 +1108,9 @@ fn collect_stages(
                     }
                 }
                 SpClassification::SingleNl { nl_edge_idx } => {
-                    if let Some(tree) = spqr_to_passive_dyn_node(node, graph, sample_rate, nl_edge_idx) {
+                    if let Some(tree) =
+                        spqr_to_passive_dyn_node(node, graph, sample_rate, nl_edge_idx)
+                    {
                         stages.push(SpqrStage::NlWdf {
                             tree,
                             nl_edge_idx,
@@ -945,7 +1138,12 @@ fn collect_stages(
                 }
             }
         }
-        SpqrNode::R { edge_indices, boundary_nodes, children, .. } => {
+        SpqrNode::R {
+            edge_indices,
+            boundary_nodes,
+            children,
+            ..
+        } => {
             // R-nodes are rigid: everything inside goes into one MNA stage.
             // Passive SP children become pendant WDF trees (port optimization).
             // Non-passive children are absorbed into the R-node's edge list.

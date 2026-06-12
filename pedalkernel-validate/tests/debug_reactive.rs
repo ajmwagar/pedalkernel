@@ -96,6 +96,10 @@ fn debug_transformer_stepdown() {
     println!("\nExpected gain: 0.1x (10:1 step-down)");
     println!("Actual output p-p: {:.4}V", output_pp);
     println!("Actual gain: {:.4}x ({:.1} dB)", gain, 20.0 * gain.log10());
+    assert!(
+        (gain - 0.1).abs() < 0.02,
+        "10:1 transformer should step down to ~0.1x, got {gain:.4}x"
+    );
 }
 
 #[test]
@@ -142,6 +146,10 @@ fn debug_transformer_stepup() {
     println!("\nExpected gain: 4.0x (1:4 step-up)");
     println!("Actual output p-p: {:.4}V", output_pp);
     println!("Actual gain: {:.4}x ({:.1} dB)", gain, 20.0 * gain.log10());
+    assert!(
+        (gain - 4.0).abs() < 0.2,
+        "1:4 transformer should step up to ~4x, got {gain:.4}x"
+    );
 }
 
 #[test]
@@ -158,6 +166,15 @@ fn debug_delay_simple() {
 
     println!("\n=== Simple Delay (10ms) ===");
     println!("{}", compiled.debug_dump());
+    assert_eq!(
+        compiled.delay_lines.len(),
+        1,
+        "simple delay fixture should compile one delay-line binding"
+    );
+    assert!(
+        compiled.stages.is_empty(),
+        "delay-only fixture should not need electrical WDF/MNA stages"
+    );
 
     let mut proc = compiled;
 
@@ -195,4 +212,13 @@ fn debug_delay_simple() {
     if found_delay == 0 {
         println!("No significant impulse detected in first 1000 samples!");
     }
+
+    assert!(
+        max_output > 0.2,
+        "expected visible delayed impulse, max output was {max_output:.4}"
+    );
+    assert!(
+        (max_sample as isize - delay_samples as isize).abs() <= 8,
+        "expected delayed impulse near sample {delay_samples}, got {max_sample}"
+    );
 }

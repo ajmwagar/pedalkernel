@@ -4,9 +4,10 @@
 * ============================================================================
 * Topology: Input → R → output node → two back-to-back zeners to ground
 *
-* Similar to Boss DS-1 hard clipping stage. Zeners clip harder than
-* silicon diodes, with a defined knee at Vz. Total clipping threshold
-* is Vz + Vf (~5.1 + 0.7 = 5.8V) in each direction.
+* This direct anti-parallel-to-ground fixture clips near the lower
+* forward/reverse conduction knee and validates pair synthesis/polarity.
+* A series back-to-back zener limiter would clip near Vz + Vf and needs
+* a separate fixture.
 *
 * Node convention:
 *   v_in  = input (driven by harness PWL source)

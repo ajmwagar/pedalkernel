@@ -144,6 +144,11 @@ impl SpiceRunner {
         let duration = input.len() as f64 / self.config.internal_rate();
         let netlist =
             self.generate_netlist(circuit_path, input, duration, output_node, &output_path)?;
+        let sample_time_offset = if single_sample_impulse(input).is_some() {
+            0.5 * self.config.timestep()
+        } else {
+            0.0
+        };
 
         std::fs::write(&netlist_path, &netlist)?;
 
@@ -170,7 +175,7 @@ impl SpiceRunner {
 
         // Parse output and resample
         let raw_output = self.parse_wrdata_output(&output_path)?;
-        let resampled = self.resample_and_decimate(&raw_output, duration);
+        let resampled = self.resample_and_decimate(&raw_output, duration, sample_time_offset);
 
         Ok(resampled)
     }
@@ -237,20 +242,39 @@ VIN v_in 0 PWL({pwl_data})
     fn generate_pwl_inline(&self, signal: &[f64]) -> String {
         let dt = self.config.timestep();
 
-        // Decimate signal for PWL to keep netlist manageable
-        // ngspice will interpolate between points
-        let decimate_factor = 10.max(signal.len() / 10000);
-
-        let mut pwl_points = Vec::new();
-        for (i, &sample) in signal.iter().enumerate().step_by(decimate_factor) {
-            let t = i as f64 * dt;
-            pwl_points.push(format!("{:.9e} {:.9e}", t, sample));
+        if let Some(amplitude) = single_sample_impulse(signal) {
+            return generate_sample_hold_impulse_pwl(amplitude, signal.len(), dt);
         }
 
-        // Ensure we include the last point
-        if signal.len() % decimate_factor != 0 {
-            let t = (signal.len() - 1) as f64 * dt;
-            pwl_points.push(format!("{:.9e} {:.9e}", t, signal[signal.len() - 1]));
+        // Keep shorter validation signals sample-exact. Very long signals are
+        // decimated to keep generated netlists practical, but their tail stays
+        // exact so high-frequency sweep endings do not pick up PWL interpolation
+        // residuals.
+        let max_pwl_points = 200_000;
+        let exact_tail_samples = 65_536;
+        let decimate_factor = if signal.len() <= max_pwl_points {
+            1
+        } else {
+            signal.len().div_ceil(max_pwl_points)
+        };
+
+        let mut pwl_points = Vec::new();
+        let exact_tail_start = if decimate_factor > 1 {
+            signal.len().saturating_sub(exact_tail_samples)
+        } else {
+            signal.len()
+        };
+
+        for i in (0..exact_tail_start).step_by(decimate_factor) {
+            let t = i as f64 * dt;
+            pwl_points.push(format!("{:.9e} {:.9e}", t, signal[i]));
+        }
+
+        if decimate_factor > 1 {
+            for (i, &sample) in signal.iter().enumerate().skip(exact_tail_start) {
+                let t = i as f64 * dt;
+                pwl_points.push(format!("{:.9e} {:.9e}", t, sample));
+            }
         }
 
         pwl_points.join(" ")
@@ -290,7 +314,12 @@ VIN v_in 0 PWL({pwl_data})
     ///
     /// Returns samples at the full internal rate (sample_rate × oversample)
     /// to match the WDF runner's output rate for sample-by-sample comparison.
-    fn resample_and_decimate(&self, raw_data: &[(f64, f64)], duration: f64) -> Vec<f64> {
+    fn resample_and_decimate(
+        &self,
+        raw_data: &[(f64, f64)],
+        duration: f64,
+        time_offset: f64,
+    ) -> Vec<f64> {
         let internal_rate = self.config.internal_rate();
         let n_internal = (duration * internal_rate) as usize;
 
@@ -298,7 +327,7 @@ VIN v_in 0 PWL({pwl_data})
         let mut uniform_output = Vec::with_capacity(n_internal);
 
         for i in 0..n_internal {
-            let t = i as f64 / internal_rate;
+            let t = i as f64 / internal_rate + time_offset;
             let v = self.interpolate(raw_data, t);
             uniform_output.push(v);
         }
@@ -341,6 +370,36 @@ VIN v_in 0 PWL({pwl_data})
     pub fn config(&self) -> &SpiceConfig {
         &self.config
     }
+}
+
+fn single_sample_impulse(signal: &[f64]) -> Option<f64> {
+    let (&first, rest) = signal.split_first()?;
+    if first == 0.0 {
+        return None;
+    }
+
+    if rest.iter().all(|&sample| sample == 0.0) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn generate_sample_hold_impulse_pwl(amplitude: f64, len: usize, dt: f64) -> String {
+    let end_time = len.saturating_sub(1) as f64 * dt;
+    let drop_time = dt;
+
+    let mut pwl_points = vec![
+        format!("{:.9e} {:.9e}", 0.0, amplitude),
+        format!("{:.9e} {:.9e}", drop_time, amplitude),
+        format!("{:.9e} {:.9e}", drop_time, 0.0),
+    ];
+
+    if end_time > drop_time {
+        pwl_points.push(format!("{:.9e} {:.9e}", end_time, 0.0));
+    }
+
+    pwl_points.join(" ")
 }
 
 /// Generate golden references for a test circuit.
@@ -392,5 +451,58 @@ mod tests {
 
         assert!((runner.interpolate(&data, 0.5) - 5.0).abs() < 1e-10);
         assert!((runner.interpolate(&data, 1.5) - 15.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pwl_generation_keeps_short_signals_sample_exact() {
+        let runner = SpiceRunner::new(SpiceConfig::default());
+        let signal: Vec<f64> = (0..12).map(|i| i as f64).collect();
+
+        let pwl = runner.generate_pwl_inline(&signal);
+        let pairs = pwl.split_whitespace().collect::<Vec<_>>();
+
+        assert_eq!(pairs.len(), signal.len() * 2);
+        assert_eq!(pairs[1], "0.000000000e0");
+        assert_eq!(pairs[3], "1.000000000e0");
+        assert_eq!(pairs[23], "1.100000000e1");
+    }
+
+    #[test]
+    fn pwl_generation_keeps_long_signal_tail_exact() {
+        let runner = SpiceRunner::new(SpiceConfig::default());
+        let signal: Vec<f64> = (0..800_000).map(|i| i as f64).collect();
+
+        let pwl = runner.generate_pwl_inline(&signal);
+        let pairs = pwl.split_whitespace().collect::<Vec<_>>();
+        let values: Vec<f64> = pairs
+            .chunks_exact(2)
+            .map(|pair| pair[1].parse::<f64>().unwrap())
+            .collect();
+
+        assert!(
+            values.len() < signal.len(),
+            "long signal should still be decimated"
+        );
+        assert!(values.windows(2).any(|w| (w[1] - w[0]).abs() > 1.0));
+        assert_eq!(values[values.len() - 3], 799_997.0);
+        assert_eq!(values[values.len() - 2], 799_998.0);
+        assert_eq!(values[values.len() - 1], 799_999.0);
+    }
+
+    #[test]
+    fn pwl_generation_uses_sample_hold_for_impulses() {
+        let runner = SpiceRunner::new(SpiceConfig::default());
+        let mut signal = vec![0.0; 8];
+        signal[0] = 2.0;
+
+        let pwl = runner.generate_pwl_inline(&signal);
+        let pairs = pwl.split_whitespace().collect::<Vec<_>>();
+
+        assert_eq!(pairs.len(), 8);
+        assert_eq!(pairs[1], "2.000000000e0");
+        assert_eq!(pairs[3], "2.000000000e0");
+        assert_eq!(pairs[5], "0.000000000e0");
+        assert_eq!(pairs[6], "1.822916667e-5");
+        assert_eq!(pairs[7], "0.000000000e0");
     }
 }

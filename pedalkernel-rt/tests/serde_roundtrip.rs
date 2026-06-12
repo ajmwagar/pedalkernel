@@ -60,8 +60,7 @@ fn dyn_node_postcard_roundtrip() {
     );
 
     // Deserialize
-    let mut deserialized: DynNode =
-        postcard::from_bytes(&bytes).expect("deserialize failed");
+    let mut deserialized: DynNode = postcard::from_bytes(&bytes).expect("deserialize failed");
     deserialized.recompute();
 
     // Build a second copy of the original for comparison
@@ -91,5 +90,8 @@ fn dyn_node_postcard_roundtrip() {
 
     // Sanity: the impulse response should not be all zeros
     let energy: f64 = out_original.iter().map(|x| x * x).sum();
-    assert!(energy > 1e-6, "impulse response is silent (energy={energy})");
+    assert!(
+        energy > 1e-6,
+        "impulse response is silent (energy={energy})"
+    );
 }

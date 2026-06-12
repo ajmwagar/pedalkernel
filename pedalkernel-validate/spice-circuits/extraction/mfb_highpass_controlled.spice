@@ -1,0 +1,11 @@
+* Rauch/MFB high-pass filter with shunt leg fixed at the DSL default.
+* Cutoff pot default: [1.0, 0.05] at 0.5 => 0.525 * 100k = 52.5k.
+
+C1 v_in n_mid 10n
+C2 n_mid v_neg 10n
+Rcut n_mid 0 52.5k
+Rfb v_neg v_op 47k
+Rout v_op v_out 1k
+
+* Ideal op-amp: v_out = A * (v_pos - v_neg), v_pos = 0.
+Eop v_op 0 0 v_neg 100000

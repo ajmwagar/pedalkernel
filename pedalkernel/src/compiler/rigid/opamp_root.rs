@@ -4,9 +4,10 @@
 //! and creates OpAmpRoot with bias-derived rail limits.
 
 use super::super::component::EdgeKind;
-use super::super::signal_flow::FlowGroup;
 use super::super::graph::{CircuitGraph, NodeId};
+use super::super::signal_flow::FlowGroup;
 use crate::elements::{OpAmpModel, OpAmpRoot};
+use std::collections::{HashMap, HashSet};
 
 /// Shared op-amp extraction from classified FlowGroup.
 pub(in crate::compiler) struct OpAmpConfig {
@@ -56,15 +57,54 @@ pub(in crate::compiler) fn extract_opamp_config(
         }
         // Check if any reactive neighbor of this node connects to GND
         graph.edges.iter().any(|e2| {
-            let other = if e2.node_a == node { e2.node_b }
-                else if e2.node_b == node { e2.node_a }
-                else { return false };
+            let other = if e2.node_a == node {
+                e2.node_b
+            } else if e2.node_b == node {
+                e2.node_a
+            } else {
+                return false;
+            };
             let c2 = &graph.components[e2.comp_idx];
             (c2.kind.capacitance().is_some() || c2.kind.inductance().is_some())
                 && (other == graph.gnd_node || graph.ac_ground_nodes.contains(&other))
         })
     };
 
+    let vcvs_comp_idx = graph.edges[*vcvs_edge_idx].comp_idx;
+    let pins = graph
+        .nullor_pins
+        .iter()
+        .find(|p| p.comp_idx == vcvs_comp_idx);
+
+    let (rf, ri) = if let Some(pins) = pins {
+        extract_feedback_resistances(group, graph, pins.neg_node, pins.out_node, inverting)
+    } else {
+        legacy_feedback_resistances(group, graph, inverting, &reaches_gnd)
+    };
+
+    let gain = if ri.is_infinite() {
+        1.0
+    } else if inverting {
+        rf / ri
+    } else {
+        1.0 + rf / ri
+    };
+
+    Ok(OpAmpConfig {
+        model,
+        rf,
+        ri,
+        gain,
+        inverting,
+    })
+}
+
+fn legacy_feedback_resistances(
+    group: &FlowGroup,
+    graph: &CircuitGraph,
+    inverting: bool,
+    reaches_gnd: &dyn Fn(NodeId) -> bool,
+) -> (f64, f64) {
     let mut rf = 0.0f64;
     let mut ri_from_feedback = 0.0f64;
     for &eidx in &group.feedback_edges {
@@ -79,50 +119,216 @@ pub(in crate::compiler) fn extract_opamp_config(
             }
         }
     }
-
-    // Compute Ri: the input coupling resistance at the op-amp's neg node.
-    // Strategy: find resistors touching the neg node that are NOT in the
-    // feedback set or active set. These are the input coupling path,
-    // regardless of which FlowGroup they belong to.
-    let vcvs_comp_idx = graph.edges[*vcvs_edge_idx].comp_idx;
-    let neg_node = graph.nullor_pins.iter()
-        .find(|p| p.comp_idx == vcvs_comp_idx)
-        .map(|p| p.neg_node);
-
-    // For non-inverting, prefer Ri from feedback edges touching GND
     let ri = if !inverting && ri_from_feedback > 0.0 {
         ri_from_feedback
-    } else if let Some(neg) = neg_node {
-        let feedback_set: std::collections::HashSet<usize> =
-            group.feedback_edges.iter().copied().collect();
-        let active_set: std::collections::HashSet<usize> =
-            group.active_edges.iter().copied().collect();
-        let ri_sum: f64 = graph.edges.iter().enumerate()
-            .filter_map(|(eidx, e)| {
-                if feedback_set.contains(&eidx) || active_set.contains(&eidx) {
-                    return None;
-                }
-                let touches_neg = e.node_a == neg || e.node_b == neg;
-                if !touches_neg { return None; }
-                let comp = &graph.components[e.comp_idx];
-                if comp.kind.is_pot() { return None; }
-                comp.kind.resistance()
-            })
-            .sum();
-        if ri_sum > 0.0 { ri_sum } else { f64::INFINITY }
     } else {
         f64::INFINITY
     };
+    (rf, ri)
+}
 
-    let gain = if ri.is_infinite() {
-        1.0
-    } else if inverting {
-        rf / ri
+fn extract_feedback_resistances(
+    group: &FlowGroup,
+    graph: &CircuitGraph,
+    neg: NodeId,
+    out: NodeId,
+    inverting: bool,
+) -> (f64, f64) {
+    let forbidden_feedback_nodes: HashSet<NodeId> = graph
+        .supply_nodes
+        .iter()
+        .copied()
+        .chain(std::iter::once(graph.gnd_node))
+        .chain(graph.ac_ground_nodes.iter().copied())
+        .chain(std::iter::once(graph.in_node))
+        .collect();
+
+    let (rf, rf_edges) = shortest_resistive_path(
+        group,
+        graph,
+        neg,
+        |node| node == out,
+        &forbidden_feedback_nodes,
+        &HashSet::new(),
+        false,
+    )
+    .unwrap_or_else(|| {
+        let rf: f64 = group
+            .feedback_edges
+            .iter()
+            .filter_map(|&eidx| {
+                graph.components[graph.edges[eidx].comp_idx]
+                    .kind
+                    .resistance()
+            })
+            .sum();
+        (rf, HashSet::new())
+    });
+
+    let ri = if inverting {
+        input_leg_resistance(group, graph, neg, out, &rf_edges)
     } else {
-        1.0 + rf / ri
+        ground_leg_resistance(group, graph, neg, out, &rf_edges)
     };
 
-    Ok(OpAmpConfig { model, rf, ri, gain, inverting })
+    (rf, ri)
+}
+
+fn input_leg_resistance(
+    group: &FlowGroup,
+    graph: &CircuitGraph,
+    neg: NodeId,
+    out: NodeId,
+    rf_edges: &HashSet<usize>,
+) -> f64 {
+    let active_edges: HashSet<usize> = group.active_edges.iter().copied().collect();
+    let mut best = f64::INFINITY;
+
+    for &eidx in &group.all_edges() {
+        if rf_edges.contains(&eidx) || active_edges.contains(&eidx) {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        let Some(r) = edge_resistance(graph, eidx) else {
+            continue;
+        };
+        let other = if e.node_a == neg {
+            e.node_b
+        } else if e.node_b == neg {
+            e.node_a
+        } else {
+            continue;
+        };
+        if other == out {
+            continue;
+        }
+
+        best = best.min(r);
+    }
+
+    best
+}
+
+fn ground_leg_resistance(
+    group: &FlowGroup,
+    graph: &CircuitGraph,
+    neg: NodeId,
+    out: NodeId,
+    rf_edges: &HashSet<usize>,
+) -> f64 {
+    let mut forbidden = HashSet::new();
+    forbidden.insert(out);
+    shortest_resistive_path(
+        group,
+        graph,
+        neg,
+        |node| is_ground_like(graph, node),
+        &forbidden,
+        rf_edges,
+        true,
+    )
+    .map(|(r, _)| r)
+    .unwrap_or(f64::INFINITY)
+}
+
+fn shortest_resistive_path(
+    group: &FlowGroup,
+    graph: &CircuitGraph,
+    start: NodeId,
+    is_target: impl Fn(NodeId) -> bool,
+    forbidden_nodes: &HashSet<NodeId>,
+    forbidden_edges: &HashSet<usize>,
+    allow_reactive_ground_short: bool,
+) -> Option<(f64, HashSet<usize>)> {
+    let edges = group.all_edges();
+    let active_edges: HashSet<usize> = group.active_edges.iter().copied().collect();
+    let mut dist: HashMap<NodeId, f64> = HashMap::new();
+    let mut prev: HashMap<NodeId, (NodeId, usize)> = HashMap::new();
+    let mut unsettled = HashSet::new();
+    dist.insert(start, 0.0);
+    unsettled.insert(start);
+
+    while !unsettled.is_empty() {
+        let node = unsettled
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                dist.get(a)
+                    .unwrap_or(&f64::INFINITY)
+                    .total_cmp(dist.get(b).unwrap_or(&f64::INFINITY))
+            })
+            .unwrap();
+        unsettled.remove(&node);
+
+        if node != start && is_target(node) {
+            let mut path_edges = HashSet::new();
+            let mut cursor = node;
+            while let Some((previous, eidx)) = prev.get(&cursor).copied() {
+                path_edges.insert(eidx);
+                cursor = previous;
+            }
+            return Some((*dist.get(&node).unwrap_or(&0.0), path_edges));
+        }
+
+        for &eidx in &edges {
+            if forbidden_edges.contains(&eidx) || active_edges.contains(&eidx) {
+                continue;
+            }
+            let e = &graph.edges[eidx];
+            let next = if e.node_a == node {
+                e.node_b
+            } else if e.node_b == node {
+                e.node_a
+            } else {
+                continue;
+            };
+            if next != start && forbidden_nodes.contains(&next) {
+                continue;
+            }
+
+            let Some(weight) = edge_path_weight(graph, eidx, allow_reactive_ground_short) else {
+                continue;
+            };
+            let candidate = dist.get(&node).copied().unwrap_or(f64::INFINITY) + weight;
+            if candidate < dist.get(&next).copied().unwrap_or(f64::INFINITY) {
+                dist.insert(next, candidate);
+                prev.insert(next, (node, eidx));
+                unsettled.insert(next);
+            }
+        }
+    }
+
+    None
+}
+
+fn edge_resistance(graph: &CircuitGraph, eidx: usize) -> Option<f64> {
+    graph.components[graph.edges[eidx].comp_idx]
+        .kind
+        .resistance()
+        .filter(|r| r.is_finite() && *r > 0.0)
+}
+
+fn edge_path_weight(
+    graph: &CircuitGraph,
+    eidx: usize,
+    allow_reactive_ground_short: bool,
+) -> Option<f64> {
+    if let Some(r) = edge_resistance(graph, eidx) {
+        return Some(r);
+    }
+    if allow_reactive_ground_short {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let reactive = comp.kind.capacitance().is_some() || comp.kind.inductance().is_some();
+        if reactive && (is_ground_like(graph, e.node_a) || is_ground_like(graph, e.node_b)) {
+            return Some(0.0);
+        }
+    }
+    None
+}
+
+fn is_ground_like(graph: &CircuitGraph, node: NodeId) -> bool {
+    node == graph.gnd_node || graph.ac_ground_nodes.contains(&node)
 }
 
 /// Create an OpAmpRoot from config, with sample rate and supply voltage set.

@@ -8,15 +8,20 @@
 // 4. Output extraction produces non-zero clipped signal
 // ═══════════════════════════════════════════════════════════════════════════
 
-use super::spqr_build::compile_via_spqr;
 use super::compiled::CompiledPedal;
+use super::spqr_build::compile_via_spqr;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
 const FREQ: f64 = 440.0;
 
 /// Helper: drive a compiled pedal with a sine and return (positive_peak, negative_peak).
-fn measure_peaks(compiled: &mut impl PedalProcessor, amp: f64, warmup: usize, measure: usize) -> (f64, f64) {
+fn measure_peaks(
+    compiled: &mut impl PedalProcessor,
+    amp: f64,
+    warmup: usize,
+    measure: usize,
+) -> (f64, f64) {
     // Warmup
     for s in 0..warmup {
         compiled.process(amp * (std::f64::consts::TAU * FREQ * s as f64 / SR).sin());
@@ -25,11 +30,14 @@ fn measure_peaks(compiled: &mut impl PedalProcessor, amp: f64, warmup: usize, me
     let mut pos_peak = 0.0f64;
     let mut neg_peak = 0.0f64;
     for s in 0..measure {
-        let out = compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (warmup + s) as f64 / SR).sin()
-        );
-        if out > pos_peak { pos_peak = out; }
-        if out < neg_peak { neg_peak = out; }
+        let out =
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (warmup + s) as f64 / SR).sin());
+        if out > pos_peak {
+            pos_peak = out;
+        }
+        if out < neg_peak {
+            neg_peak = out;
+        }
     }
     (pos_peak, neg_peak)
 }
@@ -46,27 +54,76 @@ fn dump_stage_metering(compiled: &mut CompiledPedal, amp: f64, warmup: usize, me
     }
     // Measure
     for s in 0..measure {
-        compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (warmup + s) as f64 / SR).sin()
-        );
+        compiled.process(amp * (std::f64::consts::TAU * FREQ * (warmup + s) as f64 / SR).sin());
     }
 
     // Read the latest metrics from the ring buffer
     let metrics = compiled.read_metrics();
     eprintln!("  Metering ({} blocks):", metrics.block_counter);
-    eprintln!("    input:  RMS={:.1} dB, peak={:.1} dB", metrics.input_rms_db, metrics.input_peak_db);
-    eprintln!("    output: RMS={:.1} dB, peak={:.1} dB", metrics.output_rms_db, metrics.output_peak_db);
-    eprintln!("    signal envelope: [{:.4}, {:.4}]", metrics.signal_min, metrics.signal_max);
+    eprintln!(
+        "    input:  RMS={:.1} dB, peak={:.1} dB",
+        metrics.input_rms_db, metrics.input_peak_db
+    );
+    eprintln!(
+        "    output: RMS={:.1} dB, peak={:.1} dB",
+        metrics.output_rms_db, metrics.output_peak_db
+    );
+    eprintln!(
+        "    signal envelope: [{:.4}, {:.4}]",
+        metrics.signal_min, metrics.signal_max
+    );
     let n = compiled.stages.len().min(crate::metering::MAX_STAGES);
     for i in 0..n {
         let lvl = metrics.stage_levels[i];
-        let db = if lvl > 1e-10 { 20.0 * (lvl as f64).log10() } else { -120.0 };
+        let db = if lvl > 1e-10 {
+            20.0 * (lvl as f64).log10()
+        } else {
+            -120.0
+        };
         let (stage_type, dist, label, bypass) = match &compiled.stages[i] {
-            super::compiled::Stage::Wdf(w) => ("Wdf", w.signal_flow_distance, &w.debug_label, w.bypass_serial),
-            super::compiled::Stage::MultiNl(m) => ("MultiNl", m.signal_flow_distance, &m.debug_label, m.bypass_serial),
-            super::compiled::Stage::Iir(s) => ("Iir", s.signal_flow_distance, &s.debug_label, s.bypass_serial),
-            super::compiled::Stage::StateSpace(s) => ("SS", s.signal_flow_distance, &s.debug_label, s.bypass_serial),
-            super::compiled::Stage::BlackFeedback(b) => ("BF", b.signal_flow_distance, &b.debug_label, b.bypass_serial),
+            super::compiled::Stage::Wdf(w) => (
+                "Wdf",
+                w.signal_flow_distance,
+                w.debug_label.as_str(),
+                w.bypass_serial,
+            ),
+            super::compiled::Stage::MultiNl(m) => (
+                "MultiNl",
+                m.signal_flow_distance,
+                m.debug_label.as_str(),
+                m.bypass_serial,
+            ),
+            super::compiled::Stage::Iir(s) => (
+                "Iir",
+                s.signal_flow_distance,
+                s.debug_label.as_str(),
+                s.bypass_serial,
+            ),
+            super::compiled::Stage::StateSpace(s) => (
+                "SS",
+                s.signal_flow_distance,
+                s.debug_label.as_str(),
+                s.bypass_serial,
+            ),
+            super::compiled::Stage::BlackFeedback(b) => (
+                "BF",
+                b.signal_flow_distance,
+                b.debug_label.as_str(),
+                b.bypass_serial,
+            ),
+            super::compiled::Stage::Blockwise(bk) => (
+                "BKM",
+                bk.signal_flow_distance,
+                "blockwise",
+                bk.bypass_serial,
+            ),
+            super::compiled::Stage::SerialDelayedFeedback(s) => (
+                "SerialFB",
+                s.signal_flow_distance,
+                "serial_feedback",
+                s.bypass_serial,
+            ),
+            super::compiled::Stage::KMethod { .. } => ("KMethod", usize::MAX, "k_method", true),
         };
         let bypass_tag = if bypass { " BYPASS" } else { "" };
         eprintln!("    stage {i}: [{stage_type}] dist={dist} [{label}]{bypass_tag} → {lvl:.4} ({db:.1} dB)");
@@ -84,7 +141,8 @@ fn dump_stage_metering(compiled: &mut CompiledPedal, amp: f64, warmup: usize, me
 fn diode_pair_component_clips_both_directions() {
     // Screamer-style: opamp + diode_pair in feedback
     // DiodePair clips symmetrically (same threshold + and -)
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -103,7 +161,8 @@ fn diode_pair_component_clips_both_directions() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -114,17 +173,29 @@ fn diode_pair_component_clips_both_directions() {
     eprintln!("DiodePair: pos_peak={pos_peak:.4}V, neg_peak={neg_peak:.4}V");
 
     // Both peaks should be non-zero (signal present)
-    assert!(pos_peak > 0.01, "Should have positive output: {pos_peak:.4}V");
-    assert!(neg_peak < -0.01, "Should have negative output: {neg_peak:.4}V");
+    assert!(
+        pos_peak > 0.01,
+        "Should have positive output: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak < -0.01,
+        "Should have negative output: {neg_peak:.4}V"
+    );
 
     // Both directions should be clipped (below gain × input = 1.0V)
     assert!(pos_peak < 0.9, "Positive should be clipped: {pos_peak:.4}V");
-    assert!(neg_peak > -0.9, "Negative should be clipped: {neg_peak:.4}V");
+    assert!(
+        neg_peak > -0.9,
+        "Negative should be clipped: {neg_peak:.4}V"
+    );
 
     // Symmetric: positive and negative peaks should be approximately equal magnitude
     let ratio = pos_peak / neg_peak.abs();
     eprintln!("  Symmetry ratio: {ratio:.3} (should be ~1.0)");
-    assert!((ratio - 1.0).abs() < 0.3, "Should be roughly symmetric: {ratio:.3}");
+    assert!(
+        (ratio - 1.0).abs() < 0.3,
+        "Should be roughly symmetric: {ratio:.3}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -136,7 +207,8 @@ fn two_separate_antiparallel_diodes_clip_both_directions() {
     // SD-1 style: two separate diodes in antiparallel feedback
     // D1 clips positive swing (anode at out, cathode at neg)
     // D2 clips negative swing (anode at neg, cathode at out)
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -158,7 +230,8 @@ fn two_separate_antiparallel_diodes_clip_both_directions() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -169,12 +242,21 @@ fn two_separate_antiparallel_diodes_clip_both_directions() {
 
     // CRITICAL: Both directions must clip. If only one diode is modeled,
     // one direction passes unclipped (gain × input ≈ 1.0V) while the other clips.
-    assert!(pos_peak > 0.01, "Should have positive output: {pos_peak:.4}V");
-    assert!(neg_peak < -0.01, "Should have negative output: {neg_peak:.4}V");
+    assert!(
+        pos_peak > 0.01,
+        "Should have positive output: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak < -0.01,
+        "Should have negative output: {neg_peak:.4}V"
+    );
 
     // Both should be clipped below the unclipped gain level
     assert!(pos_peak < 0.9, "Positive should be clipped: {pos_peak:.4}V");
-    assert!(neg_peak > -0.9, "Negative should be clipped: {neg_peak:.4}V");
+    assert!(
+        neg_peak > -0.9,
+        "Negative should be clipped: {neg_peak:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -186,7 +268,8 @@ fn asymmetric_diodes_have_different_clip_thresholds() {
     // SD-1 actual: silicon (Vf≈0.6V) + germanium (Vf≈0.25V) antiparallel
     // Positive swing clips at silicon threshold (higher)
     // Negative swing clips at germanium threshold (lower)
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -208,7 +291,8 @@ fn asymmetric_diodes_have_different_clip_thresholds() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -218,8 +302,14 @@ fn asymmetric_diodes_have_different_clip_thresholds() {
     eprintln!("Asymmetric diodes: pos_peak={pos_peak:.4}V, neg_peak={neg_peak:.4}V");
 
     // Both directions must produce output
-    assert!(pos_peak > 0.01, "Should have positive output: {pos_peak:.4}V");
-    assert!(neg_peak < -0.01, "Should have negative output: {neg_peak:.4}V");
+    assert!(
+        pos_peak > 0.01,
+        "Should have positive output: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak < -0.01,
+        "Should have negative output: {neg_peak:.4}V"
+    );
 
     // Both should clip
     assert!(pos_peak < 0.9, "Positive should clip: {pos_peak:.4}V");
@@ -227,7 +317,10 @@ fn asymmetric_diodes_have_different_clip_thresholds() {
 
     // Asymmetric: germanium clips at lower voltage than silicon
     // So |neg_peak| should be less than pos_peak (germanium clips harder)
-    eprintln!("  Asymmetry: pos={pos_peak:.4} vs |neg|={:.4}", neg_peak.abs());
+    eprintln!(
+        "  Asymmetry: pos={pos_peak:.4} vs |neg|={:.4}",
+        neg_peak.abs()
+    );
     // Note: this test may need adjustment based on actual diode models,
     // but the key invariant is that BOTH directions are present.
 }
@@ -241,7 +334,8 @@ fn hard_clip_diodes_to_ground_both_directions() {
     // RAT pattern: opamp gain stage → diodes to ground (hard clip)
     // D1.a at output, D1.b at ground (clips positive)
     // D2.b at output, D2.a at ground (clips negative)
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -264,7 +358,8 @@ fn hard_clip_diodes_to_ground_both_directions() {
                 R_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -278,12 +373,24 @@ fn hard_clip_diodes_to_ground_both_directions() {
     eprintln!("Hard clip to GND: pos_peak={pos_peak:.4}V, neg_peak={neg_peak:.4}V");
 
     // Both directions should produce output
-    assert!(pos_peak > 0.001, "Should have positive output: {pos_peak:.4}V");
-    assert!(neg_peak < -0.001, "Should have negative output: {neg_peak:.4}V");
+    assert!(
+        pos_peak > 0.001,
+        "Should have positive output: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak < -0.001,
+        "Should have negative output: {neg_peak:.4}V"
+    );
 
     // Hard clipping should limit output to ~Vf (0.6V for silicon)
-    assert!(pos_peak < 0.9, "Positive should be hard-clipped: {pos_peak:.4}V");
-    assert!(neg_peak > -0.9, "Negative should be hard-clipped: {neg_peak:.4}V");
+    assert!(
+        pos_peak < 0.9,
+        "Positive should be hard-clipped: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak > -0.9,
+        "Negative should be hard-clipped: {neg_peak:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -294,7 +401,8 @@ fn hard_clip_diodes_to_ground_both_directions() {
 fn feedback_opamp_output_has_harmonics() {
     // A clipped sine has crest factor < √2 ≈ 1.414 (flattened peaks).
     // If output extraction is wrong (near-zero), RMS will be near-zero too.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -313,7 +421,8 @@ fn feedback_opamp_output_has_harmonics() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -328,9 +437,9 @@ fn feedback_opamp_output_has_harmonics() {
     let n = (SR / FREQ).ceil() as usize;
     let mut samples = Vec::with_capacity(n);
     for s in 0..n {
-        samples.push(compiled.process(
-            amp * (std::f64::consts::TAU * FREQ * (2000 + s) as f64 / SR).sin()
-        ));
+        samples.push(
+            compiled.process(amp * (std::f64::consts::TAU * FREQ * (2000 + s) as f64 / SR).sin()),
+        );
     }
 
     let peak = samples.iter().map(|s| s.abs()).fold(0.0f64, f64::max);
@@ -340,13 +449,19 @@ fn feedback_opamp_output_has_harmonics() {
     eprintln!("Feedback opamp harmonics: peak={peak:.4}V, rms={rms:.4}V, crest={crest:.3}");
 
     // Output should be substantial (not near-zero from bad extraction)
-    assert!(peak > 0.05, "Output should be substantial, not near-zero: {peak:.6}V");
+    assert!(
+        peak > 0.05,
+        "Output should be substantial, not near-zero: {peak:.6}V"
+    );
     assert!(rms > 0.01, "RMS should be substantial: {rms:.6}V");
 
     // Clipped sine should have crest factor < 1.4
     // If no clipping (pure sine), crest ≈ 1.414
     // If heavily clipped (square-ish), crest → 1.0
-    assert!(crest < 1.4, "Should have harmonics (clipped): crest={crest:.3}");
+    assert!(
+        crest < 1.4,
+        "Should have harmonics (clipped): crest={crest:.3}"
+    );
     assert!(crest > 0.5, "Crest factor should be reasonable: {crest:.3}");
 }
 
@@ -374,8 +489,14 @@ fn sd1_legend_produces_clipped_output() {
     eprintln!("SD-1 legend: pos_peak={pos_peak:.4}V, neg_peak={neg_peak:.4}V");
 
     // Must produce output in both directions
-    assert!(pos_peak > 0.001, "SD-1 should have positive output: {pos_peak:.4}V");
-    assert!(neg_peak < -0.001, "SD-1 should have negative output: {neg_peak:.4}V");
+    assert!(
+        pos_peak > 0.001,
+        "SD-1 should have positive output: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak < -0.001,
+        "SD-1 should have negative output: {neg_peak:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -386,7 +507,8 @@ fn sd1_legend_produces_clipped_output() {
 fn single_diode_clips_one_direction_only() {
     // A single diode (not antiparallel pair) should only clip one direction.
     // This is the expected behavior for a half-wave clipper.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 R_in: resistor(10k)
@@ -405,7 +527,8 @@ fn single_diode_clips_one_direction_only() {
                 U1.out -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -423,8 +546,10 @@ fn single_diode_clips_one_direction_only() {
     let asymmetry = pos_peak / neg_peak.abs();
     eprintln!("  Asymmetry ratio: {asymmetry:.3} (should differ from 1.0)");
     // A single diode should be clearly asymmetric
-    assert!((asymmetry - 1.0).abs() > 0.2,
-        "Single diode should be asymmetric: ratio={asymmetry:.3}");
+    assert!(
+        (asymmetry - 1.0).abs() > 0.2,
+        "Single diode should be asymmetric: ratio={asymmetry:.3}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -437,7 +562,8 @@ fn bias_network_does_not_kill_signal() {
     // should pass audio through the clipping stage without the bias network
     // stomping the signal to zero. The bias network creates a DC reference;
     // it is NOT in the audio signal path.
-    let pedal = crate::dsl::parse_pedal_file(r#"
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
         pedal "test" { supply 9V
             components {
                 # Bias network — 4.5V virtual ground
@@ -486,7 +612,8 @@ fn bias_network_does_not_kill_signal() {
                 R_out.b -> out
             }
             controls {}
-        }"#)
+        }"#,
+    )
     .expect("parse");
 
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
@@ -502,8 +629,14 @@ fn bias_network_does_not_kill_signal() {
 
     // The bias network should NOT kill the signal.
     // The clipping stage output should reach the circuit output.
-    assert!(pos_peak > 0.01, "Signal should survive bias network: {pos_peak:.4}V");
-    assert!(neg_peak < -0.01, "Signal should survive bias network: {neg_peak:.4}V");
+    assert!(
+        pos_peak > 0.01,
+        "Signal should survive bias network: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak < -0.01,
+        "Signal should survive bias network: {neg_peak:.4}V"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -528,6 +661,12 @@ fn screamer_legend_with_bias_produces_audio() {
 
     eprintln!("Screamer: pos_peak={pos_peak:.4}V, neg_peak={neg_peak:.4}V");
 
-    assert!(pos_peak > 0.001, "Screamer should produce output: {pos_peak:.4}V");
-    assert!(neg_peak < -0.001, "Screamer should produce output: {neg_peak:.4}V");
+    assert!(
+        pos_peak > 0.001,
+        "Screamer should produce output: {pos_peak:.4}V"
+    );
+    assert!(
+        neg_peak < -0.001,
+        "Screamer should produce output: {neg_peak:.4}V"
+    );
 }

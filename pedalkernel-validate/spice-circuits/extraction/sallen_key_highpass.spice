@@ -1,0 +1,10 @@
+* Unity-gain Sallen-Key high-pass filter.
+
+C1 v_in n1 10n
+C2 n1 v_pos 10n
+R1 n1 v_op 10k
+R2 v_pos 0 10k
+Rout v_op v_out 1k
+
+* Ideal unity buffer.
+Eop v_op 0 v_pos v_op 100000

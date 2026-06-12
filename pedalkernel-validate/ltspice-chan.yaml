@@ -1,0 +1,27 @@
+global:
+  sample_rate: 96000
+  oversample: 4
+  fft_size: 65536
+
+suites:
+  magnetics_external:
+    description: "External LTspice CHAN behavioral sanity checks for PedalKernel J-A transformers"
+    tests:
+      chan_behavioral_sanity_se:
+        circuit: "magnetics/ja_vs_ltspice_chan_se.pedal"
+        description: "Gapped single-ended J-A output transformer compared loosely to LTspice CHAN behavioral shape"
+        signals:
+          - type: sine
+            frequency: 100.0
+            amplitude: 2.0
+            duration: 0.1
+            label: "sine"
+        metrics: []
+        # CHAN and J-A are different hysteresis models. This test is a broad
+        # behavioral sanity reference for geometry/sign/unit failures, not a
+        # J-A THD-equivalence gate. Tight THD coverage belongs against a J-A
+        # SPICE/reference implementation and measured B-H loop fits.
+        pass_criteria:
+          normalized_rms_error_db: 12.0
+          peak_error_db: 18.0
+          thd_error_db: 120.0

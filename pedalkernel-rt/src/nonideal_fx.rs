@@ -11,19 +11,19 @@ pub enum NonIdealFx {
     /// sample-rate-limited dV/dt clamping.
     OpAmpBandwidth {
         /// GBW product in Hz. Determines the -3dB frequency at unity gain.
-        gbw: f64,
+        gbw: crate::Wave,
         /// Maximum output rate of change in V/s.
-        slew_rate: f64,
+        slew_rate: crate::Wave,
     },
     /// Output rail saturation (tanh soft clip at supply limits).
     /// Separate from power supply sag — this is instantaneous clamping,
     /// not the slow voltage droop under load.
     RailSaturation {
         /// Maximum output swing in V (half-supply minus saturation voltage).
-        v_max: f64,
+        v_max: crate::Wave,
     },
     // Future variants:
-    // BjtThermal { thermal_voltage: f64 },
-    // TubeGridCurrent { onset_voltage: f64 },
-    // PowerSupplySag { esr: f64, filter_cap: f64 },
+    // BjtThermal { thermal_voltage: crate::Wave },
+    // TubeGridCurrent { onset_voltage: crate::Wave },
+    // PowerSupplySag { esr: crate::Wave, filter_cap: crate::Wave },
 }
