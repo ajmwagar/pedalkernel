@@ -911,18 +911,6 @@ fn claim_passive_edges(
         .iter()
         .filter_map(|node| d_in.get(node).copied())
         .min();
-    let upstream_of_inputs = |node: NodeId| -> bool {
-        if !bound_enabled {
-            return false;
-        }
-        if rails.contains(&node) || node == graph.in_node {
-            return false;
-        }
-        match (d_in.get(&node), input_pin_dist) {
-            (Some(&d), Some(d_pin)) => d < d_pin,
-            _ => false,
-        }
-    };
 
     // Build barrier set: active input nodes of OTHER SCCs, plus circuit I/O
     // terminals. Built here (before the single-hop pass) because the F10
@@ -959,6 +947,80 @@ fn claim_passive_edges(
             bfs_barriers.insert(elem.output_node);
         }
     }
+
+    // Feedback-loop interior nodes: reachable from this SCC's own output
+    // nodes through passive edges WITHOUT passing through the device's input
+    // terminals, rails, or BFS barriers. Such nodes belong to the device's
+    // feedback network and are exempt from the F10 upstream bound even when
+    // they sit closer to `in` than the input pins. Example: a Sallen-Key
+    // follower's junction J (in→C1→J, J→C2→pos, J→R1→out) is one hop from
+    // `in` but is part of the feedback loop — bounding it would split the SK
+    // network into separate groups and flatten the filter. Inverting/makeup
+    // stages are unaffected: their feedback resistor lands on the neg INPUT
+    // terminal, where this BFS stops, so an upstream passive EQ stays
+    // unreachable and remains bounded.
+    let feedback_loop_nodes: HashSet<NodeId> = {
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        let mut queue: VecDeque<NodeId> = VecDeque::new();
+        let mut seed_outputs: HashSet<NodeId> = HashSet::new();
+        for &i in scc {
+            for &out in &active_elements[i].output_nodes {
+                if !rails.contains(&out) {
+                    seed_outputs.insert(out);
+                    if visited.insert(out) {
+                        queue.push_back(out);
+                    }
+                }
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            // Reachable, but never expand through barriers or the device's
+            // input terminals. Seed output nodes are exempt from the
+            // input-terminal stop: a unity follower has neg wired to out,
+            // making its input_node coincide with the seed itself.
+            if bfs_barriers.contains(&node)
+                || (input_terminals.contains(&node) && !seed_outputs.contains(&node))
+            {
+                continue;
+            }
+            for &eidx in edge_indices {
+                if active_edges.contains(&eidx) {
+                    continue;
+                }
+                let e = &graph.edges[eidx];
+                let other = if e.node_a == node {
+                    e.node_b
+                } else if e.node_b == node {
+                    e.node_a
+                } else {
+                    continue;
+                };
+                if rails.contains(&other) {
+                    continue;
+                }
+                if visited.insert(other) {
+                    queue.push_back(other);
+                }
+            }
+        }
+        visited
+    };
+
+    let upstream_of_inputs = |node: NodeId| -> bool {
+        if !bound_enabled {
+            return false;
+        }
+        if rails.contains(&node) || node == graph.in_node {
+            return false;
+        }
+        if feedback_loop_nodes.contains(&node) {
+            return false;
+        }
+        match (d_in.get(&node), input_pin_dist) {
+            (Some(&d), Some(d_pin)) => d < d_pin,
+            _ => false,
+        }
+    };
 
     let mut pendant_edges = Vec::new();
     let mut ground_shunt_edges = Vec::new();
