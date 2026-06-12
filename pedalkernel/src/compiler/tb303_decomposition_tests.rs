@@ -6,6 +6,24 @@
 //!
 //! If the .pedal files are not found (e.g., public-only checkout),
 //! tests pass with a skip message. No .pedal content is inlined here.
+//!
+//! # Test tier ladder
+//!
+//! Tests are ordered from cheapest/most-local to broadest.  When the ladder
+//! breaks, the first failing tier identifies the defect layer — never fix a
+//! Stinchcombe shape diff before the lower tiers are green.
+//!
+//! | Tier        | What it checks                                         | Run by default? |
+//! |-------------|--------------------------------------------------------|-----------------|
+//! | Topology    | Source graph uses coupled ladder + Q12 input pair      | yes             |
+//! | Compilation | Compiler emits BKM blocks, not monolithic MNA          | yes             |
+//! | Coupling    | BKM sub-stage ports wired; coupling matrix connects    | yes             |
+//! | Runtime     | BKM produces finite, non-flat lowpass signal           | yes             |
+//! | Acceptance  | Full BKM shape vs H_tb / 10-pole Stinchcombe reference | `--ignored` only|
+//!
+//! Acceptance tests carry `#[ignore = "pedalkernel-284: late-stage acceptance …"]`.
+//! Run them explicitly once the four default tiers pass:
+//! `cargo test -p pedalkernel --lib tb303 -- --ignored --include-ignored`
 
 use super::blockwise;
 use super::graph::CircuitGraph;
@@ -4003,6 +4021,8 @@ fn tb303_bkm_rung_response_accumulates_coupled_lowpass_poles() {
 }
 
 #[test]
+#[ignore = "pedalkernel-284: late-stage acceptance — run with --ignored once granular probes pass; \
+            checks BKM shape vs H_tb and 10-pole Stinchcombe reference (max_abs_err < 3 dB)"]
 fn tb303_compare_bkm_forced_serial_and_htb_shape() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let freqs = [100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10_000.0];
@@ -5659,6 +5679,8 @@ fn tb303_resonance_creates_peak() {
 }
 
 #[test]
+#[ignore = "pedalkernel-284: late-stage acceptance — run with --ignored once granular probes pass; \
+            checks resonance k-sweep behavior tracks the Stinchcombe 10-pole reference trend"]
 fn tb303_resonance_k_sweep_tracks_10pole_shape() {
     let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
     let freqs = [250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];

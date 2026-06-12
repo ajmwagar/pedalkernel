@@ -185,6 +185,29 @@ pub(super) fn classify_rigid(
     // is unsafe because the controlled element's time-varying impedance interacts
     // with the reactive state in ways that a static biquad can't capture.
     if stats.is_single_vcvs_linear() {
+        // StageStats already counted reactive elements regardless of whether a
+        // FlowGroup is available. Use stats.reactive_count as the primary guard
+        // so the R-node path (which passes group=None) is covered too.
+        //
+        // Any reactive element in the rigid group → IIR to capture
+        // frequency response. Covers:
+        //   - 808 bridged-T: caps to ground, resistive feedback
+        //   - MFB/Rauch: cap in feedback (C from neg to out)
+        //   - Sallen-Key: caps inside the opamp's R-node group
+        // Without this, BlackFeedback computes only DC gain = Rf/Ri,
+        // losing the filter's poles and zeros.
+        if stats.reactive_count > 0 {
+            // Still perform the ControlledConductance coupling check when a
+            // FlowGroup is available — that path is unsafe to lower to IIR.
+            if let Some(g) = _group {
+                let all_edges = g.all_edges();
+                if super::coupling::has_nl_reactive_coupling(&all_edges, graph) {
+                    return RigidOptimization::General;
+                }
+            }
+            return RigidOptimization::Iir;
+        }
+
         if let Some(g) = _group {
             let all_edges = g.all_edges();
 
@@ -192,23 +215,6 @@ pub(super) fn classify_rigid(
             // node with a reactive element, we must NOT lower to static IIR.
             if super::coupling::has_nl_reactive_coupling(&all_edges, graph) {
                 return RigidOptimization::General;
-            }
-
-            let is_reactive = |eidx: usize| -> bool {
-                let comp = &graph.components[graph.edges[eidx].comp_idx];
-                comp.kind.capacitance().is_some() || comp.kind.inductance().is_some()
-            };
-
-            // Any reactive element in the rigid group → IIR to capture
-            // frequency response. Covers:
-            //   - 808 bridged-T: caps to ground, resistive feedback
-            //   - MFB/Rauch: cap in feedback (C from neg to out)
-            //   - Sallen-Key (when opamp group includes filter caps)
-            // Without this, BlackFeedback computes only DC gain = Rf/Ri,
-            // losing the filter's poles and zeros.
-            let has_any_reactive = all_edges.iter().any(|&eidx| is_reactive(eidx));
-            if has_any_reactive {
-                return RigidOptimization::Iir;
             }
         }
         return RigidOptimization::BlackFeedback;

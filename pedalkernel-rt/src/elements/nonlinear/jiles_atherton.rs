@@ -204,6 +204,10 @@ impl JaMagnetizingRoot {
 
             h -= dh;
             m -= dm;
+            // Hard physical bound: |M| cannot exceed Ms (Langevin saturation).
+            // The H-space step limiter (STEP_LIMIT_A * a) is not tight enough
+            // at small `a` — clamp M here as the authoritative guard.
+            m = m.clamp(-p.ms, p.ms);
         }
         self.last_iters = iters;
 
@@ -349,7 +353,14 @@ fn mdot_eval(p: &JaCoreModel, h: Wave, m: Wave, h_dot: Wave) -> MdotEval {
     let r_coef = p.c * p.ms / p.a;
     let r = r_coef * lp;
     let dr_dq = r_coef * lpp;
-    let den = 1.0 - p.alpha * r;
+    let mut den = 1.0 - p.alpha * r;
+    // Sign-preserving epsilon clamp: den approaching zero makes chi diverge.
+    // Guard with the same idiom used for d_irr above (eps scaled to chi's
+    // numerator magnitude so the clamp only bites at near-singular corners).
+    let den_eps = 1.0e-9 * (1.0 + math::abs(g + r));
+    if math::abs(den) < den_eps {
+        den = if den >= 0.0 { den_eps } else { -den_eps };
+    }
     let dden_dq = -p.alpha * dr_dq;
     let chi = (g + r) / den;
     let value = chi * h_dot;
