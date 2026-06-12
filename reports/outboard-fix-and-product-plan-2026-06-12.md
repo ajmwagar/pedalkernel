@@ -180,6 +180,41 @@ each buffer variant must keep ≥6 dB of pot authority at 10 kHz (today ≤0.03
 dB; passive baseline 11.06 dB), plus a level guard `resp(1 kHz) > −40 dB`
 for the −84..−240 dB collapse mode on the full Pultec netlist.
 
+### Phase 1b: bugs found by the census + Eurorack circuit work (2026-06-12 PM)
+
+**F11. BBD components are never lowered** — `CompiledPedal.bbds` is only ever
+`Vec::new()`; the Bbd component is Virtual/Skip with no binding pass, while
+full runtime support (BbdDelayLine, ControlTarget::BbdClockRate) sits unused.
+Silences boss_dm2, memory_man, boss_ce2, walrus_slo; ehx_memory_man passes
+dry leakage only. Same stub pattern as F8's VCA. (Fix in flight.)
+
+**F12. MOSFET/Zener unsupported in multi-NL MNA** — `create_nl_device`
+returns None (build.rs:76); kills fulltone_ocd. Mirror the OTA dispatch arm.
+(Fix in flight.)
+
+**F13. Signal-routing bug class** (three measured manifestations, likely
+shared machinery): (a) audio injected at an interior node of an op-amp
+feedback network compiles to silence — also the root cause of
+kick_808_wav.rs's nine silent voices, present since that test's
+introduction; (b) parallel active branches do not sum — the 808 snare's two
+resonators collapse to one regardless of mixer formulation, blend pots
+inert; (c) a serial passive stage that carries no source→out flow hard-zeros
+the chain (moog_ladder_vcf, boss_ce2 stage[2], and the 303 VCF example).
+Investigate the bypass_serial decision (~spqr_build.rs:1195-1210), passive
+root output extraction (stage.rs:1421-1440), and feedforward injection-node
+routing. Gates the Eurorack line (303 VCF + snare blend) and synth examples.
+
+**F14. Residual LSB-scale nondeterminism** — tweed_deluxe_5e3(_full) and
+opto_leveler produce distinct in-process fingerprints (~1e-13, per-instance
+RandomState at coefficient level). Candidate sites: rigid/general.rs
+HashSets (:277,402,421,447), signal_flow.rs:77 rail_nodes. Breaks bit-exact
+determinism (P1 brand promise) though inaudible.
+
+Also known: pots on IIR stages are inert (existing TODO in kick_808_wav.rs
+ignores; same family as F10 link-2), and golden triode_clean is 'too loud'
+(peak 294.85) — pre-existing, surfaced when stale-golden aborts stopped
+masking it.
+
 ### Phase 2: fidelity (after Phase 1 unblocks the topologies)
 
 Transformer step-down ~19 dB (SPICE-confirmed; blocks line-level I/O) · RMS
