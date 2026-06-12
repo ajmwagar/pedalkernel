@@ -61,7 +61,21 @@ own sign/weighting (the six red `feedforward_tests`). Acceptance:
 `inverting_opamp_with_input_cap_passes_audio`,
 `resistor_cap_coupled_opamp_cascade_passes_audio`, plus the existing
 `zero_output_tests` red test; the feedforward_tests going green is the stretch
-goal (sign fix).
+goal (sign fix). **Blast-radius warning (third RCA pass, confirmed): the loose
+path is load-bearing.** Tube Screamer, Klon, RAT, and Blues Driver all compile
+site-1 feedforward stages today and their calibrated outputs include partial
+cancellation — they survive only because their component values make it
+inexact. F2 therefore ships WITH golden re-blessing and SPICE re-validation of
+those pedals (golden_regression, legends/product matrices,
+screamer_drive_sweep), not as a quiet bugfix. Refined fix conditions: only
+bridge when (a) the convergence node is an op-amp input pin and (b) a second
+serial path source→convergence exists (mirror `sources_with_feedback`,
+spqr_build.rs:1437-1461). Companion fix B (own bead): Passthrough fallback
+sign (`stage.rs:2196` returns −V) + injection-node ordering via
+`bfs_dist_from_in_node` with a consistent distance scale — covered by the 7
+red feedforward_tests. Latent finds to bead separately: cap-coupled
+non-inverting cascades blow up (+118 dB); the rt `debug-trace` feature does
+not compile (bare `eprintln!` in no_std paths, solver.rs:735/973).
 
 **F3. Inverting-topology misclassification (B3b).**
 Cause: `is_inverting_topology` (`compiler/rigid/mod.rs:239-313`) recognizes
