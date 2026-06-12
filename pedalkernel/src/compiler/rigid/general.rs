@@ -1101,9 +1101,16 @@ fn assemble_multi_nl_stage(
     }
 
     // Apply init hints: override physics-based defaults with author-specified states.
-    // Only BJT two-port groups are supported (Vbe + Vce at port offsets).
+    //
+    // Hints are matched per-DEVICE within device_groups. nl_comp_labels is a
+    // parallel Vec to device_groups.groups with one label per device group,
+    // so nl_comp_labels[g] == the component ID of groups[g]. For a cross-coupled
+    // BJT pair (two separate BjtTwoPort groups), g=0→Q1 and g=1→Q2, so both
+    // hints are applied to the correct port offsets.
+    //
     // Unrecognized hints are silently ignored (they may target diodes or JFETs
     // in circuits where no grouped solver applies — not an error).
+    let mut any_hint_applied = false;
     if !init_hints.is_empty() {
         if let Some(ref dg) = device_groups {
             for (g, group) in dg.groups.iter().enumerate() {
@@ -1121,6 +1128,7 @@ fn assemble_multi_nl_stage(
                     if off + 1 < n_nl {
                         initial_v[off + 1] = sign * vce;
                     }
+                    any_hint_applied = true;
                     eprintln!(
                         "[init-hint] {label}: {state_name} → Vbe={:.3}, Vce={:.3} (sign={sign})",
                         vbe, vce
@@ -1129,6 +1137,19 @@ fn assemble_multi_nl_stage(
             }
         }
     }
+
+    // When init hints were applied, skip the DC ramp on reset() so the hinted
+    // v_prev is used as the NR warm-start with full DC excitation (dc_scale=1.0).
+    //
+    // Without this, dc_ramp restores to 0 on reset(), making dc_scale ≈ 0 on
+    // the first sample. With near-zero excitation, the NR solver converges to
+    // v ≈ 0 regardless of the warm-start, erasing the asymmetric seed provided
+    // by the init hints (see DC_RAMP_SAMPLES in MultiNlStage::process).
+    //
+    // For free-running oscillators (BJT astable multivibrators), this ensures
+    // that after DAW reset() the NR warm-start starts at the hinted operating
+    // point (e.g. Q1=saturated, Q2=cutoff) rather than a symmetric saddle.
+    let initial_dc_ramp: u32 = if any_hint_applied { 256 } else { 0 };
 
     let nr_workspace = if device_groups.is_some() {
         crate::elements::nonlinear::solver::NrWorkspace::new_grouped(n_nl, max_group_ports)
@@ -1210,9 +1231,12 @@ fn assemble_multi_nl_stage(
         supply_voltage,
         dc_blocker_x1: 0.0,
         dc_blocker_y1: 0.0,
-        dc_ramp: 0,
+        dc_ramp: initial_dc_ramp,
+        initial_dc_ramp,
         initial_v_prev: initial_v.clone(),
-        v_prev_2: vec![0.0; n_nl],
+        // Seed v_prev_2 from initial_v so the linear extrapolation warm-start
+        // begins near the operating point rather than at zero.
+        v_prev_2: initial_v.clone(),
         nr_workspace,
         work_b_passive: vec![0.0; n_passive],
         work_known_a: vec![0.0; n_nl],

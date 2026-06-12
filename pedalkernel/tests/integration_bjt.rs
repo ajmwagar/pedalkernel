@@ -595,3 +595,199 @@ fn fuzz_face_fuzz_sweep_thd() {
         thd_min_fuzz
     );
 }
+
+// ===========================================================================
+// BJT astable multivibrator: init hint delivery diagnostics
+// ===========================================================================
+
+/// WHY: cross-coupled BJT astable multivibrators need asymmetric initial states to
+/// start deterministically in a DAW context (reproducible after reset()). Init hints
+/// in the `.pedal` `init { Q1: saturated, Q2: cutoff }` block must flow through to
+/// `MultiNlStage.initial_v_prev` so that reset() seeds the NR solver asymmetrically.
+///
+/// This test encodes TWO guarantees:
+///   1. `initial_v_prev` differs between with-init and without-init compiled stages
+///      (hints reach the compiled state).
+///   2. The early transient (first 10ms) differs between with-init and without-init
+///      at runtime after reset() (hints affect the NR solver's first iterations).
+///
+/// WHY this matters: free-running oscillators have no stable DC fixed point, but
+/// do have a symmetric saddle point. Without asymmetric seeding, the NR warm-start
+/// may produce the same first-sample output regardless of initial conditions.
+/// With asymmetric seeding, Q1/Q2 start at different Vce values (saturated vs cutoff),
+/// producing a different early transient and ensuring DAW reproducibility.
+#[test]
+fn bjt_astable_init_hints_affect_compiled_state_and_initial_transient() {
+    use pedalkernel::compiler::compile_pedal;
+    use pedalkernel::dsl::parse_pedal_file;
+    use pedalkernel::PedalProcessor;
+    use pedalkernel_rt::processor::Stage;
+
+    const SR: f64 = 48_000.0;
+
+    let with_src = include_str!("test_pedals/bjt_astable_multivibrator.pedal");
+    let without_src = include_str!("test_pedals/bjt_astable_multivibrator_no_init.pedal");
+
+    let with_pedal = parse_pedal_file(with_src).expect("parse with-init");
+    let without_pedal = parse_pedal_file(without_src).expect("parse without-init");
+
+    assert_eq!(
+        with_pedal.init_hints.len(),
+        2,
+        "with-init pedal must have exactly 2 init hints (Q1 + Q2)"
+    );
+    assert_eq!(
+        with_pedal.init_hints[0].device_label,
+        "Q1",
+        "first hint must target Q1"
+    );
+    assert_eq!(
+        with_pedal.init_hints[1].device_label,
+        "Q2",
+        "second hint must target Q2"
+    );
+    assert!(
+        without_pedal.init_hints.is_empty(),
+        "without-init pedal must have no init hints"
+    );
+
+    let with_compiled = compile_pedal(&with_pedal, SR).expect("compile with-init");
+    let without_compiled = compile_pedal(&without_pedal, SR).expect("compile without-init");
+
+    // Both must compile to at least one MultiNl stage (BJTs active, not dropped).
+    let with_has_multinl = with_compiled
+        .stages
+        .iter()
+        .any(|s| matches!(s, Stage::MultiNl(_)));
+    let without_has_multinl = without_compiled
+        .stages
+        .iter()
+        .any(|s| matches!(s, Stage::MultiNl(_)));
+
+    for (si, s) in with_compiled.stages.iter().enumerate() {
+        if let Stage::MultiNl(m) = s {
+            eprintln!(
+                "with-init  stage[{si}] n_nl={} initial_v_prev={:.4?}",
+                m.n_nl,
+                m.initial_v_prev,
+            );
+        }
+    }
+    for (si, s) in without_compiled.stages.iter().enumerate() {
+        if let Stage::MultiNl(m) = s {
+            eprintln!(
+                "without-init stage[{si}] n_nl={} initial_v_prev={:.4?}",
+                m.n_nl,
+                m.initial_v_prev,
+            );
+        }
+    }
+
+    assert!(
+        with_has_multinl,
+        "WHY: BJTs must be active (not dropped) in with-init circuit. \
+         {} stages, none are MultiNl.",
+        with_compiled.stages.len()
+    );
+    assert!(
+        without_has_multinl,
+        "WHY: BJTs must be active in without-init circuit. \
+         {} stages, none are MultiNl.",
+        without_compiled.stages.len()
+    );
+
+    // Guarantee 1: initial_v_prev of ANY MultiNl stage differs between with/without.
+    // Collect all initial_v_prev vecs (one per MultiNl stage).
+    let with_all_ivp: Vec<Vec<f64>> = with_compiled
+        .stages
+        .iter()
+        .filter_map(|s| {
+            if let Stage::MultiNl(m) = s {
+                Some(m.initial_v_prev.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let without_all_ivp: Vec<Vec<f64>> = without_compiled
+        .stages
+        .iter()
+        .filter_map(|s| {
+            if let Stage::MultiNl(m) = s {
+                Some(m.initial_v_prev.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // At least one stage must have a different initial_v_prev.
+    let compiled_state_differs = with_all_ivp
+        .iter()
+        .zip(without_all_ivp.iter())
+        .any(|(w, wo)| w != wo);
+
+    assert!(
+        compiled_state_differs,
+        "WHY: init hints must change at least one MultiNlStage's initial_v_prev. \
+         Cross-coupled BJT astables need asymmetric seeds so reset() starts the \
+         NR solver at a known asymmetric operating point. \
+         with={:?} without={:?}",
+        with_all_ivp,
+        without_all_ivp
+    );
+
+    // Guarantee 2: early transient differs at runtime (first 10ms after reset).
+    let mut with_proc = with_compiled;
+    let mut without_proc = without_compiled;
+    with_proc.set_sample_rate(SR);
+    with_proc.reset();
+    without_proc.set_sample_rate(SR);
+    without_proc.reset();
+
+    // Use a small impulse at t=0 to exercise the BJT states (consistent with
+    // drummerboy's bjt_multivibrator_init_hints_affect_initial_transient test).
+    let early_n = (0.010 * SR) as usize; // 10ms
+    let mut with_buf = Vec::with_capacity(early_n);
+    let mut without_buf = Vec::with_capacity(early_n);
+    for i in 0..early_n {
+        let input = if i == 0 { 1.0 } else { 0.0 };
+        with_buf.push(with_proc.process(input));
+        without_buf.push(without_proc.process(input));
+    }
+
+    let early_max_diff: f64 = with_buf
+        .iter()
+        .zip(without_buf.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+
+    eprintln!(
+        "Early transient max_diff (first 10ms): {early_max_diff:.9}"
+    );
+    eprintln!(
+        "with-init   peak_early={:.6}",
+        with_buf.iter().cloned().fold(0.0_f64, f64::max)
+    );
+    eprintln!(
+        "without-init peak_early={:.6}",
+        without_buf.iter().cloned().fold(0.0_f64, f64::max)
+    );
+
+    assert!(
+        early_max_diff > 1e-6,
+        "WHY: with-init and without-init must produce different early transients \
+         (first 10ms after reset). Init hints seed Q1 at Vce=0.1V (saturated) and \
+         Q2 at Vce=9.0V (cutoff), breaking the symmetric saddle so the NR solver's \
+         first sample differs. If max_diff={early_max_diff:.9} is near zero, init \
+         hints are not flowing to v_prev on reset(). \
+         Check assemble_multi_nl_stage in rigid/general.rs and \
+         MultiNlStage::reset() in pedalkernel-rt/src/stage.rs."
+    );
+
+    eprintln!(
+        "CONFIRMED: init hints affect early transient. \
+         max_diff={early_max_diff:.6} > 1e-6. \
+         Asymmetric seeds (Q1=saturated, Q2=cutoff) break symmetric saddle."
+    );
+}

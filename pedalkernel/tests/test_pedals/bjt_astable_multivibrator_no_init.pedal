@@ -1,0 +1,52 @@
+# 909 Kick — BJT astable multivibrator (EXPERIMENTAL ENGINE PROBE — NO INIT BLOCK)
+#
+# IDENTICAL to experimental_909_bd_bjt.pedal but with the `init { ... }` block
+# REMOVED. Used by bjt_multivibrator_oscillation_requires_init_hints to determine
+# whether the init block is actually the cause of oscillation, or whether upstream
+# solver improvements are responsible.
+#
+# See experimental_909_bd_bjt.pedal for full topology documentation.
+pedal "909 BD BJT Probe No Init" {
+  supply 9V
+  components {
+    Q1: npn(2n3904)
+    Q2: npn(2n3904)
+    R_c1: resistor(10k)
+    R_c2: resistor(10k)
+    R_b1: resistor(100k)
+    R_b2: resistor(100k)
+    C_t1: cap(10n)
+    C_t2: cap(10n)
+    C_out: cap(100n)
+    R_out: resistor(100k)
+  }
+  nets {
+    # Collector pull-ups from supply
+    vcc -> R_c1.a
+    R_c1.b -> Q1.collector, C_t1.a
+
+    vcc -> R_c2.a
+    R_c2.b -> Q2.collector, C_t2.a
+
+    # Cross-coupling: Q1.collector → C_t1 → Q2.base → R_b2 → gnd
+    C_t1.b -> Q2.base, R_b2.a
+    R_b2.b -> gnd
+
+    # Cross-coupling: Q2.collector → C_t2 → Q1.base → R_b1 → gnd
+    C_t2.b -> Q1.base, R_b1.a
+    R_b1.b -> gnd
+
+    # Emitters to ground
+    Q1.emitter -> gnd
+    Q2.emitter -> gnd
+
+    # AC-coupled output from Q1.collector
+    Q1.collector -> C_out.a
+    C_out.b -> R_out.a
+    R_out.b -> gnd
+    C_out.b -> out
+
+    # Trigger input: inject pulse into Q1.base to break symmetry
+    in -> Q1.base
+  }
+}
