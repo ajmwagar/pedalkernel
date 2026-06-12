@@ -1090,3 +1090,139 @@ fn legend_blues_gain_reasonable() {
     assert!(gain > 0.5, "Blues should produce output: {gain:.2}");
     assert!(gain < 100.0, "Blues shouldn't be insanely loud: {gain:.2}");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. Sallen-Key active filter extraction (pedalkernel-ht0o)
+//
+// Unity-gain Sallen-Key uses U1.neg wired directly to U1.out (unity follower).
+// The bug: uf.union(id_pos, id_out) in graph.rs collapsed the reactive network
+// by shorting C2/R2 junction (pos) to the output, yielding −240 dB silence.
+// After the fix (union removed), the passive WDF stages see the correct SK
+// topology and the filter response is verified here.
+//
+// Component values: R1=R2=10k, C1=C2=10n → f0 ≈ 1592 Hz
+// LPF: passes 440 Hz (below fc), rejects 10 kHz (above fc)
+// HPF: rejects 440 Hz (below fc), passes 10 kHz (above fc)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Measure peak output gain for a fixed frequency on an inline pedal string.
+fn sallen_key_gain_at_freq(pedal_src: &str, freq: f64) -> f64 {
+    let pedal = crate::dsl::parse_pedal_file(pedal_src).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+    // warmup
+    for s in 0..2000 {
+        let x = AMPLITUDE * (std::f64::consts::TAU * freq * s as f64 / SR).sin();
+        compiled.process(x);
+    }
+    let n = (4.0 * SR / freq).ceil() as usize;
+    let mut peak = 0.0f64;
+    for s in 0..n {
+        let x = AMPLITUDE * (std::f64::consts::TAU * freq * (2000 + s) as f64 / SR).sin();
+        peak = peak.max(compiled.process(x).abs());
+    }
+    peak / AMPLITUDE
+}
+
+const SK_LPF: &str = r#"
+    pedal "Extraction Sallen Key Lowpass" {
+      components {
+        U1: opamp(tl072)
+        R1: resistor(10k)
+        R2: resistor(10k)
+        C1: cap(10n)
+        C2: cap(10n)
+        R_out: resistor(1k)
+      }
+      nets {
+        in -> R1.a
+        R1.b -> R2.a
+        R2.b -> U1.pos
+        R1.b -> C1.a
+        C1.b -> U1.out
+        U1.pos -> C2.a
+        C2.b -> gnd
+        U1.neg -> U1.out
+        U1.out -> R_out.a
+        R_out.b -> out
+      }
+    }"#;
+
+const SK_HPF: &str = r#"
+    pedal "Extraction Sallen Key Highpass" {
+      components {
+        U1: opamp(tl072)
+        C1: cap(10n)
+        C2: cap(10n)
+        R1: resistor(10k)
+        R2: resistor(10k)
+        R_out: resistor(1k)
+      }
+      nets {
+        in -> C1.a
+        C1.b -> C2.a
+        C2.b -> U1.pos
+        C1.b -> R1.a
+        R1.b -> U1.out
+        U1.pos -> R2.a
+        R2.b -> gnd
+        U1.neg -> U1.out
+        U1.out -> R_out.a
+        R_out.b -> out
+      }
+    }"#;
+
+#[test]
+fn sallen_key_lpf_passes_low_freq() {
+    // 440 Hz is well below f0≈1592 Hz — passband, expect gain close to 1.0.
+    // Any non-silent output (> 0.1) passes the "silence → alive" acceptance bar.
+    let gain = sallen_key_gain_at_freq(SK_LPF, 440.0);
+    let gain_db = 20.0 * gain.log10();
+    eprintln!("SK LPF at 440 Hz: gain={gain:.4} ({gain_db:.1} dB)");
+    assert!(
+        gain > 0.1,
+        "SK LPF must pass 440 Hz (was −240 dB silence before fix): gain={gain:.4}"
+    );
+}
+
+#[test]
+fn sallen_key_lpf_attenuates_high_freq() {
+    // 10 kHz is well above f0≈1592 Hz — stopband, expect significant attenuation.
+    // A 2nd-order LPF at 10x fc should attenuate by ~40 dB (factor ~0.01).
+    let gain_440 = sallen_key_gain_at_freq(SK_LPF, 440.0);
+    let gain_10k = sallen_key_gain_at_freq(SK_LPF, 10_000.0);
+    let ratio_db = 20.0 * (gain_10k / gain_440.max(1e-12)).log10();
+    eprintln!(
+        "SK LPF: 440 Hz gain={gain_440:.4}, 10 kHz gain={gain_10k:.4}, roll-off={ratio_db:.1} dB"
+    );
+    assert!(
+        gain_10k < gain_440 * 0.5,
+        "SK LPF must roll off at 10 kHz vs 440 Hz: ratio={ratio_db:.1} dB"
+    );
+}
+
+#[test]
+fn sallen_key_hpf_passes_high_freq() {
+    // 10 kHz is well above f0≈1592 Hz — passband for HPF, expect gain close to 1.0.
+    let gain = sallen_key_gain_at_freq(SK_HPF, 10_000.0);
+    let gain_db = 20.0 * gain.log10();
+    eprintln!("SK HPF at 10 kHz: gain={gain:.4} ({gain_db:.1} dB)");
+    assert!(
+        gain > 0.1,
+        "SK HPF must pass 10 kHz (was −240 dB silence before fix): gain={gain:.4}"
+    );
+}
+
+#[test]
+fn sallen_key_hpf_attenuates_low_freq() {
+    // 200 Hz is well below f0≈1592 Hz — stopband for HPF.
+    let gain_200 = sallen_key_gain_at_freq(SK_HPF, 200.0);
+    let gain_10k = sallen_key_gain_at_freq(SK_HPF, 10_000.0);
+    let ratio_db = 20.0 * (gain_10k / gain_200.max(1e-12)).log10();
+    eprintln!(
+        "SK HPF: 200 Hz gain={gain_200:.4}, 10 kHz gain={gain_10k:.4}, ratio={ratio_db:.1} dB"
+    );
+    assert!(
+        gain_10k > gain_200 * 2.0,
+        "SK HPF must pass 10 kHz more than 200 Hz: ratio={ratio_db:.1} dB"
+    );
+}

@@ -1432,6 +1432,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             peak_error_db: Some(-40.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
