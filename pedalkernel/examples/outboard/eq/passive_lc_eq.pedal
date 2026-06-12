@@ -21,7 +21,12 @@
 #                 27m / 33m / 47m / 68m / 82m / 150m henries
 #   HF cut (atten): 5 / 10 / 20 kHz RC shelf
 #
-# AS MODELED HERE (three cascaded passive sections, verified responsive):
+# AS MODELED HERE (four cascaded passive sections + 12AX7 makeup,
+# verified responsive — sweeps in tests/pultec_sweeps.rs):
+#   0. LF CUT shelf: LF_Cut pot (10k) in the series arm, bypassed at HF by
+#      C_lcut (47n, via R_lcsep — see note 3). At LF the cap blocks and the
+#      pot's resistance pads the signal -> shelf cut. Corner at full
+#      rotation ~ 1/(2*pi * 10k * 47n) ~= 339 Hz, sliding up as depth rises.
 #   1. LF BOOST shelf: R1 (10k series) into a shunt leg of R_s1 (2.7k) in
 #      series with (C_lf || LF_Boost pot). At low frequencies the cap blocks,
 #      the pot raises the shunt impedance -> less attenuation -> shelf boost.
@@ -35,55 +40,87 @@
 #      series damping in the resonant branch (bandwidth/Q).
 #   3. HF CUT: HF_Atten pot + 6.8n cap shunt to ground after separation
 #      resistor R3.
-#   Flat insertion loss ~ -25 dB (measured; real unit ~ -16 dB), preserving
-#   the passive-pad-plus-makeup character — see makeup note below.
+#   4. MAKEUP: single 12AX7 common-cathode stage (100k plate / bypassed 1.5k
+#      cathode, B+ 250V), AC-coupled after the network. Recovers the passive
+#      pad's ~-29 dB; net chain gain ~+4.3 dB at 1 kHz.
 #
 # SIMPLIFICATIONS vs real unit (audit notes — deviations are intentional):
-#   1. NO MAKEUP GAIN STAGE — key engine finding. Every attempted makeup
-#      stage broke the EQ in the current compiler:
-#        a. 12AX7 after the network: the compiler absorbs the passive
-#           network into the triode's multi-NL stage; the measured response
-#           flattens to ~-20.4 dB at 100 Hz/5 kHz/10 kHz and all boost/cut
-#           pots freeze (deltas -0.00 / -0.02 / -0.55 dB).
-#        b. 12AX7 before the network: output drops to ~-84 dB (unusable).
-#        c. JFET source-follower buffer between network and triode:
-#           output ~-92 dB.
-#        d. Non-inverting NE5532 makeup after the network: output -240 dB
-#           (silence).
-#      The real unit's push-pull 12AX7 -> 12AU7 makeup amp is therefore
-#      omitted entirely in v1; the file is the passive section only, which
-#      keeps the EQ curves and controls fully functional.
-#   2. NO SWITCHED COMPONENTS — second engine finding. Using
-#      cap_switched(150n, 270n, 560n, 820n) or
-#      inductor_switched(27m, 33m, 47m, 68m, 82m, 150m) (the real EQP-1A tap
-#      values) makes the compiled passive network collapse to a unity
-#      passthrough with dead controls (verified on a minimal RC shelf:
-#      plain cap delta +3.45 dB, cap_switched delta +0.00 dB and 0 dB
-#      insertion loss). Fixed values are used instead: C_lf = 270n (60 Hz
-#      position), L_hf = 47m + 22n (~5 kHz position). Re-introduce switched
-#      values once the engine supports them in passive trees.
-#   3. R3 (4.7k) is a topology-separation resistor, not in the real unit:
-#      without it, three branch sections sharing one node also collapse to a
-#      passthrough (verified: all deltas +0.00 dB without R3).
+#   1. MAKEUP STAGE (updated 2026-06-12): with the F10 passive-claiming fix,
+#      an AC-coupled triode makeup AFTER the network no longer flattens the
+#      passives or freezes the pots (pattern from tests/passive_claiming.rs).
+#      v1's finding — every makeup attempt silenced the EQ or froze the
+#      controls — is obsolete. The makeup here is a single 12AX7 stage, not
+#      the real push-pull 12AX7 -> 12AU7 with transformer feedback.
+#   2. NO SWITCHED COMPONENTS — with the F7 fix, cap_switched /
+#      inductor_switched compile in passive trees but the switch is frozen
+#      at position 0, which would pin the EQ to the first tap (150n / 27m =
+#      the 106 Hz / 6.5 kHz positions). Fixed values are kept instead:
+#      C_lf = 270n (60 Hz position), L_hf = 47m + 22n (~5 kHz position).
+#      Re-introduce switched values once positions are runtime-selectable.
+#   3. SEPARATION RESISTORS are engine workarounds, not in the real unit:
+#      - R3 (4.7k): three branch sections sharing one node collapse to a
+#        passthrough without it (verified: all deltas +0.00 dB).
+#      - R_lcsep (100R): NEW finding (2026-06-12) — wiring LF_Cut and C_lcut
+#        as exact parallel edges between the same two nodes collapses the
+#        WHOLE network to silence (every probe < -157 dB). Breaking the
+#        exact parallel with a 100R resistor in the cap branch restores
+#        normal compilation.
 #   4. HF boost amount is a series damping pot inside the LC branch, not the
 #      real pot-across-the-tank arrangement. The Bandwidth pot is ALSO series
 #      damping (a pot in parallel with the inductor — the more physical
 #      damping arrangement — is another collapse trigger: with HF_BW across
 #      L_hf the entire network compiled to a passthrough). Boost and
 #      Bandwidth therefore interact much more strongly than in the real unit.
-#   5. LF cut section omitted in v1 — the "Pultec trick" (simultaneous LF
-#      boost+cut) is not yet reproducible.
+#      ENGINE GAP (2026-06-12): the L+C reactance of the pot-bearing branch
+#      is mostly lost in compilation — divider math predicts a ~+13.6 dB
+#      resonant peak at 4.95 kHz with minimum damping, but the measured
+#      boost is a broad +1.4 dB hump. Its maximum DOES sit at ~5-7 kHz
+#      (within an octave of f0), so the peak location is honest even though
+#      the peak height is ~12 dB short.
+#   5. LF cut section ADDED 2026-06-12 (was omitted in v1) — the "Pultec
+#      trick" (simultaneous LF boost+cut) now measures: LF Boost 0.7 +
+#      LF Cut 0.7 vs flat shows +0.5..+0.8 dB lift below 100 Hz and a
+#      -0.4..-0.55 dB dip at 200-630 Hz (centered ~350 Hz). Depths are
+#      ~5-10x smaller than the real unit's because pot authority through
+#      the compiled passive tree is weak (boost full-throw ~+3.6 dB).
 #   6. NO input/output transformers (real: 600 ohm bridging iron both ends).
+#   7. Response artifact: the compiled chain rolls off steeply above
+#      ~12 kHz (-32 dB at 15 kHz, < -100 dB at 20 kHz) regardless of control
+#      settings — engine artifact, present in the passive-only version too.
+#      Sweep assertions stay at or below ~11 kHz.
+#   8. ENGINE GAP (2026-06-12, control sweeps): runtime set_control pot
+#      POSITIONS BELOW 0.5 are aliased and non-physical in this compiled
+#      passive tree — position 0.5 measures IDENTICAL to position 0.0, and
+#      positions ~0.1-0.25 land outside the physically reachable range
+#      (LF Boost 0.1 -> 2.8 dB BELOW the 1-ohm-pot floor; LF Cut 0.1 ->
+#      2.1 dB ABOVE the flat response; both linear and audio tapers
+#      affected). Compiled-in `controls { ... = X }` defaults are inert
+#      (response always matches position 0 regardless of X). The upper half
+#      of pot travel behaves physically and monotonically — sweeps in
+#      tests/pultec_sweeps.rs assert on that window and carry #[ignore]'d
+#      full-range red tests.
 #
-# Measured (48 kHz, 0.1 amplitude probes, this exact netlist, HF_BW = 0.5):
-#   Boost pots 0 -> 1 at 100 Hz: -25.5 dB -> -23.7 dB (+1.8 dB)
-#   Boost pots 0 -> 1 at 1 kHz:  -28.8 dB -> -28.1 dB (+0.7 dB)
-#   Boost pots 0 -> 1 at 10 kHz: -29.6 dB -> -28.7 dB (+0.9 dB)
+# Measured (48 kHz, 0.1 amplitude probes, this exact netlist, HF_BW = 0.5,
+# full tables in reports/outboard-sweeps-2026-06-12.md):
+#   Flat (all knobs 0):         +5.9 dB at 63 Hz, +4.3 dB at 1 kHz
+#   LF Boost 0 -> 1 at 63 Hz:   +2.8 dB   (movement at 1 kHz: -0.2 dB)
+#   LF Cut   0 -> 1 at 63 Hz:   -2.0 dB
+#   HF Boost 0 -> 1 (BW 0):     +1.4 dB broad hump, max ~5-7 kHz
+#   HF Atten 0 -> 1 at 8.4 kHz: -2.6 dB
 
 equipment "Passive LC EQ EQP-1A" {
+  supplies {
+    B+: 250V               # Plate supply for the 12AX7 makeup stage
+  }
+
   components {
     # === Input coupling ===
     C_in: cap(1u)
+
+    # === Section 0: LF cut (attenuate) — series R||C shelf ===
+    LF_Cut: pot(10k)          # 0 ohm = flat, 10k = max LF cut
+    C_lcut: cap(47n)          # HF bypass around the cut pot
+    R_lcsep: resistor(100)    # Separation resistor (breaks exact parallel edges)
 
     # === Section 1: LF boost shelf (RC — real EQP-1A low band is RC) ===
     R1: resistor(10k)         # Series arm
@@ -106,15 +143,27 @@ equipment "Passive LC EQ EQP-1A" {
     HF_Atten: pot(50k, a)     # 0 ohm = max cut
     C_hcut: cap(6.8n)         # HF cut shunt cap
 
-    # === Output ===
-    R_load: resistor(100k)    # Output load (stands in for the makeup amp's
-                              # grid impedance — makeup omitted, see note 1)
+    # === Network load ===
+    R_load: resistor(100k)    # Passive network load ahead of the makeup grid
+
+    # === 12AX7 makeup gain stage (AC-coupled, passive_claiming.rs pattern) ===
+    C_c: cap(22n)             # Coupling into the makeup grid
+    R_g: resistor(1M)         # Grid leak
+    V1: triode(12ax7)
+    R_p: resistor(100k)       # Plate load
+    R_k: resistor(1.5k)       # Cathode bias
+    C_k: cap(25u, electrolytic) # Cathode bypass — full gain
+    C_out: cap(22n)           # Output coupling
+    R_out: resistor(1M)       # Output load
   }
 
   nets {
-    # --- Input to section 1 ---
+    # --- Input through the LF cut shelf into section 1 ---
     in -> C_in.a
-    C_in.b -> R1.a
+    C_in.b -> LF_Cut.a, C_lcut.a
+    C_lcut.b -> R_lcsep.a
+    R_lcsep.b -> R1.a
+    LF_Cut.b -> R1.a
 
     # --- Section 1: LF boost shelf ---
     # Shunt leg: R_s1 in series with (C_lf || LF_Boost) to ground. At LF the
@@ -138,15 +187,28 @@ equipment "Passive LC EQ EQP-1A" {
     R_s2.b -> gnd
 
     # --- Section 3: HF cut after the separation resistor ---
-    R3.b -> HF_Atten.a, R_load.a, out
+    R3.b -> HF_Atten.a, R_load.a, C_c.a
     HF_Atten.b -> C_hcut.a
     C_hcut.b -> gnd
     R_load.b -> gnd
+
+    # --- 12AX7 makeup stage: 100k plate to B+, bypassed 1.5k cathode ---
+    C_c.b -> R_g.a, V1.grid
+    R_g.b -> gnd
+    B+ -> R_p.a
+    R_p.b -> V1.plate
+    V1.cathode -> R_k.a, C_k.a
+    R_k.b -> gnd
+    C_k.b -> gnd
+    V1.plate -> C_out.a
+    C_out.b -> R_out.a, out
+    R_out.b -> gnd
   }
 
   controls {
     # Ranges oriented so turning each knob UP gives MORE boost / MORE cut.
     LF_Boost.position -> "LF Boost" [0.0, 1.0] = 0.0
+    LF_Cut.position -> "LF Cut" [0.0, 1.0] = 0.0
     HF_Boost.position -> "HF Boost" [1.0, 0.0] = 0.0
     HF_BW.position -> "HF Bandwidth" [0.0, 1.0] = 0.5
     HF_Atten.position -> "HF Atten" [1.0, 0.0] = 0.0

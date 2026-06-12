@@ -38,23 +38,40 @@
 #      memory tail) is collapsed into ONE RC release (~2.2 s). The
 #      photocoupler t4b model in the engine contributes its own dynamics,
 #      but the dual-time-constant CdS memory effect is not explicit.
-#   4. FEEDBACK detector caveat: EF1.in is wired to the output node to
-#      document the real feedback sidechain, but the engine's envelope
-#      followers read the PEDAL INPUT at runtime, so detection is effectively
-#      feed-forward in simulation (same engine limitation as fet_leveler).
+#   4. FEEDBACK detector (updated 2026-06-12, F4+F5 fixed): the engine now
+#      honors the `EF1.in -> C_out.b` output tap, so detection is a true
+#      feedback sidechain as in the hardware.
 #   5. No Limit/Compress switch, no sidechain pre-emphasis (R37 trim).
-#   6. ENGINE LIMITATION (key audit finding): the engine currently modulates
-#      a photocoupler as a SERIES transmission element regardless of where
-#      the netlist places it — measured behavior is identical whether PC1 is
-#      wired as the shunt cell (this file, the physical LA-2A arrangement)
-#      or in series: loud (0.5) probe gain +14.8 dB, quiet (0.05) probe gain
-#      -20.7 dB. More LED drive -> more transmission, so the envelope
-#      follower produces upward EXPANSION (+35.5 dB loud-vs-quiet delta)
-#      instead of the LA-2A's downward compression. Additionally, in purely
-#      passive stages (no tube) the LED modulation binding has no effect at
-#      all. The netlist below remains the correct hardware topology; treat
-#      the dynamic behavior as wrong-direction until the engine models shunt
-#      photocell gain reduction.
+#      PEAK REDUCTION GAP (2026-06-12 control sweeps): the real unit's
+#      second knob — Peak Reduction, which scales the sidechain drive into
+#      the EL panel — cannot be honestly expressed in the current DSL:
+#      `controls` entries bind only pot positions; the envelope binding
+#      resolves only a DIRECT `EF1.out -> PC1.led` net (a pot inserted in
+#      that path is not a modulation sink and would silently kill the
+#      sidechain); and envelope_follower's sensitivity_r is a fixed
+#      component parameter, not control-bindable. Candidate engine feature:
+#      control-bindable EF sensitivity. Until then this model has leveling
+#      depth fixed by EF1's component values.
+#   6. GR DIRECTION (updated 2026-06-12, F6 fixed): the LDR now compiles as
+#      a controlled-resistance MNA child in its netlist position, so the
+#      shunt CdS cell produces real downward compression. Measured
+#      (48 kHz, 1 kHz probes, 8 s settle per point, Gain 0.6): quiet (0.05)
+#      gain +14.3 dB, loud (0.5) gain -1.8 dB -> 16.0 dB GR; attack 2.0 ms,
+#      release 1.78 s; gain falls monotonically from -40 to 0 dB input with
+#      an effective top-region ratio ~15:1. The v1 expansion finding is
+#      obsolete.
+#   7. GAIN POT GAP (2026-06-12 control sweeps): the Gain pot (3-terminal
+#      divider into the 12AX7 grid) has NO authority in the compiled
+#      processor — steady gain flat within 0.09 dB across positions 0.2-0.8
+#      at heavy (0.2 amp) and near-linear (0.002 amp) drive alike, slightly
+#      DECREASING with position, so it is a frozen pot rather than
+#      feedback-loop compensation. Same family as the F10 link-2 finding
+#      (pots swallowed into an active device's group go inert). Red test:
+#      tests/la2a_sweeps.rs::gain_pot_raises_steady_gain.
+#   8. PROGRAM-DEPENDENT RELEASE not reproduced (consequence of item 3):
+#      release after 3 s of heavy GR measures 1.49 s vs 2.11 s after a
+#      0.5 s light hit — the hardware's CdS memory predicts the opposite
+#      ordering. See tests/la2a_sweeps.rs::program_dependent_release_measured.
 
 equipment "Opto Leveler LA-2A" {
   supplies {
