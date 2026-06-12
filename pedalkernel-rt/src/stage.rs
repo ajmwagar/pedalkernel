@@ -2176,6 +2176,16 @@ impl WdfStage {
                         // The unnamed voltage source leaf emits b = 2V, so when there
                         // is no explicit output probe the root fallback must report
                         // the physical source-side voltage, not the wave magnitude.
+                        //
+                        // MERGE NOTE (#85 double down-sweep fix): the down-sweep is
+                        // done HERE via set_incident_with_state(b_tree). We MUST
+                        // early-return so the shared down-sweep at the end of this
+                        // function (`tree.set_incident_with_state(a_root, ...)`) is
+                        // never reached from the Passthrough path — re-scattering
+                        // with a_root = b_tree/2.0 corrupts capacitor state and
+                        // produces 0.39x gain instead of 1.0x. Returning the value
+                        // (instead of falling through) preserves single-down-sweep
+                        // semantics.
                         tree.set_incident_with_state(b_tree, runtime_state);
                         // Check output_probe BEFORE fallback
                         if let Some(ref probe_id) = output_probe {
@@ -2183,7 +2193,7 @@ impl WdfStage {
                                 return v;
                             }
                         }
-                        b_tree / 2.0
+                        return b_tree / 2.0;
                     }
                     // ShortCircuit: ground termination (a = -b)
                     // Ground has zero impedance, so it reflects with inverted sign.
@@ -2193,10 +2203,15 @@ impl WdfStage {
                         let a_root = -b_tree;
                         tree.set_incident_with_state(a_root, runtime_state);
 
-                        // Check output_probe first (for SP-reduced orphan stages)
+                        // Check output_probe first (for SP-reduced orphan stages).
+                        // MERGE NOTE (#85): leaf_voltage() returns a/2 for resistors;
+                        // for a VS-driven tree the WDF b=2V convention inflates a by
+                        // 2× relative to physical. The short_circuit_junction_voltage()
+                        // path already divides by 2 when a VS is detected, so divide
+                        // here too for consistency.
                         if let Some(ref probe_id) = output_probe {
                             if let Some(v) = tree.leaf_voltage_with_state(probe_id, runtime_state) {
-                                return v;
+                                return v / 2.0;
                             }
                         }
                         // Extract output at junction (voltage across load resistor)

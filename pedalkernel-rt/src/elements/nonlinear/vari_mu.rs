@@ -364,6 +364,15 @@ impl VariMuThreePort {
         }
     }
 
+    /// Create a VariMuThreePort for use in a GND-referenced MNA context.
+    ///
+    /// VariMuThreePort evaluates `vak = v[1]` directly (no voltage offset),
+    /// so this is equivalent to `new_with_v_max` — the supply voltage sets
+    /// the upper plate-voltage clamp only.
+    pub fn new_gnd_referenced(model: VariMuModel, supply_voltage: f64) -> Self {
+        Self::new_with_v_max(model, supply_voltage)
+    }
+
     pub fn with_parallel_count(mut self, count: usize) -> Self {
         self.parallel_count = count.max(1);
         self

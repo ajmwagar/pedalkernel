@@ -21,7 +21,8 @@ mod state_space;
 // ═══════════════════════════════════════════════════════════════════════════
 
 pub(super) use self::general::{
-    build_general_mna_from_edges, build_general_mna_from_edges_with_hints, build_opamp_nl_feedback,
+    build_general_mna_from_edges, build_general_mna_from_edges_with_hints,
+    build_general_mna_from_edges_with_supply, build_opamp_nl_feedback,
 };
 pub(super) use self::opamp_root::{extract_opamp_config, make_opamp_root, OpAmpConfig};
 
