@@ -336,6 +336,10 @@ pub enum ModulationSinkKind {
     MosfetVgs,
     OtaIabc,
     BbdClock,
+    /// VCA control-voltage port: normalized 0..1 mapped onto 0..-80 dB
+    /// (SSM2164-class dB-linear law; see the compiler's `vca_lowering` pass
+    /// and the runtime `Vca::set_cv_normalized`).
+    VcaCv,
     DelaySpeed,
     DelayTime,
 }

@@ -16,9 +16,9 @@
 #   with this engine's envelope_follower (peak-ish RC follower) — audit note.
 #
 # AS MODELED HERE:
-#   in -> C_in -> U1 (NE5532 non-inverting buffer) -> [VCA1 (SSM2164), wired
-#      via R_v2v but bypassed by a hard wire — see item 1] -> C_mid
-#      -> U2 (NE5532 non-inverting output stage) -> C_out -> Makeup pot -> out
+#   in -> C_in -> U1 (NE5532 non-inverting buffer) -> R_v2v -> VCA1 (SSM2164)
+#      -> C_mid -> U2 (NE5532 non-inverting output stage) -> C_out
+#      -> Makeup pot -> out
 #   Sidechain: EF1 envelope follower tapped from the INPUT (feed-forward,
 #   dbx-160 style — chosen because the engine's envelope followers read the
 #   pedal input at runtime anyway; SSL's feedback detector is not currently
@@ -29,17 +29,19 @@
 #                release pair; the 750k*0.47u slow arm is future work)
 #
 # SIMPLIFICATIONS vs real unit (audit notes — read before trusting GR):
-#   1. ENGINE LIMITATION (key audit finding): the DSL parses `vca(ssm2164)`
-#      and the `cv` pin, but the compiler currently treats the VCA as a
-#      virtual component — `GraphRole::Virtual`, no MNA stamp, and the
-#      compiled processor's `vcas` binding list is never populated
-#      (pedalkernel/src/compiler/compile.rs builds `vcas: Vec::new()`).
-#      Additionally `cv` is not a recognized envelope modulation target
-#      (valid sinks: vgs/gate/led/vgk/vg1k/iabc/clock/speed_mod/delay_time),
-#      so `EF1.out -> VCA1.cv` is parsed but produces NO gain modulation.
-#      The audio path below is hard-wired around the VCA so audio still
-#      flows; expect NO actual compression from this file until the engine
-#      binds VCAs. The netlist still documents the hardware topology + BOM.
+#   1. CHANGELOG — G4 FIXED 2026-06-12 (compiler vca_lowering pass). History:
+#      the original audit found the compiler treated `vca(ssm2164)` as a
+#      virtual stub — `GraphRole::Virtual`, no MNA stamp, the compiled
+#      processor's `vcas` binding list never populated, and `cv` not a
+#      recognized envelope modulation sink — so `EF1.out -> VCA1.cv` was
+#      parsed but inert, and this file shipped with the audio path
+#      HARD-WIRED around the VCA (`U1.out -> C_mid.a`) just to pass signal,
+#      with zero gain reduction (audit measured 0.11 dB GR delta). The
+#      vca_lowering pass now lowers VCA1 into a runtime SSM2164-class
+#      dB-linear gain element (normalized cv 0..1 spans 0..-80 dB) driven by
+#      the EF1 sidechain, so the hard wire is REMOVED and the signal path
+#      runs through the VCA as drawn. Behavioral islands that fail to lower
+#      are now compile errors (reports/architecture-debt-2026-06-12.md §4).
 #   2. ENGINE LIMITATION (second audit finding): the canonical SSM2164
 #      application uses an INVERTING V-to-I input and an INVERTING I-to-V
 #      output stage (signal into the op-amp summing node, 30k feedback).
@@ -70,9 +72,9 @@ equipment "VCA Bus Comp" {
     R_g1: resistor(10k)    # Gain-set leg to ground
     R_fb1: resistor(10k)   # Feedback — gain = 1 + 10k/10k = 2
 
-    # === VCA core (canonical SSM2164 application, currently virtual) ===
+    # === VCA core (canonical SSM2164 application) ===
     R_v2v: resistor(30k)   # Voltage-to-current input resistor (datasheet 30k)
-    VCA1: vca(ssm2164)     # Gain element — currently virtual in the engine!
+    VCA1: vca(ssm2164)     # Gain element — lowered by the compiler (G4 fixed)
 
     # === Output stage (non-inverting, cap-coupled — see header item 2) ===
     C_mid: cap(1u)         # ENGINE WORKAROUND: DC-coupled op-amp cascades
@@ -102,19 +104,13 @@ equipment "VCA Bus Comp" {
     R_fb1.a -> U1.neg
     R_fb1.b -> U1.out
 
-    # --- VCA: V-to-I input resistor into the (virtual) VCA core ---
-    # R_v2v -> VCA1.in is a stub branch: the VCA is virtual (header item 1),
-    # so the audio path is hard-wired from U1.out to C_mid below. VCA1.out
-    # is tied to the same node the real VCA would drive.
+    # --- VCA: V-to-I input resistor into the VCA core ---
+    # G4 fixed 2026-06-12: the hard-wire bypass (`U1.out -> C_mid.a`) that
+    # used to sit here is REMOVED — the audio path now runs through VCA1,
+    # which the compiler lowers into a runtime gain element (header item 1).
     U1.out -> R_v2v.a
     R_v2v.b -> VCA1.in
     VCA1.out -> C_mid.a
-
-    # ENGINE WORKAROUND (see header items 1-2): audio bypasses the virtual
-    # VCA directly; a series resistor bridge (30k) between the op-amp stages
-    # ALSO compiles to silence in the current engine, so the bypass is a
-    # plain wire rather than the R_thru resistor originally intended.
-    U1.out -> C_mid.a
 
     # --- Output stage (non-inverting, gain 2, cap-coupled) ---
     C_mid.b -> R_b2.a, U2.pos
@@ -131,7 +127,7 @@ equipment "VCA Bus Comp" {
     Makeup.b -> gnd
 
     # --- Sidechain: feed-forward detector drives the VCA control port ---
-    # NOTE: `cv` is not yet a compiler modulation target — parsed, inert.
+    # G4 fixed 2026-06-12: `cv` is now a live modulation sink (VcaCv target).
     EF1.in -> C_in.b
     EF1.out -> VCA1.cv
   }

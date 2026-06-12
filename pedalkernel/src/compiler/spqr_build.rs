@@ -118,6 +118,11 @@ pub fn compile_via_spqr_with_options(
     let delay_lines = build_delay_line_bindings(pedal, sample_rate);
     // Lower bbd() components into runtime BBD delay lines (census bug #1).
     let bbds = super::bbd_lowering::build_bbd_delay_lines(pedal, sample_rate);
+    // Behavioral islands must lower or fail to compile (architecture debt
+    // §4): reject components with no lowering pass at all (currently vco()),
+    // then lower vca() components into runtime gain elements (audit gap G4).
+    super::vca_lowering::reject_unlowered_behavioral(pedal)?;
+    let vcas = super::vca_lowering::lower_vcas(pedal, sample_rate)?;
 
     // When ports are declared, the first input port replaces `in` and
     // the first output port replaces `out` as the circuit's I/O nodes.
@@ -149,7 +154,7 @@ pub fn compile_via_spqr_with_options(
         .filter(|i| !active_set.contains(i))
         .collect();
 
-    if all_edges.is_empty() && delay_lines.is_empty() && bbds.is_empty() {
+    if all_edges.is_empty() && delay_lines.is_empty() && bbds.is_empty() && vcas.is_empty() {
         return Err("No circuit edges found".to_string());
     }
 
@@ -173,7 +178,7 @@ pub fn compile_via_spqr_with_options(
             bbds,
             delay_lines,
             vcos: Vec::new(),
-            vcas: Vec::new(),
+            vcas,
             thermal: if options.thermal {
                 Some(ThermalModel::silicon_standard(sample_rate))
             } else {
@@ -209,6 +214,7 @@ pub fn compile_via_spqr_with_options(
         compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
         super::bbd_lowering::bind_bbd_runtime(pedal, &mut compiled, sample_rate);
+        super::vca_lowering::bind_vca_runtime(pedal, &mut compiled, sample_rate);
         return Ok(compiled);
     }
 
@@ -238,7 +244,7 @@ pub fn compile_via_spqr_with_options(
             bbds,
             delay_lines,
             vcos: Vec::new(),
-            vcas: Vec::new(),
+            vcas,
             thermal: None,
             tolerance_seed: 0,
             opamp_stages: Vec::new(),
@@ -270,6 +276,7 @@ pub fn compile_via_spqr_with_options(
         compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
         super::bbd_lowering::bind_bbd_runtime(pedal, &mut compiled, sample_rate);
+        super::vca_lowering::bind_vca_runtime(pedal, &mut compiled, sample_rate);
         return Ok(compiled);
     }
 
@@ -283,11 +290,11 @@ pub fn compile_via_spqr_with_options(
     let mut feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph);
 merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
-    // BBD pedals: the bbd() component is GraphRole::Virtual, so the netlist
-    // is galvanically cut at BBD.in/BBD.out. Split any group that spans the
-    // gap (the sides stay "connected" through ground only) into separate
-    // serial stages — a stage built across the gap probes exact 0.
-    if !bbds.is_empty() {
+    // BBD/VCA pedals: bbd() and vca() are GraphRole::Virtual, so the netlist
+    // is galvanically cut at their in/out pins. Split any group that spans
+    // the behavioral gap (the sides stay "connected" through ground only)
+    // into separate serial stages — a stage built across the gap probes 0.
+    if !bbds.is_empty() || !vcas.is_empty() {
         super::bbd_lowering::split_groups_at_behavioral_gaps(&mut feedback_groups, &graph);
     }
     eprintln!("  [compile] Step 1 done: {} groups", feedback_groups.len());
@@ -324,6 +331,14 @@ merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
     let mut terminals = vec![graph.in_node, graph.out_node];
     if !bbds.is_empty() {
         for node in super::bbd_lowering::bbd_boundary_nodes(pedal, &graph) {
+            if !terminals.contains(&node) {
+                terminals.push(node);
+            }
+        }
+    }
+    // VCA signal pins are behavioral stage boundaries too (audit gap G4).
+    if !vcas.is_empty() {
+        for node in super::vca_lowering::vca_boundary_nodes(pedal, &graph) {
             if !terminals.contains(&node) {
                 terminals.push(node);
             }
@@ -1764,7 +1779,7 @@ merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
         bbds,
         delay_lines,
         vcos: Vec::new(),
-        vcas: Vec::new(),
+        vcas,
         thermal: if options.thermal {
             Some(ThermalModel::silicon_standard(sample_rate))
         } else {
@@ -1804,6 +1819,11 @@ merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
 
     // Bind BBD controls (clock/feedback/mix pots) and clock LFOs.
     super::bbd_lowering::bind_bbd_runtime(pedal, &mut compiled, sample_rate);
+
+    // Bind envelope followers wired to VCA cv ports (audit gap G4). Must run
+    // after the stage list is final: it resolves detector taps against
+    // `compiled.stages`.
+    super::vca_lowering::bind_vca_runtime(pedal, &mut compiled, sample_rate);
 
     if pedal.calibrate {
         super::calibrate::calibrate_output(&mut compiled);

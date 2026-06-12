@@ -213,13 +213,14 @@ fn opto_leveler_attack_release_in_t4b_range() {
 // ===========================================================================
 
 /// [G4] examples/outboard/compressor/vca_bus_comp.pedal: the EF1 -> VCA1.cv
-/// sidechain must produce real gain reduction. Audit measured GR delta of
-/// 0.11 dB because `vca(ssm2164)` is GraphRole::Virtual (no MNA stamp, the
-/// compiled `vcas` binding list is never populated) and `cv` is not a valid
-/// envelope modulation sink. See reports/outboard-gear-audit-2026-06-12.md
-/// §3, §6 G4.
+/// sidechain must produce real gain reduction. The audit measured a GR delta
+/// of 0.11 dB because `vca(ssm2164)` was GraphRole::Virtual (no MNA stamp,
+/// the compiled `vcas` binding list never populated) and `cv` was not a
+/// valid envelope modulation sink. Fixed 2026-06-12 by the compiler's
+/// vca_lowering pass (see tests/vca_lowering.rs); the example's hard-wire
+/// bypass is removed. See reports/outboard-gear-audit-2026-06-12.md §3,
+/// §6 G4.
 #[test]
-#[ignore = "red until G4 fix: vca() is an unstamped virtual stub, vca_bus_comp shows 0.11 dB GR"]
 fn vca_bus_comp_compresses() {
     let src = example_pedal_source("vca_bus_comp.pedal");
     let controls: &[(&str, f64)] = &[("Makeup", 0.7)];

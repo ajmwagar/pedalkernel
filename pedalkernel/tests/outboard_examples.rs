@@ -116,12 +116,13 @@ fn opto_leveler_gain_report() {
 // VCA Bus Comp (SSL G-bus / dbx-inspired VCA compressor)
 // ===========================================================================
 //
-// AUDIT NOTE: the compiler currently treats vca(ssm2164) as a virtual
-// component (no MNA stamp, `vcas` bindings never populated) and `cv` is not
-// a recognized envelope modulation target, so this circuit passes audio via
-// a documented hard-wired bypass around the VCA but applies NO gain
-// reduction. The gain report below is expected to show loud ~= quiet gain
-// until the engine implements VCA binding.
+// AUDIT NOTE (updated 2026-06-12, G4 fixed): vca(ssm2164) is now lowered by
+// the compiler's vca_lowering pass into a runtime SSM2164-class dB-linear
+// gain element, and `cv` is a live envelope modulation sink (VcaCv). The
+// example's hard-wired bypass is removed — audio runs through the VCA and
+// the gain report below shows real gain reduction (loud(0.5) ≈ -4 dB vs
+// quiet(0.05) ≈ -0.5 dB, GR delta ≈ +3.7 dB). Hard GR/ratio assertions live
+// in outboard_acceptance::vca_bus_comp_compresses (GR > 3 dB, ratio > 1.3).
 
 #[test]
 fn vca_bus_comp_produces_output() {

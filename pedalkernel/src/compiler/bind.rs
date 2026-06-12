@@ -1010,6 +1010,21 @@ fn resolve_modulation_target(
             }
         }
         ModulationSinkKind::BbdClock => ModulationTarget::BbdClock { bbd_idx: 0 },
+        ModulationSinkKind::VcaCv => {
+            // vcas[i] is declaration-ordered (vca_lowering index contract).
+            let vca_idx = pedal
+                .components
+                .iter()
+                .filter(|c| {
+                    c.kind
+                        .as_any()
+                        .downcast_ref::<super::components::Vca>()
+                        .is_some()
+                })
+                .position(|c| c.id == target_comp)
+                .unwrap_or(0);
+            ModulationTarget::VcaCv { vca_idx }
+        }
         ModulationSinkKind::DelaySpeed => {
             let delay_idx = delay_id_to_idx.get(target_comp).copied().unwrap_or(0);
             ModulationTarget::DelaySpeed { delay_idx }

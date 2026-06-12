@@ -244,9 +244,9 @@ pedal "Dangling VCA" {
     let pedal = parse_pedal_file(src).expect("parse");
     let err = match compile_pedal(&pedal, SAMPLE_RATE) {
         Err(e) => e,
-        Ok(_) => panic!(
-            "a vca() that lowering cannot place in the audio path must be a compile error"
-        ),
+        Ok(_) => {
+            panic!("a vca() that lowering cannot place in the audio path must be a compile error")
+        }
     };
     eprintln!("unwired vca error: {err}");
     assert!(

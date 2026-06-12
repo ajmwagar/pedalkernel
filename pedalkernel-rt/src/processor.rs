@@ -864,6 +864,11 @@ pub enum ModulationTarget {
     OtaIabcLinear { multi_nl_idx: usize },
     /// Modulate a BBD's clock frequency (for chorus/flanger).
     BbdClock { bbd_idx: usize },
+    /// Modulate a VCA's control-voltage port (compressors/tremolo).
+    /// Drives `Vca::set_cv_normalized` on `vcas[vca_idx]` (declaration-order
+    /// index contract from the compiler's `vca_lowering` pass): 0 = unity
+    /// gain, 1 = full attenuation (SSM2164-class dB-linear law).
+    VcaCv { vca_idx: usize },
     /// Modulate an op-amp's non-inverting input voltage.
     #[allow(dead_code)]
     OpAmpVp { opamp_idx: usize },
@@ -2696,6 +2701,7 @@ impl CompiledPedal {
         bbds: &mut [BbdDelayLine],
         opamp_stages: &mut [OpAmpStage],
         delay_lines: &mut [DelayLineBinding],
+        vcas: &mut [VcaBinding],
         target: &ModulationTarget,
         modulation: crate::Wave,
         env_out: crate::Wave,
@@ -2769,6 +2775,16 @@ impl CompiledPedal {
             ModulationTarget::BbdClock { bbd_idx } => {
                 if let Some(bbd) = bbds.get_mut(*bbd_idx) {
                     bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
+                }
+            }
+            ModulationTarget::VcaCv { vca_idx } => {
+                if let Some(vca_binding) = vcas.get_mut(*vca_idx) {
+                    // Detector silence (modulation 0) = unity gain; louder
+                    // program = more attenuation, per the SSM2164-class
+                    // dB-linear law in Vca::set_cv_normalized.
+                    vca_binding
+                        .vca
+                        .set_cv_normalized(modulation.clamp(0.0, 1.0));
                 }
             }
             ModulationTarget::OpAmpVp { opamp_idx } => {
@@ -2942,6 +2958,15 @@ impl PedalProcessor for CompiledPedal {
                         bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
                     }
                 }
+                ModulationTarget::VcaCv { vca_idx } => {
+                    if let Some(vca_binding) = self.vcas.get_mut(*vca_idx) {
+                        // LFO-driven VCA CV (tremolo): normalized 0..1 onto
+                        // the SSM2164-class dB-linear law.
+                        vca_binding
+                            .vca
+                            .set_cv_normalized(modulation.clamp(0.0, 1.0));
+                    }
+                }
                 ModulationTarget::OpAmpVp { opamp_idx } => {
                     if let Some(opamp_stage) = self.opamp_stages.get_mut(*opamp_idx) {
                         // LFO modulates op-amp's non-inverting input
@@ -2986,6 +3011,7 @@ impl PedalProcessor for CompiledPedal {
                 &mut self.bbds,
                 &mut self.opamp_stages,
                 &mut self.delay_lines,
+                &mut self.vcas,
                 &binding.target,
                 modulation,
                 env_out,
@@ -3556,6 +3582,7 @@ impl PedalProcessor for CompiledPedal {
                     &mut self.bbds,
                     &mut self.opamp_stages,
                     &mut self.delay_lines,
+                    &mut self.vcas,
                     &binding.target,
                     modulation,
                     env_out,
@@ -3602,7 +3629,13 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
-        // Tick VCAs — apply envelope-gated amplitude modulation after WDF stages.
+        // Tick VCAs — apply amplitude modulation after WDF stages. Two modes:
+        // - Trigger-gated (trigger_idx Some): the ADSR owns the gain (synth
+        //   voices / drum machines).
+        // - CV-driven (trigger_idx None, the vca_lowering compiler pass): the
+        //   gain is owned by ModulationTarget::VcaCv routing (envelope
+        //   follower or LFO on the cv pin) and must NOT be overwritten by the
+        //   idle ADSR (which would force gain 0 = silence).
         for vca_binding in &mut self.vcas {
             // Gate envelope from trigger: only call gate_on() when the trigger
             // fires. Do NOT call gate_off() on subsequent samples — let the ADSR
@@ -3614,9 +3647,9 @@ impl PedalProcessor for CompiledPedal {
                         vca_binding.envelope.gate_on();
                     }
                 }
+                let env_val = vca_binding.envelope.tick();
+                vca_binding.vca.set_gain(env_val);
             }
-            let env_val = vca_binding.envelope.tick();
-            vca_binding.vca.set_gain(env_val);
 
             // Read audio from input node (sum all signals at that node)
             let vca_input = self
