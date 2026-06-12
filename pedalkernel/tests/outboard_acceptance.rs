@@ -133,20 +133,33 @@ fn envelope_to_jfet_vgs_modulates_gain() {
 // G3 — Opto Leveler (LA-2A-style T4B shunt cell) GR direction + depth
 // ===========================================================================
 
+/// T4B steady gain: the CdS cell's slow state releases with a ~2.2 s time
+/// constant, so `static_gain_curve`'s standard 0.5 s settle measures
+/// mid-transition. Run 8 s per level and measure the final second.
+fn opto_steady_gain_db(src: &str, controls: &[(&str, f64)], amplitude: f64, freq_hz: f64) -> f64 {
+    let mut process = pedal_processor(src, SAMPLE_RATE, controls);
+    let input = sine_at(freq_hz, amplitude, 8.0, SAMPLE_RATE);
+    let output: Vec<f64> = input.iter().map(|&x| process(x)).collect();
+    let tail = (7.0 * SAMPLE_RATE) as usize;
+    lin_to_db(rms(&output[tail..]) / rms(&input[tail..]))
+}
+
 /// [G3] examples/outboard/compressor/opto_leveler.pedal: more program level
 /// must mean LESS gain (downward compression via the shunt CdS cell). Audit
 /// measured the OPPOSITE — loud +14.8 dB, quiet -20.7 dB, i.e. +35.5 dB of
 /// upward expansion — because the engine modulates the photocoupler as a
 /// series transmission gain regardless of netlist position.
 /// See reports/outboard-gear-audit-2026-06-12.md §3, §6 G3.
+/// 2026-06-12 (F6): fixed — LDR compiles as a controlled-resistance MNA
+/// child, LED bound to the output-tap envelope; promoted with the T4B-aware
+/// settle above.
 #[test]
-#[ignore = "red until G3 fix: photocoupler LED drive acts as series gain, opto_leveler expands +35.5 dB instead of compressing"]
 fn opto_leveler_reduces_gain_as_level_rises() {
     let src = example_pedal_source("opto_leveler.pedal");
     let controls: &[(&str, f64)] = &[("Gain", 0.6)];
 
-    let quiet_gain = steady_gain_db(&src, controls, 0.05, 1_000.0);
-    let loud_gain = steady_gain_db(&src, controls, 0.5, 1_000.0);
+    let quiet_gain = opto_steady_gain_db(&src, controls, 0.05, 1_000.0);
+    let loud_gain = opto_steady_gain_db(&src, controls, 0.5, 1_000.0);
     let gr = quiet_gain - loud_gain;
     eprintln!(
         "opto leveler: quiet(0.05) gain {quiet_gain:+.3} dB, \
@@ -171,7 +184,6 @@ fn opto_leveler_reduces_gain_as_level_rises() {
 /// direction is inverted (see opto_leveler_reduces_gain_as_level_rises).
 /// See reports/outboard-gear-audit-2026-06-12.md §3, §6 G3.
 #[test]
-#[ignore = "red until G3 fix: GR direction inverted, so T4B attack/release timing is meaningless today"]
 fn opto_leveler_attack_release_in_t4b_range() {
     let src = example_pedal_source("opto_leveler.pedal");
     let controls: &[(&str, f64)] = &[("Gain", 0.6)];

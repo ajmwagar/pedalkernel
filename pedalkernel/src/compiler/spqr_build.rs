@@ -2465,7 +2465,9 @@ fn build_passive_rtype_stage(
         // so runtime Vgs modulation (LFO/envelope) can update the G matrix
         // and re-derive scattering — same mechanism as pots. Without this
         // the JFET edge was silently dropped from the MNA (audit gap G2).
-        if comp.kind.is_jfet() {
+        // Photocoupler LDR cells are the same shape of controlled resistance
+        // (LED drive instead of Vgs) and were dropped identically (gap G3).
+        if comp.kind.is_jfet() || comp.kind.type_tag() == "photocoupler" {
             if let Some(child) = comp.kind.make_leaf(&comp.id, sample_rate) {
                 let r = child.port_resistance();
                 mna.stamp_resistor(n1, n2, r);
