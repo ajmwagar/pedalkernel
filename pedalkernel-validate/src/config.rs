@@ -1380,6 +1380,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             spectral_error_db: Some(8.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 
@@ -1410,6 +1411,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             spectral_error_db: Some(2.0),
                             ..Default::default()
                         },
+                        warmup_trim_ms: None,
                     },
                 );
 

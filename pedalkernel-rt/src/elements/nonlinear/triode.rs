@@ -322,6 +322,15 @@ pub struct TriodeThreePort {
     pub model: TriodeModel,
     /// Maximum plate voltage (B+ supply rail).
     v_max: crate::Wave,
+    /// Voltage offset added to port-1 wave before computing Vpk.
+    ///
+    /// Two MNA conventions exist:
+    /// - **VCC-referenced** (original): MNA ground = VCC, so port-1 wave =
+    ///   `V_plate - VCC` (negative). `v_offset = v_max = VCC` recovers actual Vpk.
+    ///   Clamp: `(-v_max, 10)`.
+    /// - **GND-referenced** (general MNA path): MNA ground = GND, so port-1 wave =
+    ///   `V_plate` (positive). Set `v_offset = 0` and clamp `(0, v_max)`.
+    v_offset: crate::Wave,
     /// Number of parallel tubes.
     parallel_count: usize,
     /// Grid emission current (saturation current for grid diode).
@@ -335,6 +344,7 @@ impl TriodeThreePort {
         Self {
             model,
             v_max: 500.0,
+            v_offset: 500.0,
             parallel_count: 1,
             grid_is: 1e-9,
             grid_vt: 0.025,
@@ -342,8 +352,25 @@ impl TriodeThreePort {
     }
 
     pub fn new_with_v_max(model: TriodeModel, v_max: crate::Wave) -> Self {
+        let v_max = v_max.max(1.0);
         Self {
-            v_max: v_max.max(1.0),
+            v_max,
+            v_offset: v_max, // VCC-referenced: offset = supply voltage
+            ..Self::new(model)
+        }
+    }
+
+    /// Create a TriodeThreePort for use in a GND-referenced MNA context.
+    ///
+    /// In the general MNA path, VCC is an explicit voltage source rather than
+    /// the MNA reference node. Port-1 waves represent actual plate voltage above
+    /// GND (positive, 0..supply_voltage). No offset is needed; the clamp is
+    /// adjusted accordingly.
+    pub fn new_gnd_referenced(model: TriodeModel, supply_voltage: f64) -> Self {
+        let v_max = supply_voltage.max(1.0);
+        Self {
+            v_max,
+            v_offset: 0.0, // GND-referenced: port-1 is already the physical plate voltage
             ..Self::new(model)
         }
     }
@@ -354,7 +381,12 @@ impl TriodeThreePort {
     }
 
     pub fn set_v_max(&mut self, v_max: crate::Wave) {
+        let old_offset_was_vmax = (self.v_offset - self.v_max).abs() < 1.0;
         self.v_max = v_max.max(1.0);
+        // Keep v_offset in sync for VCC-referenced convention
+        if old_offset_was_vmax {
+            self.v_offset = self.v_max;
+        }
     }
 
     pub fn v_max(&self) -> crate::Wave {
@@ -452,11 +484,15 @@ impl NlDeviceGroupIv for TriodeThreePort {
     fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let vgk = v[0]; // Port 0: grid-cathode (actual voltage, no shift needed)
 
-        // Port 1: plate-cathode. In the R-type adaptor, the supply node (B+)
-        // is grounded in the MNA, so the WDF voltage v[1] represents
-        // V_plate - V_supply. Shift by +v_max to recover the actual Vpk
-        // for the Koren model. The Jacobian is unaffected (constant shift).
-        let vpk = v[1] + self.v_max;
+        // Port 1: plate-cathode. The wave v[1] represents the port voltage in
+        // whatever MNA convention was used at compile time:
+        //
+        // - VCC-referenced (v_offset = v_max = VCC): v[1] = V_plate - VCC
+        //   (negative). v_offset shifts it back to physical Vpk.
+        // - GND-referenced (v_offset = 0): v[1] = V_plate (positive, already physical).
+        //
+        // The Jacobian is unaffected by the constant shift.
+        let vpk = v[1] + self.v_offset;
 
         // Grid current (diode model)
         let (ig, dig_dvgk) = self.grid_iv(vgk);
@@ -473,8 +509,16 @@ impl NlDeviceGroupIv for TriodeThreePort {
 
     fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
         match port {
-            0 => (-50.0, 10.0),       // Grid: well below cutoff to slight forward bias
-            _ => (-self.v_max, 10.0), // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
+            0 => (-50.0, 10.0), // Grid: well below cutoff to slight forward bias
+            _ => {
+                if self.v_offset < 1.0 {
+                    // GND-referenced: plate voltage is physical (0..v_max)
+                    (0.0, self.v_max)
+                } else {
+                    // VCC-referenced: plate wave is V_plate - VCC, range (-v_max, ~0)
+                    (-self.v_max, 10.0)
+                }
+            }
         }
     }
 }
