@@ -1128,11 +1128,17 @@ pub fn compile_via_spqr_with_options(
                 // The intent is to detect direct-connect modulator paths
                 // (LED→LDR, photocoupler) from an op-amp output to an op-amp
                 // input pin, not ordinary series input resistors.
+                // Exclude gnd_node from feedback_nodes: op-amps whose pos
+                // (or neg) input ties directly to ground are not meaningful
+                // feedforward targets — gnd is universally reachable and would
+                // cause false positives (e.g. C_tone.b → gnd flagged as
+                // feedforward from U1.out → gnd).
                 let feedback_nodes: std::collections::HashSet<super::graph::NodeId> =
                     graph
                         .nullor_pins
                         .iter()
                         .flat_map(|pins| [pins.neg_node, pins.pos_node].into_iter())
+                        .filter(|&n| n != graph.gnd_node)
                         .collect();
                 let main_outputs: std::collections::HashSet<super::graph::NodeId> = graph
                     .nullor_pins
