@@ -146,6 +146,7 @@ pub(super) fn dsp_blocks() -> &'static [&'static dyn DspBlock] {
         &super::bbd_lowering::BbdBlock,
         &super::vca_lowering::VcaBlock,
         &super::vco_lowering::VcoBlock,
+        &super::delay_lowering::DelayLineBlock,
     ]
 }
 

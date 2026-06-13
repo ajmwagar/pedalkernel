@@ -669,6 +669,15 @@ fn space_echo_wow_modulates_steady_tone() {
     let run = |wow_depth: f64| -> Vec<f64> {
         let mut proc = compile_space_echo();
         set_tape_loop(&mut proc, 0.5, 0.35);
+        // F15 NOTE: the wow LFO now binds for real (DelaySpeed) and would
+        // double-apply on top of this manual injection (and run in the no-wow
+        // control too). Disable the bound LFO's depth so this manual injection
+        // is the sole wow source, preserving the original single-source premise
+        // of this measurement. The bound path is verified separately in
+        // space_echo_wow_lfo_binding_engine_gated.
+        if !proc.lfos.is_empty() {
+            proc.lfos[0].range = 0.0;
+        }
         input
             .iter()
             .enumerate()
@@ -742,12 +751,66 @@ fn space_echo_wow_modulates_steady_tone() {
 /// Measured today (Intensity = 0, Repeat Rate = 0.5): exactly ONE echo at
 /// ~0.116 s and silence at the 2x/3x positions — see
 /// space_echo_repeat_rate_authority's event dump.
+/// PROMOTED by F15 (delay_lowering DspBlock): `T2: tap(DL1, 2.0)` /
+/// `T3: tap(DL1, 3.0)` now lower into `DelayLineBinding.taps = [1.0, 2.0, 3.0]`
+/// (was hard-coded `[1.0]`), so the runtime reads + sums all three playback
+/// heads. With Intensity = 0 (no recirculation) a single burst arrives THREE
+/// times — at the head-1 delay D, then 2D and 3D — exactly the RE-201's evenly
+/// spaced heads. Baseline: Repeat Rate 0.5 → head-1 ~0.116 s; arrivals at
+/// 1x/2x/3x +/-10%.
 #[test]
-#[ignore = "engine-gated: tap() components are not lowered — \
-            build_delay_line_bindings hard-codes taps=[1.0], so heads 2/3 \
-            are silent; head-1 echo measures ~0.116 s at Repeat Rate 0.5"]
 fn space_echo_head_ratios_2x_3x() {
-    unimplemented!("requires the compiler to lower tap() into DelayLineBinding.taps");
+    let mut proc = compile_space_echo();
+    assert_eq!(
+        proc.delay_lines[0].taps,
+        vec![1.0, 2.0, 3.0],
+        "tap(DL1,2.0)/tap(DL1,3.0) must lower into the head ratios"
+    );
+    // Intensity 0 isolates the first record pass: no recirculation, so the
+    // only echoes are the three playback heads. Repeat Rate 0.5.
+    proc.set_control("Repeat Rate", 0.5);
+    proc.set_control("Intensity", 0.0);
+
+    let (input, burst_start) = settle_burst_silence(0.5, 0.020, 1.5, 0.3);
+    let output = process_all(&mut proc, &input);
+    assert!(output.iter().all(|x| x.is_finite()), "NaN/inf in output");
+
+    let events = echo_events(&output, burst_start, 3e-3);
+    eprintln!("space_echo head ratios: events (t, env):");
+    for (t, e) in &events {
+        eprintln!("  t={:.4} s  env={:.6}", t, e);
+    }
+    assert!(
+        events.len() >= 4,
+        "expected dry burst + 3 head echoes (1x/2x/3x), got {} events",
+        events.len()
+    );
+    let t0 = events[0].0;
+    let arrivals: Vec<f64> = events[1..4].iter().map(|(t, _)| t - t0).collect();
+    let d1 = expected_head1_delay(0.5);
+    eprintln!(
+        "space_echo head ratios: arrivals after dry = {:?} s (head-1 design {:.4} s); \
+         ratios = {:?}",
+        arrivals,
+        d1,
+        arrivals.iter().map(|a| a / arrivals[0]).collect::<Vec<_>>()
+    );
+    assert!(
+        (arrivals[0] - d1).abs() / d1 < 0.10,
+        "head-1 arrival {:.4} s, design {:.4} s (>10% off)",
+        arrivals[0],
+        d1
+    );
+    let r2 = arrivals[1] / arrivals[0];
+    let r3 = arrivals[2] / arrivals[0];
+    assert!(
+        (r2 - 2.0).abs() < 0.2,
+        "head-2/head-1 ratio = {r2:.3}, expected ~2.0 +/-10%"
+    );
+    assert!(
+        (r3 - 3.0).abs() < 0.3,
+        "head-3/head-1 ratio = {r3:.3}, expected ~3.0 +/-10%"
+    );
 }
 
 // ===========================================================================
@@ -772,13 +835,66 @@ fn space_echo_head_ratios_2x_3x() {
 /// repeat tail — the measured DSP-level numbers in
 /// space_echo_repeat_rate_authority / space_echo_intensity_regeneration
 /// are the acceptance baseline.
+/// PROMOTED by F15: `RepeatRate.wiper -> DL1.delay_time` now binds to
+/// `ControlTarget::DelayTime(0)` and `Intensity.wiper -> DL1.feedback` to
+/// `ControlTarget::DelayFeedback(0)` (delay_lowering DspBlock). So
+/// `set_control("Repeat Rate", 0.0/1.0)` drives the head-1 delay across the
+/// 67-200 ms motor-speed range (log law, ~2.99x authority) and
+/// `set_control("Intensity", ..)` opens the regeneration loop. The four
+/// `tests/control_binding.rs` delay tests are the structural counterpart of
+/// this behavioral one.
 #[test]
-#[ignore = "engine-gated: SPQR pipeline never binds pot -> DL.delay_time/\
-            DL.feedback (spqr_control binds in-stage pots only; bind.rs \
-            DelayTime/DelayFeedback handlers are dead code); delay stays \
-            at the 133.5 ms midpoint regardless of set_control"]
 fn space_echo_panel_controls_engine_gated() {
-    unimplemented!("requires SPQR control binding for delay_time/feedback pins");
+    // Repeat Rate authority: 0.0 -> 67 ms, 1.0 -> 200 ms head-1 (Intensity 0
+    // isolates the first head pass; the burst's first head echo IS head 1).
+    let mut arrivals = Vec::new();
+    for &rr in &[0.0, 1.0] {
+        let mut proc = compile_space_echo();
+        proc.set_control("Intensity", 0.0);
+        proc.set_control("Repeat Rate", rr);
+        let (input, burst_start) = settle_burst_silence(0.5, 0.020, 1.2, 0.3);
+        let output = process_all(&mut proc, &input);
+        let events = echo_events(&output, burst_start, 3e-3);
+        assert!(
+            events.len() >= 2,
+            "Repeat Rate {rr}: expected dry + head-1 echo, got {} events",
+            events.len()
+        );
+        let arrival = events[1].0 - events[0].0;
+        eprintln!(
+            "space_echo panel: set_control(Repeat Rate, {rr}) -> head-1 echo at {:.4} s \
+             (design {:.4} s)",
+            arrival,
+            expected_head1_delay(rr)
+        );
+        arrivals.push(arrival);
+    }
+    let ratio = arrivals[1] / arrivals[0];
+    eprintln!("space_echo panel: Repeat Rate authority = {ratio:.3}x (design 2.99x)");
+    assert!(
+        ratio > 1.5,
+        "set_control(Repeat Rate) must shift the echo arrival by >1.5x (measured {ratio:.3}x)"
+    );
+
+    // Intensity authority: higher Intensity = more audible repeats.
+    let mut counts = Vec::new();
+    for &intensity in &[0.0, 0.75] {
+        let mut proc = compile_space_echo();
+        proc.set_control("Repeat Rate", 0.3);
+        proc.set_control("Intensity", intensity);
+        let (input, burst_start) = settle_burst_silence(0.5, 0.020, 4.0, 0.3);
+        let output = process_all(&mut proc, &input);
+        let events = echo_events(&output, burst_start, 1e-3);
+        let echoes = events.len().saturating_sub(1);
+        eprintln!("space_echo panel: set_control(Intensity, {intensity}) -> {echoes} echoes");
+        counts.push(echoes);
+    }
+    assert!(
+        counts[1] > counts[0],
+        "set_control(Intensity) must add repeats ({} vs {})",
+        counts[1],
+        counts[0]
+    );
 }
 
 /// `LFO_wow.out -> DL1.speed_mod` is the documented wow/flutter pattern
@@ -794,12 +910,86 @@ fn space_echo_panel_controls_engine_gated() {
 /// modulation — 4.974 Hz sine x 0.02 speed_mod range — through the
 /// public DelayLine::add_speed_mod API): envelope depth > 5% on a 110 Hz
 /// tone and a detected wow-band modulation rate.
+/// PROMOTED by F15: `LFO_wow.out -> DL1.speed_mod` now binds to
+/// `ModulationTarget::DelaySpeed { delay_idx: 0 }` (delay_lowering DspBlock),
+/// at the declared 4.974 Hz (`lfo(sine, 32k, 1u)`) into the speed_mod sink's
+/// 0.02 range — capstan wow. The runtime ticks the LFO each sample and calls
+/// `add_speed_mod(lfo_out * 0.02)`, so the compiled tape wobbles WITHOUT any
+/// manual injection. Control run: zero the binding's range. Baseline: >5%
+/// envelope depth on a 110 Hz tone, detected wow-band rate.
 #[test]
-#[ignore = "engine-gated: LFO -> DL.speed_mod never binds (SPQR pipeline \
-            builds LfoBindings only for BBD clocks; bind.rs \
-            build_lfo_bindings is dead code) — compiled.lfos is empty"]
 fn space_echo_wow_lfo_binding_engine_gated() {
-    unimplemented!("requires SPQR LFO binding for delay_line speed_mod/delay_time sinks");
+    // Structural: the wow LFO binds to the delay's speed_mod (was: lfos empty).
+    let compiled = compile_space_echo();
+    assert_eq!(
+        compiled.lfos.len(),
+        1,
+        "LFO_wow.out -> DL1.speed_mod must bind one LFO (was engine-gated: 0)"
+    );
+    assert!(
+        matches!(
+            compiled.lfos[0].target,
+            pedalkernel_rt::processor::ModulationTarget::DelaySpeed { delay_idx: 0 }
+        ),
+        "wow LFO must target DelaySpeed {{ delay_idx: 0 }}, got {:?}",
+        compiled.lfos[0].target
+    );
+    assert!(
+        (compiled.lfos[0].base_freq - 4.974).abs() < 0.05,
+        "wow LFO base freq {:.3} Hz, design 4.974 Hz",
+        compiled.lfos[0].base_freq
+    );
+
+    // Behavioral: the bound wow modulates a steady 110 Hz tone. Control run
+    // zeroes the binding's modulation range (kills the wow without touching
+    // the rest of the path).
+    let input = sine(110.0, 7.0, SAMPLE_RATE);
+    let run = |wow_on: bool| -> Vec<f64> {
+        let mut proc = compile_space_echo();
+        proc.set_control("Repeat Rate", 0.5);
+        proc.set_control("Intensity", 0.35);
+        if !wow_on {
+            proc.lfos[0].range = 0.0; // disable the wow depth
+        }
+        process_all(&mut proc, &input)
+    };
+
+    let depth_of = |output: &[f64]| -> f64 {
+        let settled = &output[(1.0 * SAMPLE_RATE) as usize..];
+        let mut env = rms_envelope(settled, 0.010, SAMPLE_RATE);
+        env.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let lo = env[env.len() / 20];
+        let hi = env[env.len() - 1 - env.len() / 20];
+        (hi - lo) / hi.max(1e-18)
+    };
+
+    let wet = run(true);
+    assert!(wet.iter().all(|x| x.is_finite()), "NaN/inf in output");
+    let dry = run(false);
+    let (depth_wow, depth_still) = (depth_of(&wet), depth_of(&dry));
+    let rate = detect_modulation_rate(&wet[(1.0 * SAMPLE_RATE) as usize..], SAMPLE_RATE);
+    eprintln!(
+        "space_echo wow binding: depth = {:.1}% (wow off {:.1}%), detected rate = {rate:.2} Hz \
+         (design 4.97 Hz)",
+        depth_wow * 100.0,
+        depth_still * 100.0
+    );
+    assert!(
+        depth_wow > 0.05,
+        "bound wow must modulate the steady tone by >5% (measured {:.1}%)",
+        depth_wow * 100.0
+    );
+    assert!(
+        depth_wow > 2.0 * depth_still,
+        "modulation must come from the bound wow, not the static multi-head comb \
+         ({:.1}% vs {:.1}% with wow disabled)",
+        depth_wow * 100.0,
+        depth_still * 100.0
+    );
+    assert!(
+        (2.0..=16.0).contains(&rate),
+        "detected modulation rate {rate:.2} Hz outside the wow band (design 4.97 Hz)"
+    );
 }
 
 // ===========================================================================

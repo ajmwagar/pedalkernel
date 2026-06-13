@@ -19,6 +19,7 @@ mod compiled;
 pub mod component;
 pub mod components;
 mod coupling;
+mod delay_lowering;
 mod dsp_block;
 mod dyn_node;
 mod graph;
@@ -122,6 +123,8 @@ mod biquad_table_tests;
 #[cfg(test)]
 mod blockwise_detection_tests;
 #[cfg(test)]
+mod bridged_t_bias_loading_tests;
+#[cfg(test)]
 mod coupling_tests;
 #[cfg(test)]
 mod ground_leg_tests;
@@ -137,5 +140,3 @@ mod mfb_debug_test;
 mod opamp_gain_tests;
 #[cfg(test)]
 mod tb303_decomposition_tests;
-#[cfg(test)]
-mod bridged_t_bias_loading_tests;

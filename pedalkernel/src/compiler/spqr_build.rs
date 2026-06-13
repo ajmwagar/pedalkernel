@@ -9,7 +9,6 @@
 use super::build::create_root;
 use super::classify::NonlinearKind;
 use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
-use super::components::DelayLineComp;
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::rigid::{
@@ -1945,29 +1944,17 @@ pub fn compile_via_spqr_with_options(
     Ok(compiled)
 }
 
+/// Build the initial `DelayLineBinding`s (with real tap ratios and configured
+/// medium zones). Delegates to the F15 `delay_lowering` [`DspBlock`], which is
+/// the single owner of delay-line lowering; `dsp_block::bind_runtime_all` later
+/// rebuilds + binds these idempotently. Called here so the early presence
+/// guard (`delay_lines.is_empty()`) and the no-edge `CompiledPedal` branches
+/// see the correct instances.
 fn build_delay_line_bindings(
     pedal: &PedalDef,
     sample_rate: f64,
 ) -> Vec<pedalkernel_rt::processor::DelayLineBinding> {
-    pedal
-        .components
-        .iter()
-        .filter_map(|component| {
-            let delay = component.kind.as_any().downcast_ref::<DelayLineComp>()?;
-            let mut delay_line = pedalkernel_rt::elements::DelayLine::new(
-                delay.min_delay,
-                delay.max_delay,
-                sample_rate,
-                delay.interpolation,
-            );
-            delay_line.set_medium(delay.medium);
-            Some(pedalkernel_rt::processor::DelayLineBinding {
-                delay_line,
-                taps: vec![1.0],
-                comp_id: component.id.clone(),
-            })
-        })
-        .collect()
+    super::delay_lowering::build_delay_line_bindings(pedal, sample_rate)
 }
 
 /// Check if a group is a merged pot pair (aw + wb of same component).

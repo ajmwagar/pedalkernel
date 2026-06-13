@@ -891,6 +891,10 @@ pub struct DelayLineBinding {
     /// Tap ratios for multi-tap reading (e.g., [1.0, 2.0, 4.0] for RE-201).
     /// Each tap reads from the buffer at `base_delay * ratio`.
     pub taps: Vec<crate::Wave>,
+    /// Wet/dry mix (0.0 = fully dry, 1.0 = fully wet). Per-instance (spec §6 —
+    /// no global mix). Defaults to 0.5 (the historical hard-coded 50/50) when
+    /// no mix pot is wired, so unbound delays behave as before.
+    pub wet_mix: crate::Wave,
     /// Component ID for debugging and control binding.
     #[allow(dead_code)]
     pub comp_id: String,
@@ -3820,20 +3824,33 @@ impl PedalProcessor for CompiledPedal {
             // Reset speed modulation for this sample (LFOs will have already added offsets)
             dl_binding.delay_line.write(signal);
 
-            // Read all taps and sum
+            // Read all taps and sum into the OUTPUT wet signal. The taps are
+            // the playback heads (RE-201 heads at 1x/2x/3x); summing them is
+            // the multi-head output mix.
             let num_taps = dl_binding.taps.len();
             if num_taps > 0 {
                 let mut wet = 0.0;
+                let mut base = 0.0;
                 for (tap_idx, &ratio) in dl_binding.taps.iter().enumerate() {
-                    wet += dl_binding.delay_line.read_at_ratio(ratio, tap_idx);
+                    let tap = dl_binding.delay_line.read_at_ratio(ratio, tap_idx);
+                    wet += tap;
+                    if tap_idx == 0 {
+                        base = tap; // head 1 (ratio 1.0) — the regeneration tap
+                    }
                 }
                 wet /= num_taps as crate::Wave;
 
-                // Mix wet/dry equally (same convention as BBD)
-                signal = signal * 0.5 + wet * 0.5;
+                // Per-instance wet/dry mix (spec §6). Defaults to 0.5 — the
+                // historical 50/50 — when no mix pot is wired.
+                let mix = dl_binding.wet_mix;
+                signal = signal * (1.0 - mix) + wet * mix;
 
-                // Route the wet signal back as feedback
-                dl_binding.delay_line.set_feedback_sample(wet);
+                // Regeneration recirculates the BASE tape loop (head 1), not
+                // the multi-head output sum: Intensity returns the loop signal
+                // into the record path at the base delay. Feeding back the
+                // head-average would change the loop's effective delay and
+                // decay with tap count; the loop is the tape itself.
+                dl_binding.delay_line.set_feedback_sample(base);
             }
 
             // Reset speed mod accumulator for next sample
