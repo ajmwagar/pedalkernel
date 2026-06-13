@@ -19,6 +19,7 @@ mod compiled;
 pub mod component;
 pub mod components;
 mod coupling;
+mod dsp_block;
 mod dyn_node;
 mod graph;
 mod helpers;

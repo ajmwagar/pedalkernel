@@ -93,6 +93,29 @@ no lowering pass), per-instance runtime contracts. That single change would
 have prevented BBD/VCA/VCO from ever shipping silent and prevents the next
 behavioral element from repeating the pattern.
 
+**Status — DONE (2026-06-13).** Principle *and* mechanism are now both
+realized. "Behavioral island" is a first-class compiler concept: the
+`DspBlock` trait (`compiler/dsp_block.rs`) — a `GraphRole::Virtual` component
+that lowers to a per-instance runtime DSP block bridged across a galvanic gap.
+A single `dsp_blocks()` registry is the *only* place a block is declared, and
+that one line wires it into group splitting, terminal injection, runtime
+binding, **and** the mandatory-lowering gate at once. The gate
+(`reject_unlowered_behavioral`) is registry-driven: a runtime-DSP island whose
+`type_tag` no registered block `handles()` fails to compile naming the
+component — so the gate is impossible to forget when adding a block (the
+`vco()` rejection is now produced by the registry, not a hand-written arm).
+`bbd_lowering`/`vca_lowering` were migrated to `impl DspBlock for
+BbdBlock`/`VcaBlock` (keeping their type-specific guts; each writes its own
+`compiled.bbds`/`compiled.vcas` field), collapsing the ~6 hand-wired call
+sites in `spqr_build` into one registry pass each. This was a pure refactor
+(zero behavior change: identical battery failure set, zero golden drift,
+determinism intact). The spring-reverb (roadmap) and delay-line (F15) blocks
+implement this contract — one impl + one registry line each — instead of
+hand-copying a third and fourth lowering module. The remaining open piece is
+the per-instance *runtime* contract for BBD (one global `bbd_wet_mix` for all
+BBDs — a behavioral approximation of circuit placement); the compile-side
+boundary is now formalized.
+
 ## 5. Other standing debts (pre-existing, confirmed this session)
 
 - **Feedforward sign/ordering** — the legit parallel-path feature emits −x

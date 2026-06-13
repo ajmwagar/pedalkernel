@@ -33,9 +33,40 @@ use crate::dsl::{BbdType, LfoWaveformDsl, PedalDef, Pin};
 
 use super::compiled::{CompiledPedal, ControlBinding, ControlTarget, LfoBinding, ModulationTarget};
 use super::components::{Bbd, Lfo};
+use super::dsp_block::DspBlock;
 use super::graph::CircuitGraph;
 use super::signal_flow::FlowGroup;
 use pedalkernel_rt::elements::{BbdDelayLine, BbdModel, Modulator};
+
+/// The BBD [`DspBlock`]: lowers `bbd()` components to runtime `BbdDelayLine`s
+/// (`compiled.bbds`) plus their control/LFO bindings. The type-specific guts
+/// live as `pub(super)` helpers in this module.
+pub(super) struct BbdBlock;
+
+impl DspBlock for BbdBlock {
+    fn handles(&self, type_tag: &str) -> bool {
+        type_tag == "BBD delay"
+    }
+
+    fn component_ids(&self, pedal: &PedalDef) -> Vec<String> {
+        bbd_component_ids(pedal)
+    }
+
+    fn boundary_nodes(&self, pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize> {
+        bbd_boundary_nodes(pedal, graph)
+    }
+
+    fn bind_runtime(
+        &self,
+        pedal: &PedalDef,
+        compiled: &mut CompiledPedal,
+        sample_rate: f64,
+    ) -> Result<(), String> {
+        compiled.bbds = build_bbd_delay_lines(pedal, sample_rate);
+        bind_bbd_runtime(pedal, compiled, sample_rate);
+        Ok(())
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // (1) BbdDelayLine construction

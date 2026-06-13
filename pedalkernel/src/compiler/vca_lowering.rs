@@ -31,7 +31,8 @@ use hashbrown::HashMap;
 use crate::dsl::{PedalDef, Pin};
 
 use super::compiled::{CompiledPedal, EnvelopeBinding, ModulationTarget, VcaBinding};
-use super::components::{Vca, Vco};
+use super::components::Vca;
+use super::dsp_block::{behavioral_island_error, DspBlock};
 use super::graph::CircuitGraph;
 
 /// Pin names a `vca()` accepts on its audio input side.
@@ -39,40 +40,34 @@ const VCA_IN_PINS: &[&str] = &["in", "input", "in1", "in2", "in3", "in4"];
 /// Pin names a `vca()` accepts on its audio output side.
 const VCA_OUT_PINS: &[&str] = &["out", "output", "out1", "out2", "out3", "out4"];
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Mandatory-lowering error (architecture debt §4)
-// ═══════════════════════════════════════════════════════════════════════════
+/// The VCA [`DspBlock`]: lowers `vca()` components to runtime `VcaBinding`s
+/// (`compiled.vcas`) plus their CV-modulation bindings. The type-specific
+/// guts live as `pub(super)` helpers in this module.
+pub(super) struct VcaBlock;
 
-/// Compile error for a behavioral island that did not lower to a runtime
-/// element. Generic over component kind so future lowering passes (VCO, VCF,
-/// comparator, ...) can adopt the same contract.
-pub(super) fn behavioral_island_error(comp_id: &str, type_tag: &str, reason: &str) -> String {
-    format!(
-        "{comp_id}: {type_tag} is a behavioral island that did not lower to a runtime \
-         element ({reason}). Behavioral components must lower or fail to compile — \
-         refusing to ship a silently-bypassed circuit \
-         (reports/architecture-debt-2026-06-12.md §4)."
-    )
-}
-
-/// Reject behavioral components that have NO lowering pass at all.
-///
-/// Currently: `vco()`. There is no VCO lowering, so any `vco()` circuit
-/// previously compiled to a processor with `vcos` empty — a silent island.
-/// Per the §4 principle this is now a compile error; delete the `Vco` arm
-/// here when a real VCO lowering pass lands.
-pub(super) fn reject_unlowered_behavioral(pedal: &PedalDef) -> Result<(), String> {
-    for comp in &pedal.components {
-        if comp.kind.as_any().downcast_ref::<Vco>().is_some() {
-            return Err(behavioral_island_error(
-                &comp.id,
-                "vco()",
-                "VCO lowering is not implemented yet — the oscillator would silently \
-                 produce nothing",
-            ));
-        }
+impl DspBlock for VcaBlock {
+    fn handles(&self, type_tag: &str) -> bool {
+        type_tag == "VCA"
     }
-    Ok(())
+
+    fn component_ids(&self, pedal: &PedalDef) -> Vec<String> {
+        vca_component_ids(pedal)
+    }
+
+    fn boundary_nodes(&self, pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize> {
+        vca_boundary_nodes(pedal, graph)
+    }
+
+    fn bind_runtime(
+        &self,
+        pedal: &PedalDef,
+        compiled: &mut CompiledPedal,
+        sample_rate: f64,
+    ) -> Result<(), String> {
+        compiled.vcas = lower_vcas(pedal, sample_rate)?;
+        bind_vca_runtime(pedal, compiled, sample_rate);
+        Ok(())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
