@@ -187,6 +187,8 @@
 //! - [`thermal`] — thermal drift model for temperature-dependent behavior
 //! - [`metering`] — lock-free audio-to-UI metrics for VU meters and visualizations
 
+#[cfg(feature = "analysis")]
+pub mod analysis;
 pub mod board;
 pub mod compiler;
 pub mod dsl;
