@@ -755,6 +755,14 @@ pub enum ControlTarget {
     BbdClockRate(usize),
     /// Modify a BBD delay line's feedback amount (0–1).
     BbdFeedback(usize),
+    /// Modify a spring reverb's dwell/drive input trim (normalized 0–1).
+    SpringDwell(usize),
+    /// Modify a spring reverb's decay → RT60 authority (normalized 0–1).
+    SpringDecay(usize),
+    /// Modify a spring reverb's damping LPF cutoff (normalized 0–1).
+    SpringDamping(usize),
+    /// Modify a spring reverb's wet/dry mix (normalized 0–1).
+    SpringMix(usize),
     /// Modify a switch position for fork() routing.
     /// Contains: (switch_id, num_positions)
     SwitchPosition {
@@ -877,6 +885,8 @@ pub enum ModulationTarget {
     DelaySpeed { delay_idx: usize },
     /// Modulate a delay line's delay time (normalized 0–1).
     DelayTime { delay_idx: usize },
+    /// Modulate a spring reverb's dwell/drive input trim (CV → normalized 0–1).
+    SpringDwell { spring_idx: usize },
 }
 
 /// Delay line binding in a compiled pedal.
@@ -894,6 +904,24 @@ pub struct DelayLineBinding {
     /// Wet/dry mix (0.0 = fully dry, 1.0 = fully wet). Per-instance (spec §6 —
     /// no global mix). Defaults to 0.5 (the historical hard-coded 50/50) when
     /// no mix pot is wired, so unbound delays behave as before.
+    pub wet_mix: crate::Wave,
+    /// Component ID for debugging and control binding.
+    #[allow(dead_code)]
+    pub comp_id: String,
+}
+
+/// Spring reverb binding in a compiled pedal.
+///
+/// Holds the dispersive [`crate::elements::SpringTank`] and its per-instance
+/// wet/dry mix (spec §6 — no global mix field; learns from the BBD's shared
+/// `bbd_wet_mix` being the wrong pattern). Bridged across the behavioral gap
+/// in the processor tick loop like the BBD/delay-line inserts.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SpringBinding {
+    /// The spring-reverb tank (dispersive allpass network).
+    pub tank: crate::elements::SpringTank,
+    /// Wet/dry mix (0.0 = fully dry, 1.0 = fully wet). Per-instance — default
+    /// 0.33 (a tasteful spring blend) when no mix pot is wired.
     pub wet_mix: crate::Wave,
     /// Component ID for debugging and control binding.
     #[allow(dead_code)]
@@ -1251,6 +1279,8 @@ pub struct CompiledPedal {
     pub bbds: Vec<BbdDelayLine>,
     /// Generic delay lines (tape echo, digital delay, Karplus-Strong, etc.).
     pub delay_lines: Vec<DelayLineBinding>,
+    /// Spring reverb tanks (dispersive electromechanical reverb islands).
+    pub springs: Vec<SpringBinding>,
     /// VCO audio-rate oscillator bindings (inject audio at circuit nodes).
     pub vcos: Vec<VcoBinding>,
     /// VCA amplitude modulation bindings (scale audio by envelope).
@@ -2281,6 +2311,30 @@ impl CompiledPedal {
                         bbd.set_feedback(value * 0.95);
                     }
                 }
+                ControlTarget::SpringDwell(spring_idx) => {
+                    let spring_idx = *spring_idx;
+                    if let Some(s) = self.springs.get_mut(spring_idx) {
+                        s.tank.set_dwell_normalized(value);
+                    }
+                }
+                ControlTarget::SpringDecay(spring_idx) => {
+                    let spring_idx = *spring_idx;
+                    if let Some(s) = self.springs.get_mut(spring_idx) {
+                        s.tank.set_decay_normalized(value);
+                    }
+                }
+                ControlTarget::SpringDamping(spring_idx) => {
+                    let spring_idx = *spring_idx;
+                    if let Some(s) = self.springs.get_mut(spring_idx) {
+                        s.tank.set_damping_normalized(value);
+                    }
+                }
+                ControlTarget::SpringMix(spring_idx) => {
+                    let spring_idx = *spring_idx;
+                    if let Some(s) = self.springs.get_mut(spring_idx) {
+                        s.wet_mix = value.clamp(0.0, 1.0);
+                    }
+                }
                 ControlTarget::SwitchPosition {
                     switch_id,
                     num_positions,
@@ -2716,6 +2770,7 @@ impl CompiledPedal {
         opamp_stages: &mut [OpAmpStage],
         delay_lines: &mut [DelayLineBinding],
         vcas: &mut [VcaBinding],
+        springs: &mut [SpringBinding],
         target: &ModulationTarget,
         modulation: crate::Wave,
         env_out: crate::Wave,
@@ -2815,6 +2870,11 @@ impl CompiledPedal {
                 if let Some(dl) = delay_lines.get_mut(*delay_idx) {
                     dl.delay_line
                         .set_delay_normalized(modulation.clamp(0.0, 1.0));
+                }
+            }
+            ModulationTarget::SpringDwell { spring_idx } => {
+                if let Some(s) = springs.get_mut(*spring_idx) {
+                    s.tank.set_dwell_normalized(modulation.clamp(0.0, 1.0));
                 }
             }
         }
@@ -3001,6 +3061,11 @@ impl PedalProcessor for CompiledPedal {
                             .set_delay_normalized(modulation.clamp(0.0, 1.0));
                     }
                 }
+                ModulationTarget::SpringDwell { spring_idx } => {
+                    if let Some(s) = self.springs.get_mut(*spring_idx) {
+                        s.tank.set_dwell_normalized(modulation.clamp(0.0, 1.0));
+                    }
+                }
             }
         }
 
@@ -3026,6 +3091,7 @@ impl PedalProcessor for CompiledPedal {
                 &mut self.opamp_stages,
                 &mut self.delay_lines,
                 &mut self.vcas,
+                &mut self.springs,
                 &binding.target,
                 modulation,
                 env_out,
@@ -3612,6 +3678,7 @@ impl PedalProcessor for CompiledPedal {
                     &mut self.opamp_stages,
                     &mut self.delay_lines,
                     &mut self.vcas,
+                    &mut self.springs,
                     &binding.target,
                     modulation,
                     env_out,
@@ -3817,6 +3884,14 @@ impl PedalProcessor for CompiledPedal {
             signal = signal * (1.0 - mix) + wet * mix;
         }
 
+        // Process through spring reverb tanks (wet signal mixed with dry).
+        // Per-instance mix (spec §6 — no global mix field, unlike bbd_wet_mix).
+        for spring in &mut self.springs {
+            let wet = spring.tank.process(signal);
+            let mix = spring.wet_mix;
+            signal = signal * (1.0 - mix) + wet * mix;
+        }
+
         // Process through generic delay lines.
         // Each delay line writes the current signal, then reads from all taps.
         // Tap outputs are mixed equally and blended with the dry signal.
@@ -4010,6 +4085,9 @@ impl PedalProcessor for CompiledPedal {
         for dl_binding in &mut self.delay_lines {
             dl_binding.delay_line.set_sample_rate(rate);
         }
+        for spring in &mut self.springs {
+            spring.tank.set_sample_rate(rate);
+        }
         if let Some(ref mut thermal) = self.thermal {
             thermal.set_sample_rate(rate);
         }
@@ -4048,6 +4126,9 @@ impl PedalProcessor for CompiledPedal {
         }
         for dl_binding in &mut self.delay_lines {
             dl_binding.delay_line.reset();
+        }
+        for spring in &mut self.springs {
+            spring.tank.reset();
         }
         for opamp_stage in &mut self.opamp_stages {
             opamp_stage.opamp.reset();

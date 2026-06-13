@@ -178,6 +178,7 @@ pub fn compile_via_spqr_with_options(
             slew_limiters: Vec::new(),
             bbds: Vec::new(),
             delay_lines,
+            springs: Vec::new(),
             vcos: Vec::new(),
             vcas: Vec::new(),
             thermal: if options.thermal {
@@ -243,6 +244,7 @@ pub fn compile_via_spqr_with_options(
             slew_limiters: Vec::new(),
             bbds: Vec::new(),
             delay_lines,
+            springs: Vec::new(),
             vcos: Vec::new(),
             vcas: Vec::new(),
             thermal: None,
@@ -1817,6 +1819,7 @@ pub fn compile_via_spqr_with_options(
         slew_limiters: Vec::new(),
         bbds: Vec::new(),
         delay_lines,
+        springs: Vec::new(),
         vcos: Vec::new(),
         vcas: Vec::new(),
         thermal: if options.thermal {

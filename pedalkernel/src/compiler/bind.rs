@@ -90,6 +90,13 @@ pub(super) fn build_controls(
                 let idx = trigger_id_to_idx.get(&ctrl.component).copied().unwrap_or(0);
                 ControlTarget::Trigger(idx)
             }
+            // Spring controls are bound (retargeted to the correct per-instance
+            // index) by the spring_lowering DspBlock pass; this legacy resolver
+            // maps to instance 0 as a placeholder the later pass overrides.
+            Some(ControlParamKind::SpringDwell) => ControlTarget::SpringDwell(0),
+            Some(ControlParamKind::SpringDecay) => ControlTarget::SpringDecay(0),
+            Some(ControlParamKind::SpringDamping) => ControlTarget::SpringDamping(0),
+            Some(ControlParamKind::SpringMix) => ControlTarget::SpringMix(0),
             Some(ControlParamKind::PotPosition) => {
                 let (target, is_bbd_mix) = resolve_pot_target(
                     &ctrl.component,
@@ -1032,6 +1039,12 @@ fn resolve_modulation_target(
         ModulationSinkKind::DelayTime => {
             let delay_idx = delay_id_to_idx.get(target_comp).copied().unwrap_or(0);
             ModulationTarget::DelayTime { delay_idx }
+        }
+        ModulationSinkKind::SpringDwell => {
+            // Spring dwell CV is bound by the spring_lowering pass (per-instance
+            // index contract); this legacy resolver maps to instance 0 as a
+            // safe default if ever reached.
+            ModulationTarget::SpringDwell { spring_idx: 0 }
         }
     };
 

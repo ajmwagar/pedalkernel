@@ -321,6 +321,7 @@ fn compile_subcircuit_equipment(
         slew_limiters: Vec::new(),
         bbds: Vec::new(),
         delay_lines: Vec::new(),
+        springs: Vec::new(),
         vcos: Vec::new(),
         vcas: Vec::new(),
         thermal: None,

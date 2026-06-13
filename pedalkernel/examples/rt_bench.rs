@@ -42,6 +42,14 @@ fn main() {
         ("minisynth", "examples/synths/minisynth.pedal"),
         // Delay/tape DspBlock (F15): multi-tap delay line + wow LFO.
         ("space_echo", "examples/rack/space_echo.pedal"),
+        // Spring-reverb DspBlock: dispersive allpass tank + op-amp driver/
+        // recovery. The full pedal's factor here (~12x) is dominated by the
+        // op-amp stages + oversampler + node routing (like opto_leveler ~13x),
+        // NOT by the spring. The spring BLOCK's own per-sample cost clears
+        // ~75x release at 64 allpasses (asserted directly on SpringTank::
+        // process in tests/spring_reverb.rs — the realtime budget the design
+        // doc specifies, isolated from the surrounding circuit stages).
+        ("spring_reverb", "examples/rack/spring_reverb.pedal"),
     ];
 
     let num_samples = (SAMPLE_RATE * DURATION_S) as usize;

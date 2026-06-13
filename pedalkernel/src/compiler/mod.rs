@@ -31,6 +31,7 @@ mod split;
 mod spqr;
 mod spqr_build;
 mod spqr_control;
+mod spring_lowering;
 mod stage;
 pub mod stage_test_helpers;
 pub(crate) mod subcircuit;

@@ -308,6 +308,14 @@ pub enum ControlParamKind {
     DelayTime,
     /// Delay line feedback (0–1).
     DelayFeedback,
+    /// Spring reverb dwell/drive input trim (0–1 normalized).
+    SpringDwell,
+    /// Spring reverb decay → RT60 authority (0–1 normalized).
+    SpringDecay,
+    /// Spring reverb damping LPF cutoff (0–1 normalized).
+    SpringDamping,
+    /// Spring reverb wet/dry mix (0–1 normalized).
+    SpringMix,
     /// Switch position selector.
     SwitchPosition { num_positions: usize },
     /// Fire a single-sample impulse (drum trigger).
@@ -342,6 +350,8 @@ pub enum ModulationSinkKind {
     VcaCv,
     DelaySpeed,
     DelayTime,
+    /// Spring reverb dwell/drive CV port (normalized 0..1).
+    SpringDwell,
 }
 
 /// Context provided to `resolve_edges()` so a component can decide its role

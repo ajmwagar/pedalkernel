@@ -147,6 +147,7 @@ pub(super) fn dsp_blocks() -> &'static [&'static dyn DspBlock] {
         &super::vca_lowering::VcaBlock,
         &super::vco_lowering::VcoBlock,
         &super::delay_lowering::DelayLineBlock,
+        &super::spring_lowering::SpringBlock,
     ]
 }
 
@@ -188,6 +189,7 @@ const RUNTIME_DSP_ISLAND_TAGS: &[(&str, &str)] = &[
     ("BBD delay", "bbd()"),
     ("VCA", "vca()"),
     ("VCO", "vco()"),
+    ("spring reverb", "spring()"),
 ];
 
 /// Reject behavioral islands that have NO registered [`DspBlock`] to lower
