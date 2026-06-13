@@ -1,0 +1,171 @@
+# PK:
+# Tape Saturation — Studer/Ampex-inspired tape-machine coloration channel.
+# A clean op-amp input/drive stage pushes a 1:1 transformer with a gapped
+# silicon-steel Jiles-Atherton core (the magnetic "tape" element). The
+# transformer adds harmonic colour; a playback EQ then applies the tape
+# high-frequency rolloff (Tone) and a low-frequency head bump, and a makeup
+# stage restores level. Drive sets how hard the core and electronics run.
+# Type: tape saturation (outboard studio gear)
+#
+# PROVENANCE
+#   Tape/transformer magnetics — Jiles-Atherton hysteresis model:
+#     D.C. Jiles & D.L. Atherton, "Theory of ferromagnetic hysteresis",
+#     J. Magn. Magn. Mater. 61 (1986) 48-60. Wave-digital tape/transformer
+#     realization after J. Chowdhury, "Real-time physical modelling for
+#     analog tape machines" (DAFx-19, 2019) and the CHOW Tape Model.
+#   Head bump + HF loss — the low-frequency response peak ("head bump") of a
+#     tape machine is a deliberate, loved part of the sound (Studer A800-style
+#     bump ~40-100 Hz). Treble loss is gap + self-demagnetization rolloff.
+#     See Sound on Sound features "Analogue Warmth" and "Tape Saturation",
+#     and Studer/Accutronics head-response literature.
+#
+# SIGNAL FLOW
+#   in -> C_in -> [U0 buffer] -> [U1 Drive amp]
+#      -> C_drv -> R_pri -> T_tape (1:1, J-A core)   <-- magnetic colour
+#      -> [head-bump LF shelf] -> [HF rolloff + Tone]
+#      -> [U2 makeup amp] -> Output level pot -> out
+#
+# CONTROLS
+#   Drive  — how hard the core and electronics are pushed (level + colour)
+#   Tone   — playback HF tilt (CCW darker, CW brighter)
+#   Output — makeup / output level
+#
+# UNITS / FLAGS
+#   [V] supplies +/-15 V — studio line-level op-amp rails (tape electronics
+#       live well above the 9 V guitar-pedal rail).
+#   [A] the J-A core colours on magnetizing CURRENT; the Drive stage delivers
+#       primary current swing into the core.
+#
+# SIMPLIFICATIONS vs a real tape machine (audit notes — intentional):
+#   1. THE COLOURATION ELEMENT IS A TRANSFORMER CORE, NOT A TAPE HEAD. The
+#      engine's validated magnetics (Jiles-Atherton) are reachable from the
+#      DSL only on transformer() cores via a named core model. We use the
+#      OT-DEMO-SE gapped silicon-steel core (Ms=1.6e6 A/m, a=1100,
+#      alpha=1.6e-3, k=400, c=0.2, N=2000 turns, Ae=2e-4 m^2, le=0.10 m,
+#      gap=1 mm, IDC=45 mA standing bias) at a 1:1 ELECTRICAL ratio. A
+#      dedicated standalone record/playback-head element with AC bias and
+#      transport modelling is future work.
+#   2. 1:1 RATIO ON PURPOSE. The transformer step-DOWN path has a known
+#      ~19 dB scaling defect in this engine; 1:1 is neither step-up nor
+#      step-down, so the passband gain stays sane (the transformer passes
+#      flat from 50 Hz to 10 kHz, measured <0.1 dB ripple, gain set only by
+#      the source/load resistances — see the flat-level sanity test). The
+#      core's magnetic turns (N=2000) come from the model and are independent
+#      of the 1:1 electrical ratio.
+#   3. MAGNETIC SATURATION IS LEVEL-INDEPENDENT AT LINE LEVEL (measured). The
+#      OT-DEMO-SE core needs hundreds of milliamps of magnetizing current to
+#      reach its knee; a line op-amp (50-75 ohm output impedance) cannot
+#      source that, so the core sits in a fixed operating point and
+#      contributes a near-static harmonic colour rather than a drive-
+#      dependent saturation curve. The drive-dependent-THD target test is
+#      #[ignore] with measured numbers. A core model whose knee sits at
+#      line-level currents — or a dedicated tape-head element — is the future
+#      refinement that makes saturation track Drive.
+#   4. NO BIAS OSCILLATOR, NO WOW/FLUTTER, NO PRINT-THROUGH in v1. AC bias
+#      linearization, transport wow/flutter and inter-layer print-through are
+#      not modelled. (The delay_line(medium: tape_oxide) element models HF
+#      self-demagnetization for a separate echo use-case.)
+#   5. PLAYBACK EQ SHAPE IS THE TRANSFORMER'S OWN RESPONSE (measured). Under
+#      op-amp drive (finite source impedance) the J-A transformer behaves as
+#      a ~-6 dB/oct integrator at the secondary: lows lifted, highs rolled —
+#      the correct DIRECTION for a tape head bump + HF loss, but steeper than
+#      a real machine. (Driven from an ideal 0-ohm source the same transformer
+#      measures flat <0.1 dB 50 Hz-10 kHz; the tilt is the price of a
+#      realisable line driver.) The R_bump/R_hf/Tone passives are present for
+#      provenance and the BOM; in the current WDF lowering the post-transformer
+#      passive values do not all propagate to the output the way a SPICE
+#      cascade would, so Tone authority is limited in v1. A flat-passband
+#      playback amp + active EQ is the future refinement.
+
+equipment "Tape Saturation" {
+  supplies {
+    V+: 15V
+    V-: -15V
+  }
+  components {
+    # === Input buffer ===
+    C_in: cap(1u)            # input DC block
+    R1:   resistor(1M)       # input reference to ground
+    U0:   opamp(tl072)       # high-Z input buffer
+
+    # === Drive stage (inverting amp, Drive = series feedback pot) ===
+    R_in: resistor(1M)       # inverting input resistor (sets drive headroom)
+    U1:   opamp(ne5532)      # low-noise drive amp (50 ohm out, drives iron)
+    R_fb: resistor(10k)      # minimum feedback resistor
+    Drive: pot(100k, a)      # gain = (R_fb + Drive)/R_in (audio taper)
+
+    # === Magnetic colour: 1:1 transformer, gapped J-A core ===
+    C_drv:  cap(47u)         # couple drive amp into the primary
+    T_tape: transformer(1:1, OT-DEMO-SE)   # <-- THE J-A CORE (tape colour)
+    R_pri:  resistor(100)    # primary build-out
+    R_sec:  resistor(10k)    # secondary termination (sets passband gain)
+
+    # === Playback EQ: head-bump LF shelf ===
+    R_bump: resistor(2.2k)   # head-bump shelf series resistor
+    C_bump: cap(2.2u)        # bypasses R_bump at LF -> low-frequency lift
+
+    # === Playback EQ: HF rolloff + Tone ===
+    R_hf:   resistor(3.3k)   # HF tilt series resistor
+    C_hf:   cap(2.2n)        # HF shunt cap (tape treble loss)
+    Tone:   pot(100k)        # playback HF tilt
+
+    # === Makeup / output ===
+    C_out:  cap(1u)          # output DC block
+    U2:     opamp(tl072)     # makeup amp (inverting, attenuates to ~unity)
+    R_o1:   resistor(10k)    # makeup feedback
+    R_o2:   resistor(220k)   # makeup input resistor (overall gain trim)
+    Output: pot(100k)        # output level
+  }
+  nets {
+    # --- Input buffer ---
+    in -> C_in.a
+    C_in.b -> R1.a, U0.pos
+    R1.b -> gnd
+    U0.neg -> U0.out
+
+    # --- Drive amp (inverting, Drive pot in series feedback) ---
+    U0.out -> R_in.a
+    R_in.b -> U1.neg
+    U1.pos -> gnd
+    U1.neg -> R_fb.a
+    R_fb.b -> Drive.a
+    Drive.b -> U1.out
+
+    # --- Drive into the J-A core (primary) ---
+    U1.out -> C_drv.a
+    C_drv.b -> R_pri.a
+    R_pri.b -> T_tape.pri.a
+    T_tape.pri.b -> gnd
+
+    # --- Secondary: termination ---
+    T_tape.sec.a -> R_sec.a, R_bump.a
+    T_tape.sec.b -> gnd
+    R_sec.b -> gnd
+
+    # head-bump LF shelf: R_bump bypassed at LF by C_bump (LF lift)
+    R_bump.b -> R_hf.a
+    R_bump.a -> C_bump.a
+    C_bump.b -> R_bump.b
+
+    # HF rolloff: series R_hf into shunt C_hf + Tone to ground
+    R_hf.b -> C_hf.a, Tone.a
+    C_hf.b -> gnd
+    Tone.b -> gnd
+
+    # --- Makeup amp (inverting) + output level ---
+    R_hf.b -> C_out.a
+    C_out.b -> R_o2.a
+    R_o2.b -> U2.neg
+    U2.pos -> gnd
+    U2.neg -> R_o1.a
+    R_o1.b -> U2.out
+    U2.out -> Output.a
+    Output.b -> gnd
+    Output.w -> out
+  }
+  controls {
+    Drive.position  -> "Drive"  [0.0, 1.0] = 0.35
+    Tone.position   -> "Tone"   [0.0, 1.0] = 0.6
+    Output.position -> "Output" [0.0, 1.0] = 0.5
+  }
+}
