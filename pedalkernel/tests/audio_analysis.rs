@@ -84,6 +84,34 @@ pub fn step_then_zero(
     buf
 }
 
+/// Tone-burst stimulus for attack/release measurement: a continuous-phase
+/// sine at `amp_lo` for `lo_secs`, stepped to `amp_hi` for `hi_secs`,
+/// then back to `amp_lo` for `tail_secs`.
+pub fn tone_burst(
+    freq_hz: f64,
+    amp_lo: f64,
+    amp_hi: f64,
+    lo_secs: f64,
+    hi_secs: f64,
+    tail_secs: f64,
+    sample_rate: f64,
+) -> Vec<f64> {
+    let n_lo = (lo_secs * sample_rate) as usize;
+    let n_hi = (hi_secs * sample_rate) as usize;
+    let n_tail = (tail_secs * sample_rate) as usize;
+    (0..n_lo + n_hi + n_tail)
+        .map(|i| {
+            let amp = if i >= n_lo && i < n_lo + n_hi {
+                amp_hi
+            } else {
+                amp_lo
+            };
+            let t = i as f64 / sample_rate;
+            amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin()
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Basic measurements
 // ---------------------------------------------------------------------------
@@ -142,6 +170,16 @@ pub fn correlation(a: &[f64], b: &[f64]) -> f64 {
 /// Energy of a buffer (sum of squares).
 pub fn energy(buf: &[f64]) -> f64 {
     buf.iter().map(|x| x * x).sum()
+}
+
+/// Convert a linear amplitude to decibels (floored at -240 dB).
+pub fn lin_to_db(lin: f64) -> f64 {
+    20.0 * lin.max(1e-12).log10()
+}
+
+/// Convert decibels to a linear amplitude.
+pub fn db_to_lin(db: f64) -> f64 {
+    10f64.powf(db / 20.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +474,39 @@ pub fn has_amplitude_modulation(buf: &[f64], num_chunks: usize) -> bool {
 // Compile + process helpers
 // ---------------------------------------------------------------------------
 
+/// Compile a .pedal source string into a fresh sample-by-sample process
+/// closure. Useful for measurement sweeps that recompile per data point so
+/// reactive/envelope state cannot leak between measurements.
+pub fn pedal_processor(
+    pedal_src: &str,
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+) -> impl FnMut(f64) -> f64 {
+    let pedal = parse_pedal_file(pedal_src).expect("failed to parse pedal source");
+    let mut proc = compile_pedal(&pedal, sample_rate).expect("failed to compile pedal");
+    for &(label, val) in controls {
+        proc.set_control(label, val);
+    }
+    move |s| proc.process(s)
+}
+
+/// Read a .pedal source string from tests/test_pedals/.
+pub fn test_pedal_source(filename: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/test_pedals")
+        .join(filename);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
+
+/// Read a .pedal source string from examples/ (searches subdirectories).
+pub fn example_pedal_source(filename: &str) -> String {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let path = find_file_recursive(&examples_dir, filename)
+        .unwrap_or_else(|| panic!("example file not found: {filename}"));
+    std::fs::read_to_string(&path).unwrap()
+}
+
 /// Compile a .pedal source string and process input through it.
 pub fn compile_and_process(
     pedal_src: &str,
@@ -542,6 +613,219 @@ fn find_file_recursive(dir: &Path, filename: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Outboard-gear measurements: frequency response, gain curves, dynamics
+// ---------------------------------------------------------------------------
+
+/// Settle time used before measuring steady-state response.
+const MEASURE_SETTLE_SECS: f64 = 0.5;
+/// Minimum Goertzel/RMS analysis window for steady-state measurements.
+const MEASURE_WINDOW_SECS: f64 = 0.25;
+
+/// Measure small-signal frequency response in dB at each probe frequency.
+///
+/// `make_processor` is called once per frequency so each point starts from a
+/// fresh, deterministic state (recompile-per-point — state never leaks
+/// between probes). For each frequency: synthesize a sine at `amplitude`,
+/// discard 0.5 s of settle time, then measure output/input magnitude via
+/// Goertzel over an integer number of cycles (so the bin lands exactly on
+/// the probe frequency). Returns `(freq_hz, gain_db)` pairs.
+pub fn frequency_response_db<F, P>(
+    mut make_processor: F,
+    freqs_hz: &[f64],
+    amplitude: f64,
+    sample_rate: f64,
+) -> Vec<(f64, f64)>
+where
+    F: FnMut() -> P,
+    P: FnMut(f64) -> f64,
+{
+    freqs_hz
+        .iter()
+        .map(|&freq| {
+            let mut process = make_processor();
+            // Integer cycle count keeps the Goertzel bin exactly on the probe.
+            let cycles = (MEASURE_WINDOW_SECS * freq).ceil().max(4.0);
+            let window = (cycles * sample_rate / freq).round() as usize;
+            let settle = (MEASURE_SETTLE_SECS * sample_rate) as usize;
+            let input = sine_at(
+                freq,
+                amplitude,
+                (settle + window) as f64 / sample_rate,
+                sample_rate,
+            );
+            let output: Vec<f64> = input.iter().map(|&s| process(s)).collect();
+            let in_mag = goertzel_mag(&input[settle..], sample_rate, freq);
+            let out_mag = goertzel_mag(&output[settle..], sample_rate, freq);
+            (freq, lin_to_db(out_mag) - lin_to_db(in_mag))
+        })
+        .collect()
+}
+
+/// Measure the static (steady-state) gain curve of a processor.
+///
+/// For each input level (in dB relative to 1.0 sine peak), a fresh processor
+/// is built via `make_processor` so envelope/compression state cannot leak
+/// between points. A sine at `freq_hz` runs for 0.5 s of settle time, then
+/// output RMS is measured over 0.25 s and converted to peak-equivalent dB
+/// (`20·log10(rms·√2)`), so a unity-gain device returns output_db ≈ input_db.
+/// Returns `(input_db, output_db)` pairs.
+pub fn static_gain_curve<F, P>(
+    mut make_processor: F,
+    input_levels_db: &[f64],
+    freq_hz: f64,
+    sample_rate: f64,
+) -> Vec<(f64, f64)>
+where
+    F: FnMut() -> P,
+    P: FnMut(f64) -> f64,
+{
+    let settle = (MEASURE_SETTLE_SECS * sample_rate) as usize;
+    let window = (MEASURE_WINDOW_SECS * sample_rate) as usize;
+    input_levels_db
+        .iter()
+        .map(|&in_db| {
+            let mut process = make_processor();
+            let input = sine_at(
+                freq_hz,
+                db_to_lin(in_db),
+                (settle + window) as f64 / sample_rate,
+                sample_rate,
+            );
+            let output: Vec<f64> = input.iter().map(|&s| process(s)).collect();
+            let out_db = lin_to_db(rms(&output[settle..]) * std::f64::consts::SQRT_2);
+            (in_db, out_db)
+        })
+        .collect()
+}
+
+/// Compression ratio over a region of a static gain curve.
+///
+/// Fits a least-squares line to the `(input_db, output_db)` points whose
+/// input level lies within `[lo_db, hi_db]` and returns
+/// ratio = Δinput_db / Δoutput_db = 1 / slope. A linear device gives 1.0,
+/// a limiter approaches +∞ (returned as `f64::INFINITY` when the curve is
+/// flat). Requires at least two points in the region.
+pub fn compression_ratio(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
+    let pts: Vec<(f64, f64)> = curve
+        .iter()
+        .copied()
+        .filter(|&(x, _)| x >= lo_db && x <= hi_db)
+        .collect();
+    assert!(
+        pts.len() >= 2,
+        "compression_ratio: need >= 2 curve points in [{lo_db}, {hi_db}], got {}",
+        pts.len()
+    );
+    let n = pts.len() as f64;
+    let mx = pts.iter().map(|p| p.0).sum::<f64>() / n;
+    let my = pts.iter().map(|p| p.1).sum::<f64>() / n;
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for &(x, y) in &pts {
+        sxy += (x - mx) * (y - my);
+        sxx += (x - mx) * (x - mx);
+    }
+    let slope = sxy / sxx;
+    if slope.abs() < 1e-9 {
+        f64::INFINITY
+    } else {
+        1.0 / slope
+    }
+}
+
+/// Gain reduction in dB between two points on a static gain curve.
+///
+/// GR = gain(lo) - gain(hi), where gain = output_db - input_db at the curve
+/// point nearest each requested input level. Positive GR means the device
+/// applies less gain at the high level (compression); 0 means linear.
+pub fn gain_reduction_db(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
+    assert!(!curve.is_empty(), "gain_reduction_db: empty curve");
+    let nearest = |target: f64| {
+        curve
+            .iter()
+            .min_by(|a, b| {
+                (a.0 - target)
+                    .abs()
+                    .partial_cmp(&(b.0 - target).abs())
+                    .unwrap_or(Ordering::Equal)
+            })
+            .unwrap()
+    };
+    let lo = nearest(lo_db);
+    let hi = nearest(hi_db);
+    (lo.1 - lo.0) - (hi.1 - hi.0)
+}
+
+/// Short-window RMS envelope (trailing window, same length as input).
+/// Windows shorter than one sample are clamped to one sample.
+pub fn rms_envelope(buf: &[f64], window_secs: f64, sample_rate: f64) -> Vec<f64> {
+    let w = ((window_secs * sample_rate) as usize).max(1);
+    let mut out = Vec::with_capacity(buf.len());
+    let mut sum_sq = 0.0;
+    for i in 0..buf.len() {
+        sum_sq += buf[i] * buf[i];
+        if i >= w {
+            sum_sq -= buf[i - w] * buf[i - w];
+        }
+        let n = (i + 1).min(w);
+        out.push((sum_sq.max(0.0) / n as f64).sqrt());
+    }
+    out
+}
+
+/// Envelope window for attack/release timing (2 ms — short enough to track
+/// fast attacks, long enough to smooth a 1 kHz carrier).
+const ENVELOPE_WINDOW_SECS: f64 = 0.002;
+/// Settling tolerance for attack/release timing.
+const SETTLE_TOLERANCE_DB: f64 = 1.0;
+
+/// Shared settling measurement for attack/release.
+///
+/// Convention: the new steady state is the mean envelope over the final 25%
+/// of the post-step segment; the settle time is measured from `step_sample`
+/// to the moment the 2 ms RMS envelope last leaves the ±1 dB band around
+/// that steady state (i.e. enters the band and stays there). Returns 0.0 if
+/// the envelope never leaves the band (step too shallow to resolve).
+fn envelope_settle_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    assert!(
+        step_sample < output.len(),
+        "envelope_settle_seconds: step_sample {step_sample} out of range"
+    );
+    let env = rms_envelope(output, ENVELOPE_WINDOW_SECS, sample_rate);
+    let segment = &env[step_sample..];
+    let tail_start = segment.len() - segment.len() / 4;
+    let tail = &segment[tail_start..];
+    let target = tail.iter().sum::<f64>() / tail.len().max(1) as f64;
+    if target < 1e-12 {
+        return 0.0;
+    }
+    let lo = target * db_to_lin(-SETTLE_TOLERANCE_DB);
+    let hi = target * db_to_lin(SETTLE_TOLERANCE_DB);
+    let mut settle_idx = 0;
+    for (i, &e) in segment.iter().enumerate().take(tail_start) {
+        if e < lo || e > hi {
+            settle_idx = i + 1;
+        }
+    }
+    settle_idx as f64 / sample_rate
+}
+
+/// Attack time: seconds from a level step-up at `step_sample` until the
+/// short-window RMS envelope settles within ±1 dB of its new steady state.
+/// Pass a slice that ends BEFORE any subsequent step-down (e.g.
+/// `&output[..step_down]`), since the steady state is estimated from the
+/// tail of the slice. See [`envelope_settle_seconds`] for the convention.
+pub fn measure_attack_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    envelope_settle_seconds(output, step_sample, sample_rate)
+}
+
+/// Release time: seconds from a level step-down at `step_sample` until the
+/// short-window RMS envelope settles within ±1 dB of its new steady state.
+/// Same convention as [`measure_attack_seconds`].
+pub fn measure_release_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    envelope_settle_seconds(output, step_sample, sample_rate)
 }
 
 // ---------------------------------------------------------------------------

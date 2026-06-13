@@ -90,9 +90,20 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
         }
     }
 
-    // Apply defaults
+    // Apply defaults.
+    //
+    // Use the *immediate* path, not the smoothed `set_control`. The smoother's
+    // `current` is initialized to `ctrl.default` above, so `set_control` here
+    // would see `is_settled()` == true and never fire `set_control_pot`, leaving
+    // the underlying pot leaf at its compile-time stamp (position 0.5 for
+    // PassiveRType children — see spqr_build.rs). That mismatch makes the
+    // declared default inert and folds the runtime pot sweep around 0.5
+    // (pos-0.5 measures identical to pos-0.0, sub-0.5 positions alias). Pushing
+    // the default through `set_control_immediate` writes it straight into the
+    // leaf and re-derives the scattering, so the compiled baseline IS the
+    // declared default and the sweep is monotonic across the full range.
     for ctrl in &pedal.controls {
-        compiled.set_control(&ctrl.label, ctrl.default);
+        compiled.set_control_immediate(&ctrl.label, ctrl.default);
     }
 }
 

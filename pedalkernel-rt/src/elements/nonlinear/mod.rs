@@ -20,6 +20,7 @@ mod opamp;
 mod ota;
 mod pentode;
 mod slew;
+mod spring;
 mod triode;
 mod vari_mu;
 
@@ -34,6 +35,7 @@ pub use opamp::*;
 pub use ota::*;
 pub use pentode::*;
 pub use slew::*;
+pub use spring::*;
 pub use triode::*;
 pub use vari_mu::*;
 

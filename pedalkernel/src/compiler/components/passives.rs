@@ -682,6 +682,21 @@ impl Component for CapSwitched {
         StampResult::Skip
     }
 
+    fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
+        // Position 0 (first listed value) — mirrors stamp_mna above and the
+        // fixed Capacitor::make_leaf. Live switching is F7 phase 2.
+        let &c = self.values.first()?;
+        if c.is_finite() && c > 0.0 {
+            Some(DynNode::Capacitor(
+                Some(comp_id.to_string()),
+                c,
+                1.0 / (2.0 * sample_rate * c),
+            ))
+        } else {
+            None
+        }
+    }
+
     fn edges(&self) -> Vec<ComponentEdge> {
         vec![ComponentEdge {
             pin_a: "a",
@@ -761,6 +776,21 @@ impl Component for InductorSwitched {
         StampResult::Skip
     }
 
+    fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
+        // Position 0 (first listed value) — mirrors stamp_mna above and the
+        // fixed Inductor::make_leaf. Live switching is F7 phase 2.
+        let &l = self.values.first()?;
+        if l.is_finite() && l > 0.0 {
+            Some(DynNode::Inductor(
+                Some(comp_id.to_string()),
+                l,
+                2.0 * sample_rate * l,
+            ))
+        } else {
+            None
+        }
+    }
+
     fn edges(&self) -> Vec<ComponentEdge> {
         vec![ComponentEdge {
             pin_a: "a",
@@ -834,6 +864,20 @@ impl Component for ResistorSwitched {
             }
         }
         StampResult::Stamped
+    }
+
+    fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
+        // Position 0 (first listed value) — mirrors stamp_mna above and the
+        // fixed Resistor::make_leaf (`inf` → open circuit). Live switching is
+        // F7 phase 2.
+        let &r = self.values.first()?;
+        if r.is_infinite() {
+            Some(DynNode::Resistor(Some(comp_id.to_string()), OPEN_CIRCUIT_R))
+        } else if r.is_finite() && r > 0.0 {
+            Some(DynNode::Resistor(Some(comp_id.to_string()), r))
+        } else {
+            None
+        }
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {

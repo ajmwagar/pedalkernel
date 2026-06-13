@@ -150,6 +150,56 @@ impl UnionFind {
     }
 }
 
+/// True when a conductive path exists from `from_pin` to `to_pin` through the
+/// given component pin pairs, without traversing any blocked node
+/// (gnd/supply/input — ideal-source nodes that break signal loops).
+///
+/// Used to distinguish Sallen-Key-style unity followers (a passive network
+/// feeds the op-amp output back to its pos input) from plain unity buffers
+/// (no out→pos return path), so the pos↔out transparency union is only
+/// skipped when the feedback network would actually be collapsed by it.
+fn has_conductive_path(
+    uf: &mut UnionFind,
+    pin_pairs: &[(usize, usize)],
+    blocked_ids: &[usize],
+    from_pin: usize,
+    to_pin: usize,
+) -> bool {
+    let target = uf.find(to_pin);
+    let start = uf.find(from_pin);
+    if start == target {
+        return true;
+    }
+    let blocked: std::collections::HashSet<usize> =
+        blocked_ids.iter().map(|&id| uf.find(id)).collect();
+    let edges: Vec<(usize, usize)> = pin_pairs
+        .iter()
+        .map(|&(a, b)| (uf.find(a), uf.find(b)))
+        .collect();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(start);
+    let mut queue = std::collections::VecDeque::from([start]);
+    while let Some(node) = queue.pop_front() {
+        for &(a, b) in &edges {
+            let next = if a == node {
+                b
+            } else if b == node {
+                a
+            } else {
+                continue;
+            };
+            if next == target {
+                return true;
+            }
+            if blocked.contains(&next) || !visited.insert(next) {
+                continue;
+            }
+            queue.push_back(next);
+        }
+    }
+    false
+}
+
 fn pin_key(pin: &Pin) -> String {
     match pin {
         Pin::Reserved(s) => s.clone(),
@@ -400,6 +450,48 @@ impl CircuitGraph {
                 }
             }
             set
+        };
+
+        // Pre-collect conductive pin-id pairs for unity-follower feedback
+        // detection. Includes every component that physically conducts signal
+        // between its pins (passives, transistors, tubes, pots, transformers).
+        // Excludes VCVS pseudo-edges (an op-amp's neg→out constraint is not a
+        // conductor) and Virtual/ActiveIc control taps (LFO/envelope pin
+        // adjacencies are control wiring, not current paths).
+        let conductive_pin_pairs: Vec<(usize, usize)> = {
+            let mut pairs = Vec::new();
+            for comp in &all_components {
+                match comp.kind.graph_role() {
+                    GraphRole::Edge { .. }
+                    | GraphRole::ActiveEdge { .. }
+                    | GraphRole::CoupledEdge { .. }
+                    | GraphRole::Pot
+                    | GraphRole::Transformer => {}
+                    GraphRole::Virtual | GraphRole::ActiveIc | GraphRole::VcvsEdge { .. } => {
+                        continue
+                    }
+                }
+                for (pin_a, pin_b) in comp.kind.signal_adjacencies() {
+                    let ida = get_id(&format!("{}.{}", comp.id, pin_a), &mut uf);
+                    let idb = get_id(&format!("{}.{}", comp.id, pin_b), &mut uf);
+                    pairs.push((ida, idb));
+                }
+            }
+            pairs
+        };
+
+        // Nodes a feedback path may not traverse: ground, supplies, and the
+        // circuit input (ideal-source nodes that break signal loops).
+        let feedback_blocked_ids: Vec<usize> = {
+            let mut ids = vec![
+                get_id("gnd", &mut uf),
+                get_id("vcc", &mut uf),
+                get_id("in", &mut uf),
+            ];
+            for supply in &pedal.supplies {
+                ids.push(get_id(&supply.name, &mut uf));
+            }
+            ids
         };
 
         // Build edges for two-terminal components.
@@ -680,16 +772,33 @@ impl CircuitGraph {
                     // a reactive-network junction (C2.a/R2.b). Unioning pos into
                     // out collapses the SK feedback loop and produces −240 dB silence.
                     //
-                    // Guard: skip the union if pos_node appears in the
-                    // reactive_nodes pre-computed set (i.e., pos is a pin of a
-                    // capacitor or inductor).
+                    // Guard: skip the union only for genuine Sallen-Key-style
+                    // followers, identified by BOTH:
+                    //   1. pos is reactive-adjacent (in reactive_nodes), AND
+                    //   2. a conductive path feeds the op-amp output back into
+                    //      the pos-side network without crossing gnd/supply/in
+                    //      (SK LPF: out→C1→J→R2→pos; SK HPF: out→R1→J→C2→pos).
+                    //
+                    // Condition 1 alone is too broad: a plain buffer with a
+                    // series input coupling cap (in→C1→pos) is reactive-adjacent
+                    // but has no out→pos return path — the union is correct and
+                    // keeps it a transparent wire (otherwise the buffer compiles
+                    // to an IIR VCVS stage with a spurious 2x gain).
                     let node_neg = uf.find(id_neg);
                     let node_out = uf.find(id_out);
                     if node_neg == node_out {
                         let pos_root = uf.find(id_pos);
-                        if !reactive_nodes.contains(&pos_root) {
-                            // Plain unity follower: pos is not reactive-adjacent.
-                            // Union pos→out to make it a transparent wire.
+                        let sallen_key_like = reactive_nodes.contains(&pos_root)
+                            && has_conductive_path(
+                                &mut uf,
+                                &conductive_pin_pairs,
+                                &feedback_blocked_ids,
+                                id_out,
+                                id_pos,
+                            );
+                        if !sallen_key_like {
+                            // Plain unity follower: union pos→out to make it
+                            // a transparent wire.
                             uf.union(id_pos, id_out);
                         }
                         // else: Sallen-Key or similar — keep pos and out separate.
@@ -4062,11 +4171,24 @@ pub(super) fn make_leaf(
 /// This generalizes `detect_lfo_controlled_jfets()` and
 /// `detect_envelope_controlled_otas()` in compile.rs.
 pub(super) fn resolve_components(graph: &mut CircuitGraph, pedal: &PedalDef) {
+    resolve_components_by(graph, pedal, |c| c.kind.is_modulation_source())
+}
+
+/// Like [`resolve_components`] but with a caller-supplied modulator-source
+/// filter. The SPQR pipeline currently resolves only envelope-modulated
+/// components (audit gap G2 — `EF.out -> J.vgs`); LFO-modulated components
+/// keep their existing compilation behavior until the LFO binding path is
+/// wired up.
+pub(super) fn resolve_components_by(
+    graph: &mut CircuitGraph,
+    pedal: &PedalDef,
+    is_modulator: impl Fn(&ComponentDef) -> bool,
+) {
     // Collect modulator component IDs (LFO, EnvelopeFollower).
     let modulator_ids: HashSet<&str> = pedal
         .components
         .iter()
-        .filter(|c| c.kind.is_modulation_source())
+        .filter(|c| is_modulator(c))
         .map(|c| c.id.as_str())
         .collect();
 

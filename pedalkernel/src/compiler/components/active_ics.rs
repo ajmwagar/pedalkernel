@@ -533,6 +533,30 @@ impl Component for Vca {
         StampResult::Skip
     }
 
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            // Scaling rationale (audit gap G4): the runtime Vca maps a
+            // normalized CV 0..1 onto 0..-80 dB, the SSM2164-class dB-linear
+            // law (see pedalkernel-rt `Vca::set_cv_normalized`). The engine's
+            // envelope followers output a rectified average — ~1.3-2 for
+            // full-scale program (2/π × a typical sensitivity of 2.0 from a
+            // 20k sensitivity resistor, times any buffer gain ahead of the
+            // tap) — so cv = bias + env × range with bias 0, range 0.05 puts
+            // full-scale program at cv ≈ 0.07-0.1 ≈ 5-8 dB of gain reduction
+            // and a ~2:1 ratio over the top 12 dB (SSL-bus-comp-like glue).
+            // Larger ranges over-compress: because the detector is linear in
+            // amplitude, GR in dB grows ~10^(in_db/20), and beyond ~11 dB of
+            // full-scale GR the static curve's top end slopes DOWNWARD
+            // (output falls as input rises — negative ratio).
+            "cv" | "cv1" | "cv2" | "cv3" | "cv4" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::VcaCv,
+                bias: 0.0,
+                range: 0.05,
+            }),
+            _ => None,
+        }
+    }
+
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         match self.vca_type {
             VcaType::Ssm2164 => ("Analog:SSM2164", "U"),

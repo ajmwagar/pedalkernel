@@ -90,6 +90,13 @@ pub(super) fn build_controls(
                 let idx = trigger_id_to_idx.get(&ctrl.component).copied().unwrap_or(0);
                 ControlTarget::Trigger(idx)
             }
+            // Spring controls are bound (retargeted to the correct per-instance
+            // index) by the spring_lowering DspBlock pass; this legacy resolver
+            // maps to instance 0 as a placeholder the later pass overrides.
+            Some(ControlParamKind::SpringDwell) => ControlTarget::SpringDwell(0),
+            Some(ControlParamKind::SpringDecay) => ControlTarget::SpringDecay(0),
+            Some(ControlParamKind::SpringDamping) => ControlTarget::SpringDamping(0),
+            Some(ControlParamKind::SpringMix) => ControlTarget::SpringMix(0),
             Some(ControlParamKind::PotPosition) => {
                 let (target, is_bbd_mix) = resolve_pot_target(
                     &ctrl.component,
@@ -432,11 +439,321 @@ pub(super) fn build_envelope_bindings(
                                         bias,
                                         range,
                                         env_id: comp.id.clone(),
+                                        // Legacy 6-pass builder (no runtime
+                                        // Stage list): global-input tap.
+                                        tap: EnvelopeTapSource::default(),
                                     });
                                 }
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    envelopes
+}
+
+/// Resolve an envelope follower's detector tap (`EF.in -> <node>`) to a
+/// runtime signal source.
+///
+/// Historically the runtime fed EVERY envelope follower the global pedal
+/// input, ignoring the `.in` net entirely (audit gap G1). This resolves the
+/// tap at compile time with the following rule, applied to the electrical
+/// node the `EF.in` pin sits on:
+///
+/// 1. **No `.in` net** → [`EnvelopeTapSource::GlobalInput`] (legacy
+///    behavior, also the safe default).
+/// 2. Walk outward from the tap node through PASSIVE two-terminal-ish
+///    components only (resistors, capacitors, inductors, pots and their
+///    switched/tempco variants), level by level, never expanding through
+///    supply rails or ground. At each level (level 0 = the tap node
+///    itself):
+///    - if the reserved `in` node is reached → `GlobalInput` (the tap is
+///      input-coupled, e.g. `EF.in -> C_in.b`; checked before `out` so a
+///      degenerate node touching both resolves to the legacy source);
+///    - if the reserved `out` node is reached →
+///      [`EnvelopeTapSource::StageOutput`] of the LAST serial stage (the
+///      tap is output-coupled — a feedback detector, e.g. an 1176 rev D
+///      tapping the output pot wiper).
+///    Active devices (transistors, tubes, op-amps, transformers, ...) are
+///    deliberate walk barriers: a tap behind an amplifier is NOT the same
+///    signal as the node on the amplifier's other side.
+/// 3. Otherwise (an interior tap node that reaches neither `in` nor `out`
+///    through passives): the first stage of the serial chain that owns a
+///    component touched by the walk (tap-node neighbors first) →
+///    `StageOutput` of that stage — i.e. the tap is approximated by the
+///    output of the stage the tapped network compiled into.
+/// 4. If nothing matches → `GlobalInput`.
+///
+/// The runtime feeds `StageOutput(i)` detectors stage `i`'s post-wiper
+/// serial output each sample (see the serial loop in
+/// `CompiledPedal::process`): feed-forward taps modulate the same sample,
+/// feedback taps the next (one-sample delay).
+pub(super) fn resolve_envelope_tap(
+    pedal: &PedalDef,
+    stages: &[Stage],
+    ef_id: &str,
+) -> EnvelopeTapSource {
+    use std::collections::VecDeque;
+
+    // Pin → set key. Reserved nodes are namespaced so a component named
+    // "in" can't collide with the reserved input node.
+    let pin_key = |p: &Pin| -> Option<String> {
+        match p {
+            Pin::Reserved(n) => Some(format!("@{n}")),
+            Pin::ComponentPin { component, pin } => Some(format!("{component}.{pin}")),
+            Pin::Fork { .. } | Pin::SubcircuitPort { .. } => None,
+        }
+    };
+    // Rails/ground must never join the node closure: half the circuit
+    // touches ground, and expanding through it would merge everything.
+    let is_rail_key = |key: &str| matches!(key.strip_prefix('@'), Some(n) if n == "gnd" || n == "vcc" || pedal.is_supply_rail(n));
+
+    let passive_pins = |comp_id: &str| -> Option<Vec<&'static str>> {
+        let comp = pedal.components.iter().find(|c| c.id == comp_id)?;
+        if comp.kind.is_pot() {
+            return Some(vec!["a", "b", "w", "wiper"]);
+        }
+        match comp.kind.type_tag() {
+            "resistor" | "capacitor" | "inductor" | "tempco resistor" | "switched resistor"
+            | "switched capacitor" | "switched inductor" => Some(vec!["a", "b"]),
+            _ => None,
+        }
+    };
+
+    let last_serial_stage = stages.iter().rposition(|s| !s.bypass_serial());
+
+    let mut visited: HashSet<String> = HashSet::new();
+    // Components touched by the walk, in BFS order (tap-node neighbors
+    // first) — fallback candidates for rule 3.
+    let mut touched_components: Vec<String> = Vec::new();
+    // Current BFS level's frontier of pin keys.
+    let mut frontier: Vec<String> = vec![format!("{ef_id}.in")];
+    visited.insert(frontier[0].clone());
+
+    while !frontier.is_empty() {
+        // Expand the frontier to its full electrical node closure: any net
+        // sharing a (non-rail) pin with the closure contributes all its
+        // pins. Iterate to fixpoint since nets chain through named nodes.
+        let mut closure: Vec<String> = frontier.clone();
+        let mut closure_set: HashSet<String> = closure.iter().cloned().collect();
+        loop {
+            let mut grew = false;
+            for net in &pedal.nets {
+                let keys: Vec<String> = std::iter::once(&net.from)
+                    .chain(net.to.iter())
+                    .filter_map(&pin_key)
+                    .collect();
+                if !keys
+                    .iter()
+                    .any(|k| closure_set.contains(k) && !is_rail_key(k))
+                {
+                    continue;
+                }
+                for k in keys {
+                    if !is_rail_key(&k) && closure_set.insert(k.clone()) {
+                        closure.push(k);
+                        grew = true;
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+
+        // Reserved-node checks for this level. `in` first: a node touching
+        // both resolves to the legacy global-input source.
+        if closure_set.contains("@in") {
+            return EnvelopeTapSource::GlobalInput;
+        }
+        if closure_set.contains("@out") {
+            return match last_serial_stage {
+                Some(idx) => EnvelopeTapSource::StageOutput(idx),
+                None => EnvelopeTapSource::GlobalInput,
+            };
+        }
+
+        // Cross passive components to their other pins → next level.
+        let mut next: Vec<String> = Vec::new();
+        let mut queue: VecDeque<String> = closure.into();
+        while let Some(key) = queue.pop_front() {
+            let Some((comp_id, pin)) = key.rsplit_once('.') else {
+                continue;
+            };
+            if comp_id == ef_id {
+                continue;
+            }
+            visited.insert(key.clone());
+            if !touched_components.iter().any(|c| c == comp_id) {
+                touched_components.push(comp_id.to_string());
+            }
+            let Some(pins) = passive_pins(comp_id) else {
+                continue;
+            };
+            for other in pins {
+                if other == pin {
+                    continue;
+                }
+                let other_key = format!("{comp_id}.{other}");
+                if visited.insert(other_key.clone()) {
+                    next.push(other_key);
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    // Rule 3 fallback: first serial stage owning a touched component.
+    for comp_id in &touched_components {
+        if let Some(idx) = stages.iter().position(
+            |s| matches!(s, Stage::Wdf(w) if !w.bypass_serial && w.contains_component(comp_id)),
+        ) {
+            return EnvelopeTapSource::StageOutput(idx);
+        }
+    }
+
+    EnvelopeTapSource::GlobalInput
+}
+
+/// Build envelope-follower → JFET bindings for the SPQR pipeline.
+///
+/// The SPQR pipeline never calls the legacy [`build_envelope_bindings`] (it
+/// expects the removed 6-pass pipeline's bare `WdfStage` list), so
+/// `CompiledPedal::envelopes` stayed empty and `EF.out -> J.vgs` nets were
+/// inert (audit gap G2). This builder works on the runtime [`Stage`] list.
+///
+/// A gate-modulated JFET compiles to a `jfet_vr` LEAF (`resolve_edges()`
+/// reclassifies the drain–source edge as `EdgeKind::Linear`), not a stage
+/// root, so the binding targets the leaf by component id
+/// (`ModulationTarget::JfetVrVgs`). Bias/range come from the component's
+/// `modulation_sink()` — the same scaling the LFO path uses, mapping the
+/// envelope's [0,1] output onto a negative Vgs swing toward pinch-off.
+///
+/// Photocoupler LED sinks (audit gap G3) are bound here too: the envelope
+/// drives the LED of a photocoupler that compiled as a leaf (WDF tree or
+/// PassiveRType MNA child — its netlist position), or, when no leaf exists,
+/// as an op-amp input-path gain element. The classification is exclusive
+/// (leaf-positioned XOR input-path) so a shunt CdS cell is never doubly
+/// modeled as a series transmission gain.
+///
+/// Scope: JFET vgs/gate and photocoupler LED sinks. Other sink kinds
+/// (VCA cv, ...) are separate audit gaps (G4) and keep their current
+/// behavior.
+pub(super) fn build_envelope_jfet_bindings(
+    pedal: &PedalDef,
+    stages: &[Stage],
+    sample_rate: f64,
+) -> Vec<EnvelopeBinding> {
+    use super::component::ModulationSinkKind;
+
+    let mut envelopes = Vec::new();
+
+    for comp in &pedal.components {
+        let Some(ef) = comp
+            .kind
+            .as_any()
+            .downcast_ref::<crate::compiler::components::EnvelopeFollower>()
+        else {
+            continue;
+        };
+        let envelope = crate::elements::EnvelopeFollower::from_rc(
+            ef.attack_r,
+            ef.attack_c,
+            ef.release_r,
+            ef.release_c,
+            ef.sensitivity_r,
+            sample_rate,
+        );
+        // Detector tap: resolve the `EF.in -> <node>` net to its runtime
+        // signal source (global input vs. a specific stage's output).
+        let tap = resolve_envelope_tap(pedal, stages, &comp.id);
+
+        for net in &pedal.nets {
+            let Pin::ComponentPin { component, pin } = &net.from else {
+                continue;
+            };
+            if component != &comp.id || pin != "out" {
+                continue;
+            }
+            for target_pin in &net.to {
+                let Pin::ComponentPin {
+                    component: target_comp,
+                    pin: target_prop,
+                } = target_pin
+                else {
+                    continue;
+                };
+                let Some(sink) = pedal
+                    .components
+                    .iter()
+                    .find(|c| &c.id == target_comp)
+                    .and_then(|c| c.kind.modulation_sink(target_prop))
+                else {
+                    continue;
+                };
+                match sink.target_kind {
+                    ModulationSinkKind::JfetVgs => {
+                        let Some(stage_idx) = stages.iter().position(
+                            |s| matches!(s, Stage::Wdf(w) if w.contains_jfet_vr(target_comp)),
+                        ) else {
+                            continue;
+                        };
+                        envelopes.push(EnvelopeBinding {
+                            envelope: envelope.clone(),
+                            target: ModulationTarget::JfetVrVgs {
+                                stage_idx,
+                                comp_id: target_comp.clone(),
+                            },
+                            bias: sink.bias,
+                            range: sink.range,
+                            env_id: comp.id.clone(),
+                            tap,
+                        });
+                    }
+                    ModulationSinkKind::PhotocouplerLed => {
+                        // Leaf-positioned XOR input-path (audit gap G3):
+                        // prefer the stage holding the photocoupler at its
+                        // netlist position (WDF tree leaf or PassiveRType MNA
+                        // child); only fall back to an op-amp stage that
+                        // models it as an input-path gain element when no
+                        // leaf exists anywhere. Skip (no binding) if the
+                        // photocoupler didn't compile into any stage.
+                        let stage_idx = stages
+                            .iter()
+                            .position(
+                                |s| matches!(s, Stage::Wdf(w) if w.contains_photocoupler(target_comp)),
+                            )
+                            .or_else(|| {
+                                stages.iter().position(|s| {
+                                    matches!(s, Stage::Wdf(w) if w
+                                        .input_photocouplers
+                                        .iter()
+                                        .any(|pc| pc.comp_id == *target_comp))
+                                })
+                            });
+                        let Some(stage_idx) = stage_idx else {
+                            continue;
+                        };
+                        // The sink's bias/range (0.5/0.5) map a BIPOLAR LFO
+                        // onto LED drive [0, 1]; the envelope output is
+                        // already unipolar [0, 1] and detector silence must
+                        // mean LED dark, so pass it through unscaled.
+                        envelopes.push(EnvelopeBinding {
+                            envelope: envelope.clone(),
+                            target: ModulationTarget::PhotocouplerLed {
+                                stage_idx,
+                                comp_id: target_comp.clone(),
+                            },
+                            bias: 0.0,
+                            range: 1.0,
+                            env_id: comp.id.clone(),
+                            tap,
+                        });
+                    }
+                    _ => continue,
                 }
             }
         }
@@ -591,6 +908,21 @@ fn resolve_modulation_target(
 
     let target = match sink.target_kind {
         ModulationSinkKind::JfetVgs => {
+            // Leaf resolution first: a JFET whose gate is modulated compiles
+            // to a `jfet_vr` LEAF (EdgeKind::Linear) inside a stage tree, not
+            // a stage root — root-targeting set_jfet_vgs() would silently
+            // no-op. Find the stage whose tree contains this exact component.
+            let tc = target_comp;
+            if let Some(stage_idx) = stages.iter().position(|s| s.contains_jfet_vr(tc)) {
+                return Some((
+                    ModulationTarget::JfetVrVgs {
+                        stage_idx,
+                        comp_id: tc.to_string(),
+                    },
+                    sink.bias,
+                    sink.range,
+                ));
+            }
             let jfet_count = stages
                 .iter()
                 .filter(|s| matches!(&s.root, RootKind::Jfet(_) | RootKind::JfetVr(_)))
@@ -616,22 +948,20 @@ fn resolve_modulation_target(
             }
         }
         ModulationSinkKind::PhotocouplerLed => {
-            // Find the stage containing this photocoupler — either in the WDF tree
-            // or as an input-path photocoupler on an opamp stage.
+            // Find the stage containing this photocoupler. Classification is
+            // leaf-positioned XOR op-amp-input-path (audit gap G3): prefer the
+            // stage holding the photocoupler as a LEAF (WDF tree or
+            // PassiveRType MNA child — its netlist position), and only fall
+            // back to a stage that models it as an op-amp input-path gain
+            // element when no leaf exists anywhere.
             let tc = target_comp;
             let stage_idx = stages
                 .iter()
-                .position(|s| {
-                    s.tree
-                        .find_leaf(&|leaf| {
-                            if leaf.comp_id() == Some(tc) {
-                                Some(())
-                            } else {
-                                None
-                            }
-                        })
-                        .is_some()
-                        || s.input_photocouplers.iter().any(|pc| pc.comp_id == tc)
+                .position(|s| s.contains_photocoupler(tc))
+                .or_else(|| {
+                    stages
+                        .iter()
+                        .position(|s| s.input_photocouplers.iter().any(|pc| pc.comp_id == tc))
                 })
                 .unwrap_or(0);
             ModulationTarget::PhotocouplerLed {
@@ -687,6 +1017,21 @@ fn resolve_modulation_target(
             }
         }
         ModulationSinkKind::BbdClock => ModulationTarget::BbdClock { bbd_idx: 0 },
+        ModulationSinkKind::VcaCv => {
+            // vcas[i] is declaration-ordered (vca_lowering index contract).
+            let vca_idx = pedal
+                .components
+                .iter()
+                .filter(|c| {
+                    c.kind
+                        .as_any()
+                        .downcast_ref::<super::components::Vca>()
+                        .is_some()
+                })
+                .position(|c| c.id == target_comp)
+                .unwrap_or(0);
+            ModulationTarget::VcaCv { vca_idx }
+        }
         ModulationSinkKind::DelaySpeed => {
             let delay_idx = delay_id_to_idx.get(target_comp).copied().unwrap_or(0);
             ModulationTarget::DelaySpeed { delay_idx }
@@ -694,6 +1039,12 @@ fn resolve_modulation_target(
         ModulationSinkKind::DelayTime => {
             let delay_idx = delay_id_to_idx.get(target_comp).copied().unwrap_or(0);
             ModulationTarget::DelayTime { delay_idx }
+        }
+        ModulationSinkKind::SpringDwell => {
+            // Spring dwell CV is bound by the spring_lowering pass (per-instance
+            // index contract); this legacy resolver maps to instance 0 as a
+            // safe default if ever reached.
+            ModulationTarget::SpringDwell { spring_idx: 0 }
         }
     };
 

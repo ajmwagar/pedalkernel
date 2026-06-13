@@ -75,6 +75,21 @@ impl core::fmt::Debug for Stage {
 }
 
 impl Stage {
+    /// Whether this stage is excluded from the serial audio chain
+    /// (static bias networks, K-method blocks driven via route plans, ...).
+    pub fn bypass_serial(&self) -> bool {
+        match self {
+            Stage::Wdf(w) => w.bypass_serial,
+            Stage::MultiNl(m) => m.bypass_serial,
+            Stage::Iir(i) => i.bypass_serial,
+            Stage::StateSpace(s) => s.bypass_serial,
+            Stage::BlackFeedback(b) => b.bypass_serial,
+            Stage::Blockwise(k) => k.bypass_serial,
+            Stage::KMethod { .. } => true,
+            Stage::SerialDelayedFeedback(s) => s.bypass_serial,
+        }
+    }
+
     pub fn k_method_ports(&self) -> &[(crate::stage::OwnedPortRole, PortBinding)] {
         match self {
             Stage::KMethod { ports, .. } => ports.as_slice(),
@@ -740,6 +755,14 @@ pub enum ControlTarget {
     BbdClockRate(usize),
     /// Modify a BBD delay line's feedback amount (0–1).
     BbdFeedback(usize),
+    /// Modify a spring reverb's dwell/drive input trim (normalized 0–1).
+    SpringDwell(usize),
+    /// Modify a spring reverb's decay → RT60 authority (normalized 0–1).
+    SpringDecay(usize),
+    /// Modify a spring reverb's damping LPF cutoff (normalized 0–1).
+    SpringDamping(usize),
+    /// Modify a spring reverb's wet/dry mix (normalized 0–1).
+    SpringMix(usize),
     /// Modify a switch position for fork() routing.
     /// Contains: (switch_id, num_positions)
     SwitchPosition {
@@ -828,6 +851,10 @@ pub enum ModulationTarget {
     JfetVgs { stage_idx: usize },
     /// Modulate ALL JFET stages' Vgs together (for phasers).
     AllJfetVgs,
+    /// Modulate a JFET variable-resistor *leaf* inside a stage's WDF tree.
+    /// Modulated JFETs compile to `jfet_vr` leaves (EdgeKind::Linear), not
+    /// stage roots, so root-targeting `set_jfet_vgs()` cannot reach them.
+    JfetVrVgs { stage_idx: usize, comp_id: String },
     /// Modulate a Photocoupler's LED drive.
     PhotocouplerLed { stage_idx: usize, comp_id: String },
     /// Modulate a Triode's Vgk (grid-cathode bias).
@@ -845,6 +872,11 @@ pub enum ModulationTarget {
     OtaIabcLinear { multi_nl_idx: usize },
     /// Modulate a BBD's clock frequency (for chorus/flanger).
     BbdClock { bbd_idx: usize },
+    /// Modulate a VCA's control-voltage port (compressors/tremolo).
+    /// Drives `Vca::set_cv_normalized` on `vcas[vca_idx]` (declaration-order
+    /// index contract from the compiler's `vca_lowering` pass): 0 = unity
+    /// gain, 1 = full attenuation (SSM2164-class dB-linear law).
+    VcaCv { vca_idx: usize },
     /// Modulate an op-amp's non-inverting input voltage.
     #[allow(dead_code)]
     OpAmpVp { opamp_idx: usize },
@@ -853,6 +885,8 @@ pub enum ModulationTarget {
     DelaySpeed { delay_idx: usize },
     /// Modulate a delay line's delay time (normalized 0–1).
     DelayTime { delay_idx: usize },
+    /// Modulate a spring reverb's dwell/drive input trim (CV → normalized 0–1).
+    SpringDwell { spring_idx: usize },
 }
 
 /// Delay line binding in a compiled pedal.
@@ -867,12 +901,41 @@ pub struct DelayLineBinding {
     /// Tap ratios for multi-tap reading (e.g., [1.0, 2.0, 4.0] for RE-201).
     /// Each tap reads from the buffer at `base_delay * ratio`.
     pub taps: Vec<crate::Wave>,
+    /// Wet/dry mix (0.0 = fully dry, 1.0 = fully wet). Per-instance (spec §6 —
+    /// no global mix). Defaults to 0.5 (the historical hard-coded 50/50) when
+    /// no mix pot is wired, so unbound delays behave as before.
+    pub wet_mix: crate::Wave,
+    /// Component ID for debugging and control binding.
+    #[allow(dead_code)]
+    pub comp_id: String,
+}
+
+/// Spring reverb binding in a compiled pedal.
+///
+/// Holds the dispersive [`crate::elements::SpringTank`] and its per-instance
+/// wet/dry mix (spec §6 — no global mix field; learns from the BBD's shared
+/// `bbd_wet_mix` being the wrong pattern). Bridged across the behavioral gap
+/// in the processor tick loop like the BBD/delay-line inserts.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SpringBinding {
+    /// The spring-reverb tank (dispersive allpass network).
+    pub tank: crate::elements::SpringTank,
+    /// Wet/dry mix (0.0 = fully dry, 1.0 = fully wet). Per-instance — default
+    /// 0.33 (a tasteful spring blend) when no mix pot is wired.
+    pub wet_mix: crate::Wave,
     /// Component ID for debugging and control binding.
     #[allow(dead_code)]
     pub comp_id: String,
 }
 
 /// VCO runtime binding — generates audio-rate waveforms at a circuit node.
+///
+/// A VCO is a **generator** [`crate::processor::Stage`]-free DSP block (spec
+/// §4, N=0 audio inputs): it owns no WDF/MNA scattering and injects its output
+/// into `node_signals` each sample, where downstream stages read it. Pitch is
+/// an **audio-rate CV input port** (spec §3): the block reads the voltage at
+/// `cv_node_id` from `node_signals` and maps it to frequency at 1 V/oct via
+/// `Vco::set_cv_pitch` — a float update to `phase_inc`, NO scattering recompute.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VcoBinding {
     pub vco: crate::elements::Vco,
@@ -880,6 +943,9 @@ pub struct VcoBinding {
     pub waveform: crate::elements::VcoWaveform,
     /// Circuit node where VCO output is injected.
     pub output_node_id: usize,
+    /// Circuit node whose voltage drives 1 V/oct pitch CV. `usize::MAX` when no
+    /// CV pin is wired — the VCO then runs at its declared base frequency.
+    pub cv_node_id: usize,
     /// Component ID for debugging.
     #[allow(dead_code)]
     pub comp_id: String,
@@ -932,6 +998,28 @@ pub struct LfoBinding {
     pub lfo_id: String,
 }
 
+/// Signal source feeding an envelope follower's detector input.
+///
+/// Resolved at compile time from the follower's `EF.in -> <node>` net
+/// (see `resolve_envelope_tap` in the compiler's bind pass). Historically
+/// every envelope follower read the global pedal input regardless of its
+/// netlist tap (audit gap G1); `StageOutput` makes feed-forward taps on
+/// interior nodes and feedback taps on the circuit output real.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum EnvelopeTapSource {
+    /// Detector reads the raw pedal input (ticked before any stage runs).
+    #[default]
+    GlobalInput,
+    /// Detector reads the serial-chain output of `stages[idx]`, ticked
+    /// inside the stage loop right after that stage produces its sample.
+    /// Feed-forward taps (tap stage before the modulated gain stage) thus
+    /// modulate the CURRENT sample; feedback taps (tap stage at/after the
+    /// gain stage) take effect on the NEXT sample — an inherent one-sample
+    /// delay, same convention as `SidechainProcessor::cv_delayed`.
+    StageOutput(usize),
+}
+
 /// Envelope follower binding in a compiled pedal.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnvelopeBinding {
@@ -944,6 +1032,9 @@ pub struct EnvelopeBinding {
     /// Envelope follower component ID.
     #[allow(dead_code)]
     pub env_id: String,
+    /// Where the detector taps its signal (compile-time resolved).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub tap: EnvelopeTapSource,
 }
 
 /// Smoothed parameter for zipper-free pot control.
@@ -1188,6 +1279,8 @@ pub struct CompiledPedal {
     pub bbds: Vec<BbdDelayLine>,
     /// Generic delay lines (tape echo, digital delay, Karplus-Strong, etc.).
     pub delay_lines: Vec<DelayLineBinding>,
+    /// Spring reverb tanks (dispersive electromechanical reverb islands).
+    pub springs: Vec<SpringBinding>,
     /// VCO audio-rate oscillator bindings (inject audio at circuit nodes).
     pub vcos: Vec<VcoBinding>,
     /// VCA amplitude modulation bindings (scale audio by envelope).
@@ -2218,6 +2311,30 @@ impl CompiledPedal {
                         bbd.set_feedback(value * 0.95);
                     }
                 }
+                ControlTarget::SpringDwell(spring_idx) => {
+                    let spring_idx = *spring_idx;
+                    if let Some(s) = self.springs.get_mut(spring_idx) {
+                        s.tank.set_dwell_normalized(value);
+                    }
+                }
+                ControlTarget::SpringDecay(spring_idx) => {
+                    let spring_idx = *spring_idx;
+                    if let Some(s) = self.springs.get_mut(spring_idx) {
+                        s.tank.set_decay_normalized(value);
+                    }
+                }
+                ControlTarget::SpringDamping(spring_idx) => {
+                    let spring_idx = *spring_idx;
+                    if let Some(s) = self.springs.get_mut(spring_idx) {
+                        s.tank.set_damping_normalized(value);
+                    }
+                }
+                ControlTarget::SpringMix(spring_idx) => {
+                    let spring_idx = *spring_idx;
+                    if let Some(s) = self.springs.get_mut(spring_idx) {
+                        s.wet_mix = value.clamp(0.0, 1.0);
+                    }
+                }
                 ControlTarget::SwitchPosition {
                     switch_id,
                     num_positions,
@@ -2638,6 +2755,130 @@ impl CompiledPedal {
                 .sum(),
         }
     }
+
+    /// Route one envelope follower's output to its modulation target.
+    ///
+    /// Takes disjoint field borrows (not `&mut self`) so it can be called
+    /// from inside `process()`'s serial stage loop while the envelope
+    /// binding itself is mutably borrowed. `env_out` is the raw follower
+    /// output (used by `DelaySpeed`, which scales it by `range` without the
+    /// bias); `modulation` is `bias + env_out * range`.
+    #[allow(clippy::too_many_arguments)]
+    fn route_envelope_modulation(
+        stages: &mut [Stage],
+        bbds: &mut [BbdDelayLine],
+        opamp_stages: &mut [OpAmpStage],
+        delay_lines: &mut [DelayLineBinding],
+        vcas: &mut [VcaBinding],
+        springs: &mut [SpringBinding],
+        target: &ModulationTarget,
+        modulation: crate::Wave,
+        env_out: crate::Wave,
+        range: crate::Wave,
+    ) {
+        match target {
+            ModulationTarget::JfetVgs { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_jfet_vgs(modulation);
+                }
+            }
+            ModulationTarget::AllJfetVgs => {
+                for stage in stages.iter_mut() {
+                    if let Stage::Wdf(wdf) = stage {
+                        if matches!(&wdf.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
+                            wdf.set_jfet_vgs(modulation);
+                        }
+                    }
+                }
+            }
+            ModulationTarget::JfetVrVgs { stage_idx, comp_id } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_jfet_vr_vgs(comp_id, modulation);
+                }
+            }
+            ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    let led = modulation.clamp(0.0, 1.0);
+                    // Leaf-positioned XOR input-path (audit gap G3): a
+                    // photocoupler that compiled as a leaf (its netlist
+                    // position) must NOT also be driven as an op-amp
+                    // input-path series gain — that path inverts the GR
+                    // direction for shunt CdS cells.
+                    if !wdf.set_photocoupler_led(comp_id, led) {
+                        wdf.set_input_photocoupler_led(comp_id, led);
+                    }
+                }
+            }
+            ModulationTarget::TriodeVgk { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_triode_vgk(modulation);
+                }
+            }
+            ModulationTarget::PentodeVg1k { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_pentode_vg1k(modulation);
+                }
+            }
+            ModulationTarget::VariMuVgk { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_vari_mu_vgk(modulation);
+                }
+            }
+            ModulationTarget::MosfetVgs { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    wdf.set_mosfet_vgs(modulation);
+                }
+            }
+            ModulationTarget::OtaIabc { stage_idx } => {
+                if let Some(Stage::Wdf(wdf)) = stages.get_mut(*stage_idx) {
+                    let gain = (1.0 - modulation).clamp(0.0, 1.0);
+                    wdf.set_ota_gain(gain);
+                }
+            }
+            ModulationTarget::OtaIabcLinear { multi_nl_idx } => {
+                if let Some(Stage::MultiNl(mnl)) = stages.get_mut(*multi_nl_idx) {
+                    let gain = (1.0 - modulation).clamp(0.0, 1.0);
+                    mnl.set_ota_gain_linear(gain);
+                }
+            }
+            ModulationTarget::BbdClock { bbd_idx } => {
+                if let Some(bbd) = bbds.get_mut(*bbd_idx) {
+                    bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
+                }
+            }
+            ModulationTarget::VcaCv { vca_idx } => {
+                if let Some(vca_binding) = vcas.get_mut(*vca_idx) {
+                    // Detector silence (modulation 0) = unity gain; louder
+                    // program = more attenuation, per the SSM2164-class
+                    // dB-linear law in Vca::set_cv_normalized.
+                    vca_binding
+                        .vca
+                        .set_cv_normalized(modulation.clamp(0.0, 1.0));
+                }
+            }
+            ModulationTarget::OpAmpVp { opamp_idx } => {
+                if let Some(opamp_stage) = opamp_stages.get_mut(*opamp_idx) {
+                    opamp_stage.opamp.set_vp(modulation);
+                }
+            }
+            ModulationTarget::DelaySpeed { delay_idx } => {
+                if let Some(dl) = delay_lines.get_mut(*delay_idx) {
+                    dl.delay_line.add_speed_mod(env_out * range);
+                }
+            }
+            ModulationTarget::DelayTime { delay_idx } => {
+                if let Some(dl) = delay_lines.get_mut(*delay_idx) {
+                    dl.delay_line
+                        .set_delay_normalized(modulation.clamp(0.0, 1.0));
+                }
+            }
+            ModulationTarget::SpringDwell { spring_idx } => {
+                if let Some(s) = springs.get_mut(*spring_idx) {
+                    s.tank.set_dwell_normalized(modulation.clamp(0.0, 1.0));
+                }
+            }
+        }
+    }
 }
 
 impl PedalProcessor for CompiledPedal {
@@ -2740,13 +2981,19 @@ impl PedalProcessor for CompiledPedal {
                         }
                     }
                 }
+                ModulationTarget::JfetVrVgs { stage_idx, comp_id } => {
+                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
+                        wdf.set_jfet_vr_vgs(comp_id, modulation);
+                    }
+                }
                 ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
                     if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
                         let led = modulation.clamp(0.0, 1.0);
-                        if wdf.tree.set_photocoupler_led(comp_id, led) {
-                            wdf.tree.recompute();
+                        // Leaf-positioned XOR input-path (audit gap G3) —
+                        // see route_envelope_modulation.
+                        if !wdf.set_photocoupler_led(comp_id, led) {
+                            wdf.set_input_photocoupler_led(comp_id, led);
                         }
-                        wdf.set_input_photocoupler_led(comp_id, led);
                     }
                 }
                 ModulationTarget::TriodeVgk { stage_idx } => {
@@ -2785,6 +3032,15 @@ impl PedalProcessor for CompiledPedal {
                         bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
                     }
                 }
+                ModulationTarget::VcaCv { vca_idx } => {
+                    if let Some(vca_binding) = self.vcas.get_mut(*vca_idx) {
+                        // LFO-driven VCA CV (tremolo): normalized 0..1 onto
+                        // the SSM2164-class dB-linear law.
+                        vca_binding
+                            .vca
+                            .set_cv_normalized(modulation.clamp(0.0, 1.0));
+                    }
+                }
                 ModulationTarget::OpAmpVp { opamp_idx } => {
                     if let Some(opamp_stage) = self.opamp_stages.get_mut(*opamp_idx) {
                         // LFO modulates op-amp's non-inverting input
@@ -2805,97 +3061,62 @@ impl PedalProcessor for CompiledPedal {
                             .set_delay_normalized(modulation.clamp(0.0, 1.0));
                     }
                 }
+                ModulationTarget::SpringDwell { spring_idx } => {
+                    if let Some(s) = self.springs.get_mut(*spring_idx) {
+                        s.tank.set_dwell_normalized(modulation.clamp(0.0, 1.0));
+                    }
+                }
             }
         }
 
-        // Tick all envelope followers and route their outputs to targets.
+        // Tick envelope followers and route their outputs to targets.
+        // GlobalInput-tapped detectors read the raw pedal input here, before
+        // any stage runs. Stage-tapped detectors (EnvelopeTapSource::
+        // StageOutput) tick inside the serial stage loop instead, fed by
+        // their tap stage's fresh output — except when a stage route plan
+        // bypasses the serial loop, in which case they fall back to the
+        // global input (the pre-tap legacy behavior).
+        let route_plan_active = self.stage_route_plan.primary_bkm.is_some();
         for binding in &mut self.envelopes {
+            match binding.tap {
+                EnvelopeTapSource::GlobalInput => {}
+                EnvelopeTapSource::StageOutput(_) if route_plan_active => {}
+                EnvelopeTapSource::StageOutput(_) => continue,
+            }
             let env_out = binding.envelope.process(input);
             let modulation = binding.bias + env_out * binding.range;
-
-            match &binding.target {
-                ModulationTarget::JfetVgs { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_jfet_vgs(modulation);
-                    }
-                }
-                ModulationTarget::AllJfetVgs => {
-                    for stage in &mut self.stages {
-                        if let Stage::Wdf(wdf) = stage {
-                            if matches!(&wdf.root, RootKind::Jfet(_) | RootKind::JfetVr(_)) {
-                                wdf.set_jfet_vgs(modulation);
-                            }
-                        }
-                    }
-                }
-                ModulationTarget::PhotocouplerLed { stage_idx, comp_id } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        let led = modulation.clamp(0.0, 1.0);
-                        if wdf.tree.set_photocoupler_led(comp_id, led) {
-                            wdf.tree.recompute();
-                        }
-                        wdf.set_input_photocoupler_led(comp_id, led);
-                    }
-                }
-                ModulationTarget::TriodeVgk { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_triode_vgk(modulation);
-                    }
-                }
-                ModulationTarget::PentodeVg1k { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_pentode_vg1k(modulation);
-                    }
-                }
-                ModulationTarget::VariMuVgk { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_vari_mu_vgk(modulation);
-                    }
-                }
-                ModulationTarget::MosfetVgs { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        wdf.set_mosfet_vgs(modulation);
-                    }
-                }
-                ModulationTarget::OtaIabc { stage_idx } => {
-                    if let Some(Stage::Wdf(wdf)) = self.stages.get_mut(*stage_idx) {
-                        let gain = (1.0 - modulation).clamp(0.0, 1.0);
-                        wdf.set_ota_gain(gain);
-                    }
-                }
-                ModulationTarget::OtaIabcLinear { multi_nl_idx } => {
-                    if let Some(Stage::MultiNl(mnl)) = self.stages.get_mut(*multi_nl_idx) {
-                        let gain = (1.0 - modulation).clamp(0.0, 1.0);
-                        mnl.set_ota_gain_linear(gain);
-                    }
-                }
-                ModulationTarget::BbdClock { bbd_idx } => {
-                    if let Some(bbd) = self.bbds.get_mut(*bbd_idx) {
-                        bbd.set_delay_normalized(modulation.clamp(0.0, 1.0));
-                    }
-                }
-                ModulationTarget::OpAmpVp { opamp_idx } => {
-                    if let Some(opamp_stage) = self.opamp_stages.get_mut(*opamp_idx) {
-                        opamp_stage.opamp.set_vp(modulation);
-                    }
-                }
-                ModulationTarget::DelaySpeed { delay_idx } => {
-                    if let Some(dl) = self.delay_lines.get_mut(*delay_idx) {
-                        dl.delay_line.add_speed_mod(env_out * binding.range);
-                    }
-                }
-                ModulationTarget::DelayTime { delay_idx } => {
-                    if let Some(dl) = self.delay_lines.get_mut(*delay_idx) {
-                        dl.delay_line
-                            .set_delay_normalized(modulation.clamp(0.0, 1.0));
-                    }
-                }
-            }
+            Self::route_envelope_modulation(
+                &mut self.stages,
+                &mut self.bbds,
+                &mut self.opamp_stages,
+                &mut self.delay_lines,
+                &mut self.vcas,
+                &mut self.springs,
+                &binding.target,
+                modulation,
+                env_out,
+                binding.range,
+            );
         }
 
         // Tick VCOs — generate audio-rate waveforms and inject into node_signals.
         // This happens before WDF stages so the VCO audio is available as input.
         for vco_binding in &mut self.vcos {
+            // Audio-rate CV-port path (spec §3): read the 1 V/oct pitch CV node
+            // voltage from node_signals (set by input-port injection above or an
+            // upstream stage) and map it to frequency. This is a float update to
+            // phase_inc — NO scattering recompute. When no CV pin is wired the
+            // VCO holds its declared base frequency.
+            if vco_binding.cv_node_id != usize::MAX {
+                let cv: crate::Wave = self
+                    .node_signals
+                    .iter()
+                    .rev()
+                    .filter(|(nid, _)| *nid == vco_binding.cv_node_id)
+                    .map(|(_, v)| *v)
+                    .sum();
+                vco_binding.vco.set_cv_pitch(cv);
+            }
             let (saw, tri, pulse) = vco_binding.vco.tick();
             let sample = match vco_binding.waveform {
                 crate::elements::VcoWaveform::Saw => saw,
@@ -3039,16 +3260,7 @@ impl PedalProcessor for CompiledPedal {
 
             // Check bypass_serial: static bias networks process for metering
             // but don't overwrite the serial audio signal.
-            let bypass_serial = match &self.stages[stage_idx] {
-                Stage::Wdf(w) => w.bypass_serial,
-                Stage::MultiNl(m) => m.bypass_serial,
-                Stage::Iir(i) => i.bypass_serial,
-                Stage::StateSpace(s) => s.bypass_serial,
-                Stage::BlackFeedback(b) => b.bypass_serial,
-                Stage::Blockwise(k) => k.bypass_serial,
-                Stage::KMethod { .. } => true,
-                Stage::SerialDelayedFeedback(s) => s.bypass_serial,
-            };
+            let bypass_serial = self.stages[stage_idx].bypass_serial();
 
             if bypass_serial {
                 // Process for metering but don't touch `signal`
@@ -3081,6 +3293,12 @@ impl PedalProcessor for CompiledPedal {
                 }
                 continue;
             }
+
+            // This stage's own output sample, fed to envelope followers whose
+            // detector taps resolve to this stage (EnvelopeTapSource::
+            // StageOutput). Mirrors `signal` except for feedforward WDF
+            // stages, where `signal` is the additive blend.
+            let mut stage_tap_output: crate::Wave = 0.0;
 
             if is_wdf {
                 let stage = if let Stage::Wdf(w) = &mut self.stages[stage_idx] {
@@ -3173,6 +3391,7 @@ impl PedalProcessor for CompiledPedal {
                     }
                     0.0
                 };
+                stage_tap_output = stage_output;
 
                 // Write output to stage's output node for junction summing
                 // (only for trigger voice stages).
@@ -3420,6 +3639,12 @@ impl PedalProcessor for CompiledPedal {
                 }
             }
 
+            if !is_wdf {
+                // All non-WDF serial stages write their output straight to
+                // `signal`, so the tap sample is just the updated chain value.
+                stage_tap_output = signal;
+            }
+
             // Apply output wiper dividers after the stage that contains them.
             // The WDF stage still owns the passive filtering/loading behavior;
             // this routing layer only applies the explicit wiper ratio. Using
@@ -3428,7 +3653,37 @@ impl PedalProcessor for CompiledPedal {
             for wd in &self.wiper_dividers {
                 if wd.after_stage_idx == stage_idx {
                     signal *= wd.position;
+                    // The wiper belongs to this stage, so detector taps on its
+                    // output (e.g. an 1176 feedback detector tapping the
+                    // output pot wiper) see the post-wiper level too.
+                    stage_tap_output *= wd.position;
                 }
+            }
+
+            // Tick envelope followers whose detector taps this stage's output
+            // with the fresh sample. Taps on stages BEFORE their modulated
+            // gain element (feed-forward) affect the current sample (the gain
+            // stage hasn't run yet); taps at/after it (feedback) take effect
+            // next sample — a one-sample-delayed feedback loop, the same
+            // convention as SidechainProcessor::cv_delayed.
+            for binding in &mut self.envelopes {
+                if binding.tap != EnvelopeTapSource::StageOutput(stage_idx) {
+                    continue;
+                }
+                let env_out = binding.envelope.process(stage_tap_output);
+                let modulation = binding.bias + env_out * binding.range;
+                Self::route_envelope_modulation(
+                    &mut self.stages,
+                    &mut self.bbds,
+                    &mut self.opamp_stages,
+                    &mut self.delay_lines,
+                    &mut self.vcas,
+                    &mut self.springs,
+                    &binding.target,
+                    modulation,
+                    env_out,
+                    binding.range,
+                );
             }
         }
 
@@ -3470,7 +3725,13 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
-        // Tick VCAs — apply envelope-gated amplitude modulation after WDF stages.
+        // Tick VCAs — apply amplitude modulation after WDF stages. Two modes:
+        // - Trigger-gated (trigger_idx Some): the ADSR owns the gain (synth
+        //   voices / drum machines).
+        // - CV-driven (trigger_idx None, the vca_lowering compiler pass): the
+        //   gain is owned by ModulationTarget::VcaCv routing (envelope
+        //   follower or LFO on the cv pin) and must NOT be overwritten by the
+        //   idle ADSR (which would force gain 0 = silence).
         for vca_binding in &mut self.vcas {
             // Gate envelope from trigger: only call gate_on() when the trigger
             // fires. Do NOT call gate_off() on subsequent samples — let the ADSR
@@ -3482,9 +3743,9 @@ impl PedalProcessor for CompiledPedal {
                         vca_binding.envelope.gate_on();
                     }
                 }
+                let env_val = vca_binding.envelope.tick();
+                vca_binding.vca.set_gain(env_val);
             }
-            let env_val = vca_binding.envelope.tick();
-            vca_binding.vca.set_gain(env_val);
 
             // Read audio from input node (sum all signals at that node)
             let vca_input = self
@@ -3623,6 +3884,14 @@ impl PedalProcessor for CompiledPedal {
             signal = signal * (1.0 - mix) + wet * mix;
         }
 
+        // Process through spring reverb tanks (wet signal mixed with dry).
+        // Per-instance mix (spec §6 — no global mix field, unlike bbd_wet_mix).
+        for spring in &mut self.springs {
+            let wet = spring.tank.process(signal);
+            let mix = spring.wet_mix;
+            signal = signal * (1.0 - mix) + wet * mix;
+        }
+
         // Process through generic delay lines.
         // Each delay line writes the current signal, then reads from all taps.
         // Tap outputs are mixed equally and blended with the dry signal.
@@ -3630,20 +3899,33 @@ impl PedalProcessor for CompiledPedal {
             // Reset speed modulation for this sample (LFOs will have already added offsets)
             dl_binding.delay_line.write(signal);
 
-            // Read all taps and sum
+            // Read all taps and sum into the OUTPUT wet signal. The taps are
+            // the playback heads (RE-201 heads at 1x/2x/3x); summing them is
+            // the multi-head output mix.
             let num_taps = dl_binding.taps.len();
             if num_taps > 0 {
                 let mut wet = 0.0;
+                let mut base = 0.0;
                 for (tap_idx, &ratio) in dl_binding.taps.iter().enumerate() {
-                    wet += dl_binding.delay_line.read_at_ratio(ratio, tap_idx);
+                    let tap = dl_binding.delay_line.read_at_ratio(ratio, tap_idx);
+                    wet += tap;
+                    if tap_idx == 0 {
+                        base = tap; // head 1 (ratio 1.0) — the regeneration tap
+                    }
                 }
                 wet /= num_taps as crate::Wave;
 
-                // Mix wet/dry equally (same convention as BBD)
-                signal = signal * 0.5 + wet * 0.5;
+                // Per-instance wet/dry mix (spec §6). Defaults to 0.5 — the
+                // historical 50/50 — when no mix pot is wired.
+                let mix = dl_binding.wet_mix;
+                signal = signal * (1.0 - mix) + wet * mix;
 
-                // Route the wet signal back as feedback
-                dl_binding.delay_line.set_feedback_sample(wet);
+                // Regeneration recirculates the BASE tape loop (head 1), not
+                // the multi-head output sum: Intensity returns the loop signal
+                // into the record path at the base delay. Feeding back the
+                // head-average would change the loop's effective delay and
+                // decay with tap count; the loop is the tape itself.
+                dl_binding.delay_line.set_feedback_sample(base);
             }
 
             // Reset speed mod accumulator for next sample
@@ -3803,6 +4085,9 @@ impl PedalProcessor for CompiledPedal {
         for dl_binding in &mut self.delay_lines {
             dl_binding.delay_line.set_sample_rate(rate);
         }
+        for spring in &mut self.springs {
+            spring.tank.set_sample_rate(rate);
+        }
         if let Some(ref mut thermal) = self.thermal {
             thermal.set_sample_rate(rate);
         }
@@ -3841,6 +4126,9 @@ impl PedalProcessor for CompiledPedal {
         }
         for dl_binding in &mut self.delay_lines {
             dl_binding.delay_line.reset();
+        }
+        for spring in &mut self.springs {
+            spring.tank.reset();
         }
         for opamp_stage in &mut self.opamp_stages {
             opamp_stage.opamp.reset();

@@ -9,7 +9,6 @@
 use super::build::create_root;
 use super::classify::NonlinearKind;
 use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
-use super::components::DelayLineComp;
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
 use super::rigid::{
@@ -103,8 +102,28 @@ pub fn compile_via_spqr_with_options(
     use super::signal_flow::find_flow_groups;
 
     let mut graph = CircuitGraph::from_pedal(pedal);
+    // Resolve envelope-modulated component edge kinds (audit gap G2):
+    // `EF.out -> J.vgs` reclassifies the JFET's drain–source edge to Linear
+    // so it compiles as a `jfet_vr` variable-resistor leaf the envelope
+    // binding can reach. Restricted to envelope followers so LFO-modulated
+    // circuits keep their existing compilation behavior.
+    super::graph::resolve_components_by(&mut graph, pedal, |c| {
+        c.kind
+            .as_any()
+            .downcast_ref::<super::components::EnvelopeFollower>()
+            .is_some()
+    });
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
     let delay_lines = build_delay_line_bindings(pedal, sample_rate);
+    // Behavioral islands (bbd(), vca(), ...) lower to per-instance runtime DSP
+    // blocks via the DspBlock registry, not the WDF/MNA core. The mandatory-
+    // lowering gate (architecture debt §4) rejects any registered-island
+    // type_tag with no DspBlock to lower it (currently vco()). Runtime
+    // instances are built + bound by `dsp_block::bind_runtime_all` after the
+    // CompiledPedal is constructed; `has_blocks` is the presence predicate
+    // that gates group splitting and terminal injection below.
+    super::dsp_block::reject_unlowered_behavioral(pedal)?;
+    let has_blocks = super::dsp_block::any_block_has_components(pedal);
 
     // When ports are declared, the first input port replaces `in` and
     // the first output port replaces `out` as the circuit's I/O nodes.
@@ -136,7 +155,7 @@ pub fn compile_via_spqr_with_options(
         .filter(|i| !active_set.contains(i))
         .collect();
 
-    if all_edges.is_empty() && delay_lines.is_empty() {
+    if all_edges.is_empty() && delay_lines.is_empty() && !has_blocks {
         return Err("No circuit edges found".to_string());
     }
 
@@ -159,6 +178,7 @@ pub fn compile_via_spqr_with_options(
             slew_limiters: Vec::new(),
             bbds: Vec::new(),
             delay_lines,
+            springs: Vec::new(),
             vcos: Vec::new(),
             vcas: Vec::new(),
             thermal: if options.thermal {
@@ -195,6 +215,7 @@ pub fn compile_via_spqr_with_options(
         };
         compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
+        super::dsp_block::bind_runtime_all(pedal, &mut compiled, sample_rate)?;
         return Ok(compiled);
     }
 
@@ -223,6 +244,7 @@ pub fn compile_via_spqr_with_options(
             slew_limiters: Vec::new(),
             bbds: Vec::new(),
             delay_lines,
+            springs: Vec::new(),
             vcos: Vec::new(),
             vcas: Vec::new(),
             thermal: None,
@@ -255,6 +277,7 @@ pub fn compile_via_spqr_with_options(
         };
         compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
+        super::dsp_block::bind_runtime_all(pedal, &mut compiled, sample_rate)?;
         return Ok(compiled);
     }
 
@@ -268,6 +291,13 @@ pub fn compile_via_spqr_with_options(
     let mut feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph);
     merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
+    // DSP-block pedals: bbd(), vca(), ... are GraphRole::Virtual, so the
+    // netlist is galvanically cut at their in/out pins. Split any group that
+    // spans a behavioral gap (the sides stay "connected" through ground only)
+    // into separate serial stages — a stage built across the gap probes 0.
+    if has_blocks {
+        super::dsp_block::split_groups_at_behavioral_gaps(&mut feedback_groups, &graph, pedal);
+    }
     eprintln!("  [compile] Step 1 done: {} groups", feedback_groups.len());
 
     // Step 1b: Compute signal flow distance for each group via BFS from in_node.
@@ -295,7 +325,16 @@ pub fn compile_via_spqr_with_options(
     }
 
     // Step 2: SPQR decompose each group independently.
-    let terminals = vec![graph.in_node, graph.out_node];
+    // DSP-block signal pins are behavioral stage boundaries: treat them like
+    // global terminals so the group on each side of a galvanic gap gets a port
+    // there (otherwise the dangling side has no entry/exit node and its stage
+    // probes 0). Boundary nodes are gathered from every registered DspBlock.
+    let mut terminals = vec![graph.in_node, graph.out_node];
+    for node in super::dsp_block::all_boundary_nodes(pedal, &graph) {
+        if !terminals.contains(&node) {
+            terminals.push(node);
+        }
+    }
     let mut stages: Vec<Stage> = Vec::new();
     let mut stage_comp_ids: Vec<Vec<String>> = Vec::new();
     let mut bkm_consumed_comp_ids: std::collections::HashSet<String> =
@@ -998,6 +1037,64 @@ pub fn compile_via_spqr_with_options(
                 }
             }
 
+            // Linear (gate-modulated) JFET groups: keep only edges that are
+            // graph-connected to the JFET's drain–source path through
+            // non-ground nodes. Signal-flow grouping claims the gate-bias
+            // network into the JFET's group (the gate is the amplifier
+            // "input"), but a JFET resolved to a variable resistor conducts
+            // audio only drain–source; gate-bias edges share no signal node
+            // and would compile into a bogus series chain that silences the
+            // stage (audit gap G2, fet_leveler).
+            {
+                let linear_jfet_edges: Vec<usize> = remaining_edges
+                    .iter()
+                    .copied()
+                    .filter(|&eidx| {
+                        graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear
+                            && graph.components[graph.edges[eidx].comp_idx].kind.is_jfet()
+                    })
+                    .collect();
+                if !linear_jfet_edges.is_empty() {
+                    let is_ground = |n: super::graph::NodeId| -> bool {
+                        n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
+                    };
+                    let mut keep_nodes: std::collections::HashSet<super::graph::NodeId> =
+                        linear_jfet_edges
+                            .iter()
+                            .flat_map(|&eidx| {
+                                let e = &graph.edges[eidx];
+                                [e.node_a, e.node_b]
+                            })
+                            .filter(|&n| !is_ground(n))
+                            .collect();
+                    // Grow the connected component over non-ground nodes.
+                    loop {
+                        let mut grew = false;
+                        for &eidx in &remaining_edges {
+                            let e = &graph.edges[eidx];
+                            let touches = (keep_nodes.contains(&e.node_a) && !is_ground(e.node_a))
+                                || (keep_nodes.contains(&e.node_b) && !is_ground(e.node_b));
+                            if touches {
+                                for n in [e.node_a, e.node_b] {
+                                    if !is_ground(n) && keep_nodes.insert(n) {
+                                        grew = true;
+                                    }
+                                }
+                            }
+                        }
+                        if !grew {
+                            break;
+                        }
+                    }
+                    remaining_edges.retain(|&eidx| {
+                        let e = &graph.edges[eidx];
+                        linear_jfet_edges.contains(&eidx)
+                            || (!is_ground(e.node_a) && keep_nodes.contains(&e.node_a))
+                            || (!is_ground(e.node_b) && keep_nodes.contains(&e.node_b))
+                    });
+                }
+            }
+
             // Process remaining non-pot edges through SPQR
             let group_edges = remaining_edges;
             if group_edges.is_empty() {
@@ -1062,23 +1159,25 @@ pub fn compile_via_spqr_with_options(
                             ..
                         } = nl_kind
                         {
-                            let context_edges = collect_triode_context_edges(
-                                nl_edge_idx,
-                                &graph,
-                                &all_edges,
-                            );
+                            let context_edges =
+                                collect_triode_context_edges(nl_edge_idx, &graph, &all_edges);
                             #[cfg(test)]
                             eprintln!(
                                 "  group {gi}: triode-with-grid, context edges={:?}",
-                                context_edges.iter().map(|&eidx| {
-                                    let c = &graph.components[graph.edges[eidx].comp_idx];
-                                    c.id.as_str()
-                                }).collect::<Vec<_>>()
+                                context_edges
+                                    .iter()
+                                    .map(|&eidx| {
+                                        let c = &graph.components[graph.edges[eidx].comp_idx];
+                                        c.id.as_str()
+                                    })
+                                    .collect::<Vec<_>>()
                             );
                             // Mark all non-NL context edges as absorbed so their
                             // groups are skipped later.
                             for &eidx in &context_edges {
-                                if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Nonlinear {
+                                if graph.effective_edge_kind(eidx)
+                                    != super::component::EdgeKind::Nonlinear
+                                {
                                     triode_absorbed_edges.insert(eidx);
                                 }
                             }
@@ -1134,19 +1233,69 @@ pub fn compile_via_spqr_with_options(
                 // feedforward targets — gnd is universally reachable and would
                 // cause false positives (e.g. C_tone.b → gnd flagged as
                 // feedforward from U1.out → gnd).
-                let feedback_nodes: std::collections::HashSet<super::graph::NodeId> =
-                    graph
-                        .nullor_pins
-                        .iter()
-                        .flat_map(|pins| [pins.neg_node, pins.pos_node].into_iter())
-                        .filter(|&n| n != graph.gnd_node)
-                        .collect();
+                let feedback_nodes: std::collections::HashSet<super::graph::NodeId> = graph
+                    .nullor_pins
+                    .iter()
+                    .flat_map(|pins| [pins.neg_node, pins.pos_node].into_iter())
+                    .filter(|&n| n != graph.gnd_node)
+                    .collect();
                 let main_outputs: std::collections::HashSet<super::graph::NodeId> = graph
                     .nullor_pins
                     .iter()
                     .map(|pins| pins.out_node)
                     .chain(std::iter::once(graph.in_node))
                     .collect();
+
+                // F2 (B2/B3a): an edge spanning {in / op-amp out} ↔
+                // {feedback-group node} is NOT automatically a parallel
+                // feedforward branch. Series couplers (input cap before an
+                // inverting input; R→C interstage coupling) match that shape
+                // too, and lowering one to an additive Passthrough bridge
+                // cancels the signal: the open-circuited stage emits −x and
+                // the blend computes x + (−x) = 0. Only build the bridge when
+                // the branch is genuinely parallel:
+                //   (a) the convergence node is an op-amp input pin (nullor
+                //       neg/pos) of a feedback group, AND
+                //   (b) a second serial path from the source into that same
+                //       feedback group exists — the group's own claimed edges
+                //       also reach the source node (mirrors the
+                //       sources_with_feedback check in the phase-2 detector
+                //       below).
+                // When either fails, fall through to the normal serial
+                // (blockwise/SPQR) build.
+                let is_audio_node = |n: super::graph::NodeId| -> bool {
+                    n != graph.gnd_node
+                        && n != graph.vcc_node
+                        && !graph.supply_nodes.contains(&n)
+                        && !graph.ac_ground_nodes.contains(&n)
+                };
+                let genuinely_parallel =
+                    |source: super::graph::NodeId, converge: super::graph::NodeId| -> bool {
+                        if !is_audio_node(converge) {
+                            return false;
+                        }
+                        feedback_groups.iter().any(|fg| {
+                            if !fg.has_feedback() {
+                                return false;
+                            }
+                            // (a) converge is a nullor input pin of this group.
+                            let pin_match = fg.active_edges.iter().any(|&ae| {
+                                let ae_comp = graph.edges[ae].comp_idx;
+                                graph.nullor_pins.iter().any(|p| {
+                                    p.comp_idx == ae_comp
+                                        && (p.neg_node == converge || p.pos_node == converge)
+                                })
+                            });
+                            if !pin_match {
+                                return false;
+                            }
+                            // (b) the group's own edges reach the source node.
+                            fg.all_edges().iter().any(|&fe| {
+                                let f = &graph.edges[fe];
+                                f.node_a == source || f.node_b == source
+                            })
+                        })
+                    };
 
                 let mut built_feedforward = false;
                 for &eidx in &group_edges {
@@ -1170,6 +1319,15 @@ pub fn compile_via_spqr_with_options(
                     let Some(source) = source else {
                         continue;
                     };
+
+                    let converge = if source == e.node_a {
+                        e.node_b
+                    } else {
+                        e.node_a
+                    };
+                    if !genuinely_parallel(source, converge) {
+                        continue;
+                    }
 
                     let mut wdf = WdfStage::new(
                         with_voltage_source(leaf),
@@ -1322,6 +1480,57 @@ pub fn compile_via_spqr_with_options(
         Stage::KMethod { .. } => usize::MAX,
         Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
     });
+
+    // ── Generator (VCO, N=0) source placement (spec §4) ───────────────────
+    // A generator has no audio input — there is no galvanic gap to split.
+    // Instead its wave-output node is a *source seed*: the runtime injects the
+    // VCO sample into `node_signals` at that node (processor.rs VCO tick loop),
+    // and the stage immediately downstream (e.g. the output protection resistor
+    // VCO1.saw -> R_saw -> out) must READ that node rather than the serial
+    // chain. Mark that consuming stage feedforward with injection_node_id =
+    // the generator output node, reusing the existing port-write/feedforward
+    // read path. No new per-sample machinery — this is the §4 N=0 branch made
+    // real, the analogue of the input-port VS for a pure source.
+    {
+        // Generator output nodes from every block whose io() has no audio input.
+        let mut gen_out_nodes: Vec<super::graph::NodeId> = Vec::new();
+        for block in super::dsp_block::all_generator_output_nodes(pedal, &graph) {
+            if !gen_out_nodes.contains(&block) {
+                gen_out_nodes.push(block);
+            }
+        }
+        for vn in gen_out_nodes {
+            // The consuming stage is the one whose group has an edge touching
+            // the generator output node (the first passive the VCO drives).
+            let mut consumer_comp_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for e in &graph.edges {
+                if e.node_a == vn || e.node_b == vn {
+                    consumer_comp_ids.insert(graph.components[e.comp_idx].id.clone());
+                }
+            }
+            if consumer_comp_ids.is_empty() {
+                continue;
+            }
+            for (si, stage) in stages.iter_mut().enumerate() {
+                if let Stage::Wdf(w) = stage {
+                    if w.is_feedforward || w.bypass_serial {
+                        continue;
+                    }
+                    let ids = &stage_comp_ids[si];
+                    if ids.iter().any(|id| consumer_comp_ids.contains(id)) {
+                        w.is_feedforward = true;
+                        w.injection_node_id = vn;
+                        #[cfg(test)]
+                        eprintln!(
+                            "  → generator source: stage {si} reads VCO node {vn} (feedforward)"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // ── Feedforward detection ─────────────────────────────────────────────
     // Detect non-feedback stages that fan out from a shared source node
@@ -1589,6 +1798,9 @@ pub fn compile_via_spqr_with_options(
         }
     }
 
+    // Envelope-follower → JFET-leaf modulation bindings (audit gap G2).
+    let envelopes = super::bind::build_envelope_jfet_bindings(pedal, &stages, sample_rate);
+
     let mut compiled = CompiledPedal {
         stages,
         stage_route_plan: pedalkernel_rt::processor::StageRoutePlan::default(),
@@ -1603,10 +1815,11 @@ pub fn compile_via_spqr_with_options(
         supply_voltage,
         oversampling: options.oversampling,
         lfos: Vec::new(),
-        envelopes: Vec::new(),
+        envelopes,
         slew_limiters: Vec::new(),
         bbds: Vec::new(),
         delay_lines,
+        springs: Vec::new(),
         vcos: Vec::new(),
         vcas: Vec::new(),
         thermal: if options.thermal {
@@ -1645,6 +1858,12 @@ pub fn compile_via_spqr_with_options(
 
     // Bind pot controls to their stages (WDF, IIR, MultiNl).
     super::spqr_control::bind_controls(pedal, &mut compiled);
+
+    // Lower + bind every registered DSP block's runtime instances (BBD
+    // clock/feedback/mix pots and clock LFOs; VCA gain + envelope-follower CV
+    // bindings). Must run after the stage list is final: VCA binding resolves
+    // detector taps against `compiled.stages`.
+    super::dsp_block::bind_runtime_all(pedal, &mut compiled, sample_rate)?;
 
     if pedal.calibrate {
         super::calibrate::calibrate_output(&mut compiled);
@@ -1728,29 +1947,17 @@ pub fn compile_via_spqr_with_options(
     Ok(compiled)
 }
 
+/// Build the initial `DelayLineBinding`s (with real tap ratios and configured
+/// medium zones). Delegates to the F15 `delay_lowering` [`DspBlock`], which is
+/// the single owner of delay-line lowering; `dsp_block::bind_runtime_all` later
+/// rebuilds + binds these idempotently. Called here so the early presence
+/// guard (`delay_lines.is_empty()`) and the no-edge `CompiledPedal` branches
+/// see the correct instances.
 fn build_delay_line_bindings(
     pedal: &PedalDef,
     sample_rate: f64,
 ) -> Vec<pedalkernel_rt::processor::DelayLineBinding> {
-    pedal
-        .components
-        .iter()
-        .filter_map(|component| {
-            let delay = component.kind.as_any().downcast_ref::<DelayLineComp>()?;
-            let mut delay_line = pedalkernel_rt::elements::DelayLine::new(
-                delay.min_delay,
-                delay.max_delay,
-                sample_rate,
-                delay.interpolation,
-            );
-            delay_line.set_medium(delay.medium);
-            Some(pedalkernel_rt::processor::DelayLineBinding {
-                delay_line,
-                taps: vec![1.0],
-                comp_id: component.id.clone(),
-            })
-        })
-        .collect()
+    super::delay_lowering::build_delay_line_bindings(pedal, sample_rate)
 }
 
 /// Check if a group is a merged pot pair (aw + wb of same component).
@@ -2111,7 +2318,7 @@ fn build_passive_rtype_stage(
 
     let terminals =
         compute_group_terminals(edge_indices, graph, &vec![graph.in_node, graph.out_node]);
-    let output_node = terminals
+    let mut output_node = terminals
         .iter()
         .copied()
         .find(|&t| t == graph.out_node)
@@ -2121,7 +2328,7 @@ fn build_passive_rtype_stage(
                 .copied()
                 .find(|&t| !is_ground(t) && t != graph.in_node)
         })?;
-    let input_node = terminals
+    let mut input_node = terminals
         .iter()
         .copied()
         .find(|&t| t == graph.in_node)
@@ -2131,6 +2338,25 @@ fn build_passive_rtype_stage(
                 .copied()
                 .find(|&t| !is_ground(t) && t != output_node)
         })?;
+    // Interior groups (neither terminal is the global in/out) picked their
+    // input/output above by terminal ITERATION order — i.e. by NodeId —
+    // which flips with incidental node renumbering (e.g. a virtual
+    // `EF.in` tap pin unioning into a nearby node shifts union-find roots).
+    // An inverted orientation stamps the MNA voltage source on the
+    // DOWNSTREAM terminal and extracts at the upstream one, erasing the
+    // group's transfer (a JFET-shunt GR divider measured vs=1.0 — flat —
+    // in exactly that case). Orient by rail-blocked signal-flow distance
+    // from `in`: the upstream terminal drives, the downstream one extracts.
+    // Swap only on PROVEN inversion (both distances known and ordered) so
+    // unreachable/tied terminals keep the legacy order.
+    if output_node != graph.out_node && input_node != graph.in_node {
+        let d_in = super::signal_flow::bfs_distances_from_in_node(graph);
+        if let (Some(&d_input), Some(&d_output)) = (d_in.get(&input_node), d_in.get(&output_node)) {
+            if d_output < d_input {
+                core::mem::swap(&mut input_node, &mut output_node);
+            }
+        }
+    }
 
     let mut nodes: Vec<NodeId> = edge_indices
         .iter()
@@ -2289,6 +2515,30 @@ fn build_passive_rtype_stage(
                         child,
                     );
                 }
+            }
+            continue;
+        }
+
+        // Gate-modulated JFETs reach this builder as Linear edges (variable
+        // resistors). Stamp the current Rds and register the `jfet_vr` child
+        // so runtime Vgs modulation (LFO/envelope) can update the G matrix
+        // and re-derive scattering — same mechanism as pots. Without this
+        // the JFET edge was silently dropped from the MNA (audit gap G2).
+        // Photocoupler LDR cells are the same shape of controlled resistance
+        // (LED drive instead of Vgs) and were dropped identically (gap G3).
+        if comp.kind.is_jfet() || comp.kind.type_tag() == "photocoupler" {
+            if let Some(child) = comp.kind.make_leaf(&comp.id, sample_rate) {
+                let r = child.port_resistance();
+                mna.stamp_resistor(n1, n2, r);
+                variable_resistors.push(MnaVariableResistorBinding {
+                    child_idx: children.len(),
+                    terminals: MnaPortTerminals::maybe_differential(
+                        n1.map(MnaNodeId::new),
+                        n2.map(MnaNodeId::new),
+                    ),
+                    conductance: 1.0 / r,
+                });
+                children.push(child);
             }
             continue;
         }
@@ -2645,6 +2895,9 @@ fn pot_edge_is_aw_half_for_build(
     (a == w_node && b == a_node) || (a == a_node && b == w_node)
 }
 
+// NOTE: stage-ordering helper. Walks ALL edges (including through rails),
+// unlike `signal_flow::bfs_distances_from_in_node`, which measures
+// signal-path distance (rail-blocked) for the F10 claiming bound.
 fn bfs_dist_from_in_node(
     target: super::graph::NodeId,
     graph: &super::graph::CircuitGraph,
@@ -2720,6 +2973,27 @@ fn collect_triode_context_edges(
             || n == graph.out_node
     };
 
+    // F10 upstream bound: never collect toward a non-global node strictly
+    // closer to `in_node` than the triode's grid pin. Such a node belongs to
+    // the UPSTREAM network (e.g. a passive EQ feeding this makeup stage);
+    // collecting it would swallow the network into the triode's MNA stage,
+    // flattening its response and freezing its pots. Rail-terminated bias
+    // edges (vcc→plate, cathode→gnd, grid→gnd) are handled by the is_global
+    // branch and stay collected. Unreachable nodes (disconnected
+    // subcircuits) have no distance and are never bounded.
+    let d_in = super::signal_flow::bfs_distances_from_in_node(graph);
+    let grid_dist: Option<usize> = graph
+        .node_names
+        .get(&format!("{}.grid", comp.id))
+        .and_then(|node| d_in.get(node))
+        .copied();
+    let upstream_of_grid = |n: NodeId| -> bool {
+        match (d_in.get(&n), grid_dist) {
+            (Some(&d), Some(d_grid)) => d < d_grid,
+            _ => false,
+        }
+    };
+
     let mut collected_edges: std::collections::HashSet<usize> = std::collections::HashSet::new();
     collected_edges.insert(triode_nl_edge_idx);
 
@@ -2764,8 +3038,7 @@ fn collect_triode_context_edges(
                 // connecting triode pin to a supply) OR if it is a reactive
                 // element whose global end is VCC/GND (bypass capacitor to GND
                 // is fine; coupling cap to in/out is not).
-                let other_is_signal_port =
-                    other == graph.in_node || other == graph.out_node;
+                let other_is_signal_port = other == graph.in_node || other == graph.out_node;
                 if other_is_signal_port {
                     // This is a coupling element (C_in: in→grid, C_out: plate→out).
                     // Do NOT include — it would drag in/out signal domain into the MNA.
@@ -2777,6 +3050,11 @@ fn collect_triode_context_edges(
             }
 
             // other is a non-global internal node.
+            // F10: refuse to collect toward the upstream network (see the
+            // upstream_of_grid doc above).
+            if upstream_of_grid(other) {
+                continue;
+            }
             // Exclude coupling caps that lead toward the signal ports: if the
             // component is reactive and the other node eventually only connects
             // to in_node / out_node without passing through any resistor to a
@@ -2792,7 +3070,11 @@ fn collect_triode_context_edges(
                     if other_e.node_a != other && other_e.node_b != other {
                         return true; // doesn't touch other node
                     }
-                    let far = if other_e.node_a == other { other_e.node_b } else { other_e.node_a };
+                    let far = if other_e.node_a == other {
+                        other_e.node_b
+                    } else {
+                        other_e.node_a
+                    };
                     far == graph.in_node || far == graph.out_node || far == graph.gnd_node
                 });
             if other_only_connects_to_signal_port {
@@ -2905,9 +3187,10 @@ fn merge_input_coupling_into_active_groups(
         .iter()
         .map(|g| {
             let all = g.all_edges();
-            let has_v = g.active_edges.iter().any(|&eidx| {
-                graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs
-            });
+            let has_v = g
+                .active_edges
+                .iter()
+                .any(|&eidx| graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs);
             let is_linear = all.iter().all(|&eidx| {
                 matches!(
                     graph.effective_edge_kind(eidx),
@@ -2934,9 +3217,9 @@ fn merge_input_coupling_into_active_groups(
         }
 
         // All edges must be strictly linear (resistors/pots only).
-        let all_linear = edges.iter().all(|&eidx| {
-            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear
-        });
+        let all_linear = edges
+            .iter()
+            .all(|&eidx| graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear);
         if !all_linear {
             continue;
         }
@@ -3562,8 +3845,11 @@ pub(super) fn compute_group_terminals(
 ) -> Vec<NodeId> {
     use std::collections::HashSet;
 
-    // Collect all nodes touched by this group's edges
-    let mut group_nodes: HashSet<NodeId> = HashSet::new();
+    // Collect all nodes touched by this group's edges. BTreeSet, not HashSet:
+    // the iteration below fixes the terminal order, and downstream input-node
+    // selection and MNA source stamping depend on that order — it must be
+    // deterministic across compiles and processes.
+    let mut group_nodes: std::collections::BTreeSet<NodeId> = std::collections::BTreeSet::new();
     for &eidx in group_edges {
         let e = &graph.edges[eidx];
         group_nodes.insert(e.node_a);

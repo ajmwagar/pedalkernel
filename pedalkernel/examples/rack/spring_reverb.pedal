@@ -1,0 +1,130 @@
+# PK:
+# Spring Reverb — a minimal Accutronics Type 4 spring tank with an op-amp
+# reverb driver (the "drip"/drive lives in the driver stage, not the spring)
+# and an op-amp recovery preamp. The dispersive electromechanical spring pair
+# is the spring(type4) behavioral island; the driver and recovery are ordinary
+# WDF circuit stages around it.
+# Type: reverb (outboard rack/tabletop gear)
+#
+# PROVENANCE — Accutronics Type 4 spring tank + op-amp reverb driver/recovery
+#   Sources:
+#     [S1] Välimäki, Parker & Abel, "Parametric Spring Reverberation Effect",
+#          JAES 58(7/8), 2010 (AES e-lib 15511) — the dispersion algorithm
+#          (cascaded stretched allpasses, a=0.75, stretch K=fs/(2*fC),
+#          fC~4.3 kHz, loop delay + damping LPF + RT60-derived feedback).
+#     [S2] Parker, "Efficient Dispersion Generation Structures for Spring
+#          Reverb Emulation", DAFx — group delay scales with M*K.
+#     [S3] Amplified Parts / Accutronics tank specs — Type 4 = 17" tank, 2
+#          counter-wound coupled pairs (Fender standard), long-decay class.
+#     [S4] sound-au.com reverb article — transit ~30-40 ms, fC ~2-4 kHz.
+#     [S5] freestompboxes RE-201 thread — reverb driver is a power-amp/IC stage
+#          current-driving the low-Z input coil (coil saturation = drip).
+#   Flags: [V] = verified against the sources above, [A] = assumed/chosen here.
+#
+#   Architecture [V, S5]: input -> reverb DRIVER (drives the input coil hard;
+#     drip emerges from this stage's clip when slammed) -> SPRING TANK (linear
+#     but dispersive electromechanical pair) -> RECOVERY preamp (voltage pickup
+#     from the output coil) -> wet/dry mix.
+#
+# AS MODELED HERE:
+#   1. Driver: a non-inverting op-amp gain stage (TL072 [A], stand-in for the
+#      RE-201's TA7200P power-amp driver — an IC current-drive stage [V, S5]).
+#      Feeds spring(type4).in. The drip surrogate is op-amp rail clip when the
+#      Dwell drive is high.
+#   2. RV1: spring(type4) — Accutronics Type 4 model. transit ~33/37.5 ms [A,
+#      S3/S4], fC 4200 Hz [A, S1], RT60 ~2.85 s [A, S3 long-decay class], 48
+#      stretched allpasses/spring, a=0.75 [V, S1]. Dispersion: low frequencies
+#      arrive LATER than high (the spring "boing" chirp, group delay maximal at
+#      DC). HF-chirp cascade is OFF by default (realtime budget — JAES OQ3);
+#      low-chirp path only.
+#   3. Recovery: a non-inverting op-amp preamp from the spring out (small-signal
+#      voltage gain), AC-coupled into the wet bus.
+#   4. Controls: Dwell -> RV1.dwell (input/drive trim), Decay -> RV1.decay
+#      (RT60 authority), Tone -> RV1.damping (loop LPF), Mix -> RV1.mix
+#      (per-instance wet/dry — spec 6, NOT a global field).
+#
+# SIMPLIFICATIONS vs a real unit:
+#   1. HF-CHIRP CASCADE OFF — the weak chirp above fC (JAES section II,
+#      Mh~200 allpasses at -60 dB) is omitted from the hot path to hold the
+#      realtime budget; the low-chirp path carries the dispersion signature.
+#   2. FIXED DECAY PER MODEL — RT60 is the model constant (Type 4 long-decay
+#      class); the Decay control scales it (0.3x..1.6x). BX20-style motional-
+#      feedback variable decay is deferred (JAES/GroupDIY OQ4).
+#   3. DRIVER/RECOVERY COLLAPSED — the real RE-201/BX20 driver is a power-amp
+#      IC current-driving the coil; here one op-amp gain stage stands in. The
+#      drip is the driver's rail clip, not a baked-in spring parameter.
+#   4. SINGLE TANK — Type 4's two counter-wound coupled pairs are modeled as
+#      two detuned spring lines summed (transit 33/37.5 ms), not full coupled-
+#      pair coupling.
+
+equipment "Spring Reverb (Accutronics Type 4)" {
+  supply 18V
+
+  components {
+    # === Reverb driver (op-amp gain stage into the spring input coil) ===
+    C_in: cap(100n)          # Input coupling
+    R_in: resistor(100k)     # Input impedance to ground
+    U_drv: opamp(tl072)      # Reverb driver (real: TA7200P power-amp IC)
+    R_df: resistor(100k)     # Driver feedback (gain ~ 1 + R_df/R_dg)
+    R_dg: resistor(22k)      # Driver feedback ground leg
+
+    # === Spring tank (the dispersive electromechanical island) ===
+    RV1: spring(type4)       # Accutronics Type 4 — 17" long-decay tank
+
+    # === Recovery preamp (op-amp pickup from output coil) ===
+    C_rv: cap(100n)          # Recovery input coupling from spring out
+    R_rv: resistor(100k)     # Recovery input impedance
+    U_rec: opamp(tl072)      # Recovery preamp
+    R_rf: resistor(100k)     # Recovery feedback
+    R_rg: resistor(10k)      # Recovery feedback ground leg
+
+    # === Panel controls ===
+    Dwell: pot(100k, b)      # Drive into the tank
+    Decay: pot(100k, b)      # RT60 authority
+    Tone: pot(100k, b)       # Damping LPF cutoff (tail brightness)
+    Mix: pot(100k, b)        # Wet/dry blend
+
+    # === Output ===
+    C_out: cap(100n)         # Output coupling
+    R_out: resistor(10k)     # Output series/build-out resistor
+  }
+
+  nets {
+    # --- Driver ---
+    in -> C_in.a
+    C_in.b -> R_in.a, U_drv.pos
+    R_in.b -> gnd
+    U_drv.neg -> R_df.a, R_dg.a
+    R_df.b -> U_drv.out
+    R_dg.b -> gnd
+
+    # --- Driver -> spring input ---
+    U_drv.out -> RV1.in
+
+    # --- Spring output -> recovery preamp ---
+    RV1.out -> C_rv.a
+    C_rv.b -> R_rv.a, U_rec.pos
+    R_rv.b -> gnd
+    U_rec.neg -> R_rf.a, R_rg.a
+    R_rf.b -> U_rec.out
+    R_rg.b -> gnd
+
+    # --- Recovery -> output ---
+    U_rec.out -> C_out.a
+    C_out.b -> R_out.a
+    R_out.b -> out
+
+    # --- Controls onto the spring island ---
+    Dwell.wiper -> RV1.dwell
+    Decay.wiper -> RV1.decay
+    Tone.wiper -> RV1.damping
+    Mix.wiper -> RV1.mix
+  }
+
+  controls {
+    Dwell.position -> "Dwell" [0.0, 1.0] = 0.5
+    Decay.position -> "Decay" [0.0, 1.0] = 0.6
+    Tone.position -> "Tone" [0.0, 1.0] = 0.5
+    Mix.position -> "Mix" [0.0, 1.0] = 0.33
+  }
+}

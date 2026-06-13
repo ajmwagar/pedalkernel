@@ -732,18 +732,24 @@ fn build_wdf_ports(
     // Adapted (input voltage source) port.
     // Use graph.in_node if it's in this MNA. Otherwise, find the active
     // element's signal input pin from Component::signal_terminals().
-    let injection_mna = node_to_mna(graph.in_node).or_else(|| {
-        edge_indices.iter().find_map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            match comp.kind.signal_terminals() {
-                super::super::component::SignalTerminals::Amplifier { input, .. } => {
-                    let key = format!("{}.{}", comp.id, input);
-                    graph.node_names.get(&key).and_then(|&n| node_to_mna(n))
+    // Last resort: the boundary node nearest the global input (NL groups
+    // with no amplifier inside, e.g. a clipper + tone network split off an
+    // op-amp gain stage). Without this the adapted VS port is grounded and
+    // the stage is structurally silent (s_nl_adapted = 0).
+    let injection_mna = node_to_mna(graph.in_node)
+        .or_else(|| {
+            edge_indices.iter().find_map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                match comp.kind.signal_terminals() {
+                    super::super::component::SignalTerminals::Amplifier { input, .. } => {
+                        let key = format!("{}.{}", comp.id, input);
+                        graph.node_names.get(&key).and_then(|&n| node_to_mna(n))
+                    }
+                    _ => None,
                 }
-                _ => None,
-            }
+            })
         })
-    });
+        .or_else(|| find_input_boundary_node(edge_indices, graph, node_to_mna));
     ports.push(WdfPort {
         node_pos: injection_mna,
         node_neg: None,
@@ -757,6 +763,66 @@ fn build_wdf_ports(
         passive_one_ports,
         nl_port_resistances,
     )
+}
+
+/// Injection fallback: the boundary node nearest the global input.
+///
+/// NL groups that contain neither `graph.in_node` nor an amplifier receive
+/// their audio from an upstream stage at a *boundary* node — a node of this
+/// group that is also touched by edges outside the group. Among those, pick
+/// the one with the shortest hop distance from `graph.in_node` (BFS over the
+/// full graph, not traversing GND/supply rails, ties broken by NodeId for
+/// determinism) so the adapted VS port lands where the upstream stage
+/// actually drives this group.
+fn find_input_boundary_node(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
+) -> Option<usize> {
+    let edge_set: HashSet<usize> = edge_indices.iter().copied().collect();
+
+    // Boundary nodes: in this group's MNA, but also touched by outside edges.
+    let mut boundary: Vec<NodeId> = Vec::new();
+    for (eidx, e) in graph.edges.iter().enumerate() {
+        if edge_set.contains(&eidx) {
+            continue;
+        }
+        for n in [e.node_a, e.node_b] {
+            if node_to_mna(n).is_some() && !boundary.contains(&n) {
+                boundary.push(n);
+            }
+        }
+    }
+    if boundary.is_empty() {
+        return None;
+    }
+
+    // BFS hop distances from the global input. GND and supply rails are
+    // barriers — almost everything meets there, so passing through them
+    // would make the distances meaningless.
+    let blocked =
+        |n: NodeId| n == graph.gnd_node || n == graph.vcc_node || graph.supply_nodes.contains(&n);
+    let mut dist: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
+    let mut queue = std::collections::VecDeque::new();
+    dist.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+    while let Some(n) = queue.pop_front() {
+        let d = dist[&n];
+        for e in &graph.edges {
+            for (from, to) in [(e.node_a, e.node_b), (e.node_b, e.node_a)] {
+                if from == n && !blocked(to) && !dist.contains_key(&to) {
+                    dist.insert(to, d + 1);
+                    queue.push_back(to);
+                }
+            }
+        }
+    }
+
+    boundary
+        .iter()
+        .filter_map(|&n| dist.get(&n).map(|&d| (d, n)))
+        .min()
+        .and_then(|(_, n)| node_to_mna(n))
 }
 
 /// Step 5: Derive scattering matrix + iterative Thevenin adaptation.
