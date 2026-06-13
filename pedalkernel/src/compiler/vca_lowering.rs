@@ -32,7 +32,7 @@ use crate::dsl::{PedalDef, Pin};
 
 use super::compiled::{CompiledPedal, EnvelopeBinding, ModulationTarget, VcaBinding};
 use super::components::Vca;
-use super::dsp_block::{behavioral_island_error, DspBlock};
+use super::dsp_block::{behavioral_island_error, BlockIo, BlockPort, DspBlock, PortRole};
 use super::graph::CircuitGraph;
 
 /// Pin names a `vca()` accepts on its audio input side.
@@ -54,8 +54,8 @@ impl DspBlock for VcaBlock {
         vca_component_ids(pedal)
     }
 
-    fn boundary_nodes(&self, pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize> {
-        vca_boundary_nodes(pedal, graph)
+    fn io(&self, pedal: &PedalDef, graph: &CircuitGraph) -> Vec<(String, BlockIo)> {
+        vca_io(pedal, graph)
     }
 
     fn bind_runtime(
@@ -144,27 +144,41 @@ pub(super) fn lower_vcas(pedal: &PedalDef, sample_rate: f64) -> Result<Vec<VcaBi
 // (2) Behavioral gap boundaries
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Graph node IDs of every VCA audio pin (`in`/`out` and aliases).
+/// Typed port signature (spec §2) of each `vca()`: 1 Audio input (the VCA `in`
+/// node), 1 Audio output (the VCA `out` node), in component declaration order.
+/// CV is bound separately (control-rate envelope routing, kept for zero
+/// behavior change); the Cv-port path is new capability that lands with VCO.
 ///
-/// These are behavioral stage boundaries, exactly like
-/// `bbd_lowering::bbd_boundary_nodes`: the netlist is galvanically cut
-/// there, so each one must be treated like a global terminal when computing
-/// group terminals — otherwise the dangling side of a passive group has no
-/// port and compiles into a stage whose probe reads 0. Group splitting
-/// itself is shared with the BBD pass
+/// These nodes are behavioral stage boundaries, exactly like
+/// `bbd_lowering::bbd_io`: the netlist is galvanically cut there, so each one
+/// must be treated like a global terminal when computing group terminals —
+/// otherwise the dangling side of a passive group has no port and compiles into
+/// a stage whose probe reads 0. `all_boundary_nodes` flattens inputs-then-
+/// outputs, recovering exactly the node set the previous flat
+/// `vca_boundary_nodes` produced for the 1-in/1-out circuits that exist today.
+/// Group splitting itself is shared with the BBD pass
 /// (`bbd_lowering::split_groups_at_behavioral_gaps`).
-pub(super) fn vca_boundary_nodes(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize> {
-    let mut nodes = Vec::new();
-    for id in vca_component_ids(pedal) {
-        for pin in VCA_IN_PINS.iter().chain(VCA_OUT_PINS.iter()) {
-            if let Some(&n) = graph.node_names.get(&format!("{id}.{pin}")) {
-                if !nodes.contains(&n) {
-                    nodes.push(n);
-                }
+pub(super) fn vca_io(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<(String, BlockIo)> {
+    let resolve = |id: &str, pins: &[&'static str]| -> Option<BlockPort> {
+        for &pin in pins {
+            if let Some(&node) = graph.node_names.get(&format!("{id}.{pin}")) {
+                return Some(BlockPort {
+                    node,
+                    pin,
+                    role: PortRole::Audio,
+                });
             }
         }
-    }
-    nodes
+        None
+    };
+    vca_component_ids(pedal)
+        .into_iter()
+        .map(|id| {
+            let inputs = resolve(&id, VCA_IN_PINS).into_iter().collect();
+            let outputs = resolve(&id, VCA_OUT_PINS).into_iter().collect();
+            (id, BlockIo { inputs, outputs })
+        })
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

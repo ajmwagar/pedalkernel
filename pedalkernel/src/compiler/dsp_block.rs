@@ -35,12 +35,70 @@
 use crate::dsl::PedalDef;
 
 use super::compiled::CompiledPedal;
-use super::graph::CircuitGraph;
+use super::graph::{CircuitGraph, NodeId};
 use super::signal_flow::FlowGroup;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Port signature (spec §2) — the typed shape a block declares.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// What a behavioral-block port carries. Metadata for the binder/UI/validation
+/// (e.g. a `Cv` input may be 1 V/oct-scaled); the runtime treats every input
+/// as "read node voltage" and every output as "write node voltage". Closed
+/// enum, mirroring `EdgeKind` / `ModulationSinkKind` at component.rs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PortRole {
+    /// Audio-band signal (the serial in/out of an insert).
+    Audio,
+    /// Control voltage (e.g. 1 V/oct pitch, VCA gain CV).
+    Cv,
+    /// Gate / trigger level.
+    Gate,
+    /// Clock / sample-rate tick (e.g. BBD bucket clock).
+    Clock,
+    /// Hard-sync edge.
+    Sync,
+}
+
+/// One node a behavioral block connects to, with the component pin it maps to
+/// and the role of the signal it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BlockPort {
+    /// Graph node whose voltage the block reads (input) or drives (output).
+    pub node: NodeId,
+    /// Component pin this maps to (`.in`/`.out`/`.cv`/`.clock`/`.saw`…).
+    pub pin: &'static str,
+    /// Role of the signal carried, for binder/UI/validation.
+    pub role: PortRole,
+}
+
+/// How a behavioral block connects to the surrounding circuit (spec §2). A
+/// block declares this typed signature; the lowering machinery consumes it
+/// generically.
+#[derive(Debug, Clone, Default)]
+pub(super) struct BlockIo {
+    /// Nodes whose voltage the block READS each sample. Empty ⇒ generator
+    /// (N=0 source, e.g. VCO), placed at the head of its output flow group.
+    pub inputs: Vec<BlockPort>,
+    /// Nodes the block DRIVES (as a voltage source) each sample. Empty ⇒ sink.
+    pub outputs: Vec<BlockPort>,
+}
 
 /// A behavioral island: a `GraphRole::Virtual` component that lowers to a
 /// per-instance runtime DSP block (delay line, VCA, ...) bridged across a
 /// galvanic gap in the netlist, instead of stamping into the WDF/MNA core.
+///
+/// # Cost model (spec §3) — the law that makes the generalization safe
+///
+/// A `DspBlock` **never participates in the WDF/MNA scattering solve.** Its
+/// input ports are node *reads* (`node_signals[n]`); its output ports are node
+/// *writes* (`b = 2v − a`, the existing port-injection path,
+/// processor.rs:1334/2862). Neither grows nor re-derives any per-sample matrix.
+/// Therefore a block may have **any number of ports** and **audio-rate internal
+/// controls** at constant per-sample cost. The matrix-cost rule (re-derive the
+/// scattering solve) applies *only* to controls that modulate a WDF-stamped
+/// element (pot wiper, JFET Rds, opto R_ldr) — which a block, by definition, is
+/// not.
 pub(super) trait DspBlock {
     /// `type_tag` this block handles (e.g. `"BBD delay"`, `"VCA"`). Matched
     /// against `Component::type_tag()` by the mandatory-lowering gate.
@@ -50,9 +108,13 @@ pub(super) trait DspBlock {
     /// contract — `runtime_vec[i]` corresponds to `component_ids(pedal)[i]`).
     fn component_ids(&self, pedal: &PedalDef) -> Vec<String>;
 
-    /// Boundary node ids (the Virtual audio pins) to add as SPQR terminals and
-    /// to split flow groups at. Empty when this block has no components.
-    fn boundary_nodes(&self, pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize>;
+    /// The typed port signature (spec §2) of each instance of this block, in
+    /// component declaration order. Replaces the old flat `boundary_nodes`:
+    /// `all_boundary_nodes` flattens every block's input+output port nodes to
+    /// recover the same set of SPQR terminals / gap-split boundaries, now
+    /// sourced from structure. An instance with `inputs.is_empty()` is a
+    /// generator (N=0 source). Empty `Vec` when this block has no components.
+    fn io(&self, pedal: &PedalDef, graph: &CircuitGraph) -> Vec<(String, BlockIo)>;
 
     /// Lower + bind this kind's runtime instances into the compiled pedal,
     /// writing its own runtime field (`compiled.bbds`, `compiled.vcas`, ...).
@@ -160,12 +222,20 @@ pub(super) fn reject_unlowered_behavioral(pedal: &PedalDef) -> Result<(), String
 /// declaration order). These are behavioral stage boundaries: the netlist is
 /// galvanically cut there, so each must be a SPQR terminal — otherwise the
 /// dangling side of a passive group has no port and its stage probes 0.
+///
+/// Sourced from each block's structured [`BlockIo`] signature: flatten every
+/// instance's input port nodes then output port nodes (declaration order),
+/// deduplicating. For the 1-in/1-out inserts that exist today (BBD, VCA) this
+/// yields exactly `[in_node, out_node]` per instance — the identical node set
+/// the old flat `boundary_nodes` produced.
 pub(super) fn all_boundary_nodes(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize> {
     let mut nodes = Vec::new();
     for block in dsp_blocks() {
-        for n in block.boundary_nodes(pedal, graph) {
-            if !nodes.contains(&n) {
-                nodes.push(n);
+        for (_id, io) in block.io(pedal, graph) {
+            for port in io.inputs.iter().chain(io.outputs.iter()) {
+                if !nodes.contains(&port.node) {
+                    nodes.push(port.node);
+                }
             }
         }
     }
@@ -176,8 +246,43 @@ pub(super) fn all_boundary_nodes(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<
 /// block's behavioral gap. See [`split_groups_at_behavioral_gaps`] for the
 /// union-find rationale (rails are deliberately ignored).
 ///
+/// Placement by input-port count (spec §4):
+///
+/// - **N ≥ 1 inputs** → gap-bridge: the union-find split below cuts each group
+///   that spans the block's galvanic gap into one serial stage per side. This
+///   is the only case the inserts that exist today (BBD, VCA, both 1-in/1-out)
+///   exercise.
+/// - **N = 0 (generator: VCO)** → there is no input side and thus no gap to
+///   split; the block is a source placed at the head of the flow group its
+///   output node belongs to, reusing the port-write path. The branch below is
+///   written so a generator drops in without new machinery, but is
+///   **unexercised this pass** — every registered block is 1-in/1-out, so the
+///   `inputs.is_empty()` guard never fires. Exercised by VCO (spec §8).
+///
 /// Only run when [`any_block_has_components`] is true (no gap otherwise).
-pub(super) fn split_groups_at_behavioral_gaps(groups: &mut Vec<FlowGroup>, graph: &CircuitGraph) {
+pub(super) fn split_groups_at_behavioral_gaps(
+    groups: &mut Vec<FlowGroup>,
+    graph: &CircuitGraph,
+    pedal: &PedalDef,
+) {
+    // Generators (N=0 inputs) have no galvanic gap to split: their output node
+    // is a source seed, not a cut. A 1-in/1-out insert always has a non-empty
+    // `inputs`, so this guard is dead-but-correct until VCO lands (spec §8).
+    let has_generator = dsp_blocks().iter().any(|block| {
+        block
+            .io(pedal, graph)
+            .iter()
+            .any(|(_id, io)| io.inputs.is_empty() && !io.outputs.is_empty())
+    });
+    if has_generator {
+        // A generator seeds the head of its output node's flow group rather
+        // than cutting one — no union-find split is needed for its side.
+        // Placement reuses the existing port-write path (spec §3/§4); there is
+        // no additional group restructuring to perform here for the N=0 case.
+        // exercised by VCO (spec §8)
+    }
+
+    // Gap-split every N≥1 insert (the only case present today).
     super::bbd_lowering::split_groups_at_behavioral_gaps(groups, graph);
 }
 

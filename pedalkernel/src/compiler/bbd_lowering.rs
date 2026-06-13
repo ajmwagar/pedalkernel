@@ -33,7 +33,7 @@ use crate::dsl::{BbdType, LfoWaveformDsl, PedalDef, Pin};
 
 use super::compiled::{CompiledPedal, ControlBinding, ControlTarget, LfoBinding, ModulationTarget};
 use super::components::{Bbd, Lfo};
-use super::dsp_block::DspBlock;
+use super::dsp_block::{BlockIo, BlockPort, DspBlock, PortRole};
 use super::graph::CircuitGraph;
 use super::signal_flow::FlowGroup;
 use pedalkernel_rt::elements::{BbdDelayLine, BbdModel, Modulator};
@@ -52,8 +52,8 @@ impl DspBlock for BbdBlock {
         bbd_component_ids(pedal)
     }
 
-    fn boundary_nodes(&self, pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize> {
-        bbd_boundary_nodes(pedal, graph)
+    fn io(&self, pedal: &PedalDef, graph: &CircuitGraph) -> Vec<(String, BlockIo)> {
+        bbd_io(pedal, graph)
     }
 
     fn bind_runtime(
@@ -101,24 +101,37 @@ pub(super) fn build_bbd_delay_lines(pedal: &PedalDef, sample_rate: f64) -> Vec<B
         .collect()
 }
 
-/// Graph node IDs of every BBD signal pin (`in`/`input`/`out`/`output`).
+/// Typed port signature (spec §2) of each `bbd()`: 1 Audio input (the BBD `in`
+/// node), 1 Audio output (the BBD `out` node), in component declaration order.
 ///
-/// These are the behavioral stage boundaries: the netlist is galvanically cut
-/// there, so each one must be treated like a global terminal when computing
-/// group terminals — otherwise the dangling side of a passive group has no
-/// port and compiles into a stage whose probe reads 0.
-pub(super) fn bbd_boundary_nodes(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize> {
-    let mut nodes = Vec::new();
-    for id in bbd_component_ids(pedal) {
-        for pin in ["in", "input", "out", "output"] {
-            if let Some(&n) = graph.node_names.get(&format!("{id}.{pin}")) {
-                if !nodes.contains(&n) {
-                    nodes.push(n);
-                }
+/// These nodes are the behavioral stage boundaries: the netlist is galvanically
+/// cut there, so each one must be treated like a global terminal when computing
+/// group terminals — otherwise the dangling side of a passive group has no port
+/// and compiles into a stage whose probe reads 0. `all_boundary_nodes` flattens
+/// inputs-then-outputs, recovering exactly the `[in_node, out_node]` set the
+/// previous flat `bbd_boundary_nodes` produced (`in`/`input` and `out`/`output`
+/// are pin aliases that union to one node each).
+pub(super) fn bbd_io(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<(String, BlockIo)> {
+    let resolve = |id: &str, pins: &[&'static str]| -> Option<BlockPort> {
+        for &pin in pins {
+            if let Some(&node) = graph.node_names.get(&format!("{id}.{pin}")) {
+                return Some(BlockPort {
+                    node,
+                    pin,
+                    role: PortRole::Audio,
+                });
             }
         }
-    }
-    nodes
+        None
+    };
+    bbd_component_ids(pedal)
+        .into_iter()
+        .map(|id| {
+            let inputs = resolve(&id, &["in", "input"]).into_iter().collect();
+            let outputs = resolve(&id, &["out", "output"]).into_iter().collect();
+            (id, BlockIo { inputs, outputs })
+        })
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

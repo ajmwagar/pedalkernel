@@ -295,7 +295,7 @@ merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
     // spans a behavioral gap (the sides stay "connected" through ground only)
     // into separate serial stages — a stage built across the gap probes 0.
     if has_blocks {
-        super::dsp_block::split_groups_at_behavioral_gaps(&mut feedback_groups, &graph);
+        super::dsp_block::split_groups_at_behavioral_gaps(&mut feedback_groups, &graph, pedal);
     }
     eprintln!("  [compile] Step 1 done: {} groups", feedback_groups.len());
 
