@@ -17,6 +17,7 @@ use super::graph::{CircuitGraph, NodeId};
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// The kind of nonlinear element, with element-specific data.
+#[derive(Clone)]
 pub(super) enum NonlinearKind {
     DiodePair(DiodeType),
     SingleDiode(DiodeType),
