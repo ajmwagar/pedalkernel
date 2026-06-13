@@ -1,0 +1,55 @@
+# Fender Deluxe 1x12 Open Back
+# Classic single-12 open-back combo cab. Pine construction, no bracing,
+# tweed covering. Jensen C12N ceramic speaker.
+
+cab "Fender Deluxe 1x12" {
+  driver {
+    preset: c12n
+    cone { material: paper, dust_cap: paper, surround: cloth }
+    suspension { Xmax: 2mm, curve: hardening, bl_symmetry: 0.82 }
+  }
+
+  enclosure {
+    type: open_back
+    volume: 42L
+    open_area: 80%
+    depth: 23cm
+
+    construction {
+      material: pine(12mm)
+      width: 51cm
+      height: 46cm
+      depth: 23cm
+      bracing {}
+      joints: butt
+      covering: tweed
+      corners: butt
+    }
+
+    damping { material: none }
+
+    baffle {
+      driver_position: [25cm, 26cm]
+      edge: square
+      grille: cloth
+    }
+  }
+
+  mic close {
+    model: sm57
+    position: [2cm, 0cm, 3cm]
+    angle: 15deg
+  }
+
+  mic room {
+    model: c414
+    position: [0cm, 0cm, 150cm]
+    angle: 0deg
+  }
+
+  controls {
+    mic.close.position.x -> "SM57 Position" [-8cm, 8cm] = 2cm
+    mic.close.position.z -> "SM57 Distance" [1cm, 15cm] = 3cm
+    mic.close.angle -> "SM57 Angle" [0deg, 60deg] = 15deg
+  }
+}

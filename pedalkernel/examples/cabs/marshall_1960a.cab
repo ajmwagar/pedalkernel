@@ -1,0 +1,64 @@
+# Marshall 1960A 4x12
+# Classic closed-back 4x12. Birch plywood, center bracing,
+# Celestion G12M Greenback speakers.
+
+cab "Marshall 1960A" {
+  driver all {
+    preset: g12m_greenback
+    copies: 4
+    positions: [[19cm, 57cm], [57cm, 57cm], [19cm, 19cm], [57cm, 19cm]]
+    cone { material: paper, dust_cap: felt, surround: cloth }
+    suspension { Xmax: 2.5mm, curve: hardening, bl_symmetry: 0.88 }
+  }
+
+  enclosure {
+    type: sealed
+    volume: 170L
+
+    construction {
+      material: birch_ply(18mm)
+      width: 76cm
+      height: 76cm
+      depth: 35cm
+      bracing {
+        B1: brace(horizontal, 38cm)
+        B2: brace(vertical, 38cm)
+      }
+      joints: dado
+      covering: tolex
+      corners: metal_bracket
+    }
+
+    damping {
+      material: polyester_fill
+      coverage: 30%
+      thickness: 25mm
+    }
+
+    baffle {
+      edge: square
+      grille: cloth
+    }
+  }
+
+  mic close {
+    model: sm57
+    position: [2cm, 0cm, 2cm]
+    target: upper_left
+    angle: 0deg
+  }
+
+  mic dark {
+    model: r121
+    position: [-3cm, 0cm, 8cm]
+    target: upper_left
+    angle: 0deg
+  }
+
+  controls {
+    mic.close.position.x -> "SM57 Position" [-8cm, 8cm] = 2cm
+    mic.close.position.z -> "SM57 Distance" [1cm, 15cm] = 2cm
+    enclosure.construction.material.damping_ratio -> "Wood Resonance" [0.01, 0.08] = 0.025
+    enclosure.damping.coverage -> "Stuffing" [0%, 100%] = 30%
+  }
+}
