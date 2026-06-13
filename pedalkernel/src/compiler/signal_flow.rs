@@ -786,6 +786,126 @@ pub(in crate::compiler) fn bfs_distances_from_in_node(
     visited
 }
 
+/// Set of non-rail nodes that have a directed signal path to `out` WITHOUT
+/// passing back through the active group's own output nodes.
+///
+/// This is the formation-layer discriminator for mask 7
+/// (`reports/signal-routing-formation-layer-2026-06-13.md` §1): it separates a
+/// device's BIAS / operating-point branches (which terminate on a rail and
+/// have no forward path to `out`) from the FORWARD-SIGNAL branch leaving the
+/// same node (coupling cap -> output transformer -> load).
+///
+/// For a common-cathode/common-emitter stage the output node is the plate /
+/// collector / drain; the cathode/emitter bias chain (Rk||Ck -> gnd) reaches
+/// only rails, so none of its nodes land in this set and it is still claimed.
+/// For a CATHODE FOLLOWER the output node IS the cathode, and the forward
+/// branch (cathode -> coupling cap -> transformer -> load -> out) is the one
+/// the heuristic could not previously distinguish; its interior nodes DO land
+/// in this set, so the claim BFS treats them as a boundary and the downstream
+/// transformer splits into its own stage.
+///
+/// The search runs BACKWARD from `out` over the directed signal graph:
+/// passive edges conduct both ways; an active element conducts only
+/// input_node -> output_node (so the reverse step is output_node -> input_node).
+/// Traversal is seeded only at `out`/the circuit output pins and never expands
+/// INTO the group's own output nodes — that boundary is what keeps the
+/// device's own output node out of the set (it is the source, not downstream).
+///
+/// Crucially, the GROUP's OWN active elements are NOT traversed (their reverse
+/// input<-output step is omitted): a branch counts as forward-signal only if
+/// it reaches `out` WITHOUT re-entering this group's devices. Otherwise a
+/// FEEDBACK branch (e.g. a TB303 resonance tap Q_last.emitter -> Q_first.base)
+/// would be mis-classified as forward-signal — it only reaches `out` by going
+/// back through the group's own transistors, which is a loop, not a forward
+/// path. Such feedback branches must stay claimed into the group.
+fn forward_signal_nodes_to_out(
+    group_output_nodes: &HashSet<NodeId>,
+    group_active_edges: &HashSet<usize>,
+    active_elements: &[ActiveElement],
+    graph: &CircuitGraph,
+    rails: &HashSet<NodeId>,
+) -> HashSet<NodeId> {
+    // Reverse signal adjacency: for each node, the set of predecessor nodes
+    // that can reach it in one directed signal hop.
+    let mut rev: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut add = |to: NodeId, from: NodeId| {
+        if !rails.contains(&to) && !rails.contains(&from) {
+            rev.entry(to).or_default().push(from);
+        }
+    };
+    let active_edge_set: HashSet<usize> = active_elements.iter().map(|e| e.edge_idx).collect();
+    // Passive edges conduct both directions.
+    for (eidx, e) in graph.edges.iter().enumerate() {
+        if active_edge_set.contains(&eidx) {
+            continue;
+        }
+        let comp = &graph.components[e.comp_idx];
+        if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+            continue;
+        }
+        add(e.node_a, e.node_b);
+        add(e.node_b, e.node_a);
+    }
+    // Active elements conduct input -> output; reverse predecessor of an
+    // output node is the input node. Skip this GROUP's own devices so a
+    // feedback branch does not borrow them to reach `out`.
+    for elem in active_elements {
+        if group_active_edges.contains(&elem.edge_idx) {
+            continue;
+        }
+        for &out in &elem.output_nodes {
+            add(out, elem.input_node);
+        }
+    }
+
+    // BFS backward from the circuit output(s). Seeds: out_node and output pins
+    // — but NEVER a group output node. A group's own active output pin (e.g. a
+    // BJT emitter in `output_pin_nodes`) is the SOURCE of the forward branch,
+    // not a downstream sink; seeding from it would walk backward into the
+    // device's feedback network (a TB303 resonance tap) and mis-mark it
+    // forward-signal. Only true downstream sinks (`out` and OTHER devices'
+    // output pins) seed the search.
+    let mut seeds: Vec<NodeId> = Vec::new();
+    if !rails.contains(&graph.out_node) && !group_output_nodes.contains(&graph.out_node) {
+        seeds.push(graph.out_node);
+    }
+    for &node in &graph.output_pin_nodes {
+        if !rails.contains(&node) && !group_output_nodes.contains(&node) {
+            seeds.push(node);
+        }
+    }
+
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    for s in seeds {
+        if visited.insert(s) {
+            queue.push_back(s);
+        }
+    }
+    while let Some(node) = queue.pop_front() {
+        if let Some(preds) = rev.get(&node) {
+            for &p in preds {
+                // Never expand INTO the group's own output nodes: the device
+                // output is the SOURCE of the forward branch, not a downstream
+                // node. Stopping here keeps the cathode/plate itself out of the
+                // set so it stays a group node, while still marking everything
+                // strictly downstream of it as forward-signal.
+                if group_output_nodes.contains(&p) {
+                    continue;
+                }
+                if visited.insert(p) {
+                    queue.push_back(p);
+                }
+            }
+        }
+    }
+    // The seeds (out/output pins) are not themselves "branch" nodes to exclude
+    // from claiming, but they are already barriers, so leaving them in is
+    // harmless. Group output nodes are never inserted (we never expand into
+    // them, and they are not seeds in normal topologies).
+    visited
+}
+
 /// Classify unclaimed passive edges as ground-shunts or pendants relative
 /// to a set of active elements and their signal nodes.
 ///
@@ -867,6 +987,55 @@ fn claim_passive_edges(
             }
         })
         .collect();
+
+    // ── Mask-7 forward-signal discriminator ─────────────────────────────
+    //
+    // A passive branch leaving an active device's OUTPUT node that has a
+    // directed signal path toward `out` (coupling cap -> transformer -> load)
+    // is the FORWARD-SIGNAL branch and must NOT be claimed — it is its own
+    // downstream stage. Only BIAS / operating-point branches (rail-terminated,
+    // no forward path to `out`) should be claimed.
+    //
+    // For a common-cathode/common-emitter stage the output node is the
+    // plate/collector/drain, so the cathode/emitter Rk||Ck bias chain reaches
+    // only rails and is NEVER in `forward_signal_nodes` — it stays claimed.
+    // For a cathode follower the output node IS the cathode, so the branch
+    // toward the output transformer lands in `forward_signal_nodes` and the
+    // transformer splits into its own PassiveRType stage.
+    // (`reports/signal-routing-formation-layer-2026-06-13.md` §1, mask 7.)
+    let group_output_nodes: HashSet<NodeId> = scc
+        .iter()
+        .flat_map(|&ei| active_elements[ei].output_nodes.iter().copied())
+        .filter(|n| !rails.contains(n))
+        .collect();
+    let group_active_edges: HashSet<usize> =
+        active_edges.iter().chain(feedback_edges.iter()).copied().collect();
+    let forward_signal_nodes = forward_signal_nodes_to_out(
+        &group_output_nodes,
+        &group_active_edges,
+        active_elements,
+        graph,
+        rails,
+    );
+    // An edge is a forward-signal branch (do NOT claim) when its far endpoint
+    // (the non-group end) is downstream toward `out`. A node IS allowed to be
+    // a group node and forward at once (the device output) — we key off the
+    // FAR endpoint, never the group node itself.
+    let is_forward_signal_edge = |eidx: usize| -> bool {
+        let e = &graph.edges[eidx];
+        let a_group = group_output_nodes.contains(&e.node_a);
+        let b_group = group_output_nodes.contains(&e.node_b);
+        // Only branches that actually leave a group output node can be the
+        // forward-signal branch in question; interior bias edges are handled
+        // by the rail-termination logic below.
+        if a_group && !b_group {
+            forward_signal_nodes.contains(&e.node_b)
+        } else if b_group && !a_group {
+            forward_signal_nodes.contains(&e.node_a)
+        } else {
+            false
+        }
+    };
 
     // ── F10 upstream bound ──────────────────────────────────────────────
     //
@@ -1034,6 +1203,12 @@ fn claim_passive_edges(
         if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
             continue;
         }
+        // Mask 7: a forward-signal branch leaving a group output node toward
+        // `out` (coupling cap -> output transformer -> load) is its own
+        // downstream stage — never claim it into this NL group.
+        if is_forward_signal_edge(eidx) {
+            continue;
+        }
         let e = &graph.edges[eidx];
         let a_rail = rails.contains(&e.node_a);
         let b_rail = rails.contains(&e.node_b);
@@ -1149,6 +1324,12 @@ fn claim_passive_edges(
             }
             let comp = &graph.components[graph.edges[eidx].comp_idx];
             if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+                continue;
+            }
+            // Mask 7: never claim or expand through a forward-signal branch
+            // leaving a group output node toward `out` (coupling cap ->
+            // output transformer -> load). It is its own downstream stage.
+            if is_forward_signal_edge(eidx) {
                 continue;
             }
             let e = &graph.edges[eidx];
