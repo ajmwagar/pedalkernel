@@ -80,6 +80,9 @@ pub mod subcircuit;
 // ── WDF stage processing ─────────────────────────────────────────────
 pub mod stage;
 
+// ── Parallel-branch convergence summation (F13b) ─────────────────────
+pub mod convergence;
+
 // ── Band-limited VCO with analog imperfections ──────────────────────
 pub mod oscillator;
 

@@ -199,16 +199,18 @@ fn snare_808_tonal_voice() {
     }
 }
 
-/// Dual-mode + blend acceptance — what the snare SHOULD do once the engine
-/// can sum parallel active branches.
+/// Dual-mode + blend acceptance — both bridged-T resonators reach the output
+/// and the VR8 blend pot has real crossfade authority.
+///
+/// Fixed by F13b (parallel-branch convergence summation): the two op-amp
+/// resonator branches now publish their per-sample outputs onto the
+/// `node_signals` bus, and the blend-pot mixer stage sums them by precomputed
+/// superposition gains `V_out = g_low·V_173 + g_high·V_336` (the gains are
+/// re-solved at control rate when VR8 moves). Before the fix the engine picked a
+/// single branch to own `out` and the pot was inert (173/336 balance bit-
+/// identical at every position); now Tone=0.0 → +27 dB (low mode), Tone=1.0 →
+/// −25 dB (high mode) — a >50 dB crossfade swing.
 #[test]
-#[ignore = "engine cannot sum parallel op-amp branches: 336 Hz mode reaches out at \
-            +1.7 dB over the 250 Hz neighbor (need >6 dB; it measures 3.89e-3 vs \
-            2.5e-1 expected share — resonator B alone rings correctly at 336 Hz, \
-            mag 1.7e-3), and the VR8 Tone crossfade is inert (173/336 balance \
-            +25.8 dB at Tone=0.0, 0.5 and 1.0, bit-identical outputs; passive R+R \
-            sum, inverting summing op-amp, and rheostat mixes all collapse to a \
-            single branch too — see snare_808.pedal SIMPLIFICATIONS 4b)"]
 fn snare_808_dual_modes_and_tone_blend() {
     let src = example_pedal_source("snare_808.pedal");
     let (input, trig_at) = trigger_pulse(1.0, SAMPLE_RATE);
