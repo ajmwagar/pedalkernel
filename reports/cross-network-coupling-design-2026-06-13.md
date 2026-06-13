@@ -219,13 +219,24 @@ is **orthogonal** — it lives on the tight path and is not touched by this work
    port; flip the gap-G `#[ignore]`/red acceptance test (la2a_acceptance.rs).
 5. **GAP H (separate bead).** Add GR-history state to the coupling domain.
 
-## Open questions
+## Decisions (owner, 2026-06-13)
 
-- **Coupler vs. sidechain overlap.** The T4B *is* a feedback sidechain whose CV
-  is "light." Should the new delayed coupler **subsume** `SidechainProcessor`
-  (sidechain = coupler with `coupling_state = Cv`, `policy = Delayed`), or stay
-  parallel? Subsuming is cleaner but touches the 670/push-pull path
-  (processor.rs:3811-3834) — likely a later consolidation.
+- **SUBSUME `SidechainProcessor`.** `CrossNetworkCoupler` is the more generic
+  concept; a sidechain is a delayed coupler with `coupling_state = Cv`. Subsume
+  it — its existing clients (Dyna Comp OTA sidechain, 670/push-pull) migrate
+  onto the coupler with a **zero-behavior-change bar** (the DspBlock-
+  generalization discipline: byte-identical on existing sidechain circuits
+  first, then the optocoupler lands as the first new *optical* domain).
+- **TIGHT path is already done; the entire new build is the DELAYED path.** The
+  transformer already implements tight coupling (multi-port co-solve, §1) — the
+  trait merely *describes* it, no new lowering. NOTE: GAP F (step-down scaling)
+  is a *bug inside* that existing tight path, not a missing capability — fixed
+  separately on `fix/transformer-step-down`.
+- Net work breakdown (all delayed-path): (1) define `CrossNetworkCoupler`
+  generalizing `SidechainProcessor`; (2) migrate sidechain clients,
+  zero-behavior-change; (3) optocoupler as first optical client (GAP G + GAP H).
+
+## Open questions (remaining)
 - **Multi-sample delay** — is `Delayed { samples: 1 }` ever insufficient
   (e.g. a coupling domain with transport delay)? Probably not for opto/relay;
   keep `samples` configurable but default 1.
