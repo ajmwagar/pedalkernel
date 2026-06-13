@@ -1,0 +1,250 @@
+# PK:
+# LA-2A (Teletronix/UA) — FAITHFUL 1:1 rebuild target. [V] candidate.
+# This is the no-simplifications target that earns the tightened [V] stamp
+# (topology-faithful + NO SIMPLIFICATIONS + behavior-validated). The
+# LA-2A-*inspired* model lives alongside it as opto_leveler.pedal; this file
+# does NOT replace it. See reports/la2a-1to1-rebuild-plan-2026-06-13.md.
+#
+# Type: compressor / leveling amplifier (outboard studio gear)
+#
+# ===========================================================================
+# PROVENANCE  (Legend: [V] = schematic/manual-verified per a cited source ·
+#                      [A] = engineering inference, not pinned to a primary)
+# ===========================================================================
+#   Tube complement: 2x 12AX7A, 1x 12BH7A, 1x 6AQ5.        [V] UA/Teletronix manual
+#   B+ ~275 VDC; tubes fed via separate 220 kΩ droppers.   [V] GroupDIY measurements
+#   12AX7 plate ~105 V; 6AQ5 screen ~100 V.                [V] GroupDIY measurements
+#   EL panel driven to ~90 VAC peak.                       [V] AudioScape / Kenetek T4B
+#   Input: 600 Ω bridging transformer, balanced->unbalanced.   [V] manual
+#   Output: UTC A-24-style transformer, impedance match + balanced.  [V] manual
+#   Detector: rectified FEEDBACK sidechain tapped off the OUTPUT ->
+#     12AX7 sidechain amp -> 6AQ5 power tube -> drives the T4B EL panel.   [V] manual
+#   T4B = EL panel + 2 CdS cells IS the detector AND the timing network:
+#     attack ~10 ms; two-stage program-dependent release (fast 40-80 ms,
+#     slow tail 0.5-5 s, SLOWER after heavier/longer GR).   [V] manual + T4B vendor
+#   Peak Reduction = scales sidechain drive into the EL panel.   [V] manual
+#   Sources: see reports/la2a-1to1-rebuild-plan-2026-06-13.md §Sources.
+#
+# ===========================================================================
+# TARGET FIDELITY  (what is faithful here; per engine gap, what it blocks)
+# ===========================================================================
+# FAITHFUL (encoded with no shortcut):
+#   - Input transformer (600 Ω bridging) at the front.                    [V]
+#   - T4B audio CdS cell as the SHUNT leg of a passive divider AHEAD of
+#     the first tube (gain reduction happens passively, before makeup).   [V]
+#   - TWO cascaded 12AX7 gain stages (not one).                           [V]
+#   - Gain pot as POST-detector MAKEUP, BETWEEN the two 12AX7 stages —
+#     NOT in the detector/sidechain path, NOT swallowed into a GR group.  [V/A]
+#   - 12BH7 stacked cathode follower driving the output transformer.      [V]
+#   - Output transformer (UTC A-24 style).                                [V]
+#   - Detector is the REAL rectified sidechain: output tap -> R37 HF
+#     pre-emphasis -> 12AX7 sidechain amp -> 6AQ5 -> EL-drive node ->
+#     PC1.led.  NO envelope_follower anywhere.                            [V]
+#   - Peak Reduction pot scales the sidechain drive into the EL panel.    [V]
+#   - Limit/Compress switch changes the sidechain feedback mix.           [V]
+#   - R37 HF pre-emphasis RC in the sidechain.                            [V]
+#
+# ENGINE GAPS THIS FILE WILL EXPOSE (red-by-construction — the netlist is
+# wired as the hardware INTENDS; the engine cannot honor it yet, and that
+# failure is the concrete confirmation of each gap. See la2a_acceptance.rs):
+#   GAP G (CRUX) — detector-from-circuit-sidechain.  The net
+#       `EL_drive.b -> PC1.led` below wires the LED from a REAL circuit node
+#       (the 6AQ5 EL-drive winding). The engine only binds PhotocouplerLed
+#       from an `envelope_follower` element's `.out` net
+#       (compiler/bind.rs:716-762, scan keyed on EnvelopeFollower in
+#       build_envelope_jfet_bindings); a plain net into `.led` produces NO
+#       drive binding, so the LED stays dark and the cell never moves ->
+#       expect ZERO gain reduction. BLOCKS: GR direction/depth, attack,
+#       release, GR curve — everything dynamic.
+#   GAP H — T4B GR-history memory / program-dependent release. Even once a
+#       drive reaches PC1.led, the t4b() model uses fixed asymmetric taus +
+#       a constant slow_weight (pedalkernel-rt/src/elements/controlled.rs:85-94,
+#       set_led_drive 166-205) with no GR-history state -> release does NOT
+#       slow after heavier/longer GR. BLOCKS: program-dependent release.
+#   GAP F — output transformer step-down. TransformerNode uses
+#       l_secondary = l_primary/n^2 (transformer.rs:86-113), carrying the
+#       known ~19 dB step-down scaling debt. BLOCKS: absolute output level /
+#       healthy-level acceptance.
+#   GAP E — Gain-pot placement. The 3-terminal makeup pot must be a pure
+#       passive divider between the tube stages, NOT swallowed into an active
+#       device's group (where it goes inert, same family as F10 link-2). This
+#       file places it at a pure inter-stage node; if the engine still folds
+#       it into the V2 grid group it will be inert. BLOCKS: makeup authority.
+#
+# ===========================================================================
+
+equipment "Teletronix LA-2A" {
+  supplies {
+    B+: 275V               # [V] ~275 VDC plate supply
+  }
+
+  components {
+    # === Input transformer (600 Ω bridging, balanced -> unbalanced) ===
+    # [V] 600 Ω bridging input. Modeled 1:1 (impedance bridge, level-neutral
+    # ideal); [A] turns ratio. The audio enters the GR network from .b.
+    T_in: transformer(1:1, 4H)
+
+    # === T4B passive gain-reduction divider (SHUNT cell, BEFORE the tube) ===
+    # [V] Series arm R_gr works against the T4B audio CdS cell shunting to
+    # ground. Dark = high R (little loss); lit = low R (heavy attenuation).
+    C_in: cap(100n)        # input coupling into the divider
+    R_gr: resistor(100k)   # series arm of the passive divider
+    PC1: photocoupler(t4b) # T4B: EL panel + CdS cell — the heart of the LA-2A
+
+    # === 12AX7 gain stage 1 (makeup voltage amplification after the loss) ===
+    V1: triode(12ax7)
+    R_g1: resistor(1M)                 # grid leak [V] every 12AX7 stage has one
+    R_p1: resistor(220k)               # plate load / dropper [V] 220k droppers
+    R_k1: resistor(1.5k)               # cathode bias
+    C_k1: cap(25u, electrolytic)       # cathode bypass — full gain
+
+    # === Gain pot — POST-detector MAKEUP, between the two 12AX7 stages ===
+    # [V/A] manual calls Gain the output level control; exact node is [A].
+    # Placed as a pure passive divider feeding V2's grid — NOT in the
+    # sidechain, NOT inside the GR group.
+    C_c1: cap(22n)                     # interstage coupling from V1 plate
+    Gain: pot(1M, a)                   # "Gain" makeup level
+
+    # === 12AX7 gain stage 2 ===
+    V2: triode(12ax7)
+    R_g2: resistor(1M)                 # grid leak
+    R_p2: resistor(220k)               # plate load / dropper [V]
+    R_k2: resistor(1.5k)               # cathode bias
+    C_k2: cap(25u, electrolytic)       # cathode bypass
+
+    # === 12BH7 stacked cathode follower (low-Z driver for output xfmr) ===
+    V3: triode(12bh7)
+    C_c2: cap(100n)                    # coupling V2 plate -> V3 grid
+    R_g3: resistor(1M)                 # grid leak
+    R_k3: resistor(10k)                # cathode-follower cathode resistor
+
+    # === Output transformer (UTC A-24 style) ===
+    C_c3: cap(10u, electrolytic)       # CF output coupling into the primary
+    T_out: transformer(4:1, 10H)       # [V] step-down to a 600 Ω line; [A] ratio
+    R_load: resistor(600)              # 600 Ω line termination
+
+    # === Sidechain (detector) — REAL rectified FEEDBACK from the OUTPUT ===
+    # [V] tap after the output -> R37 HF pre-emphasis -> 12AX7 sidechain amp
+    # -> 6AQ5 power tube -> EL-drive node -> EL panel (PC1.led).
+    C_sc: cap(100n)                    # sidechain input coupling (feedback tap)
+    R37a: resistor(47k)                # R37 HF pre-emphasis [V] (series)
+    C37:  cap(2.2n)                    # R37 HF pre-emphasis [V] (shunt highs)
+    PR: pot(100k, a)                   # "Peak Reduction" — scales sidechain drive
+    V4: triode(12ax7)                  # 12AX7 sidechain amplifier
+    R_g4: resistor(1M)                 # grid leak
+    R_p4: resistor(220k)              # plate load / dropper [V]
+    R_k4: resistor(1.5k)               # cathode bias
+    C_k4: cap(25u, electrolytic)       # cathode bypass
+    C_c4: cap(22n)                     # coupling sidechain amp -> 6AQ5 grid
+    V5: pentode(6aq5a)                 # 6AQ5 power tube driving the EL panel
+    R_g5: resistor(220k)               # grid leak / drive resistor
+    R_scr: resistor(1k)                # screen dropper [V] screen ~100 V
+    C_scr: cap(10u, electrolytic)      # screen bypass
+    EL_drive: transformer(1:2, 8H)     # EL-panel drive winding (~90 VAC) [A]
+
+    # === Limit/Compress feedback-mix switch ===
+    # [V] Compress = sidechain ~100% output; Limit = mostly output + small
+    # feed-forward trickle. Modeled as a 2-position selector on the tap mix.
+    LC: switch(2)                      # 0 = Compress, 1 = Limit
+    R_ff: resistor(1M)                 # feed-forward trickle arm (Limit mode)
+  }
+
+  nets {
+    # --- Input transformer: signal in, unbalanced out into the GR divider ---
+    in -> T_in.a
+    T_in.b -> C_in.a
+
+    # --- T4B passive GR divider: series R, audio CdS cell shunt to ground ---
+    C_in.b -> R_gr.a
+    R_gr.b -> PC1.a, V1.grid, R_g1.a
+    PC1.b -> gnd
+    R_g1.b -> gnd
+
+    # --- 12AX7 stage 1: 220k plate dropper to B+, bypassed 1.5k cathode ---
+    B+ -> R_p1.a
+    R_p1.b -> V1.plate
+    V1.cathode -> R_k1.a, C_k1.a
+    R_k1.b -> gnd
+    C_k1.b -> gnd
+
+    # --- Gain MAKEUP divider between the stages, feeding V2 grid ---
+    V1.plate -> C_c1.a
+    C_c1.b -> Gain.a
+    Gain.b -> gnd
+    Gain.w -> V2.grid, R_g2.a
+    R_g2.b -> gnd
+
+    # --- 12AX7 stage 2 ---
+    B+ -> R_p2.a
+    R_p2.b -> V2.plate
+    V2.cathode -> R_k2.a, C_k2.a
+    R_k2.b -> gnd
+    C_k2.b -> gnd
+
+    # --- 12BH7 cathode follower ---
+    V2.plate -> C_c2.a
+    C_c2.b -> V3.grid, R_g3.a
+    R_g3.b -> gnd
+    B+ -> V3.plate
+    V3.cathode -> R_k3.a, C_c3.a
+    R_k3.b -> gnd
+
+    # --- Output transformer: CF output -> primary -> 600 Ω line ---
+    C_c3.b -> T_out.a
+    T_out.b -> R_load.a, out
+    R_load.b -> gnd
+
+    # --- Sidechain feedback tap: from the OUTPUT (post-xfmr) ---
+    out -> C_sc.a
+    # R37 HF pre-emphasis: series R37a with a treble-shunt cap to the grid
+    C_sc.b -> R37a.a
+    R37a.b -> C37.a, PR.a
+    C37.b -> gnd
+    # Peak Reduction scales the drive into the sidechain amp grid
+    PR.b -> gnd
+    PR.w -> V4.grid, R_g4.a
+    R_g4.b -> gnd
+
+    # --- Limit/Compress: feed-forward trickle of the INPUT in Limit mode ---
+    # Compress (pos 0): sidechain sees output only. Limit (pos 1): adds a
+    # small feed-forward trickle of the input through R_ff into the tap.
+    in -> fork(LC, [gnd, R_ff.a])
+    R_ff.b -> R37a.a
+
+    # --- 12AX7 sidechain amplifier ---
+    B+ -> R_p4.a
+    R_p4.b -> V4.plate
+    V4.cathode -> R_k4.a, C_k4.a
+    R_k4.b -> gnd
+    C_k4.b -> gnd
+
+    # --- 6AQ5 power tube driving the EL panel ---
+    V4.plate -> C_c4.a
+    C_c4.b -> V5.grid, R_g5.a
+    R_g5.b -> gnd
+    B+ -> R_scr.a
+    R_scr.b -> V5.screen, C_scr.a
+    C_scr.b -> gnd
+    B+ -> EL_drive.a
+    V5.plate -> EL_drive.b
+    V5.cathode -> gnd
+
+    # --- EL-drive node ILLUMINATES the T4B EL panel (the detector) ---
+    # NO envelope_follower: the LED is driven from the REAL sidechain node.
+    # (Engine gap G: only an envelope_follower's .out binds PhotocouplerLed;
+    #  this net is wired as the hardware intends and is expected to be inert
+    #  until gap G is fixed — that is the point. bind.rs:716-762.)
+    EL_drive.b -> PC1.led
+  }
+
+  controls {
+    Gain.position -> "Gain" [0.0, 1.0] = 0.6
+    PR.position -> "Peak Reduction" [0.0, 1.0] = 0.5
+    LC.position -> "Limit/Compress" [0.0, 1.0] = 0.0
+  }
+
+  monitors {
+    V1.plate_current -> "12AX7" [glow]
+    output -> "Output" [vu]
+  }
+}
