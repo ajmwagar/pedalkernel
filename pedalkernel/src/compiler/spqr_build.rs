@@ -1423,7 +1423,13 @@ pub fn compile_via_spqr_with_options(
                 .copied();
 
             // Does this group converge at a feedback group's input?
-            let converges = group_nodes.iter().any(|n| feedback_input_nodes.contains(n));
+            // Exclude the source node itself: a unity-gain op-amp wires neg→out,
+            // so the op-amp output (source) also appears in feedback_input_nodes.
+            // A true feedforward path must reach a feedback input at a DIFFERENT
+            // node than where it taps from.
+            let converges = group_nodes.iter().any(|n| {
+                feedback_input_nodes.contains(n) && source_node != Some(*n)
+            });
 
             if let Some(src) = source_node {
                 if converges {

@@ -1739,8 +1739,13 @@ impl MnaSystem {
         let mut b_c_kept = vec![0.0; n_kept];
         if let Some(vn) = vs_node {
             for (ri, &r) in kept_nodes.iter().enumerate() {
-                b_kept[ri] = self.g_matrix[r * n_nodes + vn];
-                b_c_kept[ri] = c_cap[r * n_nodes + vn];
+                // Sign convention: moving G[r,in]*U and C[r,in]*s*U to the RHS
+                // of the KCL equation introduces a negation:
+                //   (G_kept + sC_kept)*V_kept = -(G[*,in] + sC[*,in])*U
+                // b_kept and b_c_kept are the RHS forcing vectors; they equal
+                // -G[r,in] and -C[r,in] respectively.
+                b_kept[ri] = -self.g_matrix[r * n_nodes + vn];
+                b_c_kept[ri] = -c_cap[r * n_nodes + vn];
             }
         }
 
@@ -1751,7 +1756,6 @@ impl MnaSystem {
         // where B_kept_vs/C_kept_vs/D_vs are the non-input VS entries.
         let other_vs: Vec<usize> = (0..n_vs).filter(|&i| i != vs_idx).collect();
         let n_other_vs = other_vs.len();
-
         if n_other_vs > 0 {
             // Build augmented system for remaining vsources
             let n_aug_kept = n_kept + n_other_vs;
@@ -2160,12 +2164,6 @@ impl MnaSystem {
                     }
                     g_red[i * n_c + j] -= sum;
                 }
-            }
-
-            #[cfg(feature = "std")]
-            {
-                std::eprintln!("[ss-reduce] G_cc = {g_cc:?}");
-                std::eprintln!("[ss-reduce] G_red = {g_red:?}");
             }
 
             // Reduced C matrix (cap diagonal only, in reduced space)
