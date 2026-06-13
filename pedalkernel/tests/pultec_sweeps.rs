@@ -145,13 +145,12 @@ fn lf_boost_monotonic_shelf() {
     );
 }
 
-/// Full-range pot sweep — red until the set_control position aliasing is
-/// fixed (header note 8 / report gap list).
+/// Full-range pot sweep — GREEN since 2026-06-13: the compiled pot baseline
+/// now matches the control's declared default (defaults applied via
+/// `set_control_immediate` in spqr_control.rs, so the PassiveRType pot leaf is
+/// no longer left at its compile-time 0.5 stamp). The sweep is monotonic across
+/// the full range and pos-0.5 differs from pos-0.0.
 #[test]
-#[ignore = "engine gap: pot positions < 0.5 aliased via set_control — LF Boost at 63 Hz \
-            measured +5.912 dB at 0.0, +3.084 dB at 0.1 (2.8 dB BELOW the 1-ohm floor), \
-            +4.108 dB at 0.25, +5.911 dB at 0.5 (== position 0), +8.708 dB at 1.0; \
-            compiled-in control defaults are inert (always position 0)"]
 fn lf_boost_monotonic_full_range() {
     let sweep: Vec<(f64, f64)> = [0.0, 0.1, 0.25, 0.4, 0.5, 0.75, 1.0]
         .iter()
@@ -226,12 +225,9 @@ fn hf_boost_peak_near_lc_resonance() {
     assert_monotonic_rise(&sweep, 0.05, "HF Boost at peak");
 }
 
-/// Full-range HF boost sweep — red until the set_control position aliasing
-/// is fixed (header note 8 / report gap list).
+/// Full-range HF boost sweep — GREEN since 2026-06-13 (compiled pot baseline
+/// now matches the declared default; see lf_boost_monotonic_full_range).
 #[test]
-#[ignore = "engine gap: pot positions < 0.5 aliased via set_control — HF Boost at ~5 kHz \
-            (BW 0) measured +4.807 dB at control 0.0, +6.193 dB at 0.5, +8.201 dB at \
-            0.75, +6.193 dB at 1.0 (== control 0.5)"]
 fn hf_boost_monotonic_full_range() {
     let sweep: Vec<(f64, f64)> = [0.0, 0.25, 0.5, 0.75, 1.0]
         .iter()
@@ -278,12 +274,9 @@ fn hf_atten_monotonic_cut() {
     );
 }
 
-/// Full-range HF atten sweep — red until the set_control position aliasing
-/// is fixed (header note 8 / report gap list).
+/// Full-range HF atten sweep — GREEN since 2026-06-13 (compiled pot baseline
+/// now matches the declared default; see lf_boost_monotonic_full_range).
 #[test]
-#[ignore = "engine gap: pot positions < 0.5 aliased via set_control — HF Atten at 10 kHz \
-            measured +4.472 dB at control 0.0, +1.863 dB at 0.5, -1.706 dB at 0.75, \
-            then +1.864 dB at 1.0 (== control 0.5) instead of the deepest cut"]
 fn hf_atten_monotonic_full_range() {
     let sweep: Vec<(f64, f64)> = [0.0, 0.25, 0.5, 0.75, 1.0]
         .iter()

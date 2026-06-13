@@ -60,14 +60,20 @@
 #      release 1.78 s; gain falls monotonically from -40 to 0 dB input with
 #      an effective top-region ratio ~15:1. The v1 expansion finding is
 #      obsolete.
-#   7. GAIN POT GAP (2026-06-12 control sweeps): the Gain pot (3-terminal
-#      divider into the 12AX7 grid) has NO authority in the compiled
-#      processor — steady gain flat within 0.09 dB across positions 0.2-0.8
-#      at heavy (0.2 amp) and near-linear (0.002 amp) drive alike, slightly
-#      DECREASING with position, so it is a frozen pot rather than
-#      feedback-loop compensation. Same family as the F10 link-2 finding
-#      (pots swallowed into an active device's group go inert). Red test:
-#      tests/la2a_sweeps.rs::gain_pot_raises_steady_gain.
+#   7. GAIN POT GAP (updated 2026-06-13): the Gain pot (3-terminal divider
+#      into the 12AX7 grid) still has NO authority in the compiled processor —
+#      small-signal gain measured -11.78/-11.79/-11.81/-11.85/-12.07 dB at
+#      positions 0.1/0.3/0.5/0.7/0.9, i.e. flat and slightly DECREASING. The
+#      grid-leak resistor R_grid (1M, circuit-accurate — every 12AX7 stage has
+#      one) was ADDED on 2026-06-13 to define the wiper divider's load; it did
+#      NOT make the knob live. Root cause is now isolated as an ENGINE TOPOLOGY
+#      gap, not a circuit one: the pot is split (Gain__aw/Gain__wb) and
+#      STRADDLES the WDF GR-attenuator stage and the MultiNL tube-grid stage,
+#      and the wiper-into-active-grid divider is modeled insensitively/inverted.
+#      Same family as F10 link-2 (pots swallowed into an active device's group
+#      go inert). Needs a human topology decision. Red tests:
+#      tests/la2a_sweeps.rs::gain_pot_raises_steady_gain,
+#      tests/pot_fidelity.rs::opto_gain_pot_sweeps_monotonically (both #[ignore]'d).
 #   8. PROGRAM-DEPENDENT RELEASE not reproduced (consequence of item 3):
 #      release after 3 s of heavy GR measures 1.49 s vs 2.11 s after a
 #      0.5 s light hit — the hardware's CdS memory predicts the opposite
@@ -89,6 +95,9 @@ equipment "Opto Leveler LA-2A" {
 
     # === 12AX7 makeup gain stage ===
     V1: triode(12ax7)
+    R_grid: resistor(1M)               # Grid-leak resistor (defines the Gain
+                                       # pot's wiper divider into the high-Z
+                                       # grid; real 12AX7 stages always have one)
     R_plate: resistor(100k)            # Plate load
     R_k: resistor(1.5k)                # Cathode bias resistor
     C_k: cap(25u, electrolytic)        # Cathode bypass — full gain
@@ -112,7 +121,8 @@ equipment "Opto Leveler LA-2A" {
 
     # --- Gain pot into the triode grid ---
     Gain.b -> gnd
-    Gain.w -> V1.grid
+    Gain.w -> V1.grid, R_grid.a
+    R_grid.b -> gnd
 
     # --- 12AX7 stage: 100k plate to B+, bypassed 1.5k cathode ---
     B+ -> R_plate.a
