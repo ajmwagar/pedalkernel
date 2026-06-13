@@ -37,6 +37,9 @@ fn main() {
             "tube_screamer",
             "examples/pedals/overdrive/tube_screamer.pedal",
         ),
+        // Generator DspBlock (VCO): no WDF scattering, cheap (spec §3/§8).
+        ("cem3340_vco", "examples/synths/cem3340_vco.pedal"),
+        ("minisynth", "examples/synths/minisynth.pedal"),
     ];
 
     let num_samples = (SAMPLE_RATE * DURATION_S) as usize;

@@ -145,6 +145,7 @@ pub(super) fn dsp_blocks() -> &'static [&'static dyn DspBlock] {
     &[
         &super::bbd_lowering::BbdBlock,
         &super::vca_lowering::VcaBlock,
+        &super::vco_lowering::VcoBlock,
     ]
 }
 
@@ -176,9 +177,11 @@ pub(super) fn behavioral_island_error(comp_id: &str, type_tag: &str, reason: &st
 /// these tags but no registered block would compile to a silent island — the
 /// §4 violation this gate exists to stop.
 ///
-/// `vco()` is the only one without a block today: there is no VCO lowering, so
-/// `cem3340_vco`/`minisynth` previously compiled silent. Delete its tag here
-/// when a `VcoBlock` lands (one impl + one `dsp_blocks` line).
+/// All three (`bbd()`, `vca()`, `vco()`) now have registered blocks, so this
+/// gate fires only if a block is ever removed from [`dsp_blocks`] while its tag
+/// stays here. A block that *exists* but cannot place a specific instance
+/// (e.g. an unwired `vco()`/`vca()`) errors from its own `bind_runtime`,
+/// naming the component.
 const RUNTIME_DSP_ISLAND_TAGS: &[(&str, &str)] = &[
     // (Component::type_tag, the spelling used in the error message)
     ("BBD delay", "bbd()"),
@@ -192,7 +195,8 @@ const RUNTIME_DSP_ISLAND_TAGS: &[(&str, &str)] = &[
 ///
 /// Registry-driven: the gate cannot be forgotten when adding a block, and a
 /// new runtime-DSP island that ships without a block fails to compile naming
-/// the component (currently: `vco()`).
+/// the component. With `bbd()`/`vca()`/`vco()` all registered, the actual
+/// "unwired instance" rejection now lives in each block's `bind_runtime`.
 pub(super) fn reject_unlowered_behavioral(pedal: &PedalDef) -> Result<(), String> {
     let blocks = dsp_blocks();
     for comp in &pedal.components {
@@ -206,8 +210,8 @@ pub(super) fn reject_unlowered_behavioral(pedal: &PedalDef) -> Result<(), String
         return Err(behavioral_island_error(
             &comp.id,
             spelling,
-            "VCO lowering is not implemented yet — the oscillator would silently \
-             produce nothing",
+            "no registered DspBlock lowers this behavioral island — it would \
+             silently produce nothing",
         ));
     }
     Ok(())
@@ -242,6 +246,30 @@ pub(super) fn all_boundary_nodes(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<
     nodes
 }
 
+/// Output node ids of every **generator** instance (a block whose `io()` has
+/// no audio input — spec §4 N=0). These are source seeds: the runtime injects
+/// the block's sample into `node_signals` there, and `spqr_build` marks the
+/// consuming downstream stage feedforward to read it. A CV/Sync input does NOT
+/// make a block non-generator (those are reads, not audio-path inputs), so the
+/// guard tests `inputs` having no `Audio`-role port.
+pub(super) fn all_generator_output_nodes(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<usize> {
+    let mut nodes = Vec::new();
+    for block in dsp_blocks() {
+        for (_id, io) in block.io(pedal, graph) {
+            let has_audio_input = io.inputs.iter().any(|p| p.role == PortRole::Audio);
+            if has_audio_input || io.outputs.is_empty() {
+                continue;
+            }
+            for port in &io.outputs {
+                if !nodes.contains(&port.node) {
+                    nodes.push(port.node);
+                }
+            }
+        }
+    }
+    nodes
+}
+
 /// Split flow groups into galvanically-connected clusters at every registered
 /// block's behavioral gap. See [`split_groups_at_behavioral_gaps`] for the
 /// union-find rationale (rails are deliberately ignored).
@@ -254,35 +282,28 @@ pub(super) fn all_boundary_nodes(pedal: &PedalDef, graph: &CircuitGraph) -> Vec<
 ///   exercise.
 /// - **N = 0 (generator: VCO)** → there is no input side and thus no gap to
 ///   split; the block is a source placed at the head of the flow group its
-///   output node belongs to, reusing the port-write path. The branch below is
-///   written so a generator drops in without new machinery, but is
-///   **unexercised this pass** — every registered block is 1-in/1-out, so the
-///   `inputs.is_empty()` guard never fires. Exercised by VCO (spec §8).
+///   output node belongs to, reusing the port-write path. This is realized by
+///   the generator-placement pass in `spqr_build` (after stages are built),
+///   sourcing generator output nodes from [`all_generator_output_nodes`].
+///   Exercised by VCO (spec §8).
 ///
 /// Only run when [`any_block_has_components`] is true (no gap otherwise).
 pub(super) fn split_groups_at_behavioral_gaps(
     groups: &mut Vec<FlowGroup>,
     graph: &CircuitGraph,
-    pedal: &PedalDef,
+    _pedal: &PedalDef,
 ) {
-    // Generators (N=0 inputs) have no galvanic gap to split: their output node
-    // is a source seed, not a cut. A 1-in/1-out insert always has a non-empty
-    // `inputs`, so this guard is dead-but-correct until VCO lands (spec §8).
-    let has_generator = dsp_blocks().iter().any(|block| {
-        block
-            .io(pedal, graph)
-            .iter()
-            .any(|(_id, io)| io.inputs.is_empty() && !io.outputs.is_empty())
-    });
-    if has_generator {
-        // A generator seeds the head of its output node's flow group rather
-        // than cutting one — no union-find split is needed for its side.
-        // Placement reuses the existing port-write path (spec §3/§4); there is
-        // no additional group restructuring to perform here for the N=0 case.
-        // exercised by VCO (spec §8)
-    }
+    // Generators (no audio input) have no galvanic gap to split: their output
+    // node is a source seed, not a cut. A 1-in/1-out insert (BBD/VCA) always
+    // has a non-empty Audio input. A VCO (spec §8) hits this branch: it may
+    // carry CV/Sync *input* ports, but those are node reads, not audio-path
+    // inputs, so they do not constitute a gap to bridge here. Source placement
+    // (marking the consuming downstream stage feedforward to read the injected
+    // output node) happens after stages are built, in `spqr_build`'s
+    // generator-placement pass via [`all_generator_output_nodes`]; there is no
+    // group restructuring to perform here for the N=0 case.
 
-    // Gap-split every N≥1 insert (the only case present today).
+    // Gap-split every N≥1 (audio-input) insert (BBD/VCA today).
     super::bbd_lowering::split_groups_at_behavioral_gaps(groups, graph);
 }
 

@@ -897,6 +897,13 @@ pub struct DelayLineBinding {
 }
 
 /// VCO runtime binding — generates audio-rate waveforms at a circuit node.
+///
+/// A VCO is a **generator** [`crate::processor::Stage`]-free DSP block (spec
+/// §4, N=0 audio inputs): it owns no WDF/MNA scattering and injects its output
+/// into `node_signals` each sample, where downstream stages read it. Pitch is
+/// an **audio-rate CV input port** (spec §3): the block reads the voltage at
+/// `cv_node_id` from `node_signals` and maps it to frequency at 1 V/oct via
+/// `Vco::set_cv_pitch` — a float update to `phase_inc`, NO scattering recompute.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct VcoBinding {
     pub vco: crate::elements::Vco,
@@ -904,6 +911,9 @@ pub struct VcoBinding {
     pub waveform: crate::elements::VcoWaveform,
     /// Circuit node where VCO output is injected.
     pub output_node_id: usize,
+    /// Circuit node whose voltage drives 1 V/oct pitch CV. `usize::MAX` when no
+    /// CV pin is wired — the VCO then runs at its declared base frequency.
+    pub cv_node_id: usize,
     /// Component ID for debugging.
     #[allow(dead_code)]
     pub comp_id: String,
@@ -3022,6 +3032,21 @@ impl PedalProcessor for CompiledPedal {
         // Tick VCOs — generate audio-rate waveforms and inject into node_signals.
         // This happens before WDF stages so the VCO audio is available as input.
         for vco_binding in &mut self.vcos {
+            // Audio-rate CV-port path (spec §3): read the 1 V/oct pitch CV node
+            // voltage from node_signals (set by input-port injection above or an
+            // upstream stage) and map it to frequency. This is a float update to
+            // phase_inc — NO scattering recompute. When no CV pin is wired the
+            // VCO holds its declared base frequency.
+            if vco_binding.cv_node_id != usize::MAX {
+                let cv: crate::Wave = self
+                    .node_signals
+                    .iter()
+                    .rev()
+                    .filter(|(nid, _)| *nid == vco_binding.cv_node_id)
+                    .map(|(_, v)| *v)
+                    .sum();
+                vco_binding.vco.set_cv_pitch(cv);
+            }
             let (saw, tri, pulse) = vco_binding.vco.tick();
             let sample = match vco_binding.waveform {
                 crate::elements::VcoWaveform::Saw => saw,

@@ -289,7 +289,7 @@ pub fn compile_via_spqr_with_options(
     );
     let mut feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph);
-merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
+    merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
     // DSP-block pedals: bbd(), vca(), ... are GraphRole::Virtual, so the
     // netlist is galvanically cut at their in/out pins. Split any group that
     // spans a behavioral gap (the sides stay "connected" through ground only)
@@ -1232,13 +1232,12 @@ merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
                 // feedforward targets — gnd is universally reachable and would
                 // cause false positives (e.g. C_tone.b → gnd flagged as
                 // feedforward from U1.out → gnd).
-                let feedback_nodes: std::collections::HashSet<super::graph::NodeId> =
-                    graph
-                        .nullor_pins
-                        .iter()
-                        .flat_map(|pins| [pins.neg_node, pins.pos_node].into_iter())
-                        .filter(|&n| n != graph.gnd_node)
-                        .collect();
+                let feedback_nodes: std::collections::HashSet<super::graph::NodeId> = graph
+                    .nullor_pins
+                    .iter()
+                    .flat_map(|pins| [pins.neg_node, pins.pos_node].into_iter())
+                    .filter(|&n| n != graph.gnd_node)
+                    .collect();
                 let main_outputs: std::collections::HashSet<super::graph::NodeId> = graph
                     .nullor_pins
                     .iter()
@@ -1480,6 +1479,57 @@ merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
         Stage::KMethod { .. } => usize::MAX,
         Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
     });
+
+    // ── Generator (VCO, N=0) source placement (spec §4) ───────────────────
+    // A generator has no audio input — there is no galvanic gap to split.
+    // Instead its wave-output node is a *source seed*: the runtime injects the
+    // VCO sample into `node_signals` at that node (processor.rs VCO tick loop),
+    // and the stage immediately downstream (e.g. the output protection resistor
+    // VCO1.saw -> R_saw -> out) must READ that node rather than the serial
+    // chain. Mark that consuming stage feedforward with injection_node_id =
+    // the generator output node, reusing the existing port-write/feedforward
+    // read path. No new per-sample machinery — this is the §4 N=0 branch made
+    // real, the analogue of the input-port VS for a pure source.
+    {
+        // Generator output nodes from every block whose io() has no audio input.
+        let mut gen_out_nodes: Vec<super::graph::NodeId> = Vec::new();
+        for block in super::dsp_block::all_generator_output_nodes(pedal, &graph) {
+            if !gen_out_nodes.contains(&block) {
+                gen_out_nodes.push(block);
+            }
+        }
+        for vn in gen_out_nodes {
+            // The consuming stage is the one whose group has an edge touching
+            // the generator output node (the first passive the VCO drives).
+            let mut consumer_comp_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for e in &graph.edges {
+                if e.node_a == vn || e.node_b == vn {
+                    consumer_comp_ids.insert(graph.components[e.comp_idx].id.clone());
+                }
+            }
+            if consumer_comp_ids.is_empty() {
+                continue;
+            }
+            for (si, stage) in stages.iter_mut().enumerate() {
+                if let Stage::Wdf(w) = stage {
+                    if w.is_feedforward || w.bypass_serial {
+                        continue;
+                    }
+                    let ids = &stage_comp_ids[si];
+                    if ids.iter().any(|id| consumer_comp_ids.contains(id)) {
+                        w.is_feedforward = true;
+                        w.injection_node_id = vn;
+                        #[cfg(test)]
+                        eprintln!(
+                            "  → generator source: stage {si} reads VCO node {vn} (feedforward)"
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // ── Feedforward detection ─────────────────────────────────────────────
     // Detect non-feedback stages that fan out from a shared source node
@@ -3147,9 +3197,10 @@ fn merge_input_coupling_into_active_groups(
         .iter()
         .map(|g| {
             let all = g.all_edges();
-            let has_v = g.active_edges.iter().any(|&eidx| {
-                graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs
-            });
+            let has_v = g
+                .active_edges
+                .iter()
+                .any(|&eidx| graph.effective_edge_kind(eidx) == super::component::EdgeKind::Vcvs);
             let is_linear = all.iter().all(|&eidx| {
                 matches!(
                     graph.effective_edge_kind(eidx),
@@ -3176,9 +3227,9 @@ fn merge_input_coupling_into_active_groups(
         }
 
         // All edges must be strictly linear (resistors/pots only).
-        let all_linear = edges.iter().all(|&eidx| {
-            graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear
-        });
+        let all_linear = edges
+            .iter()
+            .all(|&eidx| graph.effective_edge_kind(eidx) == super::component::EdgeKind::Linear);
         if !all_linear {
             continue;
         }

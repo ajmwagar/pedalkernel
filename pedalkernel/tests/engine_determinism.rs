@@ -166,6 +166,38 @@ fn dyna_comp_compile_is_deterministic_across_processes() {
     );
 }
 
+/// Compile the cem3340_vco generator and fingerprint 0.25 s of its output
+/// (FNV-1a over every sample's bit pattern). A VCO is the first generator
+/// DspBlock; this guards that the N=0 source path + PolyBLEP body recompile
+/// bit-identically (spec §8 / §9 determinism).
+fn cem3340_vco_fingerprint() -> u64 {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/synths/cem3340_vco.pedal");
+    let src = std::fs::read_to_string(&path).expect("read cem3340_vco.pedal");
+    let pedal = parse_pedal_file(&src).expect("parse cem3340_vco");
+    let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile cem3340_vco");
+
+    let n = (0.25 * SAMPLE_RATE) as usize;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    for _ in 0..n {
+        let y = proc.process(0.0);
+        for byte in y.to_bits().to_le_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3); // FNV-1a prime
+        }
+    }
+    hash
+}
+
+#[test]
+fn cem3340_vco_recompile_is_deterministic_in_process() {
+    let fingerprints: Vec<u64> = (0..8).map(|_| cem3340_vco_fingerprint()).collect();
+    let first = fingerprints[0];
+    assert!(
+        fingerprints.iter().all(|&f| f == first),
+        "cem3340_vco recompiles diverge within one process: {fingerprints:016x?}"
+    );
+}
+
 fn decimate(buf: &[f64], factor: usize) -> Vec<f64> {
     buf.iter().step_by(factor).copied().collect()
 }

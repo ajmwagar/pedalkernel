@@ -35,6 +35,7 @@ pub mod stage_test_helpers;
 pub(crate) mod subcircuit;
 pub mod validate;
 mod vca_lowering;
+mod vco_lowering;
 mod warnings;
 pub(crate) mod wdf_leaf;
 

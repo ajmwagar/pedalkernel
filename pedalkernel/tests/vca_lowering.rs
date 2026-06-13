@@ -259,9 +259,11 @@ pedal "Dangling VCA" {
     );
 }
 
-/// vco() has NO lowering pass: previously it compiled into a processor with
-/// `vcos` empty — a silent island (e.g. examples/synths/cem3340_vco.pedal).
-/// Until VCO lowering lands, vco() is a compile error via the same mechanism.
+/// A vco() whose wave output (saw/tri/pulse) is NOT wired into the netlist
+/// cannot be placed as a source in the audio path — it would silently produce
+/// nothing. The VcoBlock's `bind_runtime` rejects it via the same
+/// mandatory-lowering mechanism (architecture debt §4), naming the component.
+/// (A *wired* vco() now lowers — see tests/vco_lowering.rs.)
 #[test]
 fn unlowered_vco_is_a_compile_error_naming_the_component() {
     let src = r#"
@@ -272,7 +274,7 @@ pedal "Bare VCO" {
     R_out: resistor(1k)
   }
   nets {
-    VCO1.saw -> R_out.a
+    in -> R_out.a
     R_out.b -> out
   }
   controls {}
@@ -281,7 +283,9 @@ pedal "Bare VCO" {
     let pedal = parse_pedal_file(src).expect("parse");
     let err = match compile_pedal(&pedal, SAMPLE_RATE) {
         Err(e) => e,
-        Ok(_) => panic!("vco() has no lowering pass and must be a compile error, not silence"),
+        Ok(_) => {
+            panic!("a vco() with no wired wave output must be a compile error, not silence")
+        }
     };
     eprintln!("unlowered vco error: {err}");
     assert!(
