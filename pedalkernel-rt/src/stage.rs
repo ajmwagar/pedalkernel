@@ -1559,7 +1559,52 @@ pub struct WdfStage {
     /// leave this empty and continue to behave as one-input/one-output stages.
     #[cfg_attr(feature = "serde", serde(default))]
     pub boundary_bindings: Vec<WdfBoundaryBinding>,
+
+    /// Last-APPLIED controlled resistance per component id, for threshold
+    /// gating of photocoupler / `jfet_vr` scattering re-derivations.
+    ///
+    /// Physics: a CdS photocell's resistance trajectory is band-limited by
+    /// its own carrier dynamics (ms-to-s time constants — e.g. T4B attack
+    /// ~10 ms, release 0.5–5 s), and a sidechain-driven JFET Vgs is likewise
+    /// smoothed by the detector's RC network. Control content therefore
+    /// lives below a few hundred Hz, so re-deriving the MNA scattering
+    /// matrix (or WDF adaptor gammas) at audio rate is wasted work: between
+    /// recomputes the applied resistance lags the true value by less than
+    /// the gate epsilon. The element's internal state still updates every
+    /// sample, so attack/release timing physics are unaffected — only the
+    /// expensive re-derivation is skipped. Comparing against the
+    /// last-APPLIED value (not the last-seen one) lets sub-epsilon drift
+    /// accumulate and eventually trigger, bounding steady-state error by
+    /// the epsilon.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub ctrl_r_last_applied: Vec<CtrlRecomputeGate>,
 }
+
+/// Per-component gating state for controlled-resistor recomputes.
+/// See [`WdfStage::ctrl_resistance_drifted`].
+pub struct CtrlRecomputeGate {
+    pub comp_id: String,
+    /// Resistance encoded in the currently-applied scattering matrix /
+    /// adaptor gammas (the last value that actually triggered a recompute).
+    pub last_applied_r: crate::Wave,
+}
+
+/// Relative resistance change below which a controlled-resistor
+/// (photocoupler LDR / JFET VR) scattering re-derivation is skipped.
+///
+/// 1e-3 relative resistance corresponds to well under 0.01 dB of gain
+/// error in a divider, far below measurement tolerances, while skipping
+/// the vast majority of per-sample recomputes once the envelope settles.
+///
+/// MEASURED (2026-06-13, opto_leveler/fet_leveler sweeps): eps = 1e-3
+/// shifts the opto GR curve by at most 0.006 dB and release timing by
+/// 0.01% — far inside the 0.1 dB / 5% acceptance band. Do NOT add a
+/// control-rate decimation on top of this check: a /16 decimation was
+/// measured to buy only ~14% throughput while aliasing the loud-input
+/// envelope ripple into a 0.154 dB GR shift (effective ratio 15.3 -> 17.9)
+/// — the check must stay at audio rate so every >eps resistance move is
+/// applied sample-accurately.
+pub const CTRL_R_RECOMPUTE_EPS: crate::Wave = 1e-3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1648,6 +1693,7 @@ impl WdfStage {
             main_vs_ptr: None,
             port_vs_ptrs: Vec::new(),
             boundary_bindings: Vec::new(),
+            ctrl_r_last_applied: Vec::new(),
         }
     }
 
@@ -2483,6 +2529,10 @@ impl WdfStage {
     pub fn reset(&mut self) {
         self.tree.reset_with_state(&mut self.runtime_state);
         self.oversampler.reset();
+        // Reset returns controlled-resistor leaves to their dark/zero-bias
+        // resistance without re-deriving scattering; drop the gating
+        // baseline so the first post-reset control write recomputes.
+        self.ctrl_r_last_applied.clear();
         self.ensure_passive_rtype_child_runtime_states();
         if let Some(ref mut opamp) = self.paired_opamp {
             opamp.reset();
@@ -2706,6 +2756,61 @@ impl WdfStage {
         }
     }
 
+    /// Current effective resistance of the controlled-resistor leaf with
+    /// the given component id (WDF tree or PassiveRType MNA children).
+    fn controlled_leaf_resistance(&self, comp_id: &str) -> Option<crate::Wave> {
+        let probe = |leaf: &dyn crate::wdf_leaf::WdfLeaf| -> Option<crate::Wave> {
+            (leaf.comp_id() == Some(comp_id)).then(|| leaf.port_resistance())
+        };
+        if let Some(r) = self.tree.find_leaf(&probe) {
+            return Some(r);
+        }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            for child in children {
+                if let Some(r) = child.find_leaf(&probe) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+
+    /// Threshold gate for controlled-resistor (photocoupler / `jfet_vr`)
+    /// scattering re-derivations. Returns `true` when the re-derivation
+    /// should run, recording the new resistance as the last-applied value.
+    ///
+    /// Physics justification: the CdS cell's resistance trajectory is
+    /// band-limited by its own ms-to-s time constants, so its control
+    /// content lives below a few hundred Hz — re-deriving the scattering
+    /// matrix at audio rate is wasted work. The element's internal state
+    /// (carrier dynamics / Vgs) still updates every sample upstream of this
+    /// gate, so timing physics are unaffected. The comparison is against
+    /// the last-APPLIED resistance, so sub-epsilon per-sample drift
+    /// accumulates and eventually triggers a recompute: steady-state gain
+    /// error is bounded by [`CTRL_R_RECOMPUTE_EPS`].
+    fn ctrl_resistance_drifted(&mut self, comp_id: &str) -> bool {
+        let Some(new_r) = self.controlled_leaf_resistance(comp_id) else {
+            // Can't read the leaf back — recompute unconditionally (safe).
+            return true;
+        };
+        for entry in self.ctrl_r_last_applied.iter_mut() {
+            if entry.comp_id == comp_id {
+                if (new_r - entry.last_applied_r).abs()
+                    <= CTRL_R_RECOMPUTE_EPS * entry.last_applied_r.abs()
+                {
+                    return false;
+                }
+                entry.last_applied_r = new_r;
+                return true;
+            }
+        }
+        self.ctrl_r_last_applied.push(CtrlRecomputeGate {
+            comp_id: String::from(comp_id),
+            last_applied_r: new_r,
+        });
+        true
+    }
+
     /// Set Vgs on a `jfet_vr` LEAF anywhere in this stage — in the WDF tree
     /// or among PassiveRType MNA children — and trigger the matching
     /// impedance recompute.
@@ -2714,28 +2819,32 @@ impl WdfStage {
     /// resistors), not stage roots, so external modulation (LFO, envelope)
     /// must reach the leaf; the root setter [`Self::set_jfet_vgs`] silently
     /// no-ops for them. Returns `true` if the component was found.
+    ///
+    /// The leaf's Vgs/Rds state updates every sample; the expensive
+    /// adaptor/scattering re-derivation is threshold-gated — see
+    /// [`Self::ctrl_resistance_drifted`].
     pub fn set_jfet_vr_vgs(&mut self, comp_id: &str, vgs: crate::Wave) -> bool {
         if self.tree.set_jfet_vr_vgs(comp_id, vgs) {
-            self.tree.recompute();
+            if self.ctrl_resistance_drifted(comp_id) {
+                self.tree.recompute();
+            }
             return true;
         }
         let mut found = false;
-        if let RootKind::PassiveRType {
-            children,
-            needs_recompute,
-            ..
-        } = &mut self.root
-        {
+        if let RootKind::PassiveRType { children, .. } = &mut self.root {
             for child in children.iter_mut() {
                 if child.set_jfet_vr_vgs(comp_id, vgs) {
                     found = true;
                 }
             }
-            if found {
+        }
+        if found && self.ctrl_resistance_drifted(comp_id) {
+            if let RootKind::PassiveRType {
+                needs_recompute, ..
+            } = &mut self.root
+            {
                 *needs_recompute = true;
             }
-        }
-        if found {
             // Re-derive the scattering matrix with the JFET's new Rds.
             self.flush_passive_rtype_recompute();
         }
@@ -2806,28 +2915,33 @@ impl WdfStage {
     /// PassiveRType stage are MNA variable-resistor children, so after the
     /// LED drive updates the CdS resistance the scattering matrix must be
     /// re-derived for the gain change to reach the audio path.
+    ///
+    /// The CdS carrier state updates every sample (the photocoupler's
+    /// attack/release physics live in the leaf); the expensive scattering
+    /// re-derivation is threshold-gated — see
+    /// [`Self::ctrl_resistance_drifted`].
     pub fn set_photocoupler_led(&mut self, comp_id: &str, led_drive: crate::Wave) -> bool {
         if self.tree.set_photocoupler_led(comp_id, led_drive) {
-            self.tree.recompute();
+            if self.ctrl_resistance_drifted(comp_id) {
+                self.tree.recompute();
+            }
             return true;
         }
         let mut found = false;
-        if let RootKind::PassiveRType {
-            children,
-            needs_recompute,
-            ..
-        } = &mut self.root
-        {
+        if let RootKind::PassiveRType { children, .. } = &mut self.root {
             for child in children.iter_mut() {
                 if child.set_photocoupler_led(comp_id, led_drive) {
                     found = true;
                 }
             }
-            if found {
+        }
+        if found && self.ctrl_resistance_drifted(comp_id) {
+            if let RootKind::PassiveRType {
+                needs_recompute, ..
+            } = &mut self.root
+            {
                 *needs_recompute = true;
             }
-        }
-        if found {
             // Re-derive the scattering matrix with the CdS cell's new R.
             self.flush_passive_rtype_recompute();
         }
