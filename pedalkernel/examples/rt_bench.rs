@@ -40,6 +40,8 @@ fn main() {
         // Generator DspBlock (VCO): no WDF scattering, cheap (spec §3/§8).
         ("cem3340_vco", "examples/synths/cem3340_vco.pedal"),
         ("minisynth", "examples/synths/minisynth.pedal"),
+        // Delay/tape DspBlock (F15): multi-tap delay line + wow LFO.
+        ("space_echo", "examples/rack/space_echo.pedal"),
     ];
 
     let num_samples = (SAMPLE_RATE * DURATION_S) as usize;
