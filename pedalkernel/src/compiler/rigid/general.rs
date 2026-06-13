@@ -280,6 +280,13 @@ fn build_general_mna_from_edges_inner(
         .copied()
         .collect();
 
+    // Wiper-into-amplifier-grid divider: the audio source drives the wiper
+    // through the pot's UPPER (a→w) leg, which we model as the adapted source
+    // port resistance. The stamped lower (w→b) leg then tracks `position`.
+    let divider_pot = detect_wiper_into_amp_divider(all_edges, graph, effective_rate);
+    let divider_pot_comp_idx = divider_pot.as_ref().map(|(idx, _)| *idx);
+    let adapted_pot_leaf: Option<DynNode> = divider_pot.map(|(_, leaf)| leaf);
+
     let (mut mna, reactive_edges, variable_resistor_candidates) = stamp_passive_edges(
         all_edges,
         &nl_edge_set,
@@ -289,6 +296,7 @@ fn build_general_mna_from_edges_inner(
         num_vsources,
         effective_rate,
         vcc_vs_idx,
+        divider_pot_comp_idx,
     );
 
     // Step 4: Build WDF ports
@@ -300,6 +308,7 @@ fn build_general_mna_from_edges_inner(
         n_nl,
         all_edges,
         effective_rate,
+        adapted_pot_leaf.as_ref().map(|l| l.port_resistance()),
     );
     let n_passive = passive_children.len();
     let extract_output_nodes = find_output_extract_node(all_edges, &node_set, graph)
@@ -346,6 +355,7 @@ fn build_general_mna_from_edges_inner(
         extract_output_nodes,
         &nl_comp_labels,
         init_hints,
+        adapted_pot_leaf,
     )?;
 
     // Step 9: DC Q-point pre-charge for triode-with-grid stages.
@@ -541,8 +551,8 @@ fn classify_nl_devices(
                 let grid = *grid;
                 let plate = *plate_node;
                 let cathode = *cathode_node;
-                nl_terminals.push((grid, cathode));   // port 0: grid-cathode
-                nl_terminals.push((plate, cathode));  // port 1: plate-cathode
+                nl_terminals.push((grid, cathode)); // port 0: grid-cathode
+                nl_terminals.push((plate, cathode)); // port 1: plate-cathode
                 for &n in &[grid, plate, cathode] {
                     if !node_set.contains(&n)
                         && n != graph.gnd_node
@@ -582,6 +592,75 @@ fn check_vcc_needed(
 
 /// Step 3: Build MNA system and stamp passive edges (skip NL).
 /// Returns (mna, reactive_edges).
+/// Detect a 3-terminal pot acting as a wiper-into-amplifier-input divider
+/// inside this stage's edge set: the pot's wiper node IS an amplifier input pin
+/// (e.g. a 12AX7 grid). For such a pot only the lower (w→b) leg is stamped into
+/// this stage's MNA (the upper a→w leg lives upstream, by the F10 collection
+/// bound), so the wiper voltage is set by the WDF adapted (source) port driving
+/// the wiper. Modelling the upper leg as that source resistance turns the stamped
+/// lower leg + grid-leak into a true voltage divider: V_wiper/V_src =
+/// (R_wb∥R_grid)/(R_aw + R_wb∥R_grid). For monotonic gain (higher position =
+/// more signal) the upper leg R_aw must track `1-position` and the lower leg
+/// R_wb must track `position`. Returns the pot's component index (so its stamped
+/// lower leg can be set NON-complement = tracks position) and an upper-leg
+/// `WdfPot` leaf (complement = tracks 1-position) whose resistance drives the
+/// adapted source port.
+fn detect_wiper_into_amp_divider(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    effective_rate: f64,
+) -> Option<(usize, DynNode)> {
+    use super::super::component::SignalTerminals;
+    // Amplifier input pin nodes present in this stage.
+    let mut amp_input_nodes: HashSet<NodeId> = HashSet::new();
+    for &eidx in edge_indices {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if let SignalTerminals::Amplifier { input, .. } = comp.kind.signal_terminals() {
+            if let Some(&n) = graph.node_names.get(&format!("{}.{}", comp.id, input)) {
+                amp_input_nodes.insert(n);
+            }
+        }
+    }
+    if amp_input_nodes.is_empty() {
+        return None;
+    }
+    for &eidx in edge_indices {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        if !comp.kind.is_pot() {
+            continue;
+        }
+        let w_node = graph
+            .node_names
+            .get(&format!("{}.w", comp.id))
+            .or_else(|| graph.node_names.get(&format!("{}.wiper", comp.id)))
+            .copied();
+        let Some(w_node) = w_node else { continue };
+        if !amp_input_nodes.contains(&w_node) {
+            continue;
+        }
+        // Only treat this as a divider when the pot's LOWER (w→b) leg is the one
+        // stamped into THIS stage's MNA (the upper a→w leg is upstream). If the
+        // lower leg isn't here, the divider would be incomplete — leave it alone.
+        let wb_leg_here = edge_indices.iter().any(|&e2| {
+            let e = &graph.edges[e2];
+            e.comp_idx == graph.edges[eidx].comp_idx
+                && pot_edge_is_wb_half(graph, &comp.id, e.node_a, e.node_b)
+        });
+        if !wb_leg_here {
+            continue;
+        }
+        // Build the upper (a→w) leg leaf, complemented so it tracks 1-position.
+        let Some(mut leaf) = comp.kind.make_leaf(&comp.id, effective_rate) else {
+            continue;
+        };
+        if let DynNode::Leaf(ref mut l) = leaf {
+            l.set_complement();
+        }
+        return Some((graph.edges[eidx].comp_idx, leaf));
+    }
+    None
+}
+
 /// A pot detected during passive stamping. Stamped into MNA as a fixed resistor
 /// at its initial position, but also tracked for runtime delta-updating.
 struct VariableResistorCandidate {
@@ -603,6 +682,7 @@ fn stamp_passive_edges(
     num_vsources: usize,
     effective_rate: f64,
     vcc_vs_idx: Option<usize>,
+    divider_pot_comp_idx: Option<usize>,
 ) -> (
     MnaSystem,
     Vec<(usize, OnePortKind)>,
@@ -626,7 +706,14 @@ fn stamp_passive_edges(
             // for runtime updates. A 3-terminal pot appears as two graph
             // edges: a-w tracks position, w-b tracks 1-position.
             if let Some(mut leaf) = comp.kind.make_leaf(&comp.id, effective_rate) {
-                if pot_edge_is_wb_half(graph, &comp.id, e.node_a, e.node_b) {
+                // A wiper-into-amplifier divider pot has its UPPER (a→w) leg
+                // modelled as the adapted source resistance (see
+                // `detect_wiper_into_amp_divider`); the stamped lower (w→b) leg
+                // must then track `position` (NOT 1-position) so the wiper rises
+                // with position. For all other pots keep the default: w→b is the
+                // complement (1-position) leg.
+                let is_divider = divider_pot_comp_idx == Some(e.comp_idx);
+                if !is_divider && pot_edge_is_wb_half(graph, &comp.id, e.node_a, e.node_b) {
                     if let DynNode::Leaf(ref mut l) = leaf {
                         l.set_complement();
                     }
@@ -686,6 +773,7 @@ fn build_wdf_ports(
     n_nl: usize,
     edge_indices: &[usize],
     effective_rate: f64,
+    adapted_resistance_override: Option<f64>,
 ) -> (
     Vec<WdfPort>,
     Vec<WdfPortTerminals>,
@@ -693,7 +781,10 @@ fn build_wdf_ports(
     Vec<f64>,
 ) {
     let r_nl_default = 1000.0;
-    let r_adapted = 1000.0;
+    // Default adapted source resistance is a small 1k Thevenin stand-in. For a
+    // wiper-into-amplifier divider it is the pot's upper-leg resistance so the
+    // source actually divides against the stamped lower leg + grid-leak.
+    let r_adapted = adapted_resistance_override.unwrap_or(1000.0);
     let mut ports = Vec::with_capacity(n_nl + reactive_edges.len() + 1);
     let mut port_node_pairs = Vec::new();
     let mut nl_port_resistances = vec![r_nl_default; n_nl];
@@ -923,8 +1014,7 @@ fn compute_dc_bias(
                 port_idx += 2;
             }
             NonlinearKind::Triode {
-                grid_node: Some(_),
-                ..
+                grid_node: Some(_), ..
             } => {
                 // Port 0 = Vgk (grid-cathode), port 1 = Vpk (plate-cathode).
                 // Warm-start Vpk at half supply so the NR solver converges near
@@ -1118,11 +1208,18 @@ fn assemble_multi_nl_stage(
     extract_output_nodes: Option<WdfPortTerminals>,
     nl_comp_labels: &[String],
     init_hints: &[crate::dsl::InitHint],
+    adapted_pot_leaf: Option<DynNode>,
 ) -> Result<MultiNlStage, String> {
     let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
-    let r_adapted = 1000.0;
+    // The adapted source resistance must match the value baked into `ports`
+    // (and thus the scattering matrix). For a wiper-into-amplifier divider that
+    // is the pot's upper-leg resistance; otherwise the 1k Thevenin default.
+    let r_adapted = adapted_pot_leaf
+        .as_ref()
+        .map(|l| l.port_resistance())
+        .unwrap_or(1000.0);
     let extract_coeffs = extract_output_nodes.map(|out| {
         let (out_pos, out_neg) = out.as_tuple();
         mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
@@ -1245,6 +1342,7 @@ fn assemble_multi_nl_stage(
             mna,
             port_node_pairs,
             adapted_resistance: r_adapted,
+            adapted_pot: adapted_pot_leaf,
             vs_source_index: None,
             vcc_vs_index: vcc_vs_idx,
             extract_output_nodes,
@@ -1363,8 +1461,7 @@ fn compute_triode_dc_qpoint(
             return None;
         }
         let (a, b) = (e.node_a, e.node_b);
-        if (a == cathode_node && b == graph.gnd_node)
-            || (b == cathode_node && a == graph.gnd_node)
+        if (a == cathode_node && b == graph.gnd_node) || (b == cathode_node && a == graph.gnd_node)
         {
             comp.kind.resistance()
         } else {

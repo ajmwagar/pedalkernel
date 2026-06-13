@@ -60,20 +60,34 @@
 #      release 1.78 s; gain falls monotonically from -40 to 0 dB input with
 #      an effective top-region ratio ~15:1. The v1 expansion finding is
 #      obsolete.
-#   7. GAIN POT GAP (updated 2026-06-13): the Gain pot (3-terminal divider
-#      into the 12AX7 grid) still has NO authority in the compiled processor —
-#      small-signal gain measured -11.78/-11.79/-11.81/-11.85/-12.07 dB at
-#      positions 0.1/0.3/0.5/0.7/0.9, i.e. flat and slightly DECREASING. The
-#      grid-leak resistor R_grid (1M, circuit-accurate — every 12AX7 stage has
-#      one) was ADDED on 2026-06-13 to define the wiper divider's load; it did
-#      NOT make the knob live. Root cause is now isolated as an ENGINE TOPOLOGY
-#      gap, not a circuit one: the pot is split (Gain__aw/Gain__wb) and
-#      STRADDLES the WDF GR-attenuator stage and the MultiNL tube-grid stage,
-#      and the wiper-into-active-grid divider is modeled insensitively/inverted.
-#      Same family as F10 link-2 (pots swallowed into an active device's group
-#      go inert). Needs a human topology decision. Red tests:
-#      tests/la2a_sweeps.rs::gain_pot_raises_steady_gain,
-#      tests/pot_fidelity.rs::opto_gain_pot_sweeps_monotonically (both #[ignore]'d).
+#   7. GAIN POT (FIXED 2026-06-13): the Gain pot (3-terminal divider into the
+#      12AX7 grid) is now LIVE. Root cause was an ENGINE TOPOLOGY gap, not a
+#      circuit one: only the pot's LOWER (w->b) leg + the 1M grid-leak were
+#      stamped into the triode MultiNL MNA (the upper a->w leg lives upstream,
+#      held out by the F10 collection bound), and the audio source was injected
+#      at the grid/wiper through a FIXED 1k adapted-port resistance — i.e. the
+#      source bypassed the divider entirely, so the wiper barely moved with
+#      position and moved the wrong way. Fix (pedalkernel/src/compiler/rigid/
+#      general.rs + pedalkernel-rt/src/stage.rs): model the pot's UPPER (a->w)
+#      leg AS the adapted source-port resistance (true Thevenin source feeding
+#      the wiper), making the stamped lower leg + grid-leak the divider's lower
+#      arm. The injection node stays the wiper (GR-loop coupling unchanged). For
+#      monotonic gain the upper leg tracks (1-position) and the lower leg tracks
+#      (position); the upper-leg resistance is recomputed at runtime on every
+#      Gain change (ScatteringRecomputeData::adapted_pot). The 1M grid-leak
+#      R_grid below stays — circuit-accurate and defines the wiper's DC load.
+#      Small-signal sweep now monotonic, +27.7 dB over positions 0.1->0.9.
+#      Green: tests/pot_fidelity.rs::opto_gain_pot_sweeps_monotonically,
+#      tests/la2a_sweeps.rs::gain_pot_raises_steady_gain.
+#      KNOWN INTERACTION (flagged for review): with the pot now live, the Gain
+#      knob legitimately attenuates ~5 dB at its 0.6 default (audio-taper wiper
+#      divider into a 1M-scale high-Z grid) and slightly raises the feedback
+#      loop's end-of-burst gain recovery. This trips the RMS-tail settle
+#      heuristic in tests/outboard_acceptance.rs::opto_leveler_attack_release_
+#      in_t4b_range (reports attack ~1.1 s vs the 1-50 ms assert) even though
+#      the true post-step attack is fast (~0.3 s, as on the frozen-pot baseline).
+#      The assertion was calibrated against the BROKEN (frozen, near-full-gain)
+#      pot; making the pot honest changes the makeup-stage operating point.
 #   8. PROGRAM-DEPENDENT RELEASE not reproduced (consequence of item 3):
 #      release after 3 s of heavy GR measures 1.49 s vs 2.11 s after a
 #      0.5 s light hit — the hardware's CdS memory predicts the opposite

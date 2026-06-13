@@ -4229,6 +4229,12 @@ pub struct ScatteringRecomputeData {
     pub port_node_pairs: Vec<WdfPortTerminals>,
     /// Resistance of the adapted (voltage source) port.
     pub adapted_resistance: crate::Wave,
+    /// When Some, the adapted source port models a pot's UPPER leg in a
+    /// wiper-into-amplifier voltage divider (e.g. a Gain pot into a 12AX7 grid).
+    /// Its position is updated by `set_pot`, and `recompute_scattering` reads its
+    /// resistance into `adapted_resistance` so the divider ratio tracks the knob.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub adapted_pot: Option<DynNode>,
     /// When Some, the input VS is stamped as an ideal voltage source in MNA B/C
     /// matrices. The value is the MNA VS branch index. Recompute uses
     /// `derive_scattering_and_vs_injection()` instead of `derive_scattering_matrix_general()`.
@@ -6209,6 +6215,21 @@ impl MultiNlStage {
             }
         }
 
+        // Wiper-into-amplifier divider: the adapted source port models the
+        // pot's upper leg. Update its position too so the divider ratio tracks
+        // the knob. The leaf carries its own complement flag (upper leg tracks
+        // 1-position), so feed it the raw control value.
+        if let Some(ref mut recompute) = self.recompute_data {
+            if let Some(ref mut leaf) = recompute.adapted_pot {
+                if leaf.set_pot(target_id, value)
+                    || leaf.set_pot(&aw, value)
+                    || leaf.set_pot(&wb, value)
+                {
+                    found = true;
+                }
+            }
+        }
+
         if found {
             self.recompute_pending = true;
         }
@@ -6304,6 +6325,14 @@ impl MultiNlStage {
     /// and passive_one_ports, re-derives the scattering matrix, and updates all
     /// sub-blocks (s_nl, s_nl_passive, s_nl_adapted) and the RTypeAdaptor.
     fn recompute_scattering(&mut self) {
+        // Wiper-into-amplifier divider: refresh the adapted source resistance
+        // from the upper-leg pot leaf so the divider ratio tracks the knob.
+        if let Some(ref mut recompute) = self.recompute_data {
+            if let Some(ref leaf) = recompute.adapted_pot {
+                recompute.adapted_resistance = leaf.port_resistance();
+            }
+        }
+
         // ── IIR recompute ────────────────────────────────────────────────
         // When IIR is active, read current pot resistances and recompute
         // the biquad coefficients. O(1) — no matrix inversion.

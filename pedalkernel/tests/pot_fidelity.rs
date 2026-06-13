@@ -120,18 +120,6 @@ fn opto_small_signal_gain_db(src: &str, gain_pos: f64) -> f64 {
 }
 
 #[test]
-#[ignore = "engine topology gap (NOT circuit-fixable): the LA-2A Gain pot is a \
-            3-terminal divider whose wiper feeds the high-Z 12AX7 grid. The pot is \
-            split (Gain__aw/Gain__wb) and STRADDLES the WDF GR-attenuator stage and \
-            the MultiNL tube-grid stage; the control binds to PotInStage(0) and the \
-            runtime fans the value to the MultiNL Pot[0] too, but the wiper-into-grid \
-            divider is insensitive + inverted (small-signal gain measured \
-            -11.78/-11.79/-11.81/-11.85/-12.07 dB at positions 0.1/0.3/0.5/0.7/0.9 — \
-            flat and slightly DECREASING). Adding a circuit-accurate 1M grid-leak \
-            resistor (R_grid, now in opto_leveler.pedal) did NOT make the knob live, \
-            so this is a genuine engine topology problem requiring a human decision on \
-            how a 3-terminal wiper divider into a MultiNL active-device grid should be \
-            modeled — not an autonomous engine guess."]
 fn opto_gain_pot_sweeps_monotonically() {
     let src = example_pedal_source(OPTO);
     let positions = [0.1, 0.3, 0.5, 0.7, 0.9];

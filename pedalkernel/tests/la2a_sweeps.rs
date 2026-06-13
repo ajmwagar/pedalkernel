@@ -48,11 +48,6 @@ fn opto_steady_gain_db(src: &str, controls: &[(&str, f64)], amplitude: f64, freq
 /// output. Red until the 3-terminal pot divider inside the triode group is
 /// live (same family as the F10 link-2 op-amp finding).
 #[test]
-#[ignore = "engine gap: opto_leveler Gain pot frozen — steady gain at 0.2 amp measured \
-            +4.753/+4.751/+4.749/+4.730 dB at positions 0.2/0.4/0.6/0.8, and \
-            +31.282/+31.274/+31.267/+31.199 dB at 0.002 amp (near-linear region), \
-            i.e. flat within 0.09 dB and slightly DECREASING — not leveling-loop \
-            compensation"]
 fn gain_pot_raises_steady_gain() {
     let src = example_pedal_source(OPTO);
     let sweep: Vec<(f64, f64)> = [0.2, 0.4, 0.6, 0.8]
