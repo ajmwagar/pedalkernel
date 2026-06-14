@@ -7,7 +7,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while, take_while1},
     character::complete::{alpha1, char, multispace1, not_line_ending},
-    combinator::{map, opt, recognize, value},
+    combinator::{map, opt, peek, recognize, value},
     multi::{many0, separated_list1},
     number::complete::double,
     sequence::{delimited, pair, preceded, tuple},
@@ -821,6 +821,84 @@ impl TransformerConfig {
     /// Returns true if this transformer has a tertiary (third) winding.
     pub fn has_tertiary(&self) -> bool {
         self.tertiary_turns_ratio.is_some()
+    }
+}
+
+/// Voltage-driven Jiles-Atherton tape head configuration.
+///
+/// Unlike a transformer core (driven by Ampere-law magnetizing CURRENT, whose
+/// knee needs hundreds of mA at studio turns counts), a record/playback head is
+/// a tiny gap/coil whose magnetic field is driven by the head GAP VOLTAGE:
+/// `H = kv * V`. With `kv` chosen so the J-A knee lands at line level (~1 V),
+/// tape saturation tracks signal Drive directly.
+///
+/// The J-A hysteresis parameters share physics with the transformer core
+/// (Jiles & Atherton 1986; Chowdhury DAFx-19 wave-digital tape realization)
+/// but use a SMALL-GEOMETRY head whose saturation occurs at ~1 V:
+///   - `ja_a` is reduced vs an output-transformer core so the Langevin knee is
+///     reached at the small fields a head produces,
+///   - the geometry turns/area/path are nominal (the voltage law uses `kv`, not
+///     Ampere's law, so they only need to be sane positives).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TapeHeadConfig {
+    /// Optional named head model (for provenance / future library lookup).
+    pub model: Option<String>,
+    /// Jiles-Atherton saturation magnetization (A/m).
+    pub ja_ms: f64,
+    /// Jiles-Atherton anhysteretic shape parameter (A/m).
+    pub ja_a: f64,
+    /// Jiles-Atherton inter-domain coupling.
+    pub ja_alpha: f64,
+    /// Jiles-Atherton domain-wall pinning parameter (A/m).
+    pub ja_k: f64,
+    /// Jiles-Atherton reversible magnetization fraction (0..1).
+    pub ja_c: f64,
+    /// Field-per-volt coupling (A/m per V) — places the knee at line level.
+    pub kv: f64,
+    /// Saturating magnetic current scale (A) — harmonic drive strength.
+    pub isat: f64,
+    /// Linear leakage conductance (S) keeping the port well-posed.
+    pub gp: f64,
+    /// Fixed record-bias field offset (A/m): asymmetric transfer -> even
+    /// harmonics (the soft, even-rich tape/transformer colour).
+    pub h_bias: f64,
+    /// WDF port resistance (Ω) — sets the scattering port impedance.
+    pub rp: f64,
+}
+
+impl Default for TapeHeadConfig {
+    fn default() -> Self {
+        Self::studio_head()
+    }
+}
+
+impl TapeHeadConfig {
+    /// A studio record/playback head whose J-A knee lands at ~1 V line level.
+    ///
+    /// Values verified in `pedalkernel-rt/tests/tape_head_voltage.rs`: THD
+    /// climbs monotonically from ~0.7% at 0.05 V to ~7% at 2 V, Newton
+    /// converges in well under the iteration budget, output is finite/stable.
+    pub fn studio_head() -> Self {
+        Self {
+            model: Some("STUDIO-HEAD".to_string()),
+            ja_ms: 3.5e5,
+            ja_a: 1500.0,
+            ja_alpha: 1.6e-3,
+            ja_k: 30.0,
+            ja_c: 0.65,
+            kv: 8000.0,
+            isat: 2.0e-4,
+            gp: 8.0e-5,
+            h_bias: 400.0,
+            rp: 1_000.0,
+        }
+    }
+
+    pub fn with_model(model: String) -> Self {
+        Self {
+            model: Some(model),
+            ..Self::studio_head()
+        }
     }
 }
 
@@ -1877,6 +1955,97 @@ fn parse_transformer(input: &str) -> IResult<&str, BoxComp> {
     Ok((input, Box::new(TransformerComp { config })))
 }
 
+/// `tape_head()` — voltage-driven Jiles-Atherton record/playback head.
+///
+/// Drives the magnetic field from PORT VOLTAGE so tape saturation tracks Drive
+/// at line level (the transformer core saturates only at hundreds of mA).
+///
+/// Forms:
+///   `tape_head()`                         — default studio head
+///   `tape_head(STUDIO-HEAD)`              — named head model
+///   `tape_head(kv=900, a=550, isat=4m)`   — named-parameter overrides
+///
+/// Override keys: `kv`, `isat`, `gp`, `rp`, `ms`, `a`, `alpha`, `k`, `c`.
+fn parse_tape_head(input: &str) -> IResult<&str, BoxComp> {
+    let (input, _) = tag("tape_head")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+
+    let mut config = TapeHeadConfig::studio_head();
+
+    // A key=value override token: an override key immediately followed by '='.
+    // Probed with `peek` so a leading bare model name is not mistaken for a key
+    // (e.g. `tape_head(kv=...)` must NOT read "kv" as a model name).
+    fn override_key(input: &str) -> IResult<&str, &str> {
+        let (rest, name) = alt((
+            tag("isat"),
+            tag("alpha"),
+            tag("h_bias"),
+            tag("kv"),
+            tag("gp"),
+            tag("rp"),
+            tag("ms"),
+            tag("a"),
+            tag("k"),
+            tag("c"),
+        ))(input)?;
+        let (rest, _) = ws_comments(rest)?;
+        let (rest, _) = peek(char('='))(rest)?;
+        Ok((rest, name))
+    }
+
+    // Optional leading model name — only if it is NOT a key=value override.
+    let input = if peek(override_key)(input).is_ok() {
+        input
+    } else if let Ok((input, model)) = model_name_str(input) {
+        config = TapeHeadConfig::with_model(model.to_string());
+        input
+    } else {
+        input
+    };
+    let (input, _) = ws_comments(input)?;
+
+    // Comma-separated key=value overrides.
+    let mut remaining = input;
+    loop {
+        if let Ok((input, _)) = tuple((
+            ws_comments,
+            char::<&str, nom::error::Error<&str>>(','),
+            ws_comments,
+        ))(remaining)
+        {
+            remaining = input;
+        }
+
+        if let Ok((input, name)) = override_key(remaining) {
+            let (input, _) = char('=')(input)?;
+            let (input, _) = ws_comments(input)?;
+            let (input, value) = eng_value(input)?;
+            match name {
+                "kv" => config.kv = value,
+                "isat" => config.isat = value,
+                "gp" => config.gp = value,
+                "rp" => config.rp = value,
+                "h_bias" => config.h_bias = value,
+                "ms" => config.ja_ms = value,
+                "a" => config.ja_a = value,
+                "alpha" => config.ja_alpha = value,
+                "k" => config.ja_k = value,
+                "c" => config.ja_c = value,
+                _ => unreachable!(),
+            }
+            remaining = input;
+            continue;
+        }
+        break;
+    }
+
+    let (input, _) = ws_comments(remaining)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((input, Box::new(TapeHeadComp { config })))
+}
+
 /// `cap_switched([1.5u, 220n, 68n, 27n])` — capacitor with switchable values
 fn parse_cap_switched(input: &str) -> IResult<&str, BoxComp> {
     let (input, _) = tag("cap_switched")(input)?;
@@ -2060,6 +2229,7 @@ fn component_kind(input: &str) -> IResult<&str, BoxComp> {
             parse_matched_npn, // must come before parse_matched_pnp
             parse_matched_pnp,
             parse_tempco,
+            parse_tape_head, // must come before parse_transformer (distinct tag, kept grouped)
             parse_transformer,
             parse_rotary_switch,
             parse_switch, // simple n-position switch
