@@ -601,6 +601,100 @@ mod tests {
             .all(|one_port| matches!(one_port.spec.kind, OnePortKind::Capacitor(_))));
     }
 
+    /// Regression lock for the state-space OUTPUT extraction when the output
+    /// node is ALGEBRAIC (resistive / VCVS-driven, no capacitor on it).
+    ///
+    /// An algebraic output node's voltage is a linear function of BOTH the
+    /// input AND the dynamic (capacitor) state vector:
+    ///   v_out_alg = (G_aa⁻¹·b_a)·u  +  (−G_aa⁻¹·G_ac)·x
+    /// `build_state_space_matrices` must fold the state part into `c_vector`
+    /// (NOT collapse it entirely into the direct feedthrough `d`). If the
+    /// state coupling were dropped, the algebraic output would be a flat
+    /// feedthrough `y = d·u` and the circuit's frequency shaping would vanish.
+    ///
+    /// Circuit: VS(0) → R_in(10k) → pos(1) ; C(10nF): pos(1) → gnd ;
+    /// unity buffer VCVS pos=1, neg=out, out=2. Output node = 2 (ALGEBRAIC).
+    /// node1 is a first-order RC low-pass of the input (corner ~1.6 kHz),
+    /// buffered to node2. The output MUST roll off with frequency: low-freq
+    /// gain ≈ 1, high-freq gain ≪ 1. A non-trivial `c_vector` is the only way
+    /// that state dependence reaches the algebraic output.
+    #[test]
+    fn state_space_algebraic_output_retains_state_coupling() {
+        use crate::tree::MnaSystem;
+
+        let fs = 48_000.0;
+        let mut mna = MnaSystem::new(3, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_resistor(Some(0), Some(1), 10_000.0); // R_in
+                                                        // unity buffer: pos=1, neg=out=2 (op-amp follower)
+        mna.stamp_vcvs(Some(1), Some(2), Some(2), None, 200_000.0, 75.0, 1);
+
+        // Capacitor on the (algebraic-feeding) pos node -> RC low-pass.
+        let reactive_one_ports = alloc::vec![OnePort::new(
+            PortTerminals::single_ended(MnaNodeId::new(1)),
+            OnePortKind::Capacitor(10e-9),
+        )];
+
+        // Output node 2 is the VCVS output: ALGEBRAIC (no cap on it).
+        let (a_d, b_d, c_out, n_states, d_ft) =
+            mna.build_state_space_matrices(&reactive_one_ports, 0, Some(2), None, fs);
+
+        assert!(n_states >= 1, "expected >=1 dynamic state, got {n_states}");
+
+        // The decisive invariant: the algebraic output's state coupling must
+        // survive in c_vector. If the bug were present, c_vector would be all
+        // zero and the entire response would live in the constant feedthrough.
+        let c_norm: crate::Wave = c_out.iter().map(|v| v.abs()).sum();
+        assert!(
+            c_norm > 1e-6,
+            "algebraic-output c_vector collapsed to ~0 ({c_out:?}); state \
+             coupling was dropped into feedthrough d={d_ft}"
+        );
+
+        // Behavioural check: measure peak gain at a low and a high frequency.
+        let measure = |freq: crate::Wave| -> crate::Wave {
+            let n = (fs * 0.5) as usize;
+            let mut x = alloc::vec![0.0; n_states];
+            let mut work = alloc::vec![0.0; n_states];
+            let mut peak = 0.0 as crate::Wave;
+            for i in 0..n {
+                let u = crate::math::sin(
+                    2.0 * crate::math::PI * freq * i as crate::Wave / fs,
+                );
+                for r in 0..n_states {
+                    let mut v = b_d[r] * u;
+                    for cc in 0..n_states {
+                        v += a_d[r * n_states + cc] * x[cc];
+                    }
+                    work[r] = v;
+                }
+                let mut y = d_ft * u;
+                for r in 0..n_states {
+                    // trapezoidal output (matches bilinear midpoint)
+                    y += c_out[r] * (work[r] + x[r]) * 0.5;
+                }
+                x.copy_from_slice(&work);
+                if i > n * 3 / 4 {
+                    peak = peak.max(y.abs());
+                }
+            }
+            peak
+        };
+
+        let g_low = measure(100.0);
+        let g_high = measure(15_000.0);
+        // Low-freq passes (~unity), high-freq is rolled off by the RC.
+        assert!(
+            g_low > 0.7,
+            "low-frequency gain {g_low:.4} should be near unity"
+        );
+        assert!(
+            g_high < 0.5 * g_low,
+            "high-frequency gain {g_high:.4} should roll off below low \
+             gain {g_low:.4}; a flat feedthrough would NOT roll off"
+        );
+    }
+
     #[test]
     fn state_space_stage_exposes_declarative_route_bindings() {
         let ss = StateSpaceData {

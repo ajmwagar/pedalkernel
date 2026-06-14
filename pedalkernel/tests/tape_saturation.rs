@@ -309,14 +309,25 @@ fn saturation_thd_rises_with_drive() {
 // (8) TONE AUTHORITY — KNOWN ENGINE LIMIT (documented, ignored)
 // ===========================================================================
 //
-// The post-transformer passive Tone network does not propagate to the output
-// in the current WDF lowering (component-value changes downstream of the
-// transformer split do not move the measured response). The Tone pot is
-// present for provenance/BOM; its audio authority is a future refinement.
+// ROOT CAUSE (empirically verified 2026-06-14 via a stage-chain probe, NOT the
+// state-space output-extraction path originally suspected):
+//   tape_saturation compiles to 5 stages — WDF(PassiveRType), WDF(ShortCircuit),
+//   BlackFeedback, BlackFeedback, WDF(ShortCircuit) — and contains NO StateSpace
+//   stage at all. The compiled Controls list binds only `Drive` (BlackFeedback
+//   stage 2) and `Output` (WDF stage 4); `Tone` is DROPPED during compilation
+//   and is bound to no stage, so set_control("Tone", ..) is inert. The passive
+//   playback EQ (R_sec/R_bump/C_bump/R_hf/C_hf/Tone) sits between two op-amp
+//   (BlackFeedback) stages and is not lowered as a live, pot-controlled network.
+//   This is a compiler control-discovery + passive-EQ-lowering gap, NOT a
+//   state-space matrix-extraction bug — the algebraic-output state coupling in
+//   MnaSystem::build_state_space_matrices is correct and now locked by the rt
+//   unit test `state_space_algebraic_output_retains_state_coupling`.
 #[test]
-#[ignore = "Post-transformer Tone network is inert in the current WDF lowering: \
-sweeping Tone 0..1 at 4 kHz moves the level < 0.1 dB (measured). Downstream \
-passive values do not propagate past the transformer tree split. Future work."]
+#[ignore = "Tone is dropped during compilation: tape_saturation has no StateSpace \
+stage; only Drive+Output are bound as live controls. The passive playback EQ \
+between the BlackFeedback op-amp stages is not lowered as a pot-controlled \
+network, so sweeping Tone 0..1 at 4 kHz moves the level 0.00 dB (measured). \
+Compiler control-discovery / passive-EQ-lowering gap, not an extraction bug."]
 fn tone_control_has_authority() {
     let f = 4000.0;
     let mut levels = Vec::new();
