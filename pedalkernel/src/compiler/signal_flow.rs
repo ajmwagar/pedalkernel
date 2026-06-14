@@ -1483,6 +1483,27 @@ pub(in crate::compiler) fn find_flow_groups(
                     || comp.kind.is_tube()
             });
 
+            // A *series* diode (both terminals are interior signal nodes, neither
+            // tied to a rail) sits IN the through-path — e.g. a half-wave
+            // rectifier `in -> R1 -> D1 -> RL -> gnd`. Like a transistor's signal
+            // path, it must keep its adjacent series resistors in the same MNA
+            // block: an isolated diode node sees only the GMIN leak (~1e9 Ω) for a
+            // Thevenin source, so it can never develop a junction voltage and
+            // fails to rectify (the stage degenerates to a unity pass-through).
+            //
+            // Shunt clippers (one diode terminal on a rail, the classic
+            // diode-to-ground clipper) are deliberately left split so their
+            // downstream tone/coupling networks compile as independent passive
+            // WDF/IIR stages — that path is already correct and must not change.
+            let has_series_diode = scc.iter().any(|&i| {
+                let edge = &graph.edges[active_elements[i].edge_idx];
+                let comp = &graph.components[edge.comp_idx];
+                comp.kind.is_diode_family()
+                    && !rails.contains(&edge.node_a)
+                    && !rails.contains(&edge.node_b)
+            });
+            should_claim_local_passives |= has_series_diode;
+
             // F10: a tube fed from an upstream INTERIOR node (a passive
             // network between `in` and the grid, e.g. an EQ ahead of a
             // makeup stage) must NOT claim local passives here. Claiming

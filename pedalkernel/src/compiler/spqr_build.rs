@@ -2266,6 +2266,76 @@ pub(super) fn build_spqr_stage_with_options(
             let oversampler = Oversampler::new(OversamplingFactor::X1);
             let mut wdf_stage = WdfStage::new(tree, root, oversampler);
             wdf_stage.base_diode_model = base_diode_model;
+
+            // Series-diode rectifier output extraction.
+            //
+            // For a diode root the stage normally reports the *junction* voltage
+            // −(a_root + b_tree)/2, i.e. the voltage across the diode itself.
+            // That is correct for the canonical cases the diode root was built
+            // for: a shunt clipper (diode to ground — junction voltage IS the
+            // output) and an op-amp feedback clipper (diode across the feedback
+            // path). But in a *series* rectifier `in -> R1 -> D1 -> RL -> gnd`,
+            // the circuit output is the load voltage at the diode's cathode
+            // (D1.b / RL.a), NOT the diode junction voltage. Reporting the
+            // junction voltage there yields an inverted, non-rectifying signal.
+            //
+            // Detect the series-rectifier shape: a single-diode whose cathode
+            // (output terminal "b") drives exactly one resistor to ground (the
+            // load RL), with one resistor between the anode and the source (R1).
+            // The output load voltage follows from KVL: V_RL = (Vin - V_diode) *
+            // RL/(R1+RL). Record that divider so the runtime computes the load
+            // voltage. Shunt clippers (cathode == gnd) leave it unset and keep the
+            // junction-voltage behaviour.
+            if matches!(nl_kind, super::classify::NonlinearKind::SingleDiode(_)) {
+                let is_gnd = |n: super::graph::NodeId| -> bool {
+                    n == graph.gnd_node || graph.ac_ground_nodes.contains(&n)
+                };
+                // Diode terminals: anode = input "a" = e.node_a, cathode = "b".
+                let anode = e.node_a;
+                let cathode = e.node_b;
+                // Total series resistance touching a node (excluding the diode).
+                let series_r_at = |node: super::graph::NodeId| -> f64 {
+                    edge_indices
+                        .iter()
+                        .filter(|&&eidx| eidx != nl_edge_idx)
+                        .filter_map(|&eidx| {
+                            let le = &graph.edges[eidx];
+                            if le.node_a == node || le.node_b == node {
+                                graph.components[le.comp_idx].kind.resistance()
+                            } else {
+                                None
+                            }
+                        })
+                        .sum()
+                };
+                if !is_gnd(cathode) {
+                    // Load resistance: cathode → gnd resistors (RL).
+                    let r_load: f64 = edge_indices
+                        .iter()
+                        .filter(|&&eidx| eidx != nl_edge_idx)
+                        .filter_map(|&eidx| {
+                            let le = &graph.edges[eidx];
+                            let touches_cathode = le.node_a == cathode || le.node_b == cathode;
+                            let other = if le.node_a == cathode {
+                                le.node_b
+                            } else {
+                                le.node_a
+                            };
+                            if touches_cathode && is_gnd(other) {
+                                graph.components[le.comp_idx].kind.resistance()
+                            } else {
+                                None
+                            }
+                        })
+                        .sum();
+                    // Source-side series resistance feeding the anode (R1).
+                    let r_series = series_r_at(anode);
+                    if r_load > 0.0 && (r_series + r_load).is_finite() {
+                        wdf_stage.series_rectifier_divider = Some(r_load / (r_series + r_load));
+                    }
+                }
+            }
+
             Ok(BuiltStage::Wdf(wdf_stage))
         }
         SpqrStage::Rigid {
