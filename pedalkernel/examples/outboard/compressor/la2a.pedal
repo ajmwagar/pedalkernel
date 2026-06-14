@@ -151,8 +151,13 @@ equipment "Teletronix LA-2A" {
 
   nets {
     # --- Input transformer: signal in, unbalanced out into the GR divider ---
+    # 4-terminal two-port: primary (a,b) across the input, secondary (c,d)
+    # feeds the GR divider. (2-terminal a/b usage degenerates to a series
+    # inductor with no turns-ratio transfer — see signal-routing RCA.)
     in -> T_in.a
-    T_in.b -> C_in.a
+    T_in.b -> gnd
+    T_in.c -> C_in.a
+    T_in.d -> gnd
 
     # --- T4B passive GR divider: series R, audio CdS cell shunt to ground ---
     C_in.b -> R_gr.a
@@ -190,8 +195,14 @@ equipment "Teletronix LA-2A" {
     R_k3.b -> gnd
 
     # --- Output transformer: CF output -> primary -> 600 Ω line ---
+    # 4-terminal two-port: primary (a,b) is the CF load (reflects the 600 Ω
+    # secondary load as n^2*600 = 9.6k to the follower); secondary (c,d) is
+    # the 600 Ω line. 4:1 voltage step-down on the secondary. (2-terminal a/b
+    # usage degenerates to a 10 H series inductor with NO turns ratio.)
     C_c3.b -> T_out.a
-    T_out.b -> R_load.a, out
+    T_out.b -> gnd
+    T_out.c -> R_load.a, out
+    T_out.d -> gnd
     R_load.b -> gnd
 
     # --- Sidechain feedback tap: from the OUTPUT (post-xfmr) ---

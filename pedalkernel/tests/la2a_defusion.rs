@@ -63,16 +63,15 @@ fn stage_label(stage: &Stage) -> String {
 }
 
 /// MASK 8 — STRUCTURAL (the de-fusion proof): NO single compiled stage may
-/// contain BOTH "T_in" and "T_out" in its `debug_label`. The detector tap
-/// over-fuses the input transformer, the sidechain front-end, and the output
-/// transformer into one connected PassiveRType group whose label holds both.
-/// After the detector-tap cut they split into separate forward stages.
+/// contain BOTH "T_in" and "T_out" in its `debug_label`.
 ///
-/// RED today: one stage's label
-/// `C37,C_c3,C_in,C_sc,PR,R37a,R_ff,R_gr,R_load,T_in,T_out,__fork_0_path_0,__fork_0_path_1`
-/// contains both "T_in" and "T_out".
+/// GREEN since the 4-terminal transformer rewire (`la2a.pedal`): wiring T_in
+/// and T_out as proper two-ports (primary a/b, secondary c/d) gives the output
+/// transformer galvanic isolation, so the detector tap no longer bridges T_in
+/// and T_out into one passive group. T_out now lands in its own stage with the
+/// V3 cathode follower; T_in is separate. The faithful wiring resolves the
+/// mask-8 over-fusion without a detector-tap-cut compiler change.
 #[test]
-#[ignore = "MASK 8 de-fusion proof: detector tap over-fuses T_in+T_out into one passive group (signal_flow.rs passive grouping does not barrier in/out). RED until the detector-tap-cut fix lands."]
 fn la2a_output_network_is_not_one_fused_group() {
     let src = example_pedal_source(LA2A);
     let def = parse_pedal_file(&src).expect("parse la2a");
@@ -99,9 +98,10 @@ fn la2a_output_network_is_not_one_fused_group() {
 /// floor (> -40 dB). BLOCKED BY A THIRD CAUSE independent of the detector-loop
 /// fusion (see `forward_only_chain_is_collapsed_even_without_sidechain`).
 ///
-/// RED today: ~-99 dB with the sidechain present (fused).
+/// RED: ~-121.8 dB post 4-terminal rewire. The output network is now DE-FUSED
+/// (structural gate green), so this is NOT transformer wiring or mask-8 fusion.
 #[test]
-#[ignore = "BLOCKED BY THIRD CAUSE (forward-cascade collapse, NOT mask-8 fusion): forward-only LA-2A with the sidechain removed still reads ~-78.5 dB. De-fusion alone cannot clear -40 dB. Out of scope for the de-fusion task; left RED."]
+#[ignore = "BLOCKED BY CASCADE ROUTING (§3 signal-flow): post 4-terminal rewire the output network de-fuses (structural gate green) but the multi-stage forward path does not chain — T_in is pulled into the sidechain group via the Limit feed-forward fork, and the heuristic inter-stage routing does not carry the forward signal (~-121.8 dB). Needs the signal-flow/cascade-routing work."]
 fn la2a_forward_path_passes_signal() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[
