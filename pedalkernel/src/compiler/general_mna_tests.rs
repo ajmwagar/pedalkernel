@@ -2,10 +2,12 @@
 //
 // These verify the most complex part of the SPQR pipeline:
 // MNA scattering matrix construction + Newton-Raphson solver for
-// nonlinear elements (BJTs, coupled diodes).
+// nonlinear elements (BJTs, coupled diodes, tubes).
 
+use super::compiled::Stage;
 use super::spqr_build::compile_via_spqr;
 use crate::PedalProcessor;
+use pedalkernel_rt::stage::NlDeviceGroupKind;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Single BJT tests
@@ -353,5 +355,105 @@ fn general_mna_silence_in_silence_out() {
     assert!(
         final_output.abs() < 0.1,
         "Silence in → near-silence out (DC blocked): {final_output:.4}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Pentode push-pull routing test
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Push-pull pentode stages MUST route through NlDeviceGroupKind::PentodeThreePort,
+/// not a fallback K-table or single-port WdfStage.
+///
+/// WHY: A pentode in push-pull needs the 3-port grid-context solve (Vgk + Vpk coupled
+/// via the Koren model) to correctly model the interaction between the coupling-cap
+/// charging path at the grid and the plate current. Without the 3-port path the
+/// pentode falls back to a lookup table which cannot represent the grid-cathode
+/// conduction diode or the cross-derivative ∂Ip/∂Vgk. This produces wrong THD and
+/// wrong class-AB crossover behaviour.
+#[test]
+fn push_pull_pentode_routes_to_pentode_three_port() {
+    // Push-Pull 6L6: two 6L6GC pentodes in class-AB push-pull driving a CT transformer.
+    // (Mirrors pedalkernel-validate/circuits/active/push_pull_6l6.pedal)
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "Push-Pull 6L6" {
+          supply 400V
+          components {
+            C1: cap(22n)
+            C2: cap(22n)
+            Rg1: resistor(220k)
+            Rg2: resistor(220k)
+            Rk: resistor(250)
+            Ck: cap(100u)
+            V1: pentode(6l6gc)
+            V2: pentode(6l6gc)
+            Rsg1: resistor(1k)
+            Rsg2: resistor(1k)
+            Csg: cap(47u)
+            T1: transformer(25:1, 10H, pp)
+            RL: resistor(8)
+          }
+          nets {
+            in -> C1.a
+            C1.b -> Rg1.a, V1.g1
+            Rg1.b -> gnd
+            gnd -> C2.a
+            C2.b -> Rg2.a, V2.g1
+            Rg2.b -> gnd
+            V1.cathode -> Rk.a, Ck.a
+            V2.cathode -> Rk.a
+            Rk.b -> gnd
+            Ck.b -> gnd
+            vcc -> Rsg1.a
+            Rsg1.b -> V1.g2, Csg.a
+            vcc -> Rsg2.a
+            Rsg2.b -> V2.g2, Csg.a
+            Csg.b -> gnd
+            V1.plate -> T1.a
+            V2.plate -> T1.b
+            T1.c -> RL.a, out
+            T1.d -> gnd
+            RL.b -> gnd
+          }
+        }
+        "#,
+    )
+    .expect("parse push_pull_6l6 pedal");
+
+    let compiled =
+        compile_via_spqr(&pedal, 48000.0).expect("push_pull_6l6 should compile without error");
+
+    // Find the MultiNlStage that contains the pentodes.
+    let pentode_three_port_found = compiled.stages.iter().any(|stage| {
+        if let Stage::MultiNl(ref mnl) = stage {
+            if let Some(ref dg) = mnl.device_groups {
+                return dg
+                    .groups
+                    .iter()
+                    .any(|g| matches!(g, NlDeviceGroupKind::PentodeThreePort(_)));
+            }
+        }
+        false
+    });
+
+    assert!(
+        pentode_three_port_found,
+        "push_pull_6l6 pentodes must route to NlDeviceGroupKind::PentodeThreePort \
+         (3-port grid-context coupled solver). Got stages: {:?}",
+        compiled
+            .stages
+            .iter()
+            .map(|s| match s {
+                Stage::Wdf(_) => "Wdf",
+                Stage::MultiNl(_) => "MultiNl",
+                Stage::Iir(_) => "Iir",
+                Stage::StateSpace(_) => "StateSpace",
+                Stage::BlackFeedback(_) => "BlackFeedback",
+                Stage::Blockwise(_) => "Blockwise",
+                Stage::SerialDelayedFeedback(_) => "SerialDelayedFeedback",
+                Stage::KMethod { .. } => "KMethod",
+            })
+            .collect::<Vec<_>>()
     );
 }
