@@ -1,0 +1,57 @@
+* ============================================================================
+* MXR Dyna Comp — CA3080 OTA compressor, ngspice reference
+* PedalKernel Validation Circuit (bead pedalkernel-mbte.3)
+* ============================================================================
+* Mirrors examples/pedals/compressor/dyna_comp.pedal:
+*   in -> C1 -> R1 -> U1.pos (CA3080 OTA, gm ∝ Iabc) ; R2 feedback sets ratio
+*   -> C3 -> Output. Sidechain: EF1 envelope_follower(1k,10u,100k,1u,10k)
+*   FEED-FORWARD (taps C1.b) -> U1.iabc (the OTA bias current = gain control).
+* The CA3080 OTA is an IC; a behavioral transconductance model (the standard
+* SPICE approach) is used: Iout = Iabc * tanh(Vdiff/(2*Vt)).
+*
+* VERIFIED (orchestrator, 2026-06-15, ngspice direct, NO bootstrap):
+*   - CONVERGES. COMPRESSES: gain 2635x@in=0.05 -> 263x@in=0.5 (strong GR).
+*   NOTE: the iabc sens (1m/(1+40*env)) is OVER-AGGRESSIVE (near-limiting) — the
+*   validation agent should tune it + the loads to the real CA3080 gm and the
+*   dyna_comp gain staging for a musical ratio. Direction + physics are correct.
+*
+* HARNESS: strip the standalone Vin SINE + .control block; inject the harness
+* PWL stimulus at `in` and read the output node (mirror push_pull_6l6.spice).
+* Consider repo model refs for the OTA if available; otherwise this behavioral
+* CA3080 is the standard reference. EF detector is feed-forward (no loop).
+* ----------------------------------------------------------------------------
+
+.param Vt=0.026
+.model Ddet D(IS=1e-14)
+V_vcc vcc 0 9
+V_ref vref 0 4.5
+
+C1 in n1 1u
+R1 n1 npos 10k
+R3 npos vref 560k
+
+* CA3080 OTA: Iout = Iabc * tanh(Vdiff/(2Vt)) into load + feedback R2
+B_ota nout 0 I = V(niabc) * tanh( (V(npos)-V(nneg))/(2*Vt) )
+R_oload nout vref 220k
+R2 nneg nout 150k
+R_nb nneg vref 1meg
+C3 nout no2 1u
+R_o no2 0 500k
+
+* feed-forward envelope detector on n1: attack 1k/10u (~10ms), release 100k/1u (~100ms)
+B_rect nrect 0 V = abs(V(n1)-4.5)
+R_att nrect na 1k
+D_att na nenv Ddet
+C_env nenv 0 10u ic=0
+R_rel nenv 0 100k
+* iabc: rest = high gm (full gain); rising envelope reduces iabc -> gain reduction
+B_iabc niabc 0 V = 1m / (1 + 40*V(nenv))
+
+* --- standalone inspection stimulus (harness replaces this) ---
+Vin in 0 SINE(4.5 0.1 1k)
+.control
+tran 20u 150m uic
+let g = maximum(abs(v(no2)))/maximum(abs(v(n1)-4.5))
+print g
+.endc
+.end
