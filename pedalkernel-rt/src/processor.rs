@@ -828,6 +828,39 @@ pub struct InternalPortBinding {
     pub prev_value: crate::Wave,
 }
 
+/// Compiler-synthesized DETECTOR → photocoupler-LED coupling (Phase 3) — the
+/// actual gain-reduction loop closure of a cross-network feedback detector
+/// (the LA-2A `EL_drive.b -> PC1.led` light path).
+///
+/// This is the optical, non-electrical half of the de-fused detector: it reads
+/// the detector's solved EL-drive value (carried one sample late by the
+/// `internal_ports[carry_idx]` z⁻¹ register, Phase 2b), rectifies + normalizes
+/// it to a 0..1 LED drive, and pushes it into the T4B photocoupler's two-rate
+/// cell (`set_led_drive`), which darkens the LDR shunt leaf in the FORWARD
+/// gain-reduction divider — louder program -> brighter EL panel -> lower cell
+/// resistance -> more attenuation. The one-sample (z⁻¹) delay (reusing the 2b
+/// carry) breaks the otherwise-instantaneous feedback loop, exactly the
+/// `cv_delayed` precedent.
+///
+/// NARROW: only synthesized for a true delayed feedback detector (LA-2A opto
+/// leveler). Non-detector circuits leave this `None`, so the
+/// envelope-follower → LED modulation path (`ModulationTarget::PhotocouplerLed`,
+/// used by `opto_leveler.pedal`) is entirely untouched.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DetectorLedCoupling {
+    /// Index into `internal_ports` of the EL-drive carry (its `prev_value` is
+    /// last sample's solved detector output — the z⁻¹ closure).
+    pub carry_idx: usize,
+    /// The photocoupler (LDR) component id to drive (e.g. `PC1`).
+    pub comp_id: String,
+    /// Stage index that owns the photocoupler LDR leaf in the forward divider.
+    pub stage_idx: usize,
+    /// Normalization gain: `led = (|el_drive| * scale).clamp(0, 1)`. Chosen so a
+    /// loud-program EL-drive maps near full illumination.
+    pub scale: crate::Wave,
+}
+
 pub use crate::routing::{
     BindingId, BkmVsRouteBinding, GraphRoutedBkm, PortBinding, Route, StageRouteDebug,
     StageRoutePlan,
@@ -1571,6 +1604,12 @@ pub struct CompiledPedal {
     /// Not user-overridable; written/read entirely inside `process()`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub internal_ports: Vec<InternalPortBinding>,
+    /// Compiler-synthesized DETECTOR → photocoupler-LED coupling (Phase 3) — the
+    /// gain-reduction loop closure for a cross-network feedback detector
+    /// (LA-2A). `None` for every other circuit (envelope-follower opto levelers
+    /// drive the LED via `ModulationTarget::PhotocouplerLed`, unchanged).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub detector_led_coupling: Option<DetectorLedCoupling>,
     /// Auto-init flag: cache_all_vs_pointers runs once on first process() call.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub initialized: bool,
@@ -3218,6 +3257,40 @@ impl PedalProcessor for CompiledPedal {
             if ip.consumer_node_id != usize::MAX {
                 self.node_signals
                     .push((ip.consumer_node_id, ip.prev_value * ip.gain));
+            }
+        }
+
+        // Phase 3 — CLOSE THE GR LOOP. Drive the photocoupler LED from the
+        // detector's solved EL-drive value, carried one sample late (the z⁻¹
+        // closure that breaks the otherwise-instantaneous feedback loop). The
+        // T4B cell darkens the FORWARD shunt leaf -> downward gain reduction.
+        // This runs BEFORE the WDF stages so the cell resistance is current
+        // when the forward divider solves this sample.
+        if let Some(coupling) = self.detector_led_coupling.clone() {
+            if let Some(ip) = self.internal_ports.get(coupling.carry_idx) {
+                // Rectify (full-wave) + normalize the carried EL-drive node
+                // value to a 0..1 LED drive. The T4B set_led_drive applies the
+                // physical attack/release of the EL panel + CdS cell.
+                let led = (ip.prev_value.abs() * coupling.scale).clamp(0.0, 1.0);
+                match self.stages.get_mut(coupling.stage_idx) {
+                    // Shunt CdS cell that compiled as a WDF leaf.
+                    Some(Stage::Wdf(wdf)) => {
+                        // Leaf-positioned (the shunt cell) — same XOR fallback
+                        // as route_envelope_modulation; the LED never drives an
+                        // input-path series gain for a shunt CdS divider.
+                        if !wdf.set_photocoupler_led(&coupling.comp_id, led) {
+                            wdf.set_input_photocoupler_led(&coupling.comp_id, led);
+                        }
+                    }
+                    // Shunt CdS cell fused into the MNA stage with the makeup
+                    // tube V1 (the LA-2A faithful case: stage label
+                    // `C_in,...,PC1,...,V1`) — the cell is an MNA G-matrix
+                    // conductance, driven via the MultiNlStage setter.
+                    Some(Stage::MultiNl(mnl)) => {
+                        mnl.set_photocoupler_led(&coupling.comp_id, led);
+                    }
+                    _ => {}
+                }
             }
         }
 

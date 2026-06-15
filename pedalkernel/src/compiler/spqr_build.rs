@@ -219,6 +219,7 @@ pub fn compile_via_spqr_with_options(
             ports: Vec::new(),
             port_values: Vec::new(),
             internal_ports: Vec::new(),
+            detector_led_coupling: None,
             initialized: false,
         };
         compiled.set_supply_voltage(supply_voltage);
@@ -282,6 +283,7 @@ pub fn compile_via_spqr_with_options(
             ports: Vec::new(),
             port_values: Vec::new(),
             internal_ports: Vec::new(),
+            detector_led_coupling: None,
             initialized: false,
         };
         compiled.set_supply_voltage(supply_voltage);
@@ -2088,6 +2090,7 @@ pub fn compile_via_spqr_with_options(
         ports: Vec::new(),
         port_values: Vec::new(),
         internal_ports: Vec::new(),
+        detector_led_coupling: None,
         initialized: false,
     };
     compiled.set_supply_voltage(supply_voltage);
@@ -2299,6 +2302,7 @@ fn populate_detector_internal_ports(
     }
 
     // EL-drive carry-only port (the detector output, for Phase 3 + measurement).
+    // carry_idx 0 = the EL-drive carry the Phase-3 LED coupling reads.
     let internal_ports = vec![InternalPortBinding {
         source_node_id: el_node,
         consumer_node_id: usize::MAX,
@@ -2316,6 +2320,44 @@ fn populate_detector_internal_ports(
     }
 
     compiled.internal_ports = internal_ports;
+
+    // ---- Phase 3: close the GR loop (LED -> cell -> forward shunt). --------
+    // The carry above stores the detector's solved EL-drive value one sample
+    // late. Synthesize the optical coupling that turns that value into actual
+    // gain reduction: drive the photocoupler (`coupler_comp_id` = PC1) LED from
+    // |EL_drive| each sample. The runtime reads `internal_ports[0].prev_value`
+    // (the z⁻¹ closure), rectifies + normalizes it, and calls `set_led_drive`,
+    // darkening the LDR shunt leaf in the FORWARD divider -> downward GR.
+    if let Some(coupler) = coupler_comp_id {
+        // Find the WDF stage that owns the photocoupler's LDR leaf (its
+        // conductive forward-divider position — the shunt cell ahead of V1).
+        let mut led_stage_idx: Option<usize> = None;
+        for (si, comp_ids) in stage_comp_ids.iter().enumerate() {
+            if comp_ids.iter().any(|c| c == &coupler) {
+                led_stage_idx = Some(si);
+                break;
+            }
+        }
+        if let Some(stage_idx) = led_stage_idx {
+            // Normalization: a loud-program detector drives EL_drive to ~15 V
+            // peak (see la2a_detector_el_drive_tracks_program); quiet ~0.05 V.
+            // scale = 1/15 maps loud -> ~full illumination, quiet -> near dark.
+            // The T4B two-rate cell (set_led_drive) provides attack/release.
+            compiled.detector_led_coupling =
+                Some(pedalkernel_rt::processor::DetectorLedCoupling {
+                    carry_idx: 0,
+                    comp_id: coupler,
+                    stage_idx,
+                    scale: 1.0 / 15.0,
+                });
+            #[cfg(test)]
+            eprintln!(
+                "  [3] detector LED coupling: carry=0 comp={:?} stage={stage_idx} scale={}",
+                compiled.detector_led_coupling.as_ref().map(|c| &c.comp_id),
+                1.0 / 15.0
+            );
+        }
+    }
 }
 
 /// Build the initial `DelayLineBinding`s (with real tap ratios and configured

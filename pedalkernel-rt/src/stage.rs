@@ -6420,6 +6420,68 @@ impl MultiNlStage {
         None
     }
 
+    /// Set the LED drive of a photocoupler LDR leaf held among this stage's
+    /// MNA `pot_children` (a controlled G-matrix conductance, not a WDF port)
+    /// and delta-update the scattering matrix so the new cell resistance takes
+    /// effect on the FORWARD divider this sample. Returns `true` if a matching
+    /// photocoupler was found.
+    ///
+    /// This is the MultiNlStage counterpart of `WdfStage::set_photocoupler_led`.
+    /// Used by the LA-2A Phase-3 detector → LED gain-reduction coupling, where
+    /// the T4B shunt cell compiles into the same MNA stage as the makeup tube
+    /// V1 (stage label `C_in,...,PC1,...,V1`). The recompute is threshold-gated
+    /// (the cell's resistance trajectory is band-limited by its own ms-to-s time
+    /// constants) so audio-rate re-inversion is avoided.
+    pub fn set_photocoupler_led(&mut self, comp_id: &str, led_drive: crate::Wave) -> bool {
+        // Locate the photocoupler among pot_children and the variable-resistor
+        // binding that maps it into the MNA G matrix (so we can read its
+        // post-set resistance and threshold-gate the expensive recompute).
+        let mut found = false;
+        let mut child_hit: Option<usize> = None;
+        for (ci, child) in self.pot_children.iter_mut().enumerate() {
+            if child.set_photocoupler_led(comp_id, led_drive) {
+                found = true;
+                child_hit = Some(ci);
+            }
+        }
+        if !found {
+            return false;
+        }
+        // Threshold-gate the (matrix-re-inverting) recompute on a meaningful
+        // relative resistance change vs the conductance last folded into the G
+        // matrix. The cell's resistance trajectory is band-limited by its own
+        // ms-to-s time constants, so its control content lives well below audio
+        // rate — re-inverting the scattering matrix every sample is wasted work.
+        let should_recompute = match child_hit {
+            Some(ci) => {
+                let new_r = self.pot_children[ci].port_resistance();
+                if new_r.is_finite() && new_r > 0.0 {
+                    let new_g = 1.0 / new_r;
+                    // Compare against the matching binding's last-applied g.
+                    match self
+                        .variable_resistors
+                        .iter()
+                        .find(|ps| ps.child_idx == ci)
+                    {
+                        Some(ps) => {
+                            let last_g = ps.conductance;
+                            (new_g - last_g).abs() > CTRL_R_RECOMPUTE_EPS * last_g.abs()
+                        }
+                        // No binding match — recompute to be safe.
+                        None => true,
+                    }
+                } else {
+                    false
+                }
+            }
+            None => true,
+        };
+        if should_recompute {
+            self.recompute_scattering();
+        }
+        found
+    }
+
     /// Recompute the scattering matrix from stored MNA data after a pot change.
     ///
     /// Rebuilds WdfPort vec with current port resistances from nl_port_resistances

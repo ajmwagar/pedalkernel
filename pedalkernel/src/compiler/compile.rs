@@ -352,6 +352,7 @@ fn compile_subcircuit_equipment(
         ports: Vec::new(),
         port_values: Vec::new(),
         internal_ports: Vec::new(),
+        detector_led_coupling: None,
         initialized: false,
     })
 }
