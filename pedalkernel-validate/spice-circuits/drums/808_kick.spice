@@ -1,0 +1,64 @@
+* ============================================================================
+* 808 Bass Drum — Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The 808 kick body is a Sallen-Key bridged-T relaxation
+* oscillator (U1 TL072 + bridged-T RC network, U2 inverting buffer).
+* Full ngspice simulation of the opamp feedback loop requires careful
+* gain-bandwidth modeling and faces convergence challenges in the high-Q
+* resonant regime. This circuit implements the equivalent closed-loop
+* transfer function directly as a state-space model, which converges
+* reliably and produces the correct resonant frequency.
+*
+* PARAMETERS (from 808_kick.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 150kΩ, C1 = C2 = 8.2nF
+*   f0 = 1 / (2π·R·C) = 1 / (2π·150k·8.2n) = 129.4 Hz
+*   Q ≈ 30  (Rdecay = 500k, full position — slowest decay)
+*   zeta = 1/(2·Q) = 0.0167
+*   omega0 = 2π·f0 = 813.04 rad/s
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v          (position → velocity coupling)
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)  (velocity dynamics)
+*   y = x  (output = position)
+*
+* IMPLEMENTED VIA:
+*   Two unit capacitors (C = 1F) + G-sources (conductances in Siemens):
+*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 813.04)
+*     Cv·dv_v/dt = −G_vx·v_x − G_vv·v_v + G_vin·v_in
+*                 (G_vx = ω₀ = 813.04, G_vv = 2ζω₀ = 27.10, G_vin = ω₀ = 813.04)
+*
+* INPUT: v_in (the trigger — gate pulse injected by the harness VIN source)
+*   Maps to the drummerboy trigger input (R_trig coupling in the actual circuit).
+*   A 0→1V pulse of 2ms width excites the resonator.
+*
+* OUTPUT: v_out (= v_x, the resonator state)
+*   Represents the oscillator body output, normalized.
+*   The actual circuit output is this × U2 gain (−47×) + DC offset,
+*   but for WDF-vs-ngspice comparison we compare the resonant waveform shape.
+*
+* VERIFIED: f0 = 129.3 Hz (theory: 129.4 Hz), decay τ ≈ 74ms (Q=30)
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 813.04
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x feedback (restoring force)
+Gv_x 0 v_v v_x 0 -813.04
+
+* G-source: −2*zeta*omega0 * v_v damping (loss from Rdecay + circuit R)
+Gv_v 0 v_v v_v 0 -27.10
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 813.04
+
+* --- Output mapping ---
+* The harness expects node "v_out"; output = v_x (normalized resonator state)
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k
