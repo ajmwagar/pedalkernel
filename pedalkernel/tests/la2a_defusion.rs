@@ -151,7 +151,7 @@ fn t_in_is_not_in_the_detector_group() {
 /// RED: ~-121.8 dB post 4-terminal rewire. The output network is now DE-FUSED
 /// (structural gate green), so this is NOT transformer wiring or mask-8 fusion.
 #[test]
-#[ignore = "PHASE 2a de-fuses the detector (T_in is OUT of the detector group; the detector front-end C37/PR/R37a/R_ff is its own stage) — full LA-2A rose -175.6 dB -> -127.2 dB at 1 kHz. Still blocked by the THIRD CAUSE (forward-cascade routing): the T_in secondary (T_in.c) is a stage boundary with no port, so the V1 group is not yet fed to level. 2a only proves de-fusion; the T_in.c forward-cascade port is later work."]
+#[ignore = "THIRD CAUSE (transformer Tight-coupling) is FIXED: T_in primary is no longer bypass_serial and the output group sorts after V1 (broker `is_tight_coupled_link` honored by bias_analysis reachability + the flow-distance BFS). The forward path now PASSES — a 4-terminal forward-only LA-2A reads +17 dB, and removing only the `in -> fork(LC, [gnd, R_ff.a])` arm from the full netlist gives +23 dB. The remaining full-LA-2A collapse (-99.5 dB) is a SEPARATE, fourth cause: that Limit/Compress fork's `in -> gnd` arm shares the `in` node with T_in.a and shorts the live input (it is the detector feed-forward mouth at the `in` seed, skipped by `delayed_cut_edges` because its interior is the gnd rail). Un-bypassing T_in (correctly) exposed that pre-existing short. Fixing it is detector/fork de-fusion work, out of scope for the transformer-coupling task. Left ignored pending the fork de-fuse."]
 fn la2a_forward_path_passes_signal() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[
@@ -308,11 +308,15 @@ fn forward_only_is_already_defused() {
     );
 }
 
-/// THIRD-CAUSE evidence: the forward chain alone (no sidechain, already de-fused)
-/// still collapses far below -40 dB. This documents that the LA-2A level gate is
-/// blocked by a forward-cascade cause independent of mask-8 fusion.
+/// FORWARD-PATH PASSES (was the "third cause" evidence, now GREEN): the forward
+/// chain alone (no sidechain, already de-fused) used to collapse far below -40 dB.
+/// With the transformer Tight-coupling fix (broker `is_tight_coupled_link` honored
+/// by the reachability + flow-distance analyses) the forward cascade now passes
+/// signal: this de-fused forward-only LA-2A reads ~+9.6 dB at 1 kHz (was ~-30.8).
+/// The historical name is kept for traceability; the assertion (> -40 dB) is the
+/// same — it simply holds now. (The FULL la2a is still blocked by the unrelated
+/// Limit/Compress fork short — see `la2a_forward_path_passes_signal`.)
 #[test]
-#[ignore = "THIRD-CAUSE evidence (forward-cascade collapse): forward-only LA-2A reads ~-78.5 dB at 1 kHz despite being fully de-fused. Documents that de-fusion alone cannot clear -40 dB."]
 fn forward_only_chain_is_collapsed_even_without_sidechain() {
     let resp = frequency_response_db(
         || pedal_processor(LA2A_FWD_ONLY, SAMPLE_RATE, &[("Gain", 0.6)]),

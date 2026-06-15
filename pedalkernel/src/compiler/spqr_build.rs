@@ -323,6 +323,14 @@ pub fn compile_via_spqr_with_options(
     // tone third, etc.) regardless of the order find_flow_groups returned them.
     let group_flow_distances = compute_group_flow_distances(&feedback_groups, &graph);
 
+    // Broker (d-2): does this circuit have a mid-chain Tight transformer coupling
+    // (plain two-port, secondary != out)? If so, the rail-crossing grid-hop walk
+    // used to order triode stages under-counts everything behind the magnetic gap,
+    // and the corrected broker-coupled-link-aware `group_flow_distances` must be
+    // used for those stages instead. Computed once (cheap; consults the broker).
+    let has_tight_coupled_transformer =
+        super::boundary_rules::has_tight_coupled_transformer(&graph);
+
     // Step 1c: Classify each group as signal path or static bias.
     // Static bias groups (VCC dividers) are bypassed in the serial audio
     // chain — they still process and meter, but don't overwrite the signal.
@@ -1270,8 +1278,30 @@ pub fn compile_via_spqr_with_options(
                             supply_voltage,
                         )
                         .map_err(|e| format!("Group {gi} (triode-context MNA): {e}"))?;
-                        let triode_flow_dist = bfs_dist_from_in_node(grid_node, &graph)
-                            .unwrap_or(group_flow_distances[gi]);
+                        // A triode's serial position is normally its grid's hop
+                        // distance from `in` (`bfs_dist_from_in_node`). That walk
+                        // is undirected AND crosses rails, so once a circuit has a
+                        // mid-chain plain two-port transformer (whose magnetic
+                        // primary↔secondary coupling is NOT a graph edge), every
+                        // triode downstream of the gap is reached only via rail
+                        // shortcuts and gets spuriously SMALL distances — scrambling
+                        // the serial order (LA-2A's output group sorting ahead of
+                        // V1/V2). `group_flow_distances[gi]` is the corrected
+                        // rail-blocked, directed, broker-coupled-link-aware distance
+                        // (d-2, now honoring the Tight link). Defer to it ONLY when
+                        // the circuit actually has such a Tight coupling — which is
+                        // exactly the case the rail-crossing grid walk gets wrong.
+                        // Circuits without a mid-chain two-port (ordinary tube amps:
+                        // their output transformer is its OWN group and its
+                        // secondary is `out`, which the broker excludes; cap-coupled
+                        // amps with no transformer at all) keep the existing grid
+                        // distance, byte-for-byte. (Broker consult only.)
+                        let triode_flow_dist = if has_tight_coupled_transformer {
+                            group_flow_distances[gi]
+                        } else {
+                            bfs_dist_from_in_node(grid_node, &graph)
+                                .unwrap_or(group_flow_distances[gi])
+                        };
                         push_stage!(
                             BuiltStage::MultiNl(built),
                             triode_flow_dist,

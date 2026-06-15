@@ -846,6 +846,23 @@ pub(in crate::compiler) fn directed_signal_distances_from_in(
             add(elem.input_node, out);
         }
     }
+    // A plain two-port transformer couples primary↔secondary through magnetic
+    // flux — a link recorded in `coupled_nodes`, NOT in `graph.edges`, so the
+    // edge scan above never sees it. Without it, a mid-chain transformer whose
+    // secondary feeds a SEPARATE downstream stage leaves that whole secondary
+    // side unreachable from `in`: it gets no distance, so the stage-ordering
+    // pass sorts it BEFORE the stages that actually feed it (LA-2A's output
+    // group sorting ahead of V1). The broker's `Tight` coupled-link rule says
+    // the winding pair is a traversable signal connection; cross it in both
+    // directions so the secondary side is reachable from `in`. (Consults the
+    // broker only; gated to plain two-ports whose secondary isn't `out`.)
+    for (node, others) in graph.coupled_nodes.iter() {
+        for &other in others {
+            if super::boundary_rules::is_tight_coupled_link(graph, *node, other) {
+                add(*node, other);
+            }
+        }
+    }
 
     let mut visited: HashMap<NodeId, usize> = HashMap::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();

@@ -209,6 +209,119 @@ fn node_is_rail(graph: &CircuitGraph, node: NodeId) -> bool {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Tight coupled link — the broker rule honored by the reachability/ordering
+// analyses (the "third cause" fix)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// True iff `(node_a, node_b)` is a **`Tight` coupled signal link** — i.e. the
+/// primary↔secondary winding pair of a plain two-port transformer that the
+/// reachability (`bias_analysis`) and stage-ordering (flow-distance BFS)
+/// analyses must TRAVERSE as a co-solved signal connection.
+///
+/// # Why this rule lives here (and what it means)
+///
+/// A transformer couples its primary and secondary through magnetic flux, NOT a
+/// galvanic edge — the link is recorded in [`CircuitGraph::coupled_nodes`], never
+/// in `graph.edges`. The two analyses BFS only `graph.edges`, so a mid-chain
+/// two-port transformer whose secondary feeds a SEPARATE downstream stage is
+/// invisible to them: the primary group looks like a rail-only stub (bias) and
+/// the secondary side is unreachable from `in`. The broker's [`BoundaryPolicy::Tight`]
+/// policy already says a conducting/cascade coupling is co-solved and traversable;
+/// this predicate is the concrete, model-grounded test the analyses consult to
+/// honor that policy across the magnetic link.
+///
+/// # Gate (deliberately narrow — see the LA-2A "third cause" task)
+///
+/// Fires ONLY when ALL hold, so it never touches couplings that already work:
+/// * `node_a`/`node_b` are coupled winding nodes of the SAME transformer, and
+/// * one is on the PRIMARY winding and the other on the SECONDARY (the
+///   cross-winding link — never an intra-winding `a↔b` pair), and
+/// * NEITHER node is a rail (the analyses traverse signal terminals only), and
+/// * the transformer is a plain TWO-PORT (`!has_tertiary()` — a tertiary /
+///   center-tapped 3-winding R-type adaptor is excluded; those work today), and
+/// * the SECONDARY node is NOT the global `out` (an output-transformer-to-`out`
+///   stage already orders/classifies correctly — fixing it would move amp
+///   goldens; this gate keeps `tweed_deluxe_5e3` et al. byte-identical).
+///
+/// The two analyses each call this once to decide "also traverse this coupled
+/// link", keeping the transformer-specific knowledge HERE in the broker.
+pub(super) fn is_tight_coupled_link(
+    graph: &CircuitGraph,
+    node_a: NodeId,
+    node_b: NodeId,
+) -> bool {
+    // The pair must be a recorded coupled link (magnetic, not a graph edge).
+    if !graph
+        .coupled_nodes
+        .get(&node_a)
+        .is_some_and(|others| others.contains(&node_b))
+    {
+        return false;
+    }
+    // Neither end may be a rail: the analyses traverse signal terminals only.
+    if node_is_rail(graph, node_a) || node_is_rail(graph, node_b) {
+        return false;
+    }
+    // Both ends must be transformer winding nodes of the SAME transformer, on
+    // OPPOSITE windings (the primary↔secondary cross-link).
+    let (Some(info_a), Some(info_b)) = (
+        graph.transformer_info.get(&node_a),
+        graph.transformer_info.get(&node_b),
+    ) else {
+        return false;
+    };
+    if info_a.comp_idx != info_b.comp_idx || info_a.is_secondary == info_b.is_secondary {
+        return false;
+    }
+    // Plain TWO-PORT only: exclude tertiary / 3-winding R-type adaptors.
+    let comp = &graph.components[info_a.comp_idx];
+    let Some(cfg) = comp.kind.transformer_config() else {
+        return false;
+    };
+    if cfg.has_tertiary() {
+        return false;
+    }
+    // The secondary winding must NOT be the global `out` node: an
+    // output-transformer-to-`out` stage already classifies/orders correctly and
+    // must stay byte-identical (tweed/bassman/marshall tripwire).
+    let secondary_node = if info_a.is_secondary { node_a } else { node_b };
+    if secondary_node == graph.out_node {
+        return false;
+    }
+    true
+}
+
+/// All `Tight` coupled-link neighbours of `node` (the broker's traversal hook for
+/// the reachability/ordering analyses). Each returned node is the OPPOSITE-winding
+/// terminal of a plain two-port transformer reachable from `node` via its magnetic
+/// coupling — i.e. every `n` for which [`is_tight_coupled_link`]`(graph, node, n)`
+/// holds. Empty for non-transformer nodes and for the excluded cases.
+pub(super) fn tight_coupled_neighbors(graph: &CircuitGraph, node: NodeId) -> Vec<NodeId> {
+    let Some(others) = graph.coupled_nodes.get(&node) else {
+        return Vec::new();
+    };
+    others
+        .iter()
+        .copied()
+        .filter(|&other| is_tight_coupled_link(graph, node, other))
+        .collect()
+}
+
+/// True iff the circuit contains at least one `Tight` coupled transformer link —
+/// i.e. a plain two-port (non-tertiary) transformer crossing a stage boundary
+/// whose secondary is not the global `out`. This is the circuit-level flag the
+/// stage-ordering pass uses to decide that the rail-crossing grid-hop distance is
+/// unreliable (a mid-chain magnetic gap is present) and the corrected, broker-
+/// coupled-link-aware flow distance must be used instead. False for ordinary amps
+/// (output transformer to `out`, or cap-coupled) — they keep their existing order.
+pub(super) fn has_tight_coupled_transformer(graph: &CircuitGraph) -> bool {
+    graph
+        .coupled_nodes
+        .iter()
+        .any(|(&node, others)| others.iter().any(|&o| is_tight_coupled_link(graph, node, o)))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BoundaryPolicy — the WHOLE rule table in one place
 // ═══════════════════════════════════════════════════════════════════════════
 
