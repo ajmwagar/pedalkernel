@@ -38,7 +38,7 @@ tools/.venv/bin/python tools/mouser_bom.py \
     --qty 5 --csv bom.csv
 ```
 
-`--qty` multiplies the per-circuit quantity by the number of units you want to build (5 units of the Big Muff in this example). The same BOM functionality is also available in Rust via `pedalkernel::hw::build_bom` — see the [Hardware export](./hardware.md) page.
+`--qty` multiplies the per-circuit quantity by the number of units you want to build (5 units of the Big Muff in this example). The tool reads `.pedal` files directly and picks up part-name overrides from any companion `.pedalhw` file. See the [Hardware export](./hardware.md) page for the broader story.
 
 ## Benchmarks
 
