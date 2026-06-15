@@ -45,7 +45,7 @@ analysis = ["std"]
 
 [dependencies]
 # Runtime crate (WDF engine, elements, tree)
-pedalkernel-rt = { path = "../pedalkernel-rt" }
+pedalkernel-rt = { path = "../pedalkernel-rt", version = "0.1.0" }
 
 # DSL parser
 nom = "7"
