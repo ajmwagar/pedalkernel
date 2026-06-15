@@ -351,6 +351,8 @@ fn compile_subcircuit_equipment(
         original_passive_values: hashbrown::HashMap::new(),
         ports: Vec::new(),
         port_values: Vec::new(),
+        internal_ports: Vec::new(),
+        detector_led_coupling: None,
         initialized: false,
     })
 }

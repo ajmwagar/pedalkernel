@@ -80,7 +80,13 @@ fn la2a_output_network_is_not_one_fused_group() {
     let mut both = None;
     for (i, stage) in compiled.stages.iter().enumerate() {
         let label = stage_label(stage);
-        eprintln!("[Stage {i}] {stage:?} label={label:?}");
+        let (byp, inj, outn) = match stage {
+            Stage::Wdf(w) => (w.bypass_serial, w.injection_node_id, w.output_node_id),
+            Stage::MultiNl(m) => (m.bypass_serial, m.injection_node_id, m.output_node_id),
+            _ => (false, usize::MAX, usize::MAX),
+        };
+        eprintln!("[Stage {i}] label={label:?} bypass={byp} inj={inj} out={outn}");
+        let _ = stage;
         if label.contains("T_in") && label.contains("T_out") {
             both = Some((i, label));
         }
@@ -94,14 +100,74 @@ fn la2a_output_network_is_not_one_fused_group() {
     );
 }
 
-/// MASK 8 — LEVEL: full LA-2A forward gain at 1 kHz must clear the silence
-/// floor (> -40 dB). BLOCKED BY A THIRD CAUSE independent of the detector-loop
-/// fusion (see `forward_only_chain_is_collapsed_even_without_sidechain`).
-///
-/// RED: ~-121.8 dB post 4-terminal rewire. The output network is now DE-FUSED
-/// (structural gate green), so this is NOT transformer wiring or mask-8 fusion.
+/// PHASE 2a (broker-driven de-fusion) — STRUCTURAL: `T_in` must NOT share a
+/// stage with the detector front-end (`PR`/`R37a`/`R_ff`/`C37`). Before 2a, the
+/// detector feedback tap fused `C_sc,R37a,PR,R_ff,...,T_in,R_load` into ONE
+/// passive group, stranding `T_in` at a large signal-flow distance and starving
+/// the forward V1 group. The broker `delayed_cut_edges` cuts the tap-mouth edges
+/// (`C_sc` out-side, the `R_ff`/fork arm in-side) so the detector de-fuses into
+/// its own stage. GREEN since Phase 2a.
 #[test]
-#[ignore = "BLOCKED BY CASCADE ROUTING (§3 signal-flow): post 4-terminal rewire the output network de-fuses (structural gate green) but the multi-stage forward path does not chain — T_in is pulled into the sidechain group via the Limit feed-forward fork, and the heuristic inter-stage routing does not carry the forward signal (~-121.8 dB). Needs the signal-flow/cascade-routing work."]
+fn t_in_is_not_in_the_detector_group() {
+    let src = example_pedal_source(LA2A);
+    let def = parse_pedal_file(&src).expect("parse la2a");
+    let compiled = compile_pedal(&def, SAMPLE_RATE).expect("compile la2a");
+
+    // The stage holding the detector front-end (the Peak-Reduction tap network).
+    let mut detector_stage = None;
+    let mut t_in_stage = None;
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        let label = stage_label(stage);
+        let comps: Vec<&str> = label.split(',').collect();
+        eprintln!("[Stage {i}] label={label:?}");
+        // Detector front-end = the Peak-Reduction pot tap network (PR/R37a).
+        if comps.iter().any(|c| *c == "PR") && comps.iter().any(|c| *c == "R37a") {
+            detector_stage = Some(i);
+        }
+        if comps.iter().any(|c| *c == "T_in") {
+            t_in_stage = Some(i);
+        }
+    }
+
+    let detector_stage = detector_stage.expect("detector front-end (PR/R37a) must compile");
+    let t_in_stage = t_in_stage.expect("T_in must compile into a stage");
+    assert_ne!(
+        detector_stage, t_in_stage,
+        "PHASE 2a: T_in (stage {t_in_stage}) is still fused with the detector \
+         front-end (stage {detector_stage}) — the tap-mouth cut did not de-fuse"
+    );
+
+    // And the detector front-end must NOT drag T_in OR the output load in.
+    let det_label = stage_label(&compiled.stages[detector_stage]);
+    let det_comps: Vec<&str> = det_label.split(',').collect();
+    assert!(
+        !det_comps.contains(&"T_in"),
+        "detector stage must not contain T_in: {det_label:?}"
+    );
+    assert!(
+        !det_comps.contains(&"R_load") && !det_comps.contains(&"T_out"),
+        "detector stage must not contain the output network: {det_label:?}"
+    );
+}
+
+/// MASK 8 — LEVEL: full LA-2A forward gain at 1 kHz must clear the silence
+/// floor (> -40 dB).
+///
+/// GREEN since Phase 2b. History of the four causes, all now resolved:
+///   1-2. mask-8 detector-loop over-fusion + transformer 4-terminal rewire
+///        (`la2a_output_network_is_not_one_fused_group`).
+///   3.   transformer Tight-coupling (broker `is_tight_coupled_link` honored by
+///        the reachability + flow-distance analyses): the forward cascade passes
+///        (`forward_only_chain_is_collapsed_even_without_sidechain` ~+9.6 dB).
+///   4.   the Limit/Compress fork short. `expand_forks` turns
+///        `in -> fork(LC, [gnd, R_ff.a])` into two synthetic resistors BOTH on
+///        the live `in` node; path 0 (`in -> gnd`, the Compress shunt) shorted
+///        the input transformer to ground (-99.5 dB). Phase 2b's broker step (4b)
+///        in `delayed_cut_edges` cuts BOTH fork arms at the `in` seed (the
+///        gnd-shunt arm via a narrow rail-interior relaxation gated on a sibling
+///        arm reaching the detector closure), so the fork no longer conducts on
+///        the forward `in`. The full LA-2A forward path now reads ~+50 dB.
+#[test]
 fn la2a_forward_path_passes_signal() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[
@@ -121,6 +187,112 @@ fn la2a_forward_path_passes_signal() {
     assert!(
         gain > -40.0,
         "MASK 8/level: LA-2A forward gain {gain:+.1} dB collapsed (expected > -40 dB)"
+    );
+}
+
+/// PHASE 2b — the de-fused detector OUTPUT (`EL_drive`) must TRACK the program
+/// signal: a louder input must produce a larger detector drive. The detector is
+/// driven by the internal delayed-port carries (the cut `in`/`out` taps delivered
+/// one sample late); its solved `EL_drive` value is captured every sample into
+/// the carry-only internal port's `prev_value` (AVAILABLE for Phase 3 — NO gain
+/// reduction is applied in 2b). This measures that carry directly.
+///
+/// Because NO GR is applied, the forward gain is unchanged from the de-fused
+/// forward path (no compression) — verified separately by
+/// `la2a_forward_path_passes_signal`. Here we only assert the detector RESPONDS.
+#[test]
+fn la2a_detector_el_drive_tracks_program() {
+    let src = example_pedal_source(LA2A);
+    let def = parse_pedal_file(&src).expect("parse la2a");
+
+    // Compile twice (independent processors) and drive each at a different input
+    // amplitude; the detector EL-drive carry must be larger for the louder input.
+    let peak_el_drive = |amp: f64| -> f64 {
+        let mut proc = compile_pedal(&def, SAMPLE_RATE).expect("compile la2a");
+        for &(label, val) in &[
+            ("Gain", 0.6f64),
+            ("Peak Reduction", 0.5),
+            ("Limit/Compress", 0.0),
+        ] {
+            proc.set_control(label, val);
+        }
+        // The carry-only internal port (consumer == MAX) is the EL-drive output.
+        let el_idx = proc
+            .internal_ports
+            .iter()
+            .position(|p| p.consumer_node_id == usize::MAX)
+            .expect("EL_drive carry-only internal port must exist");
+
+        let n = (SAMPLE_RATE * 0.2) as usize; // 200 ms, past the settling transient
+        let mut peak = 0.0f64;
+        for i in 0..n {
+            let t = i as f64 / SAMPLE_RATE;
+            let s = amp * (2.0 * std::f64::consts::PI * PROBE_HZ * t).sin();
+            let _ = proc.process(s);
+            // Read AFTER process(): end-of-sample z⁻¹ write stored this sample's
+            // solved EL-drive value into prev_value.
+            if i > n / 2 {
+                peak = peak.max(proc.internal_ports[el_idx].prev_value.abs());
+            }
+        }
+        peak
+    };
+
+    let quiet = peak_el_drive(0.02);
+    let loud = peak_el_drive(0.20);
+    eprintln!("EL_drive peak: quiet(0.02)={quiet:.6e}  loud(0.20)={loud:.6e}");
+
+    assert!(
+        loud > quiet * 1.5,
+        "PHASE 2b: detector EL_drive must track program — louder input ({loud:.3e}) \
+         should drive the detector harder than quiet ({quiet:.3e})"
+    );
+    assert!(
+        loud > 0.0,
+        "PHASE 2b: detector EL_drive is dead (no program tracking): {loud:.3e}"
+    );
+}
+
+/// PHASE 1 (cross-network-coupler de-fuse) — LED-side isolation barrier.
+///
+/// The faithful la2a.pedal now wires the T4B LED as a real galvanically-isolated
+/// electrical port-pair: `EL_drive.b -> PC1.led.a` / `gnd -> PC1.led.b`. The LED
+/// edge is declared `EdgeKind::Behavioral`, so it is NEVER claimed into a
+/// FlowGroup and CANNOT union the sidechain (LED-side) network into the audio
+/// (LDR-side) network. This test asserts the structural barrier holds: the LDR
+/// leaf (PC1) and the LED-driving sidechain element (EL_drive, the 6AQ5 panel
+/// winding) land in SEPARATE stages — they were never electrically fused
+/// through the LED. (Phase 1 keeps the LED optically dark — no contribute/read
+/// yet — so this is purely a non-merge / boundary-port structural check.)
+#[test]
+fn la2a_photocoupler_led_does_not_fuse_sidechain_into_audio() {
+    let src = example_pedal_source(LA2A);
+    let def = parse_pedal_file(&src).expect("parse la2a");
+    let compiled = compile_pedal(&def, SAMPLE_RATE).expect("compile la2a");
+
+    let mut pc1_stage = None;
+    let mut el_drive_stage = None;
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        let label = stage_label(stage);
+        eprintln!("[Stage {i}] label={label:?}");
+        // Match the LDR leaf id exactly (`PC1`), not the EL-drive substring.
+        if label.split(',').any(|c| c == "PC1") {
+            pc1_stage = Some(i);
+        }
+        if label.split(',').any(|c| c == "EL_drive") {
+            el_drive_stage = Some(i);
+        }
+    }
+
+    let pc1_stage = pc1_stage.expect("PC1 (LDR) must compile into a stage");
+    let el_drive_stage =
+        el_drive_stage.expect("EL_drive (LED-side winding) must compile into a stage");
+    assert_ne!(
+        pc1_stage, el_drive_stage,
+        "PHASE 1: the photocoupler LDR side (PC1, stage {pc1_stage}) and the \
+         LED-driving sidechain winding (EL_drive, stage {el_drive_stage}) fused \
+         into ONE stage — the Behavioral LED edge failed to isolate the two \
+         galvanically-isolated networks"
     );
 }
 
@@ -215,11 +387,15 @@ fn forward_only_is_already_defused() {
     );
 }
 
-/// THIRD-CAUSE evidence: the forward chain alone (no sidechain, already de-fused)
-/// still collapses far below -40 dB. This documents that the LA-2A level gate is
-/// blocked by a forward-cascade cause independent of mask-8 fusion.
+/// FORWARD-PATH PASSES (was the "third cause" evidence, now GREEN): the forward
+/// chain alone (no sidechain, already de-fused) used to collapse far below -40 dB.
+/// With the transformer Tight-coupling fix (broker `is_tight_coupled_link` honored
+/// by the reachability + flow-distance analyses) the forward cascade now passes
+/// signal: this de-fused forward-only LA-2A reads ~+9.6 dB at 1 kHz (was ~-30.8).
+/// The historical name is kept for traceability; the assertion (> -40 dB) is the
+/// same — it simply holds now. (The FULL la2a is still blocked by the unrelated
+/// Limit/Compress fork short — see `la2a_forward_path_passes_signal`.)
 #[test]
-#[ignore = "THIRD-CAUSE evidence (forward-cascade collapse): forward-only LA-2A reads ~-78.5 dB at 1 kHz despite being fully de-fused. Documents that de-fusion alone cannot clear -40 dB."]
 fn forward_only_chain_is_collapsed_even_without_sidechain() {
     let resp = frequency_response_db(
         || pedal_processor(LA2A_FWD_ONLY, SAMPLE_RATE, &[("Gain", 0.6)]),

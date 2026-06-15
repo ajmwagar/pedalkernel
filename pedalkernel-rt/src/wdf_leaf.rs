@@ -14,7 +14,9 @@ use crate::pot_taper::PotTaper;
 // Import the elements::WdfLeaf trait to call port_resistance/set_sample_rate/reset
 // on Photocoupler and JfetVariableResistor. Renamed to avoid conflict with our WdfLeaf.
 use crate::elements::WdfLeaf as ElementsWdfLeaf;
-use crate::elements::{JfetVariableResistor, Photocoupler as PhotocouplerInner, WdfJaMagnetizing};
+use crate::elements::{
+    JfetVariableResistor, Photocoupler as PhotocouplerInner, WdfJaMagnetizing, WdfTapeHeadVoltage,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WdfLeaf trait
@@ -623,6 +625,55 @@ impl WdfLeaf for WdfJaMagnetizing {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// WdfTapeHeadVoltage
+// ═══════════════════════════════════════════════════════════════════════════
+
+impl WdfLeaf for WdfTapeHeadVoltage {
+    fn reflected(&mut self) -> crate::Wave {
+        self.last_b
+    }
+
+    fn set_incident(&mut self, a: crate::Wave) {
+        self.last_b = self.root.process(a);
+    }
+
+    fn port_resistance(&self) -> crate::Wave {
+        self.root.port_resistance()
+    }
+
+    fn comp_id(&self) -> Option<&str> {
+        self.comp_id.as_deref()
+    }
+
+    fn type_tag(&self) -> &'static str {
+        "tape_head_voltage"
+    }
+
+    fn is_reactive(&self) -> bool {
+        // Carries magnetic (M, H) state between samples — a stateful one-port.
+        true
+    }
+
+    fn reset(&mut self) {
+        self.last_b = 0.0;
+        self.root.reset();
+    }
+
+    fn debug_info(&self) -> String {
+        let id = self.comp_id.as_deref().unwrap_or("?");
+        format!(
+            "TapeHeadVoltage(id=\"{id}\", Rp={:.1}Ω, M={:.3e})",
+            self.root.port_resistance(),
+            self.root.magnetization()
+        )
+    }
+
+    fn clone_box(&self) -> Box<dyn WdfLeaf> {
+        Box::new(self.clone())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // WdfSwitchedResistor
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -769,6 +820,7 @@ pub enum LeafKind {
     Photocoupler(WdfPhotocoupler),
     JfetVr(WdfJfetVr),
     JaMagnetizing(WdfJaMagnetizing),
+    TapeHeadVoltage(WdfTapeHeadVoltage),
     SwitchedResistor(WdfSwitchedResistor),
     UnitDelay(WdfUnitDelay),
 }
@@ -859,6 +911,7 @@ macro_rules! delegate_leaf {
             LeafKind::Photocoupler(x) => x.$method($($arg),*),
             LeafKind::JfetVr(x) => x.$method($($arg),*),
             LeafKind::JaMagnetizing(x) => x.$method($($arg),*),
+            LeafKind::TapeHeadVoltage(x) => x.$method($($arg),*),
             LeafKind::SwitchedResistor(x) => x.$method($($arg),*),
             LeafKind::UnitDelay(x) => x.$method($($arg),*),
         }

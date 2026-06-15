@@ -171,6 +171,27 @@ fn interior_reaches_signal(
         }
     }
 
+    // A plain two-port transformer couples its windings through magnetic flux,
+    // NOT a graph edge — the link is in `coupled_nodes`, invisible to the edge
+    // scan above. A transformer-primary group whose galvanic edge bridges
+    // interior↔rail (e.g. LA-2A's `T_in`: primary across `in`↔gnd) would be
+    // mis-classified StaticBias and bypassed, collapsing the forward path. The
+    // broker's `Tight` coupled-link rule says that primary↔secondary pair is a
+    // co-solved, traversable SIGNAL connection: if any of this group's winding
+    // nodes is one end of a Tight link whose OTHER end is non-rail, the group
+    // carries signal. (Consults the broker only; no transformer special-casing
+    // here.)
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        for node in [e.node_a, e.node_b] {
+            for other in super::boundary_rules::tight_coupled_neighbors(graph, node) {
+                if !rail_set.contains(&other) {
+                    return true;
+                }
+            }
+        }
+    }
+
     false
 }
 

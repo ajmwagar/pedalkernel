@@ -384,6 +384,8 @@ fn upsert_control(
         .find(|b| b.label == ctrl.label && b.component_id == ctrl.component)
     {
         existing.target = target;
+        // Drop stale coordinated pot/divider targets — now a delay target.
+        existing.targets.clear();
     } else {
         let comp = pedal.components.iter().find(|c| c.id == ctrl.component);
         let max_r = comp.and_then(|c| c.kind.resistance()).unwrap_or(100_000.0);
@@ -393,6 +395,7 @@ fn upsert_control(
         compiled.controls.push(ControlBinding {
             label: ctrl.label.clone(),
             target,
+            targets: Vec::new(),
             component_id: ctrl.component.clone(),
             max_resistance: max_r,
             taper,

@@ -1,0 +1,119 @@
+* ============================================================================
+* Tape Head Saturation — voltage-driven Jiles-Atherton head (ngspice golden)
+* PedalKernel Validation Circuit
+* ============================================================================
+* Faithful ngspice behavioural model of the SHIPPED voltage-driven J-A tape
+* head element (pedalkernel-rt .../jiles_atherton.rs::TapeHeadVoltageRoot,
+* DSL component compiler/components/tape_head.rs::studio_head).
+*
+* Engine circuit it mirrors (circuits/tape/tape_head_saturation.pedal):
+*   v_in --[R_pri 470]--> v_out ; R_load 2.2k v_out->0 ; head sinks i(V) at v_out
+*
+* The harness drives v_in with a PWL source and measures V(v_out).
+*
+* --------------------------------------------------------------------------
+* ELEMENT CONSTITUTIVE RELATION (the SHIPPED port law, reproduced here)
+* --------------------------------------------------------------------------
+*   Field from gap voltage:     H = kv * V + h_bias                  [A/m]
+*   Anhysteretic curve:         M_an = Ms * L((H + alpha*M)/a)       Langevin
+*                               L(x) = coth(x) - 1/x
+*   Jiles-Atherton field slope (rate-independent, dM/dH):
+*       dM/dH = (1-c)*deltaM*(M_an-M) / (delta*k*(1-c) - alpha*(M_an-M))
+*               + c * dM_an/dH
+*     delta  = sign(dH/dt)         (ascending/descending branch select)
+*     deltaM = 1 if (M_an-M)*delta >= 0 else 0   (wall-motion gate)
+*   Port current (head sinks this at v_out):
+*       i(V) = Gp * V + Isat * M / Ms                                [A]
+*
+* In the field-domain element, M is advanced rate-INDEPENDENTLY: dM = (dM/dH) dH.
+* For an ngspice TRANSIENT golden we realize the mathematically identical
+* trajectory in TIME by chain rule, dM/dt = (dM/dH) * (dH/dt), and integrate it
+* with an Sdt() integrator behavioural source. Because the J-A slope dM/dH is
+* rate-independent, M(t) follows the SAME H->M curve the element produces; only
+* the independent variable of integration changes (H vs t), so V(out)(t) matches.
+*
+* --------------------------------------------------------------------------
+* PARAMETERS — STUDIO-HEAD defaults, 1:1 with the element
+* --------------------------------------------------------------------------
+.param Ms=3.5e5            $ saturation magnetization        [A/m]
+.param Aja=1500            $ J-A 'a' (domain density shape)   [A/m]
+.param Alpha=1.6e-3        $ inter-domain coupling
+.param Kja=30              $ J-A 'k' (pinning/coercivity)     [A/m]
+.param Cja=0.65            $ J-A 'c' (reversible fraction)
+.param Kv=8000             $ field-per-volt coupling          [A/m per V]
+.param Isat=2.0e-4         $ saturating magnetic current      [A]
+.param Gp=8.0e-5           $ linear leakage conductance       [S]
+.param Hbias=400           $ record-bias field offset         [A/m]
+.param Rp=1000             $ WDF scattering port R (info only) [ohm]
+
+* Surrounding passive network (matches the .pedal exactly)
+R_pri  v_in v_out 470
+R_load v_out 0     2.2k
+
+* --------------------------------------------------------------------------
+* Field from gap voltage:  H = Kv*V(v_out) + Hbias
+* --------------------------------------------------------------------------
+Bh h 0 V = Kv*V(v_out) + Hbias
+
+* dH/dt for the branch-direction sign and the chain-rule rate.
+Bhdot hdot 0 V = ddt(V(h))
+
+* --------------------------------------------------------------------------
+* Anhysteretic magnetization and its field slope.
+*   q = (H + alpha*M)/a ;  L(q)=coth(q)-1/q ;  L'(q)=1/q^2 - 1/sinh(q)^2
+*   M_an = Ms*L(q) ;  dM_an/dH = Ms*L'(q)/a
+* (small-q series guards avoid the 1/q singularity at q->0, matching the
+*  element's langevin()/langevin_d() series branches.)
+* --------------------------------------------------------------------------
+.func Lang(x)  {abs(x) < 1e-4 ? (x/3 - x*x*x/45) : (1/tanh(x) - 1/x)}
+.func LangD(x) {abs(x) < 1e-4 ? (1.0/3 - x*x/15) : (1/(x*x) - 1/(sinh(x)*sinh(x)))}
+
+Bman  man  0 V = Ms * Lang( (V(h) + Alpha*V(m)) / Aja )
+BdmanH dmanh 0 V = Ms * LangD( (V(h) + Alpha*V(m)) / Aja ) / Aja
+
+* --------------------------------------------------------------------------
+* Jiles-Atherton field slope dM/dH (clamped non-negative like the element).
+*   delta  = sign(dH/dt)
+*   deltaM = 1 if (M_an-M)*delta >= 0 else 0
+*   diff   = M_an - M
+*   den    = delta*k*(1-c) - alpha*diff       (sign-preserving eps guard)
+*   slope  = (1-c)*deltaM*diff/den + c*dM_an/dH       (>= c*dM_an/dH, >= 0)
+* --------------------------------------------------------------------------
+* ngspice cannot parse the monolithic nested-ternary form LTspice accepts, so
+* the J-A slope is decomposed into intermediate behavioural nodes (same math):
+Bdelta  delta  0 V = (V(hdot) >= 0 ? 1 : -1)
+Bdiff   diff   0 V = V(man) - V(m)
+BdeltaM deltaM 0 V = ((V(diff)*V(delta)) >= 0 ? 1 : 0)
+Bden    den    0 V = V(delta)*Kja*(1-Cja) - Alpha*V(diff)
+* sign-preserving eps guard on the denominator (matches element/jiles_atherton.rs):
+Bdeng   deng   0 V = (abs(V(den)) < 1e-9*(1+abs(V(diff))) ? (V(den) >= 0 ? 1e-9*(1+abs(V(diff))) : -1e-9*(1+abs(V(diff)))) : V(den))
+* slope = (1-c)*deltaM*diff/den + c*dM_an/dH, clamped >= c*dM_an/dH (>= 0):
+Bslope  slope  0 V = max( (1-Cja)*V(deltaM)*V(diff)/V(deng) + Cja*V(dmanh), Cja*V(dmanh) )
+
+* --------------------------------------------------------------------------
+* Integrate M in TIME along the J-A trajectory:  dM/dt = (dM/dH)*(dH/dt)
+* (rate-independent slope -> identical H->M curve as the element).
+* Seed M at the anhysteretic value at the bias field (matches reset()):
+*   M0 = Ms*L(Hbias/a) approx (alpha*M term negligible at seed).
+* ic on the integrator sets the initial magnetization.
+* ngspice has no sdt()/idt(): realize the integral with a native 1 F capacitor
+* integrator — a current source drives charge dM = (slope*hdot) dt onto C_m, so
+* V(m) = (1/C)*integral = integral(slope*hdot) dt for C = 1 F. ic seeds M0.
+* --------------------------------------------------------------------------
+.param M0={Ms*( abs(Hbias/Aja) < 1e-4 ? ((Hbias/Aja)/3) : (1/tanh(Hbias/Aja) - Aja/Hbias) )}
+B_mi 0 m I = V(slope)*V(hdot)
+C_m  m 0 1 ic={M0}
+R_m  m 0 1e12
+
+* --------------------------------------------------------------------------
+* Port current law:  i(V) = Gp*V + Isat*M/Ms, sunk by the head at v_out.
+* (A current INTO node v_out toward ground = the head loading the node.)
+* --------------------------------------------------------------------------
+Bhead v_out 0 I = Gp*V(v_out) + Isat*V(m)/Ms
+
+* The harness supplies the v_in PWL stimulus and a .tran card; for standalone
+* inspection a sine + transient analysis is provided (commented):
+* Vin v_in 0 SINE(0 2 120 0 0 0)
+* .tran 1.041666e-6 0.05 0
+* .save V(v_out)
+.end

@@ -1,0 +1,49 @@
+# Tape-head saturation validation circuit (engine side).
+#
+# Minimal standalone circuit that drives a single voltage-driven Jiles-Atherton
+# tape head from a line-level source through a build-out resistor into a load.
+# The head colours on its GAP VOLTAGE (H = kv*V), so it reaches its J-A knee at
+# ~1 V line level and THD climbs with drive — the property this test validates
+# against an ngspice behavioural J-A reference (see
+# spice-circuits/tape/tape_head_saturation.spice).
+#
+# TOPOLOGY — the head is a nonlinear SHUNT load on the output node, exactly as
+# the ngspice golden deck models it ("head sinks i(V) at v_out"):
+#
+#   in --[R_pri 470Ω]--> out ;  R_load(2.2k): out --> gnd ;  TH: out --> gnd
+#
+# The head's WDF port voltage V is therefore V(out) (port across out->gnd), so
+# H = kv*V(out) drives saturation off the actual output level — matching the
+# deck's `Bhead v_out 0 I = Gp*V(v_out) + Isat*M/Ms` shunt and `R_load v_out 0`.
+#
+# NOTE (bead pedalkernel-x0mv, Phase 0): this circuit previously wired TH in
+# SERIES between R_pri.b and out, which made the head port voltage the series
+# drop V(R_pri.b)-V(out) rather than V(out). That series topology does NOT match
+# the shunt golden deck and produced a ~4 dB clean-regime level error — a netlist
+# mismatch, NOT an element-model defect. Instrumenting the compiled circuit vs
+# the ngspice golden sample-by-sample confirmed the shunt netlist matches the
+# golden to ~70 dB (clean AND saturated); the J-A element is unchanged. With this
+# stiff 470/2.2k divider the head is a light shunt load, so output THD is modest
+# (≤~1.2%, matching ngspice ground truth) — a faithful, mild-saturation reference.
+#
+# The head is the only nonlinear element; everything else is a plain resistor,
+# so an ngspice B-source J-A head produces a directly comparable V(out).
+#
+# Head model = the shipped STUDIO-HEAD defaults (compiler/components/tape_head.rs
+# ::studio_head, mirrored explicitly in the .spice .param block):
+#   Ms=3.5e5 A/m, a=1500, alpha=1.6e-3, k=30, c=0.65,
+#   kv=8000 A/m/V, Isat=200 uA, Gp=80 uS, h_bias=400 A/m, Rp=1 kΩ.
+
+pedal "Tape Head Saturation" {
+  components {
+    R_pri:  resistor(470)        # head build-out / source impedance
+    TH:     tape_head()          # voltage-driven Jiles-Atherton tape head
+    R_load: resistor(2.2k)       # head load
+  }
+  nets {
+    in -> R_pri.a
+    R_pri.b -> out, TH.a, R_load.a
+    TH.b -> gnd
+    R_load.b -> gnd
+  }
+}

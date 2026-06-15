@@ -13,7 +13,9 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use crate::boundary_math::{OnePortKind, RuntimeOnePort, RuntimeState};
-use crate::elements::{JaCoreModel, JfetVariableResistor, Photocoupler, WdfJaMagnetizing};
+use crate::elements::{
+    JaCoreModel, JfetVariableResistor, Photocoupler, WdfJaMagnetizing, WdfTapeHeadVoltage,
+};
 use crate::pot_taper::PotTaper;
 use crate::tree::RTypeAdaptor;
 use crate::wdf_leaf::{
@@ -276,7 +278,8 @@ fn projected_leaf_voltage(leaf: &LeafKind, incident: crate::Wave) -> crate::Wave
         LeafKind::VoltageSource(_)
         | LeafKind::Photocoupler(_)
         | LeafKind::JfetVr(_)
-        | LeafKind::JaMagnetizing(_) => 0.0,
+        | LeafKind::JaMagnetizing(_)
+        | LeafKind::TapeHeadVoltage(_) => 0.0,
         LeafKind::UnitDelay(_) => 0.0,
     }
 }
@@ -304,7 +307,8 @@ fn projected_leaf_voltage_incident_gain(leaf: &LeafKind) -> crate::Wave {
         LeafKind::VoltageSource(_)
         | LeafKind::Photocoupler(_)
         | LeafKind::JfetVr(_)
-        | LeafKind::JaMagnetizing(_) => 0.0,
+        | LeafKind::JaMagnetizing(_)
+        | LeafKind::TapeHeadVoltage(_) => 0.0,
         LeafKind::UnitDelay(_) => 0.0,
     }
 }
@@ -376,6 +380,35 @@ impl DynNode {
             sample_rate,
             rp,
             dc_bias_current,
+        )))
+    }
+
+    /// Voltage-driven Jiles-Atherton tape head one-port.
+    ///
+    /// Unlike `JaMagnetizing` (Ampere/current-driven core), this leaf drives
+    /// the magnetic field H from PORT VOLTAGE (`H = kv*V`), so saturation
+    /// tracks signal level at line drive. `isat` sets the saturating magnetic
+    /// current scale and `gp` a small linear leakage conductance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn TapeHeadVoltage(
+        comp_id: Option<String>,
+        model: JaCoreModel,
+        kv: crate::Wave,
+        isat: crate::Wave,
+        gp: crate::Wave,
+        h_bias: crate::Wave,
+        sample_rate: crate::Wave,
+        rp: crate::Wave,
+    ) -> Self {
+        Self::Leaf(LeafKind::TapeHeadVoltage(WdfTapeHeadVoltage::new(
+            comp_id,
+            model,
+            kv,
+            isat,
+            gp,
+            h_bias,
+            sample_rate,
+            rp,
         )))
     }
 

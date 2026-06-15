@@ -606,6 +606,100 @@ mod tests {
             .all(|one_port| matches!(one_port.spec.kind, OnePortKind::Capacitor(_))));
     }
 
+    /// Regression lock for the state-space OUTPUT extraction when the output
+    /// node is ALGEBRAIC (resistive / VCVS-driven, no capacitor on it).
+    ///
+    /// An algebraic output node's voltage is a linear function of BOTH the
+    /// input AND the dynamic (capacitor) state vector:
+    ///   v_out_alg = (G_aa⁻¹·b_a)·u  +  (−G_aa⁻¹·G_ac)·x
+    /// `build_state_space_matrices` must fold the state part into `c_vector`
+    /// (NOT collapse it entirely into the direct feedthrough `d`). If the
+    /// state coupling were dropped, the algebraic output would be a flat
+    /// feedthrough `y = d·u` and the circuit's frequency shaping would vanish.
+    ///
+    /// Circuit: VS(0) → R_in(10k) → pos(1) ; C(10nF): pos(1) → gnd ;
+    /// unity buffer VCVS pos=1, neg=out, out=2. Output node = 2 (ALGEBRAIC).
+    /// node1 is a first-order RC low-pass of the input (corner ~1.6 kHz),
+    /// buffered to node2. The output MUST roll off with frequency: low-freq
+    /// gain ≈ 1, high-freq gain ≪ 1. A non-trivial `c_vector` is the only way
+    /// that state dependence reaches the algebraic output.
+    #[test]
+    fn state_space_algebraic_output_retains_state_coupling() {
+        use crate::tree::MnaSystem;
+
+        let fs = 48_000.0;
+        let mut mna = MnaSystem::new(3, 2);
+        mna.stamp_voltage_source(Some(0), None, 0);
+        mna.stamp_resistor(Some(0), Some(1), 10_000.0); // R_in
+                                                        // unity buffer: pos=1, neg=out=2 (op-amp follower)
+        mna.stamp_vcvs(Some(1), Some(2), Some(2), None, 200_000.0, 75.0, 1);
+
+        // Capacitor on the (algebraic-feeding) pos node -> RC low-pass.
+        let reactive_one_ports = alloc::vec![OnePort::new(
+            PortTerminals::single_ended(MnaNodeId::new(1)),
+            OnePortKind::Capacitor(10e-9),
+        )];
+
+        // Output node 2 is the VCVS output: ALGEBRAIC (no cap on it).
+        let (a_d, b_d, c_out, n_states, d_ft) =
+            mna.build_state_space_matrices(&reactive_one_ports, 0, Some(2), None, fs);
+
+        assert!(n_states >= 1, "expected >=1 dynamic state, got {n_states}");
+
+        // The decisive invariant: the algebraic output's state coupling must
+        // survive in c_vector. If the bug were present, c_vector would be all
+        // zero and the entire response would live in the constant feedthrough.
+        let c_norm: crate::Wave = c_out.iter().map(|v| v.abs()).sum();
+        assert!(
+            c_norm > 1e-6,
+            "algebraic-output c_vector collapsed to ~0 ({c_out:?}); state \
+             coupling was dropped into feedthrough d={d_ft}"
+        );
+
+        // Behavioural check: measure peak gain at a low and a high frequency.
+        let measure = |freq: crate::Wave| -> crate::Wave {
+            let n = (fs * 0.5) as usize;
+            let mut x = alloc::vec![0.0; n_states];
+            let mut work = alloc::vec![0.0; n_states];
+            let mut peak = 0.0 as crate::Wave;
+            for i in 0..n {
+                let u = crate::math::sin(
+                    2.0 * crate::math::PI * freq * i as crate::Wave / fs,
+                );
+                for r in 0..n_states {
+                    let mut v = b_d[r] * u;
+                    for cc in 0..n_states {
+                        v += a_d[r * n_states + cc] * x[cc];
+                    }
+                    work[r] = v;
+                }
+                let mut y = d_ft * u;
+                for r in 0..n_states {
+                    // trapezoidal output (matches bilinear midpoint)
+                    y += c_out[r] * (work[r] + x[r]) * 0.5;
+                }
+                x.copy_from_slice(&work);
+                if i > n * 3 / 4 {
+                    peak = peak.max(y.abs());
+                }
+            }
+            peak
+        };
+
+        let g_low = measure(100.0);
+        let g_high = measure(15_000.0);
+        // Low-freq passes (~unity), high-freq is rolled off by the RC.
+        assert!(
+            g_low > 0.7,
+            "low-frequency gain {g_low:.4} should be near unity"
+        );
+        assert!(
+            g_high < 0.5 * g_low,
+            "high-frequency gain {g_high:.4} should roll off below low \
+             gain {g_low:.4}; a flat feedthrough would NOT roll off"
+        );
+    }
+
     #[test]
     fn state_space_stage_exposes_declarative_route_bindings() {
         let ss = StateSpaceData {
@@ -709,16 +803,127 @@ pub struct NamedPortBinding {
     pub stage_idx: usize,
 }
 
+/// Compiler-synthesized INTERNAL delayed port (Phase 2b) — NOT user-overridable.
+///
+/// Carries a solved boundary-node value across a one-sample (z⁻¹) gap, so a
+/// de-fused sub-network (e.g. the LA-2A detector) can read its taps one sample
+/// late and solve as its own sub-network with NO intra-sample ordering
+/// dependency. This is the GENERAL realization of the `cv_delayed` cross-sample
+/// precedent (`SidechainProcessor`): the value at `source_node_id` is WRITTEN to
+/// `prev_value` at end-of-sample, and INJECTED at `consumer_node_id` (via
+/// `node_signals`) at the START of the next sample.
+///
+/// * `gain` scales the injected value (a superposition transfer weight from the
+///   detector resistive mix; `1.0` for a pass-through carry).
+/// * `consumer_node_id == usize::MAX` means "carry only" — the solved value is
+///   stored in `prev_value` for a later phase to consume (Phase 3 reads the
+///   detector `EL_drive` carry to drive the photocoupler LED), but nothing is
+///   injected this phase.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct InternalPortBinding {
+    /// Circuit graph node whose SOLVED value is captured at end-of-sample.
+    pub source_node_id: usize,
+    /// Circuit graph node where `prev_value * gain` is injected at the start of
+    /// the NEXT sample. `usize::MAX` = carry-only (store, do not inject).
+    pub consumer_node_id: usize,
+    /// Superposition / carry gain applied to the injected value.
+    pub gain: crate::Wave,
+    /// The z⁻¹ register: last sample's solved value at `source_node_id`.
+    pub prev_value: crate::Wave,
+}
+
+/// Compiler-synthesized DETECTOR → photocoupler-LED coupling (Phase 3) — the
+/// actual gain-reduction loop closure of a cross-network feedback detector
+/// (the LA-2A `EL_drive.b -> PC1.led` light path).
+///
+/// This is the optical, non-electrical half of the de-fused detector: it reads
+/// the detector's solved EL-drive value (carried one sample late by the
+/// `internal_ports[carry_idx]` z⁻¹ register, Phase 2b), rectifies + normalizes
+/// it to a 0..1 LED drive, and pushes it into the T4B photocoupler's two-rate
+/// cell (`set_led_drive`), which darkens the LDR shunt leaf in the FORWARD
+/// gain-reduction divider — louder program -> brighter EL panel -> lower cell
+/// resistance -> more attenuation. The one-sample (z⁻¹) delay (reusing the 2b
+/// carry) breaks the otherwise-instantaneous feedback loop, exactly the
+/// `cv_delayed` precedent.
+///
+/// NARROW: only synthesized for a true delayed feedback detector (LA-2A opto
+/// leveler). Non-detector circuits leave this `None`, so the
+/// envelope-follower → LED modulation path (`ModulationTarget::PhotocouplerLed`,
+/// used by `opto_leveler.pedal`) is entirely untouched.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DetectorLedCoupling {
+    /// Index into `internal_ports` of the EL-drive carry (its `prev_value` is
+    /// last sample's solved detector output — the z⁻¹ closure).
+    pub carry_idx: usize,
+    /// The photocoupler (LDR) component id to drive (e.g. `PC1`).
+    pub comp_id: String,
+    /// Stage index that owns the photocoupler LDR leaf in the forward divider.
+    pub stage_idx: usize,
+    /// Normalization gain: `led = (|el_drive| * scale).clamp(0, 1)`. Chosen so a
+    /// loud-program EL-drive maps near full illumination.
+    pub scale: crate::Wave,
+}
+
 pub use crate::routing::{
     BindingId, BkmVsRouteBinding, GraphRoutedBkm, PortBinding, Route, StageRouteDebug,
     StageRoutePlan,
 };
 
+/// Which physical half of a 3-terminal pot a stage binding drives.
+///
+/// A 3-terminal pot is split at compile time into two leaves, `{id}__aw`
+/// (a→wiper) and `{id}__wb` (wiper→b). Each owning stage binding records
+/// which half it re-stamps so dispatch can route the correctly-formatted
+/// leaf id and the (optionally complemented) position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PotHalf {
+    /// The pot is not split in this stage — re-stamp the base component id.
+    Whole,
+    /// The a→wiper half (`{id}__aw`).
+    Aw,
+    /// The wiper→b half (`{id}__wb`).
+    Wb,
+}
+
+/// One coordinated stage update for a control.
+///
+/// A single logical control (one host parameter) can own several stage
+/// bindings when its pot STRADDLES a stage boundary — e.g. an LA-2A makeup
+/// pot whose two halves land in a WDF gain-reduction stage and a MultiNL
+/// tube-grid stage, with a wiper-divider tap at the boundary. Each binding
+/// re-stamps one stage (or applies one wiper divider) with the correct half
+/// and complement; `CompiledPedal::set_control` fans a single position out to
+/// every binding in the set.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageBinding {
+    /// Which stage / element this binding updates, and how to reach it.
+    pub target: ControlTarget,
+    /// Which physical half of a split 3-terminal pot this binding drives.
+    pub half: PotHalf,
+    /// Invert the position (`1.0 - value`) for this binding. Used for the
+    /// ground-touching half of a split pot so the two halves sum to `max_R`.
+    pub complement: bool,
+}
+
 /// Control binding: maps a knob label to a parameter in the processing chain.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ControlBinding {
     pub label: String,
+    /// Primary / representative target (kept for back-compat with the many
+    /// readers of `.target`; for a multi-target pot it is the first stage).
     pub target: ControlTarget,
+    /// Coordinated stage-update set. ONE logical control = ONE host
+    /// parameter, but N coordinated stage updates. Empty for legacy /
+    /// non-pot bindings, in which case dispatch falls back to `target` +
+    /// the comp-id broadcast. When populated, dispatch iterates this set so
+    /// a pot straddling a stage boundary updates EVERY owning stage (and any
+    /// wiper-divider at the boundary).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub targets: Vec<StageBinding>,
     pub component_id: String,
     #[allow(dead_code)]
     pub max_resistance: crate::Wave,
@@ -730,7 +935,7 @@ pub struct ControlBinding {
     pub range: (crate::Wave, crate::Wave),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ControlTarget {
     /// Modify a pot in a specific WDF stage.
@@ -740,6 +945,18 @@ pub enum ControlTarget {
     /// Modify a pot inside a multi-NL stage (R-type adaptor approach).
     /// (multi_nl_stage_idx, passive_child_idx)
     PotInMultiNlStage(usize, usize),
+    /// Apply an inter-stage wiper-divider ratio after the given stage index.
+    ///
+    /// This is the cross-stage pot path: a 3-terminal pot whose wiper feeds a
+    /// downstream high-impedance load (e.g. a tube grid / BJT base in a LATER
+    /// stage) divides the signal by its position at the boundary. Used as one
+    /// of a multi-target [`StageBinding`] set alongside the per-stage leaf
+    /// re-stamps so the divided wiper voltage actually reaches the load. The
+    /// matching [`WiperDivider`] entry (keyed by component id) carries the
+    /// live position; this target marks that a divider exists for the control.
+    WiperDivider {
+        after_stage_idx: usize,
+    },
     /// Modify the feedback pot in a BlackFeedback stage (recomputes Rf → gain).
     PotInBlackFeedbackStage(usize),
     /// Forward a control change to a sidechain sub-circuit.
@@ -1387,6 +1604,17 @@ pub struct CompiledPedal {
     /// Input ports: written by external code via set_port() before process().
     /// Output ports: written by process(), read via get_port() after.
     pub port_values: Vec<crate::Wave>,
+    /// Compiler-synthesized INTERNAL delayed ports (Phase 2b) — the z⁻¹ carry
+    /// table for de-fused sub-networks (e.g. the LA-2A detector taps + EL_drive).
+    /// Not user-overridable; written/read entirely inside `process()`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub internal_ports: Vec<InternalPortBinding>,
+    /// Compiler-synthesized DETECTOR → photocoupler-LED coupling (Phase 3) — the
+    /// gain-reduction loop closure for a cross-network feedback detector
+    /// (LA-2A). `None` for every other circuit (envelope-follower opto levelers
+    /// drive the LED via `ModulationTarget::PhotocouplerLed`, unchanged).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub detector_led_coupling: Option<DetectorLedCoupling>,
     /// Auto-init flag: cache_all_vs_pointers runs once on first process() call.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub initialized: bool,
@@ -2203,7 +2431,8 @@ impl CompiledPedal {
             ControlTarget::PotInStage(_)
             | ControlTarget::PotInIirStage(_)
             | ControlTarget::PotInMultiNlStage(_, _)
-            | ControlTarget::PotInBlackFeedbackStage(_) => {
+            | ControlTarget::PotInBlackFeedbackStage(_)
+            | ControlTarget::WiperDivider { .. } => {
                 if let Some(smoother) = self
                     .pot_smoothers
                     .iter_mut()
@@ -2237,7 +2466,8 @@ impl CompiledPedal {
                 ControlTarget::PotInStage(_)
                 | ControlTarget::PotInIirStage(_)
                 | ControlTarget::PotInMultiNlStage(_, _)
-                | ControlTarget::PotInBlackFeedbackStage(_) => {
+                | ControlTarget::PotInBlackFeedbackStage(_)
+                | ControlTarget::WiperDivider { .. } => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
                     {
@@ -2248,6 +2478,11 @@ impl CompiledPedal {
                         let comp_id = self.controls[i].component_id.clone();
                         for stage in &mut self.stages {
                             stage.set_control_pot(&comp_id, value);
+                        }
+                        for wd in &mut self.wiper_dividers {
+                            if wd.pot_comp_id == comp_id {
+                                wd.position = wd.taper.apply(value);
+                            }
                         }
                         if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
                             self.bbd_wet_mix = value;
@@ -2389,26 +2624,29 @@ impl CompiledPedal {
                 ControlTarget::PotInStage(_)
                 | ControlTarget::PotInIirStage(_)
                 | ControlTarget::PotInMultiNlStage(_, _)
-                | ControlTarget::PotInBlackFeedbackStage(_) => {
+                | ControlTarget::PotInBlackFeedbackStage(_)
+                | ControlTarget::WiperDivider { .. } => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
                     {
                         smoother.current = value;
                         smoother.target = value;
                     }
-                    let comp_id = self.controls[i].component_id.clone();
-                    for stage in &mut self.stages {
-                        stage.set_control_pot(&comp_id, value);
-                    }
-                    for wd in &mut self.wiper_dividers {
-                        if wd.pot_comp_id == comp_id {
-                            wd.position = wd.taper.apply(value);
+                    if !self.fan_out_pot_targets(i, value) {
+                        let comp_id = self.controls[i].component_id.clone();
+                        for stage in &mut self.stages {
+                            stage.set_control_pot(&comp_id, value);
                         }
+                        for wd in &mut self.wiper_dividers {
+                            if wd.pot_comp_id == comp_id {
+                                wd.position = wd.taper.apply(value);
+                            }
+                        }
+                        if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+                            self.bbd_wet_mix = value;
+                        }
+                        self.apply_pot_mirrors(&comp_id, value);
                     }
-                    if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
-                        self.bbd_wet_mix = value;
-                    }
-                    self.apply_pot_mirrors(&comp_id, value);
                 }
                 _ => self.set_control(label, value),
             }
@@ -2426,6 +2664,65 @@ impl CompiledPedal {
         for trig in &mut self.triggers {
             trig.fire();
         }
+    }
+
+    /// Fan a single pot position out to EVERY coordinated stage binding.
+    ///
+    /// This is the multi-target dispatch path: a control whose pot straddles a
+    /// stage boundary owns several [`StageBinding`]s (one per stage the pot
+    /// touches, plus a wiper-divider at the boundary). Each binding re-stamps
+    /// its stage with the correctly-formatted half id (`{id}__aw` / `{id}__wb`
+    /// / base id) and the (optionally complemented) position, so a 3-terminal
+    /// pot spanning a WDF→MultiNL boundary updates both halves coherently and
+    /// the wiper-divider delivers the divided voltage to the downstream load.
+    ///
+    /// Returns true if any binding was applied. When the control has no
+    /// explicit `targets` set (legacy / non-pot bindings) the caller falls
+    /// back to the comp-id broadcast.
+    fn fan_out_pot_targets(&mut self, ctrl_idx: usize, value: crate::Wave) -> bool {
+        if self.controls[ctrl_idx].targets.is_empty() {
+            return false;
+        }
+        let comp_id = self.controls[ctrl_idx].component_id.clone();
+        // Clone the small target set to release the borrow on self.controls.
+        let targets = self.controls[ctrl_idx].targets.clone();
+        for sb in &targets {
+            let pos = if sb.complement { 1.0 - value } else { value };
+            let leaf_id = match sb.half {
+                PotHalf::Whole => comp_id.clone(),
+                PotHalf::Aw => format!("{comp_id}__aw"),
+                PotHalf::Wb => format!("{comp_id}__wb"),
+            };
+            match &sb.target {
+                ControlTarget::PotInStage(idx)
+                | ControlTarget::PotInIirStage(idx)
+                | ControlTarget::PotInBlackFeedbackStage(idx) => {
+                    if let Some(stage) = self.stages.get_mut(*idx) {
+                        stage.set_control_pot(&leaf_id, pos);
+                    }
+                }
+                ControlTarget::PotInMultiNlStage(idx, _) => {
+                    if let Some(stage) = self.stages.get_mut(*idx) {
+                        stage.set_control_pot(&leaf_id, pos);
+                    }
+                }
+                ControlTarget::WiperDivider { .. } => {
+                    for wd in &mut self.wiper_dividers {
+                        if wd.pot_comp_id == comp_id {
+                            wd.position = wd.taper.apply(pos);
+                        }
+                    }
+                }
+                // A coordinated set only ever holds pot/divider targets; any
+                // other kind is dispatched via its single-target path.
+                _ => {}
+            }
+        }
+        if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+            self.bbd_wet_mix = value;
+        }
+        self.apply_pot_mirrors(&comp_id, value);
+        true
     }
 
     /// Update mirrored pots (position = 1.0 - source) across all stages.
@@ -2467,25 +2764,31 @@ impl CompiledPedal {
             if self.pot_smoothers[si].advance() {
                 let ctrl_idx = self.pot_smoothers[si].control_idx;
                 let value = self.pot_smoothers[si].current;
-                let comp_id = self.controls[ctrl_idx].component_id.clone();
 
-                // Update all stages — each stage ignores pots it doesn't own.
-                // Complement halves automatically use 1-value via the complement flag.
-                for stage in &mut self.stages {
-                    stage.set_control_pot(&comp_id, value);
-                }
+                // Multi-target path: fan out to every coordinated stage binding
+                // (per-stage half/complement + wiper divider). Falls back to the
+                // comp-id broadcast for legacy/non-explicit bindings.
+                if !self.fan_out_pot_targets(ctrl_idx, value) {
+                    let comp_id = self.controls[ctrl_idx].component_id.clone();
 
-                // Update wiper dividers
-                for wd in &mut self.wiper_dividers {
-                    if wd.pot_comp_id == comp_id {
-                        wd.position = wd.taper.apply(value);
+                    // Update all stages — each stage ignores pots it doesn't own.
+                    // Complement halves automatically use 1-value via the complement flag.
+                    for stage in &mut self.stages {
+                        stage.set_control_pot(&comp_id, value);
                     }
-                }
 
-                if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
-                    self.bbd_wet_mix = value;
+                    // Update wiper dividers
+                    for wd in &mut self.wiper_dividers {
+                        if wd.pot_comp_id == comp_id {
+                            wd.position = wd.taper.apply(value);
+                        }
+                    }
+
+                    if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+                        self.bbd_wet_mix = value;
+                    }
+                    self.apply_pot_mirrors(&comp_id, value);
                 }
-                self.apply_pot_mirrors(&comp_id, value);
             }
         }
 
@@ -2938,6 +3241,53 @@ impl PedalProcessor for CompiledPedal {
             if port.direction == crate::PortDirection::Input && port.node_id != usize::MAX {
                 self.node_signals
                     .push((port.node_id, self.port_values[port.index]));
+            }
+        }
+
+        // INTERNAL delayed ports (Phase 2b): the z⁻¹ READ. Inject each carried
+        // value (last sample's solved value at `source_node_id`) at its consumer
+        // node, scaled by the superposition/carry gain. Because the value is from
+        // LAST sample, the consuming sub-network has no intra-sample ordering
+        // dependency on its driver — this is the cross-sample (cv_delayed-style)
+        // persistence that lets the de-fused detector solve as its own network.
+        for ip in &self.internal_ports {
+            if ip.consumer_node_id != usize::MAX {
+                self.node_signals
+                    .push((ip.consumer_node_id, ip.prev_value * ip.gain));
+            }
+        }
+
+        // Phase 3 — CLOSE THE GR LOOP. Drive the photocoupler LED from the
+        // detector's solved EL-drive value, carried one sample late (the z⁻¹
+        // closure that breaks the otherwise-instantaneous feedback loop). The
+        // T4B cell darkens the FORWARD shunt leaf -> downward gain reduction.
+        // This runs BEFORE the WDF stages so the cell resistance is current
+        // when the forward divider solves this sample.
+        if let Some(coupling) = self.detector_led_coupling.clone() {
+            if let Some(ip) = self.internal_ports.get(coupling.carry_idx) {
+                // Rectify (full-wave) + normalize the carried EL-drive node
+                // value to a 0..1 LED drive. The T4B set_led_drive applies the
+                // physical attack/release of the EL panel + CdS cell.
+                let led = (ip.prev_value.abs() * coupling.scale).clamp(0.0, 1.0);
+                match self.stages.get_mut(coupling.stage_idx) {
+                    // Shunt CdS cell that compiled as a WDF leaf.
+                    Some(Stage::Wdf(wdf)) => {
+                        // Leaf-positioned (the shunt cell) — same XOR fallback
+                        // as route_envelope_modulation; the LED never drives an
+                        // input-path series gain for a shunt CdS divider.
+                        if !wdf.set_photocoupler_led(&coupling.comp_id, led) {
+                            wdf.set_input_photocoupler_led(&coupling.comp_id, led);
+                        }
+                    }
+                    // Shunt CdS cell fused into the MNA stage with the makeup
+                    // tube V1 (the LA-2A faithful case: stage label
+                    // `C_in,...,PC1,...,V1`) — the cell is an MNA G-matrix
+                    // conductance, driven via the MultiNlStage setter.
+                    Some(Stage::MultiNl(mnl)) => {
+                        mnl.set_photocoupler_led(&coupling.comp_id, led);
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -4114,6 +4464,27 @@ impl PedalProcessor for CompiledPedal {
                     .find(|(nid, _)| *nid == port.node_id)
                     .map(|(_, v)| *v)
                     .unwrap_or(output);
+            }
+        }
+
+        // INTERNAL delayed ports (Phase 2b): the z⁻¹ WRITE. After the full sample
+        // has solved, capture the value at each `source_node_id` from
+        // `node_signals` (rev-find = the last writer, same convention as output
+        // ports) into `prev_value`, where it waits one sample for the consumer.
+        // For the detector this captures the mixed tap value at the front node
+        // AND the solved `EL_drive` node (carry-only, consumer = MAX) so Phase 3
+        // can drive the photocoupler LED from it.
+        if !self.internal_ports.is_empty() {
+            for idx in 0..self.internal_ports.len() {
+                let src = self.internal_ports[idx].source_node_id;
+                if let Some(&(_, v)) = self
+                    .node_signals
+                    .iter()
+                    .rev()
+                    .find(|(nid, _)| *nid == src)
+                {
+                    self.internal_ports[idx].prev_value = v;
+                }
             }
         }
 

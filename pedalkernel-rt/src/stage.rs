@@ -5478,6 +5478,12 @@ pub struct StateSpacePotBinding {
     pub position: crate::Wave,
     pub terminals: MnaPortTerminals,
     pub conductance: crate::Wave,
+    /// True for the `w→b` half of a 3-terminal wiper divider: its resistance is
+    /// `(1 − taper.apply(position)) · max_r` (the complement of the `a→w` half),
+    /// matching the compile-time `stamp_mna_multi` baseline so deltas stay exact.
+    /// Defaults to false (2-terminal rheostats and the `a→w` half).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub complement: bool,
 }
 
 /// How a StateSpace stage's vector relates to physical reactive one-ports.
@@ -5560,32 +5566,36 @@ impl StateSpaceStage {
     }
 
     pub fn has_pot(&self, comp_id: &str) -> bool {
-        self.pot_bindings
-            .iter()
-            .any(|binding| binding.comp_id == comp_id)
+        let aw_id = format!("{comp_id}__aw");
+        let wb_id = format!("{comp_id}__wb");
+        self.pot_bindings.iter().any(|binding| {
+            binding.comp_id == comp_id || binding.comp_id == aw_id || binding.comp_id == wb_id
+        })
     }
 
-    pub fn set_pot(&mut self, comp_id: &str, position: crate::Wave) {
-        let Some(idx) = self
-            .pot_bindings
-            .iter()
-            .position(|binding| binding.comp_id == comp_id)
-        else {
-            return;
-        };
-
+    /// Delta-update the stored MNA G-matrix for one pot binding at `idx` to the
+    /// new wiper `position`. Returns true if the conductance changed (matrix was
+    /// touched). Does NOT rebuild the state-space matrices — callers batch that.
+    fn restamp_pot_binding(&mut self, idx: usize, position: crate::Wave) -> bool {
         let Some(ref mut mna) = self.recompute_mna else {
-            return;
+            return false;
         };
-
         let binding = &mut self.pot_bindings[idx];
         binding.position = position.clamp(0.0, 1.0);
         let tapered = binding.taper.apply(binding.position);
-        let new_r = (tapered * binding.max_r).max(1.0);
+        // w→b half: resistance is the complement of the tapered a→w half, so the
+        // two segments always sum to max_r and the baseline matches the
+        // compile-time `stamp_mna_multi` stamp ((1−taper.apply(0.5))·max_r).
+        let frac = if binding.complement {
+            1.0 - tapered
+        } else {
+            tapered
+        };
+        let new_r = (frac * binding.max_r).max(1.0);
         let new_g = 1.0 / new_r;
         let delta = new_g - binding.conductance;
         if delta.abs() <= 1e-15 {
-            return;
+            return false;
         }
 
         let n_mna = mna.num_nodes;
@@ -5603,6 +5613,34 @@ impl StateSpaceStage {
             }
         }
         binding.conductance = new_g;
+        true
+    }
+
+    pub fn set_pot(&mut self, comp_id: &str, position: crate::Wave) {
+        // GAP (a): a 3-terminal wiper pot is bound as two segment leaves with
+        // synthetic ids `{comp_id}__aw` (tracks `position`) and `{comp_id}__wb`
+        // (tracks `1 − position`). Drive every matching binding — the exact id
+        // (2-terminal rheostat) and both split halves — then rebuild once.
+        let aw_id = format!("{comp_id}__aw");
+        let wb_id = format!("{comp_id}__wb");
+        let mut touched = false;
+        for idx in 0..self.pot_bindings.len() {
+            let id = &self.pot_bindings[idx].comp_id;
+            // All matching bindings receive the SAME wiper position. The `__wb`
+            // binding carries `complement: true`, so `restamp_pot_binding`
+            // derives its (1 − taper.apply(position)) resistance internally.
+            if !(id == comp_id || id == &aw_id || id == &wb_id) {
+                continue;
+            }
+            touched |= self.restamp_pot_binding(idx, position);
+        }
+        if !touched {
+            return;
+        }
+
+        let Some(ref mut mna) = self.recompute_mna else {
+            return;
+        };
 
         let (a_d, b_d, c_out, n_states, d_feedthrough) = mna.build_state_space_matrices(
             &self.ss.reactive_one_ports,
@@ -6407,6 +6445,68 @@ impl MultiNlStage {
             }
         }
         None
+    }
+
+    /// Set the LED drive of a photocoupler LDR leaf held among this stage's
+    /// MNA `pot_children` (a controlled G-matrix conductance, not a WDF port)
+    /// and delta-update the scattering matrix so the new cell resistance takes
+    /// effect on the FORWARD divider this sample. Returns `true` if a matching
+    /// photocoupler was found.
+    ///
+    /// This is the MultiNlStage counterpart of `WdfStage::set_photocoupler_led`.
+    /// Used by the LA-2A Phase-3 detector → LED gain-reduction coupling, where
+    /// the T4B shunt cell compiles into the same MNA stage as the makeup tube
+    /// V1 (stage label `C_in,...,PC1,...,V1`). The recompute is threshold-gated
+    /// (the cell's resistance trajectory is band-limited by its own ms-to-s time
+    /// constants) so audio-rate re-inversion is avoided.
+    pub fn set_photocoupler_led(&mut self, comp_id: &str, led_drive: crate::Wave) -> bool {
+        // Locate the photocoupler among pot_children and the variable-resistor
+        // binding that maps it into the MNA G matrix (so we can read its
+        // post-set resistance and threshold-gate the expensive recompute).
+        let mut found = false;
+        let mut child_hit: Option<usize> = None;
+        for (ci, child) in self.pot_children.iter_mut().enumerate() {
+            if child.set_photocoupler_led(comp_id, led_drive) {
+                found = true;
+                child_hit = Some(ci);
+            }
+        }
+        if !found {
+            return false;
+        }
+        // Threshold-gate the (matrix-re-inverting) recompute on a meaningful
+        // relative resistance change vs the conductance last folded into the G
+        // matrix. The cell's resistance trajectory is band-limited by its own
+        // ms-to-s time constants, so its control content lives well below audio
+        // rate — re-inverting the scattering matrix every sample is wasted work.
+        let should_recompute = match child_hit {
+            Some(ci) => {
+                let new_r = self.pot_children[ci].port_resistance();
+                if new_r.is_finite() && new_r > 0.0 {
+                    let new_g = 1.0 / new_r;
+                    // Compare against the matching binding's last-applied g.
+                    match self
+                        .variable_resistors
+                        .iter()
+                        .find(|ps| ps.child_idx == ci)
+                    {
+                        Some(ps) => {
+                            let last_g = ps.conductance;
+                            (new_g - last_g).abs() > CTRL_R_RECOMPUTE_EPS * last_g.abs()
+                        }
+                        // No binding match — recompute to be safe.
+                        None => true,
+                    }
+                } else {
+                    false
+                }
+            }
+            None => true,
+        };
+        if should_recompute {
+            self.recompute_scattering();
+        }
+        found
     }
 
     /// Recompute the scattering matrix from stored MNA data after a pot change.

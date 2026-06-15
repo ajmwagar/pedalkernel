@@ -69,8 +69,13 @@ fn la2a_compiles_and_is_healthy() {
 /// node (`EL_drive.b -> PC1.led`), but only an `envelope_follower` can bind
 /// PhotocouplerLed (bind.rs:716-762), so the cell never illuminates and GR is
 /// ~0 dB — the circuit behaves as a static (non-dynamic) amplifier.
+// PROMOTED (Phase 3, 2026-06-15): GAP G CLOSED. The detector's solved EL-drive
+// value is carried one sample late (2b z⁻¹ carry) and now drives the T4B
+// photocoupler LED (`DetectorLedCoupling` in spqr_build.rs / processor.rs); the
+// shunt CdS cell — compiled as an MNA variable resistor (rigid/general.rs) in
+// the V1 makeup-tube group — darkens with program, producing real downward GR.
+// Measured: quiet(0.05) gain ~+86 dB, loud(0.5) gain ~+67 dB, GR ~19 dB.
 #[test]
-#[ignore = "BLOCKED BY GAP G (detector-from-circuit-sidechain, bind.rs:716-762): LED never bound from the real sidechain node -> cell dark -> no GR. Report fills in measured quiet/loud gain + GR delta."]
 fn la2a_reduces_gain_as_level_rises() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[("Gain", 0.6), ("Peak Reduction", 0.5)];
@@ -172,8 +177,10 @@ fn la2a_release_slower_after_heavy_gr() {
 /// leveling, limiter-grade at the top — published LA-2A character). Blocked by
 /// GAP G: with the cell dark the curve is flat (linear amp), not a leveling
 /// curve. The report records the measured curve + total GR.
+// PROMOTED (Phase 3, 2026-06-15): GAP G CLOSED — the static curve now falls
+// monotonically with level (the shunt T4B cell darkens as program rises) and
+// the total GR (-40 vs 0 dB input) is deep (~50 dB), well past the 20 dB floor.
 #[test]
-#[ignore = "BLOCKED BY GAP G (bind.rs:716-762): cell dark -> flat curve, no leveling. Report fills in measured curve + total GR vs published LA-2A shape."]
 fn la2a_gr_curve_matches_published_shape() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[("Gain", 0.6), ("Peak Reduction", 0.5)];

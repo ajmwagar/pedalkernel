@@ -663,6 +663,24 @@ fn stamp_passive_edges(
                     initial_conductance: 1.0 / initial_r,
                 });
             }
+        } else if comp.kind.is_jfet() || comp.kind.type_tag() == "photocoupler" {
+            // Controlled resistors (JFET Rds, photocoupler CdS cell) are the
+            // same shape as a pot: stamp the current resistance into the MNA G
+            // matrix AND register a variable-resistor candidate so runtime
+            // control (LFO/envelope, OR the LA-2A detector→LED GR coupling) can
+            // delta-update the G matrix and re-derive scattering. Without this
+            // the cell folds into the STATIC G matrix and the GR loop is inert
+            // even when the LED is driven (the cell can never change R).
+            if let Some(leaf) = comp.kind.make_leaf(&comp.id, effective_rate) {
+                let initial_r = leaf.port_resistance();
+                mna.stamp_resistor(n1, n2, initial_r);
+                variable_resistor_candidates.push(VariableResistorCandidate {
+                    leaf,
+                    mna_pos: n1,
+                    mna_neg: n2,
+                    initial_conductance: 1.0 / initial_r,
+                });
+            }
         } else if let Some(r) = comp.kind.resistance() {
             mna.stamp_resistor(n1, n2, r);
         } else if let Some(c) = comp.kind.capacitance() {

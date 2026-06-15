@@ -277,6 +277,232 @@ impl WdfJaMagnetizing {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Voltage-driven tape head (TapeHeadVoltageRoot)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The transformer J-A core above is CURRENT-driven via Ampere's law
+// (`I = (H*le + M*gap)/N`). With studio turns counts the knee needs ~hundreds
+// of mA — a line op-amp cannot source that, so the core never saturates with
+// level. A record/playback tape head instead drives the magnetic field H from
+// the head GAP VOLTAGE: the head is a tiny coil/gap whose H scales with the
+// applied voltage, so saturation tracks signal level at ~1 V line drive.
+//
+// CONSTITUTIVE RELATION (the shipped port law)
+// --------------------------------------------
+// One-port WDF with port resistance Rp. Port voltage and current:
+//   V = (a + b) / 2          i = (a - b) / (2*Rp)
+// so with b = 2V - a we have the convenient identity  i = (a - V) / Rp.
+//
+// The head drives the field linearly from the gap voltage, with a small fixed
+// record-bias offset that makes the transfer ASYMMETRIC (even-harmonic, tape-
+// like — a symmetric drive would be odd-only):
+//                          H = kv * V + h_bias                          [A/m]
+// Magnetization M is advanced along the Jiles-Atherton hysteresis trajectory
+// RATE-INDEPENDENTLY in the FIELD (H) domain (no time derivative → no audio-
+// rate stiffness): `dM/dH = ja_slope(H, M, sign(dH))`, integrated with one
+// sub-stepped field step from H_prev to H (see `ja_field_step`). The port
+// current is a small linear leakage plus a saturating magnetic term:
+//                       i(V) = Gp*V + Isat * (M / Ms)
+// M is bounded by the Langevin saturation built into the J-A curve, so as |V|
+// grows past the knee the magnetic current compresses -> harmonics.
+//
+// Each sample we solve the scalar port KCL for V by damped Newton:
+//   f(V) = (a - V)/Rp - Gp*V - Isat*M(H(V))/Ms = 0
+// with M(H) and dM/dH supplied by the field-domain J-A step (the field kink at
+// reversals is handled by a descent-guarded step). Then b = 2V - a. `kv` is
+// chosen so H reaches a few * `a` (A/m) near V ~ 1 V, placing the knee at line
+// level; Rp sets a well-conditioned scattering port (gamma neither ~0 nor ~1).
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TapeHeadVoltageRoot {
+    model: JaCoreModel,
+    /// Field-per-volt coupling (A/m per V). Places the J-A knee at line level.
+    kv: Wave,
+    /// Saturating magnetic current scale (A) — sets harmonic drive strength.
+    isat: Wave,
+    /// Small linear leakage conductance (S) keeping the port well-posed.
+    gp: Wave,
+    /// Fixed record-bias field offset (A/m): asymmetric transfer -> even
+    /// harmonics (tape/transformer colour). 0 = symmetric (odd-only).
+    h_bias: Wave,
+    /// Magnetization, field and their bilinear derivatives (per-sample memory).
+    m: Wave,
+    m_dot: Wave,
+    h: Wave,
+    h_dot: Wave,
+    v_prev: Wave,
+    fs: Wave,
+    t: Wave,
+    rp: Wave,
+    pub last_iters: usize,
+}
+
+impl TapeHeadVoltageRoot {
+    pub fn new(model: JaCoreModel, kv: Wave, isat: Wave, gp: Wave, h_bias: Wave) -> Self {
+        Self {
+            model,
+            kv,
+            isat,
+            gp,
+            h_bias,
+            m: 0.0,
+            m_dot: 0.0,
+            h: 0.0,
+            h_dot: 0.0,
+            v_prev: 0.0,
+            fs: 0.0,
+            t: 0.0,
+            rp: 0.0,
+            last_iters: 0,
+        }
+    }
+
+    pub fn prepare(&mut self, sample_rate: Wave, port_resistance: Wave) {
+        self.fs = sample_rate;
+        self.t = 1.0 / sample_rate;
+        self.rp = port_resistance;
+        self.reset();
+    }
+
+    pub fn reset(&mut self) {
+        // Seed the field at the record-bias operating point so the first sample
+        // does not see a spurious dH jump from 0 to h_bias.
+        self.h = self.h_bias;
+        self.h_dot = 0.0;
+        self.v_prev = 0.0;
+        self.last_iters = 0;
+        // Seat M on the J-A trajectory at the bias field (anhysteretic seed).
+        self.m = if self.model.is_complete() {
+            solve_anhysteretic_m(&self.model, self.h_bias, 0.0)
+        } else {
+            0.0
+        };
+        self.m_dot = 0.0;
+    }
+
+    pub fn port_resistance(&self) -> Wave {
+        self.rp
+    }
+
+    pub fn model(&self) -> JaCoreModel {
+        self.model
+    }
+
+    pub fn magnetization(&self) -> Wave {
+        self.m
+    }
+
+    pub fn process(&mut self, a: Wave) -> Wave {
+        if self.fs <= 0.0 || self.rp <= 0.0 || !self.model.is_complete() || self.isat <= 0.0 {
+            // Degenerate config: behave as a plain Rp resistor (b = a - 2*Rp*i,
+            // with i = a/(2*Rp) into a short -> b = 0). Returning -a matches the
+            // reflection-free fallback used by the J-A magnetizing root.
+            return -a;
+        }
+
+        // The port law is solved RATE-INDEPENDENTLY in the field (H) domain:
+        // there is no bilinear time derivative scaled by kv, so the system is
+        // well-conditioned and never stiff. Magnetization advances along the
+        // Jiles-Atherton hysteresis trajectory as a function of H, integrated
+        // with one implicit field step from H_prev to H = kv*V.
+        const TAPE_MAX_ITERS: usize = 24;
+
+        let p = self.model;
+        let inv_ms = 1.0 / p.ms;
+        let (h_prev, m_prev) = (self.h, self.m);
+
+        // Newton initial guess: linearized port with no magnetic load.
+        // i = (a - V)/Rp = Gp*V  ->  V0 = a / (1 + Gp*Rp).
+        let mut v = a / (1.0 + self.gp * self.rp);
+        let i_scale = 1.0 + math::abs(a) / self.rp;
+        let mut iters = TAPE_MAX_ITERS;
+
+        let mut f_prev = Wave::MAX;
+        for it in 0..TAPE_MAX_ITERS {
+            let h = self.kv * v + self.h_bias;
+            // Magnetization on the J-A trajectory at this H (field domain),
+            // plus its sensitivity dM/dH — both rate-independent.
+            let (m, dm_dh) = ja_field_step(&p, h, h_prev, m_prev);
+            let dm_dv = dm_dh * self.kv;
+
+            // Port KCL residual: i = (a-V)/Rp must equal Gp*V + Isat*M/Ms.
+            let f = (a - v) / self.rp - self.gp * v - self.isat * m * inv_ms;
+            if math::abs(f) < 1.0e-10 * i_scale {
+                iters = it;
+                break;
+            }
+            // df/dV = -1/Rp - Gp - Isat/Ms * dM/dV.
+            let df = -1.0 / self.rp - self.gp - self.isat * inv_ms * dm_dv;
+            if math::abs(df) < 1.0e-30 {
+                iters = it;
+                break;
+            }
+            // Damped Newton with a kink guard: the field-domain slope has a
+            // branch kink at field reversals (delta = sign(dH) flips). If the
+            // raw step does not reduce |f|, halve it. This guarantees descent
+            // and termination even across the reversal corner.
+            let full = f / df;
+            let mut step = full;
+            if math::abs(f) >= math::abs(f_prev) {
+                step *= 0.5;
+            }
+            v -= step;
+            f_prev = math::abs(f);
+            // Step-size convergence: at a field-reversal kink the residual can
+            // sit just above the f-tolerance while V has effectively settled.
+            if math::abs(step) < 1.0e-12 * (1.0 + math::abs(v)) {
+                iters = it;
+                break;
+            }
+        }
+        self.last_iters = iters;
+
+        // Commit the converged operating point (H includes the record bias).
+        let h = self.kv * v + self.h_bias;
+        let (m_final, _) = ja_field_step(&p, h, h_prev, m_prev);
+        self.h = h;
+        self.h_dot = 0.0;
+        self.m = m_final;
+        self.m_dot = 0.0;
+        self.v_prev = v;
+
+        // b = 2V - a.
+        2.0 * v - a
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct WdfTapeHeadVoltage {
+    pub comp_id: Option<alloc::string::String>,
+    pub root: TapeHeadVoltageRoot,
+    pub last_b: Wave,
+}
+
+impl WdfTapeHeadVoltage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        comp_id: Option<alloc::string::String>,
+        model: JaCoreModel,
+        kv: Wave,
+        isat: Wave,
+        gp: Wave,
+        h_bias: Wave,
+        sample_rate: Wave,
+        port_resistance: Wave,
+    ) -> Self {
+        let mut root = TapeHeadVoltageRoot::new(model, kv, isat, gp, h_bias);
+        root.prepare(sample_rate, port_resistance);
+        Self {
+            comp_id,
+            root,
+            last_b: 0.0,
+        }
+    }
+}
+
 struct MdotEval {
     value: Wave,
     d_dm: Wave,
@@ -311,6 +537,83 @@ fn langevin_d2(x: Wave) -> Wave {
         let s = math::sinh(x);
         2.0 * math::cosh(x) / (s * s * s) - 2.0 / (x * x * x)
     }
+}
+
+/// Anhysteretic magnetization and its field slope at field `h`, with `m` the
+/// current magnetization used for the (small) inter-domain coupling term.
+#[inline]
+fn anhysteretic(p: &JaCoreModel, h: Wave, m: Wave) -> (Wave, Wave) {
+    let q = (h + p.alpha * m) / p.a;
+    let m_an = p.ms * langevin(q);
+    // dM_an/dH = Ms*L'(q)/a  (coupling alpha folded in by the caller's loop).
+    let dman_dh = p.ms * langevin_d(q) / p.a;
+    (m_an, dman_dh)
+}
+
+/// Instantaneous rate-independent Jiles-Atherton field slope dM/dH.
+///
+///   dM/dH = (1-c)*deltaM*(M_an - M) / (delta*k*(1-c) - alpha*(M_an - M))
+///           + c * dM_an/dH
+/// `delta = sign(dH)` selects the ascending/descending branch (hysteresis);
+/// `deltaM` gates irreversible wall motion to the field direction. Clamped to
+/// be non-negative (a soft-magnetic head cannot have dM/dH < 0).
+#[inline]
+fn ja_slope(p: &JaCoreModel, h: Wave, m: Wave, delta: Wave) -> Wave {
+    let one_c = 1.0 - p.c;
+    let kk = p.k.max(1.0e-9);
+    let (m_an, dman_dh) = anhysteretic(p, h, m);
+    let diff = m_an - m;
+    let mut den = delta * kk * one_c - p.alpha * diff;
+    let den_eps = 1.0e-9 * (1.0 + math::abs(diff));
+    if math::abs(den) < den_eps {
+        den = if den >= 0.0 { den_eps } else { -den_eps };
+    }
+    let delta_m = if diff * delta >= 0.0 { 1.0 } else { 0.0 };
+    let slope = one_c * delta_m * diff / den + p.c * dman_dh;
+    slope.max(p.c * dman_dh).max(0.0)
+}
+
+/// One rate-independent Jiles-Atherton step in the FIELD (H) domain.
+///
+/// Advances magnetization from `(h_prev, m_prev)` to field `h` along the J-A
+/// hysteresis trajectory and returns `(M, dM/dH at h)`. Rate-independent (no
+/// time derivative → no audio-rate stiffness). The field-domain ODE `dM/dH =
+/// ja_slope(...)` is integrated with explicit sub-steps in H; the field
+/// interval is subdivided so each sub-step moves M by a bounded fraction of
+/// Ms, which keeps the integrator unconditionally well-behaved even under
+/// extreme overdrive. The returned slope is the trajectory slope AT `h`, used
+/// as the outer port-solver Jacobian.
+#[inline]
+fn ja_field_step(p: &JaCoreModel, h: Wave, h_prev: Wave, m_prev: Wave) -> (Wave, Wave) {
+    let dh_total = h - h_prev;
+    let delta: Wave = if dh_total >= 0.0 { 1.0 } else { -1.0 };
+
+    // Sub-step count: bound |dH| per step so M can't jump more than ~Ms/64 at
+    // the steepest slope (~Ms/a). nsub = ceil(|dH| * (Ms/a) / (Ms/64) ... )
+    // simplified to |dH| / a scaled — cheap and conservative.
+    let n = (math::abs(dh_total) / (0.25 * p.a)).ceil();
+    let nsub = (n as usize).clamp(1, 256);
+    let dh = dh_total / nsub as Wave;
+
+    let mut m = m_prev.clamp(-p.ms, p.ms);
+    let mut hh = h_prev;
+    let mut slope = 0.0;
+    for _ in 0..nsub {
+        // Midpoint (RK2) in field for accuracy at modest cost.
+        let s0 = ja_slope(p, hh, m, delta);
+        let m_mid = (m + 0.5 * dh * s0).clamp(-p.ms, p.ms);
+        let s_mid = ja_slope(p, hh + 0.5 * dh, m_mid, delta);
+        m = (m + dh * s_mid).clamp(-p.ms, p.ms);
+        hh += dh;
+        slope = s_mid;
+    }
+    // Final slope evaluated at the endpoint for the outer Jacobian.
+    slope = if nsub == 1 {
+        ja_slope(p, h, m, delta)
+    } else {
+        slope
+    };
+    (m, slope)
 }
 
 fn solve_anhysteretic_m(p: &JaCoreModel, h: Wave, initial_m: Wave) -> Wave {

@@ -239,10 +239,66 @@ pub(super) fn build_mna(
         }
     }
 
+    // Mid-chain terminal derivation (GAP b): a passive group sitting between
+    // two other stages touches neither the global `in` nor `out` node, and has
+    // no nullor of its own. The injection/output resolvers below then fall to
+    // None → a zero c-vector → silence. Derive the group's true boundary ports
+    // the same way `build_passive_rtype_stage` does (via `compute_group_terminals`
+    // + signal-flow orientation) so a mid-chain StateSpace group binds real
+    // injection/output ports. Used only as a last-resort fallback, so circuits
+    // whose group contains the global in/out (the extraction suite) are
+    // unaffected.
+    let is_signal_ref = |n: NodeId| -> bool {
+        n == graph.gnd_node || graph.supply_nodes.contains(&n) || graph.ac_ground_nodes.contains(&n)
+    };
+    let mid_chain_terminals = || -> Option<(Option<usize>, Option<usize>)> {
+        let terminals = crate::compiler::spqr_build::compute_group_terminals(
+            edge_indices,
+            graph,
+            &[graph.in_node, graph.out_node],
+        );
+        // Pick output: prefer the global out, else the first non-ref boundary
+        // that isn't the chosen input; pick input symmetrically.
+        let mut output_node = terminals
+            .iter()
+            .copied()
+            .find(|&t| t == graph.out_node)
+            .or_else(|| {
+                terminals
+                    .iter()
+                    .copied()
+                    .find(|&t| !is_signal_ref(t) && t != graph.in_node)
+            })?;
+        let mut input_node = terminals
+            .iter()
+            .copied()
+            .find(|&t| t == graph.in_node)
+            .or_else(|| {
+                terminals
+                    .iter()
+                    .copied()
+                    .find(|&t| !is_signal_ref(t) && t != output_node)
+            })?;
+        // Orient interior groups by rail-blocked signal-flow distance from
+        // `in`: the upstream terminal drives, the downstream one extracts.
+        // Swap only on a proven inversion (mirrors build_passive_rtype_stage).
+        if output_node != graph.out_node && input_node != graph.in_node {
+            let d_in = crate::compiler::signal_flow::bfs_distances_from_in_node(graph);
+            if let (Some(&d_input), Some(&d_output)) =
+                (d_in.get(&input_node), d_in.get(&output_node))
+            {
+                if d_output < d_input {
+                    core::mem::swap(&mut input_node, &mut output_node);
+                }
+            }
+        }
+        Some((node_to_mna(input_node), node_to_mna(output_node)))
+    };
+
     // Input voltage source at injection node.
     // Prefer graph.in_node if it's in this stage's MNA. Otherwise, fall
     // back to the VCVS neg node (for multi-stage pedals where the global
-    // input is in a different stage).
+    // input is in a different stage), then to the mid-chain upstream terminal.
     let injection_mna = node_to_mna(graph.in_node)
         .or_else(|| nearest_stage_input_node(&node_set, graph).and_then(node_to_mna))
         .or_else(|| {
@@ -255,27 +311,30 @@ pub(super) fn build_mna(
                         .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
                 })
                 .and_then(|rec| node_to_mna(rec.neg_node))
-        });
+        })
+        .or_else(|| mid_chain_terminals().and_then(|(inj, _)| inj));
     mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
     // Output node: if this rigid group contains the circuit's named `out`
     // terminal, sample that node. Otherwise fall back to the active device's
-    // output node for mid-chain stages.
+    // output node, then to the mid-chain downstream terminal.
     //
     // This matters for module/pedal output pads: `U1.out -> R -> out -> R -> gnd`
     // must extract at `out`, not at `U1.out`, or the pad only loads the circuit
     // and never attenuates the returned signal.
-    let output_mna = node_to_mna(graph.out_node).or_else(|| {
-        graph
-            .nullor_pins
-            .iter()
-            .find(|rec| {
-                edge_indices
-                    .iter()
-                    .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
-            })
-            .and_then(|rec| node_to_mna(rec.out_node))
-    });
+    let output_mna = node_to_mna(graph.out_node)
+        .or_else(|| {
+            graph
+                .nullor_pins
+                .iter()
+                .find(|rec| {
+                    edge_indices
+                        .iter()
+                        .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+                })
+                .and_then(|rec| node_to_mna(rec.out_node))
+        })
+        .or_else(|| mid_chain_terminals().and_then(|(_, out)| out));
 
     Ok(BuiltMna {
         mna,

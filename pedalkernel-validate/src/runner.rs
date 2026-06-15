@@ -144,11 +144,16 @@ impl ValidationRunner {
         let mut test_results = BTreeMap::new();
         let mut passed = 0;
         let mut failed = 0;
+        let mut pending = 0;
 
         for (test_name, test_case) in &suite.tests {
             match self.run_test(suite_name, test_name, test_case) {
                 Ok(result) => {
-                    if result.passed {
+                    if result.pending {
+                        // Excluded from both passed and failed (and thus the
+                        // gate total/denominator).
+                        pending += 1;
+                    } else if result.passed {
                         passed += 1;
                     } else {
                         failed += 1;
@@ -161,6 +166,7 @@ impl ValidationRunner {
                         test_name.clone(),
                         TestResult {
                             passed: false,
+                            pending: false,
                             error: Some(e.to_string()),
                             signals: vec![],
                         },
@@ -173,6 +179,7 @@ impl ValidationRunner {
             description: suite.description.clone(),
             passed,
             failed,
+            pending,
             tests: test_results,
         })
     }
@@ -194,6 +201,7 @@ impl ValidationRunner {
         let warmup_trim_ms = test_case.effective_warmup_trim_ms(&self.validation_config.global);
         let mut signal_results = vec![];
         let mut all_passed = true;
+        let mut any_pending = false;
 
         for signal_config in &test_case.signals {
             let signal_result = self.run_signal(
@@ -204,16 +212,32 @@ impl ValidationRunner {
                 effective_sr as f64,
                 &test_case.pass_criteria,
                 warmup_trim_ms,
+                test_case.pending_reference,
             )?;
 
-            if !signal_result.passed {
+            if signal_result.pending {
+                any_pending = true;
+            } else if !signal_result.passed {
                 all_passed = false;
             }
             signal_results.push(signal_result);
         }
 
+        // A test is PENDING when at least one of its signals is pending (golden
+        // missing + pending_reference). Pending tests are neither passed nor
+        // failed; the suite excludes them from the gate counts.
+        if any_pending {
+            return Ok(TestResult {
+                passed: false,
+                pending: true,
+                error: Some("golden not generated".to_string()),
+                signals: signal_results,
+            });
+        }
+
         Ok(TestResult {
             passed: all_passed,
+            pending: false,
             error: None,
             signals: signal_results,
         })
@@ -234,6 +258,7 @@ impl ValidationRunner {
         sample_rate: f64,
         pass_criteria: &PassCriteria,
         warmup_trim_ms: f64,
+        pending_reference: bool,
     ) -> Result<SignalResult, RunnerError> {
         let signal_label = signal_config.label();
 
@@ -264,10 +289,25 @@ impl ValidationRunner {
             .join(format!("{}.npy", signal_label));
 
         if !golden_path.exists() {
-            // No golden reference - can't compare, but circuit ran
+            // No golden reference - can't compare, but circuit ran.
+            if pending_reference {
+                // Pending reference: the .npy has not been generated yet (e.g.
+                // committed before ngspice produced it). Report as PENDING so it
+                // is excluded from the gate's passed AND total counts, rather
+                // than failing. Once the golden is dropped in, golden_path will
+                // exist and the comparison below runs normally — no code change
+                // needed (auto-activation).
+                return Ok(SignalResult::pending(
+                    signal_label,
+                    format!("golden not generated: {:?}", golden_path),
+                ));
+            }
+            // Not pending: a missing golden is a genuine failure (e.g. an
+            // accidental deletion), so fail loudly.
             return Ok(SignalResult {
                 label: signal_label,
                 passed: false,
+                pending: false,
                 comparison: None,
                 error: Some(format!("Golden reference not found: {:?}", golden_path)),
             });
@@ -300,6 +340,7 @@ impl ValidationRunner {
         Ok(SignalResult {
             label: signal_label,
             passed,
+            pending: false,
             comparison: Some(comparison.into()),
             error: None,
         })

@@ -113,6 +113,13 @@ pub fn compile_via_spqr_with_options(
             .downcast_ref::<super::components::EnvelopeFollower>()
             .is_some()
     });
+    // Connectivity-based completeness check: every active device that declares
+    // `terminal_requirements()` must have its Required neighbour roles present
+    // (e.g. a triode must have a Load reachable from an output terminal). This
+    // is additive and behaviour-neutral — it only rejects circuits that are
+    // genuinely missing a required neighbour; it never changes how complete
+    // circuits compile. Gated false-positive-free on the working corpus.
+    super::neighbor_roles::validate_completeness(&graph)?;
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
     let delay_lines = build_delay_line_bindings(pedal, sample_rate);
     // Behavioral islands (bbd(), vca(), ...) lower to per-instance runtime DSP
@@ -211,6 +218,8 @@ pub fn compile_via_spqr_with_options(
             original_passive_values: hashbrown::HashMap::new(),
             ports: Vec::new(),
             port_values: Vec::new(),
+            internal_ports: Vec::new(),
+            detector_led_coupling: None,
             initialized: false,
         };
         compiled.set_supply_voltage(supply_voltage);
@@ -273,6 +282,8 @@ pub fn compile_via_spqr_with_options(
             original_passive_values: hashbrown::HashMap::new(),
             ports: Vec::new(),
             port_values: Vec::new(),
+            internal_ports: Vec::new(),
+            detector_led_coupling: None,
             initialized: false,
         };
         compiled.set_supply_voltage(supply_voltage);
@@ -288,9 +299,19 @@ pub fn compile_via_spqr_with_options(
         "  [compile] Step 1: find_flow_groups ({} edges)...",
         all_edges.len()
     );
+    // Phase 2a: the same broker cut set find_flow_groups consulted. Threaded
+    // into the merge passes so a cut tap-mouth edge can never be re-absorbed
+    // back across the delayed-coupling boundary.
+    let cut_edges = super::boundary_rules::delayed_cut_edges(&graph);
+    // Detector control-electrode nodes (DelayedSense sinks) — used below to mark
+    // the de-fused detector group bypass_serial so it can't hijack the chain.
+    let detector_seed_nodes: std::collections::HashSet<super::graph::NodeId> =
+        super::boundary_rules::detector_control_nodes(&graph)
+            .into_iter()
+            .collect();
     let mut feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
-    merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph);
-    merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
+    merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph, &cut_edges);
+    merge_input_coupling_into_active_groups(&mut feedback_groups, &graph, &cut_edges);
     // DSP-block pedals: bbd(), vca(), ... are GraphRole::Virtual, so the
     // netlist is galvanically cut at their in/out pins. Split any group that
     // spans a behavioral gap (the sides stay "connected" through ground only)
@@ -305,6 +326,14 @@ pub fn compile_via_spqr_with_options(
     // This gives the correct processing order (input coupling first, clipping second,
     // tone third, etc.) regardless of the order find_flow_groups returned them.
     let group_flow_distances = compute_group_flow_distances(&feedback_groups, &graph);
+
+    // Broker (d-2): does this circuit have a mid-chain Tight transformer coupling
+    // (plain two-port, secondary != out)? If so, the rail-crossing grid-hop walk
+    // used to order triode stages under-counts everything behind the magnetic gap,
+    // and the corrected broker-coupled-link-aware `group_flow_distances` must be
+    // used for those stages instead. Computed once (cheap; consults the broker).
+    let has_tight_coupled_transformer =
+        super::boundary_rules::has_tight_coupled_transformer(&graph);
 
     // Step 1c: Classify each group as signal path or static bias.
     // Static bias groups (VCC dividers) are bypassed in the serial audio
@@ -331,6 +360,25 @@ pub fn compile_via_spqr_with_options(
     // probes 0). Boundary nodes are gathered from every registered DspBlock.
     let mut terminals = vec![graph.in_node, graph.out_node];
     for node in super::dsp_block::all_boundary_nodes(pedal, &graph) {
+        if !terminals.contains(&node) {
+            terminals.push(node);
+        }
+    }
+    // Cross-network couplers (photocoupler LED/LDR) are galvanically isolated:
+    // each side's port nodes must be SPQR terminals so the side that does not
+    // carry the global in/out signal still gets a stage port (otherwise its
+    // dangling group probes 0). Kept as a sibling of `all_boundary_nodes` so
+    // the DspBlock registry and the coupler concern stay cleanly separated.
+    for node in coupler_boundary_nodes(&graph) {
+        if !terminals.contains(&node) {
+            terminals.push(node);
+        }
+    }
+    // Phase 2a: each side of a broker-cut delayed-coupling boundary becomes a
+    // stage port — register the tap-mouth nodes as SPQR terminals (sibling of
+    // `coupler_boundary_nodes`) so the de-fused detector group and the forward
+    // group each get an entry/exit node at the cut.
+    for &node in &cut_edges.boundary_nodes {
         if !terminals.contains(&node) {
             terminals.push(node);
         }
@@ -524,11 +572,18 @@ pub fn compile_via_spqr_with_options(
         // an independent serial audio stage.
         let has_signal_transformer =
             group_has_signal_transformer_boundary(group, &graph, graph.in_node, graph.out_node);
-        let is_bypass = (matches!(
+        // Phase 2a: the de-fused detector group (holds the DelayedSense control
+        // electrode, no non-cut path to in/out after the tap-mouth cut) computes
+        // state/metering but must NOT hijack the forward serial signal — bypass
+        // it. Its input is floating in 2a (driven by internal delayed ports in
+        // 2b); de-fusing + feeding the forward path is all 2a proves.
+        let is_detector_bypass = is_delayed_detector_group(group, &graph, &detector_seed_nodes);
+        let is_bypass = ((matches!(
             group_bias[gi],
             super::bias_analysis::GroupBiasKind::StaticBias { .. }
         ) || is_nonlinear_modulator_group(group, &graph))
-            && !has_signal_transformer;
+            && !has_signal_transformer)
+            || is_detector_bypass;
 
         #[cfg(test)]
         {
@@ -1227,8 +1282,30 @@ pub fn compile_via_spqr_with_options(
                             supply_voltage,
                         )
                         .map_err(|e| format!("Group {gi} (triode-context MNA): {e}"))?;
-                        let triode_flow_dist = bfs_dist_from_in_node(grid_node, &graph)
-                            .unwrap_or(group_flow_distances[gi]);
+                        // A triode's serial position is normally its grid's hop
+                        // distance from `in` (`bfs_dist_from_in_node`). That walk
+                        // is undirected AND crosses rails, so once a circuit has a
+                        // mid-chain plain two-port transformer (whose magnetic
+                        // primary↔secondary coupling is NOT a graph edge), every
+                        // triode downstream of the gap is reached only via rail
+                        // shortcuts and gets spuriously SMALL distances — scrambling
+                        // the serial order (LA-2A's output group sorting ahead of
+                        // V1/V2). `group_flow_distances[gi]` is the corrected
+                        // rail-blocked, directed, broker-coupled-link-aware distance
+                        // (d-2, now honoring the Tight link). Defer to it ONLY when
+                        // the circuit actually has such a Tight coupling — which is
+                        // exactly the case the rail-crossing grid walk gets wrong.
+                        // Circuits without a mid-chain two-port (ordinary tube amps:
+                        // their output transformer is its OWN group and its
+                        // secondary is `out`, which the broker excludes; cap-coupled
+                        // amps with no transformer at all) keep the existing grid
+                        // distance, byte-for-byte. (Broker consult only.)
+                        let triode_flow_dist = if has_tight_coupled_transformer {
+                            group_flow_distances[gi]
+                        } else {
+                            bfs_dist_from_in_node(grid_node, &graph)
+                                .unwrap_or(group_flow_distances[gi])
+                        };
                         push_stage!(
                             BuiltStage::MultiNl(built),
                             triode_flow_dist,
@@ -1471,6 +1548,75 @@ pub fn compile_via_spqr_with_options(
                         group_comp_ids.clone()
                     );
                     continue;
+                } else if !group_has_nonlinear
+                    && spqr_stages.is_empty()
+                    && group_has_runtime_pot
+                {
+                    // All-passive group that reduced to a rigid (non-series-
+                    // parallel) R-node AND carries a runtime pot: spqr_to_dyn_node
+                    // returns None for the R-node, so the AllPassive arm of
+                    // collect_stages warns and drops the entire stage — and its
+                    // declared pots vanish with it (symptom: dead Tone/Level
+                    // controls, unity passthrough).
+                    //
+                    // The pot guard is load-bearing: an all-passive group with NO
+                    // pot (e.g. a bare input/output coupling RC feeding an active
+                    // device's pin) is HARMLESS to drop — the serial chain carries
+                    // the signal through as a passthrough, which is correct. Only a
+                    // dropped group that owns a CONTROL needs rebuilding, and only
+                    // then is it worth the risk of mis-terminating a coupling
+                    // network as a standalone 2-port (which silences it — observed
+                    // on dyna_comp's pot-less input-coupling group).
+                    //
+                    // Rebuild it exactly the way the normal `SpqrStage::Rigid`
+                    // all-passive branch does — via `build_passive_rtype_stage`,
+                    // which lowers the group into a WDF PassiveRType stage with
+                    // terminal-derived input/output ports (compute_group_terminals)
+                    // and live pot leaves (both 2-terminal rheostats like Tone and
+                    // 3-terminal wiper dividers like Level). This preserves the
+                    // mid-chain 2-port transfer; the generic rigid MNA builder does
+                    // NOT — it models a 1-port (voltage-source-in / sample-at-`out`)
+                    // and silences any mid-chain passive group that does not contain
+                    // the global `out` (output port unbound -> zero c-vector).
+                    // Narrow: only fires when SPQR produced ZERO stages for an
+                    // all-passive group that owns a pot control.
+                    let built = if let Some(wdf) = build_passive_rtype_stage(
+                        &group_edges,
+                        &graph,
+                        sample_rate,
+                        &bias_node_voltages,
+                    ) {
+                        eprintln!(
+                            "  [compile] group {gi}: SPQR dropped all-passive stage (rigid R-node), rebuilt as PassiveRType WDF"
+                        );
+                        BuiltStage::Wdf(wdf)
+                    } else {
+                        // PassiveRType could not lower this group (e.g. degenerate
+                        // terminals); last-resort rigid MNA so the stage at least
+                        // exists rather than being silently dropped.
+                        eprintln!(
+                            "  [compile] group {gi}: SPQR dropped all-passive stage; PassiveRType lowering failed, using rigid MNA"
+                        );
+                        build_rigid_from_group_with_hints(
+                            group_edges,
+                            &graph,
+                            sample_rate,
+                            Some(group),
+                            supply_voltage,
+                            None,
+                            !options.disable_iir,
+                            &pedal.init_hints,
+                        )
+                        .map_err(|e| format!("Group {gi} (all-passive rigid fallback): {e}"))?
+                    };
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass,
+                        group_comp_ids.clone()
+                    );
+                    continue;
                 }
 
                 for stage in spqr_stages {
@@ -1496,19 +1642,45 @@ pub fn compile_via_spqr_with_options(
         }
     }
 
-    // Sort stages by signal_flow_distance (original group index from
-    // find_flow_groups) so processing order matches the circuit's signal chain.
-    // Build order was different (non-feedback first for Ri extraction).
-    stages.sort_by_key(|s| match s {
-        Stage::Wdf(w) => w.signal_flow_distance,
-        Stage::Iir(i) => i.signal_flow_distance,
-        Stage::StateSpace(ss) => ss.signal_flow_distance,
-        Stage::MultiNl(m) => m.signal_flow_distance,
-        Stage::BlackFeedback(b) => b.signal_flow_distance,
-        Stage::Blockwise(k) => k.signal_flow_distance,
-        Stage::KMethod { .. } => usize::MAX,
-        Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
-    });
+    // Defect B tertiary tiebreak: when two stages share a signal_flow_distance,
+    // resolve their order DETERMINISTICALLY by the minimum stable component id
+    // in each stage (netlist names are stable across compiles/processes). This
+    // makes the serial chain reproducible even when `find_flow_groups` returns
+    // tied groups in a process-dependent order. `stage_comp_ids` is populated in
+    // both debug and release. A stage with no comp ids sorts last among its tie.
+    let mut stage_min_comp_id: Vec<String> = stage_comp_ids
+        .iter()
+        .map(|ids| ids.iter().min().cloned().unwrap_or_else(|| "~".to_string()))
+        .collect();
+    let stage_dist = |s: &Stage| -> usize {
+        match s {
+            Stage::Wdf(w) => w.signal_flow_distance,
+            Stage::Iir(i) => i.signal_flow_distance,
+            Stage::StateSpace(ss) => ss.signal_flow_distance,
+            Stage::MultiNl(m) => m.signal_flow_distance,
+            Stage::BlackFeedback(b) => b.signal_flow_distance,
+            Stage::Blockwise(k) => k.signal_flow_distance,
+            Stage::KMethod { .. } => usize::MAX,
+            Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
+        }
+    };
+
+    // Sort stages by (signal_flow_distance, min_comp_id). Index-permutation
+    // based so the parallel `stage_min_comp_id` table stays aligned through the
+    // sort (the second, post-feedforward re-sort below reuses it).
+    // (`stage_comp_ids` is intentionally left in its build order — the VCO
+    // generator pass below indexes it by the same pre-sort positions it always
+    // has, so we do not perturb that pre-existing behavior.)
+    {
+        let mut perm: Vec<usize> = (0..stages.len()).collect();
+        perm.sort_by(|&a, &b| {
+            stage_dist(&stages[a])
+                .cmp(&stage_dist(&stages[b]))
+                .then_with(|| stage_min_comp_id[a].cmp(&stage_min_comp_id[b]))
+        });
+        apply_permutation(&mut stages, &perm);
+        apply_permutation(&mut stage_min_comp_id, &perm);
+    }
 
     // ── Generator (VCO, N=0) source placement (spec §4) ───────────────────
     // A generator has no audio input — there is no galvanic gap to split.
@@ -1802,20 +1974,26 @@ pub fn compile_via_spqr_with_options(
     }
 
     // Re-sort: feedforward stages may have changed distance.
-    // Secondary key: feedforward stages sort AFTER non-feedforward at same distance.
-    stages.sort_by_key(|s| {
-        let (d, ff) = match s {
-            Stage::Wdf(w) => (w.signal_flow_distance, w.is_feedforward),
-            Stage::Iir(i) => (i.signal_flow_distance, false),
-            Stage::StateSpace(ss) => (ss.signal_flow_distance, false),
-            Stage::MultiNl(m) => (m.signal_flow_distance, false),
-            Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
-            Stage::Blockwise(k) => (k.signal_flow_distance, false),
-            Stage::KMethod { .. } => (usize::MAX, false),
-            Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
+    // Secondary key: feedforward stages sort AFTER non-feedforward at same
+    // distance. Tertiary key (Defect B): min stable component id, for
+    // deterministic ordering among otherwise-tied stages.
+    {
+        let ff_of = |s: &Stage| -> u8 {
+            match s {
+                Stage::Wdf(w) => w.is_feedforward as u8,
+                _ => 0,
+            }
         };
-        (d, ff as u8) // false=0 sorts before true=1
-    });
+        let mut perm: Vec<usize> = (0..stages.len()).collect();
+        perm.sort_by(|&a, &b| {
+            stage_dist(&stages[a])
+                .cmp(&stage_dist(&stages[b]))
+                .then_with(|| ff_of(&stages[a]).cmp(&ff_of(&stages[b])))
+                .then_with(|| stage_min_comp_id[a].cmp(&stage_min_comp_id[b]))
+        });
+        apply_permutation(&mut stages, &perm);
+        apply_permutation(&mut stage_min_comp_id, &perm);
+    }
 
     // F13b: wire parallel branches into the convergence mixer. The convergence
     // stage reads its driver voltages from `node_signals`, so each upstream
@@ -1913,6 +2091,8 @@ pub fn compile_via_spqr_with_options(
         original_passive_values: hashbrown::HashMap::new(),
         ports: Vec::new(),
         port_values: Vec::new(),
+        internal_ports: Vec::new(),
+        detector_led_coupling: None,
         initialized: false,
     };
     compiled.set_supply_voltage(supply_voltage);
@@ -2001,11 +2181,185 @@ pub fn compile_via_spqr_with_options(
         compiled.port_values = port_values;
     }
 
+    // Phase 2b: build the internal delayed-port table for a DELAYED detector.
+    // Compiler-synthesized (separate from the user `ports` Vec): cross-sample
+    // (z⁻¹) carries that deliver the cut forward taps into the de-fused detector
+    // sub-network one sample late, and store the detector output (`EL_drive`) for
+    // Phase 3. NARROW: fires only when `detector_control_nodes` found a true
+    // cross-network feedback detector (LA-2A opto leveler) AND the broker cut a
+    // tap mouth — non-detector circuits get an empty table (byte-identical).
+    populate_detector_internal_ports(
+        &mut compiled,
+        &graph,
+        &cut_edges,
+        &detector_seed_nodes,
+        &stage_comp_ids,
+    );
+
     // Cache raw pointers to all VS leaves for zero-cost runtime access.
     // Must be after port binding (wrap_leaf_with_vs) and recompute.
     compiled.cache_all_vs_pointers();
 
     Ok(compiled)
+}
+
+/// Phase 2b — populate `compiled.internal_ports` for a DELAYED feedback detector.
+///
+/// The broker (`delayed_cut_edges`) de-fuses the detector from the forward audio
+/// path by cutting the tap-mouth edges (the `out -> C_sc` feedback mouth and the
+/// `in -> fork`/`R_ff` feed-forward mouth — see step 4 + 4b of `delayed_cut_edges`).
+/// After the cut the forward `in` is no longer shorted by the Compress fork arm,
+/// and the de-fused detector sub-chain (front-end → V4 → V5 → `EL_drive`) solves
+/// on the program signal it still sees through the forward serial routing (the
+/// feed-forward tap), producing a program-dependent EL-drive value.
+///
+/// This routine wires the genuinely-new cross-sample (z⁻¹) piece — the EL-DRIVE
+/// CARRY port — that captures and stores that detector output:
+///
+///   * EL-DRIVE CARRY port: `source = the Behavioral coupler's LED-anode node`
+///     (the detector output, `EL_drive.b == PC1.led.a`), `consumer = usize::MAX`
+///     (carry-only). The detector's solved EL-drive value is captured every
+///     sample into `prev_value`, AVAILABLE for Phase 3 (which will set
+///     `consumer = PC1.led` to apply gain reduction from the carried value) and
+///     for the 2b tracking measurement (`la2a_detector_el_drive_tracks_program`).
+///     NO gain reduction is applied here — 2b only COMPUTES and STORES it.
+///
+/// To make the EL-drive node observable for the carry, the stage that owns the
+/// EL-drive driver component is told to PUBLISH its solved output node into
+/// `node_signals` (`output_node_id = el_node`); this does NOT alter the serial
+/// audio signal, it only ALSO exposes the node for the end-of-sample z⁻¹ capture.
+///
+/// The DELAYED feedback-tap mix (re-injecting the `out` node into the detector
+/// front one sample late) belongs to Phase 3, where the GR loop is actually
+/// closed; in 2b the detector is open-loop (no GR) so the feed-forward solve
+/// suffices to demonstrate program tracking. The internal-port table + carry
+/// generalize the `SidechainProcessor.cv_delayed` precedent and subsume it.
+fn populate_detector_internal_ports(
+    compiled: &mut CompiledPedal,
+    graph: &CircuitGraph,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
+    detector_seeds: &std::collections::HashSet<super::graph::NodeId>,
+    stage_comp_ids: &[Vec<String>],
+) {
+    use pedalkernel_rt::processor::{InternalPortBinding, Stage};
+    use super::component::EdgeKind;
+
+    // Narrow gate: only a true delayed detector with a broker tap-mouth cut.
+    if detector_seeds.is_empty() || cut_edges.cuts.is_empty() {
+        return;
+    }
+
+    // The detector OUTPUT node = the cross-network coupler's LED-anode node
+    // (the node that drives the photocoupler LED — `EL_drive.b == PC1.led.a`).
+    // Derive it from the Behavioral coupling edge's `pin_a` (the driven side).
+    // Also record the coupler component id so we can EXCLUDE it when finding the
+    // detector-side driver component that owns that node.
+    let mut el_drive_node: Option<super::graph::NodeId> = None;
+    let mut coupler_comp_id: Option<String> = None;
+    for comp in &graph.components {
+        for edge in comp.kind.edges() {
+            if edge.kind != EdgeKind::Behavioral {
+                continue;
+            }
+            if let Some(&n) = graph.node_names.get(&format!("{}.{}", comp.id, edge.pin_a)) {
+                el_drive_node = Some(n);
+                coupler_comp_id = Some(comp.id.clone());
+            }
+        }
+    }
+
+    let Some(el_node) = el_drive_node else {
+        return;
+    };
+
+    // The detector-side component that DRIVES el_node (e.g. the `EL_drive`
+    // transformer winding `EL_drive.b`) — any conductive component, other than
+    // the coupler, with a graph edge on el_node.
+    let driver_comp_id: Option<String> = graph
+        .edges
+        .iter()
+        .filter(|e| e.node_a == el_node || e.node_b == el_node)
+        .map(|e| graph.components[e.comp_idx].id.clone())
+        .find(|id| Some(id) != coupler_comp_id.as_ref());
+
+    // Make the stage that owns the EL-drive driver PUBLISH its solved output node
+    // value into `node_signals` (set `output_node_id = el_node`). The non-feed-
+    // forward WDF stage publish path (`processor.rs`) then writes el_node every
+    // sample, where the carry-only internal port captures it at end-of-sample.
+    // This does NOT change the serial audio signal (the stage still drives the
+    // chain as before) — it only ALSO publishes the node for the z⁻¹ capture.
+    if let Some(ref drv) = driver_comp_id {
+        for (si, comp_ids) in stage_comp_ids.iter().enumerate() {
+            if comp_ids.iter().any(|c| c == drv) {
+                if let Some(stage) = compiled.stages.get_mut(si) {
+                    match stage {
+                        Stage::Wdf(w) => w.output_node_id = el_node,
+                        Stage::MultiNl(m) => m.output_node_id = el_node,
+                        _ => {}
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // EL-drive carry-only port (the detector output, for Phase 3 + measurement).
+    // carry_idx 0 = the EL-drive carry the Phase-3 LED coupling reads.
+    let internal_ports = vec![InternalPortBinding {
+        source_node_id: el_node,
+        consumer_node_id: usize::MAX,
+        gain: 1.0,
+        prev_value: 0.0,
+    }];
+
+    #[cfg(test)]
+    {
+        eprintln!(
+            "  [2b] detector internal-ports: el_node={el_node} driver={driver_comp_id:?} \
+             coupler={coupler_comp_id:?} in={} out={} cut_boundary={:?}",
+            graph.in_node, graph.out_node, cut_edges.boundary_nodes
+        );
+    }
+
+    compiled.internal_ports = internal_ports;
+
+    // ---- Phase 3: close the GR loop (LED -> cell -> forward shunt). --------
+    // The carry above stores the detector's solved EL-drive value one sample
+    // late. Synthesize the optical coupling that turns that value into actual
+    // gain reduction: drive the photocoupler (`coupler_comp_id` = PC1) LED from
+    // |EL_drive| each sample. The runtime reads `internal_ports[0].prev_value`
+    // (the z⁻¹ closure), rectifies + normalizes it, and calls `set_led_drive`,
+    // darkening the LDR shunt leaf in the FORWARD divider -> downward GR.
+    if let Some(coupler) = coupler_comp_id {
+        // Find the WDF stage that owns the photocoupler's LDR leaf (its
+        // conductive forward-divider position — the shunt cell ahead of V1).
+        let mut led_stage_idx: Option<usize> = None;
+        for (si, comp_ids) in stage_comp_ids.iter().enumerate() {
+            if comp_ids.iter().any(|c| c == &coupler) {
+                led_stage_idx = Some(si);
+                break;
+            }
+        }
+        if let Some(stage_idx) = led_stage_idx {
+            // Normalization: a loud-program detector drives EL_drive to ~15 V
+            // peak (see la2a_detector_el_drive_tracks_program); quiet ~0.05 V.
+            // scale = 1/15 maps loud -> ~full illumination, quiet -> near dark.
+            // The T4B two-rate cell (set_led_drive) provides attack/release.
+            compiled.detector_led_coupling =
+                Some(pedalkernel_rt::processor::DetectorLedCoupling {
+                    carry_idx: 0,
+                    comp_id: coupler,
+                    stage_idx,
+                    scale: 1.0 / 15.0,
+                });
+            #[cfg(test)]
+            eprintln!(
+                "  [3] detector LED coupling: carry=0 comp={:?} stage={stage_idx} scale={}",
+                compiled.detector_led_coupling.as_ref().map(|c| &c.comp_id),
+                1.0 / 15.0
+            );
+        }
+    }
 }
 
 /// Build the initial `DelayLineBinding`s (with real tap ratios and configured
@@ -2019,6 +2373,56 @@ fn build_delay_line_bindings(
     sample_rate: f64,
 ) -> Vec<pedalkernel_rt::processor::DelayLineBinding> {
     super::delay_lowering::build_delay_line_bindings(pedal, sample_rate)
+}
+
+/// SPQR terminal nodes contributed by cross-network couplers.
+///
+/// A cross-network coupler (today: `photocoupler`) declares a `Behavioral`
+/// edge between two galvanically-isolated terminals (the LED side) ALONGSIDE a
+/// conductive `graph_role` edge (the LDR side). The two sides live in different
+/// electrical networks and must never be fused (see the photocoupler component
+/// and `find_flow_groups`). For SPQR to emit a proper stage port on each side,
+/// the (isolated) LED side must be a global terminal — the same treatment
+/// `in_node`/`out_node` and DspBlock boundary pins receive.
+///
+/// Detection is generic (no component-type matching): a component qualifies
+/// when its `graph_role` is a conductive edge role (so it is a coupler with a
+/// real LDR edge, not a pure `GraphRole::Virtual` DSP island like a BBD, which
+/// is handled by `all_boundary_nodes`).
+///
+/// Only the endpoints of the **Behavioral** edge (the galvanically-isolated
+/// side that has NO conductive graph edge — the LED) are forced to terminals.
+/// The conductive side (the LDR `a`/`b`) already gets a stage port from its
+/// real graph edge, so it MUST NOT be forced: forcing it would fragment the
+/// passive WDF tree of every existing photocoupler-as-LDR circuit (e.g.
+/// `photocoupler_t4b.pedal`), which is a regression, not isolation.
+fn coupler_boundary_nodes(graph: &CircuitGraph) -> Vec<NodeId> {
+    use super::component::{EdgeKind, GraphRole};
+    let mut nodes = Vec::new();
+    for comp in &graph.components {
+        let role_is_conductive = matches!(
+            comp.kind.graph_role(),
+            GraphRole::Edge { .. }
+                | GraphRole::ActiveEdge { .. }
+                | GraphRole::CoupledEdge { .. }
+        );
+        if !role_is_conductive {
+            continue;
+        }
+        for edge in comp.kind.edges() {
+            if edge.kind != EdgeKind::Behavioral {
+                continue;
+            }
+            for pin in [edge.pin_a, edge.pin_b] {
+                if let Some(&n) = graph.node_names.get(&format!("{}.{}", comp.id, pin)) {
+                    if !nodes.contains(&n) {
+                        nodes.push(n);
+                    }
+                }
+            }
+        }
+    }
+    nodes
 }
 
 /// Check if a group is a merged pot pair (aw + wb of same component).
@@ -3503,6 +3907,7 @@ fn is_ground_clip_group(
 fn merge_input_coupling_into_active_groups(
     groups: &mut Vec<super::signal_flow::FlowGroup>,
     graph: &super::graph::CircuitGraph,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
 ) {
     // Build node sets for each active group (include all edges — active,
     // feedback, and pendant — so we can find the coupling junction J even
@@ -3579,6 +3984,10 @@ fn merge_input_coupling_into_active_groups(
 
         let mut target: Option<usize> = None;
         for &eidx in &edges {
+            // Phase 2a: a broker-cut tap-mouth edge can't be a merge bridge.
+            if cut_edges.cuts.contains_key(&eidx) {
+                continue;
+            }
             let e = &graph.edges[eidx];
             // One side must be a "source" node.
             let (src_side, other_side) = if is_source_node(e.node_a) {
@@ -3658,6 +4067,7 @@ fn merge_input_coupling_into_active_groups(
 fn merge_cross_reactive_groups_into_active_groups(
     groups: &mut Vec<super::signal_flow::FlowGroup>,
     graph: &super::graph::CircuitGraph,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
 ) {
     let rails = super::signal_flow::rail_nodes(graph);
     let is_boundary_node = |node: super::graph::NodeId| -> bool {
@@ -3705,6 +4115,8 @@ fn merge_cross_reactive_groups_into_active_groups(
         let reactive_edges: Vec<usize> = group
             .all_edges()
             .into_iter()
+            // Phase 2a: a broker-cut tap-mouth edge can't be a merge bridge.
+            .filter(|eidx| !cut_edges.cuts.contains_key(eidx))
             .filter(|&eidx| graph.effective_edge_kind(eidx) == super::component::EdgeKind::Reactive)
             .collect();
         if reactive_edges.is_empty() {
@@ -3787,6 +4199,35 @@ fn can_absorb_cross_reactive_passives(
         !(comp.kind.is_diode_family()
             && (rails.contains(&edge.node_a) || rails.contains(&edge.node_b)))
     })
+}
+
+/// Phase 2a: true if `group` is the de-fused DELAYED detector group — it holds a
+/// DelayedSense control electrode (a node in `detector_seeds`) AND, after the
+/// broker tap-mouth cut, has NO edge touching the global `in`/`out` nodes (no
+/// non-cut path to the forward chain). Such a group must compute (state/metering)
+/// but NOT overwrite the forward serial signal, so it is marked `bypass_serial`.
+fn is_delayed_detector_group(
+    group: &super::signal_flow::FlowGroup,
+    graph: &super::graph::CircuitGraph,
+    detector_seeds: &std::collections::HashSet<super::graph::NodeId>,
+) -> bool {
+    if detector_seeds.is_empty() {
+        return false;
+    }
+    let mut holds_seed = false;
+    let mut touches_io = false;
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        for n in [e.node_a, e.node_b] {
+            if detector_seeds.contains(&n) {
+                holds_seed = true;
+            }
+            if n == graph.in_node || n == graph.out_node {
+                touches_io = true;
+            }
+        }
+    }
+    holds_seed && !touches_io
 }
 
 fn is_nonlinear_modulator_group(
@@ -3996,6 +4437,16 @@ fn compute_bias_v_max_for_group(
     None
 }
 
+/// Reorder `v` in place so that the new element `i` is the old element
+/// `perm[i]`. `perm` must be a permutation of `0..v.len()`.
+fn apply_permutation<T>(v: &mut Vec<T>, perm: &[usize]) {
+    debug_assert_eq!(v.len(), perm.len());
+    let mut taken: Vec<Option<T>> = v.drain(..).map(Some).collect();
+    for &i in perm {
+        v.push(taken[i].take().expect("permutation index reused"));
+    }
+}
+
 /// lower distance values, giving the correct processing order regardless of
 /// the order `find_flow_groups` returned them.
 fn compute_group_flow_distances(
@@ -4084,8 +4535,18 @@ fn compute_group_flow_distances(
         false
     }
 
+    // Defect B (stage ordering): the base in->node distance is now a
+    // RAIL-BLOCKED, signal-DIRECTED traversal. The old `bfs_distances` was
+    // undirected and never blocked B+/gnd/ac-ground rails, so a plate-/
+    // collector-load resistor tied to B+ let the walk reach a tube's downstream
+    // plate node in a few hops THROUGH the supply rail — giving load nodes tiny
+    // distances and scrambling serial stage order. Crossing active devices only
+    // input->output and dead-ending rails fixes the order. The `out`-side
+    // distance keeps the old undirected walk: it only ranks active-output->output
+    // proximity for the feedback ordering special case, where reachability
+    // (not signal direction) is what matters.
     let mut node_dist: HashMap<NodeId, usize> = HashMap::new();
-    node_dist.extend(bfs_distances(graph.in_node, graph));
+    node_dist.extend(super::signal_flow::directed_signal_distances_from_in(graph));
     let out_dist = bfs_distances(graph.out_node, graph);
     let span = graph.edges.len() + graph.components.len() + groups.len() + 1;
 

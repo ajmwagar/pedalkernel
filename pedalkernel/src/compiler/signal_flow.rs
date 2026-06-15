@@ -217,9 +217,15 @@ fn build_passive_adjacency(
     graph: &CircuitGraph,
     rails: &HashSet<NodeId>,
     active_edge_set: &HashSet<usize>,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
 ) -> BTreeMap<NodeId, Vec<(usize, NodeId)>> {
     let mut adj: BTreeMap<NodeId, Vec<(usize, NodeId)>> = BTreeMap::new();
     for &eidx in edge_indices {
+        // Phase 2a: skip broker-cut tap-mouth edges (mirrors the active-edge
+        // skip below) so a delayed-coupling boundary can't bridge two groups.
+        if cut_edges.cuts.contains_key(&eidx) {
+            continue;
+        }
         // Skip active element edges — we only traverse passive signal paths
         if active_edge_set.contains(&eidx) {
             continue;
@@ -780,6 +786,96 @@ pub(in crate::compiler) fn bfs_distances_from_in_node(
             if !visited.contains_key(&other) {
                 visited.insert(other, dist + 1);
                 queue.push_back(other);
+            }
+        }
+    }
+    visited
+}
+
+/// Rail-blocked, signal-DIRECTED hop distance from the circuit input.
+///
+/// Unlike [`bfs_distances_from_in_node`] (rail-blocked but UNDIRECTED — it walks
+/// every edge both ways, including straight through an active device and along
+/// supply-tied bias resistors), this traversal models the *signal* path:
+///
+/// * Rail nodes (gnd / supply / ac-ground) are dead-ends — never expanded.
+/// * Passive edges conduct both directions (a passive network is reciprocal).
+/// * Active devices conduct only `input_node -> output_nodes` (forward signal),
+///   never output->input and never input->input.
+///
+/// This is the Defect-B fix base distance: plate-/collector-load resistors tie
+/// to B+, so an undirected rail-unblocked walk reaches a tube's downstream plate
+/// node in a couple of hops *through the supply rail*, giving the plate-load node
+/// a tiny distance and scrambling serial stage order. With rails dead-ended and
+/// devices crossed input->output only, a node downstream of a tube is reachable
+/// only THROUGH that tube, so it gets a correctly larger distance.
+///
+/// Adjacency mirrors [`forward_signal_nodes_to_out`] but forward (in->out)
+/// instead of reverse (out<-in), and over ALL active devices (no group exclusion
+/// — every device is a legitimate forward conductor when measuring global flow).
+pub(in crate::compiler) fn directed_signal_distances_from_in(
+    graph: &CircuitGraph,
+) -> HashMap<NodeId, usize> {
+    let rails = rail_nodes(graph);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let active_elements = find_active_elements(&all_edges, graph);
+
+    // Forward signal adjacency: node -> nodes reachable in one directed hop.
+    let mut fwd: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut add = |from: NodeId, to: NodeId| {
+        if !rails.contains(&from) && !rails.contains(&to) {
+            fwd.entry(from).or_default().push(to);
+        }
+    };
+    let active_edge_set: HashSet<usize> = active_elements.iter().map(|e| e.edge_idx).collect();
+    // Passive edges conduct both directions.
+    for (eidx, e) in graph.edges.iter().enumerate() {
+        if active_edge_set.contains(&eidx) {
+            continue;
+        }
+        let comp = &graph.components[e.comp_idx];
+        if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+            continue;
+        }
+        add(e.node_a, e.node_b);
+        add(e.node_b, e.node_a);
+    }
+    // Active devices conduct input -> each output node only.
+    for elem in &active_elements {
+        for &out in &elem.output_nodes {
+            add(elem.input_node, out);
+        }
+    }
+    // A plain two-port transformer couples primary↔secondary through magnetic
+    // flux — a link recorded in `coupled_nodes`, NOT in `graph.edges`, so the
+    // edge scan above never sees it. Without it, a mid-chain transformer whose
+    // secondary feeds a SEPARATE downstream stage leaves that whole secondary
+    // side unreachable from `in`: it gets no distance, so the stage-ordering
+    // pass sorts it BEFORE the stages that actually feed it (LA-2A's output
+    // group sorting ahead of V1). The broker's `Tight` coupled-link rule says
+    // the winding pair is a traversable signal connection; cross it in both
+    // directions so the secondary side is reachable from `in`. (Consults the
+    // broker only; gated to plain two-ports whose secondary isn't `out`.)
+    for (node, others) in graph.coupled_nodes.iter() {
+        for &other in others {
+            if super::boundary_rules::is_tight_coupled_link(graph, *node, other) {
+                add(*node, other);
+            }
+        }
+    }
+
+    let mut visited: HashMap<NodeId, usize> = HashMap::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    visited.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+    while let Some(node) = queue.pop_front() {
+        let dist = visited[&node];
+        if let Some(neighbors) = fwd.get(&node) {
+            for &next in neighbors {
+                if !visited.contains_key(&next) {
+                    visited.insert(next, dist + 1);
+                    queue.push_back(next);
+                }
             }
         }
     }
@@ -1414,8 +1510,14 @@ pub(in crate::compiler) fn find_flow_groups(
         }];
     }
 
+    // Phase 2a: consult the broker ONCE for the delayed-coupling cut set. The
+    // rule logic lives entirely in `boundary_rules::delayed_cut_edges`; formation
+    // only excludes the returned tap-mouth edges from grouping. Empty for every
+    // circuit without a feedback-detector control electrode (the common case).
+    let cut_edges = super::boundary_rules::delayed_cut_edges(graph);
+
     let active_edge_set: HashSet<usize> = active_elements.iter().map(|e| e.edge_idx).collect();
-    let adj = build_passive_adjacency(edge_indices, graph, &rails, &active_edge_set);
+    let adj = build_passive_adjacency(edge_indices, graph, &rails, &active_edge_set, &cut_edges);
 
     // Build directed flow graph and find SCCs
     let flow_adj = build_flow_graph(&active_elements, &adj, &rails, graph);
@@ -1881,6 +1983,14 @@ pub(in crate::compiler) fn find_flow_groups(
     let mut isolated_edges: Vec<usize> = Vec::new();
     for &eidx in edge_indices {
         if claimed.contains(&eidx) {
+            continue;
+        }
+        // Phase 2a: a broker-cut tap-mouth edge is the delayed-coupling
+        // boundary — it must NOT re-fuse the detector front-end to the forward
+        // network through the unclaimed-passive connectivity grouping. Exclude
+        // it (its endpoints become stage ports via the SPQR terminal set).
+        if cut_edges.cuts.contains_key(&eidx) {
+            claimed.insert(eidx);
             continue;
         }
         let e = &graph.edges[eidx];

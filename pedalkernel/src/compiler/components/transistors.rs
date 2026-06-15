@@ -5,8 +5,8 @@ use hashbrown::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, KMethodSpec, ModulationSink, ModulationSinkKind,
-    PinConfig, PinDirection, ResolveContext, SignalTerminals, StampResult,
-    K_AXIS_INCIDENT_CONTROL_2D,
+    NeighborReq, NeighborRole, PinConfig, PinDirection, ResolveContext, SignalTerminals,
+    StampResult, K_AXIS_INCIDENT_CONTROL_2D,
 };
 use crate::compiler::dyn_node::DynNode;
 use crate::compiler::graph::NodeId;
@@ -15,6 +15,52 @@ use crate::elements::{JfetModel, JfetVariableResistor};
 use crate::tree::MnaSystem;
 
 use super::impl_component_dyn;
+
+/// BJT terminal requirements: a Load on AN output terminal (collector-load
+/// common-emitter OR an emitter-follower's emitter load), plus optional
+/// base/emitter bias references and an optional series coupling on the base.
+fn bjt_terminal_requirements() -> Vec<(&'static str, Vec<NeighborReq>)> {
+    vec![
+        ("collector", vec![NeighborReq::required(NeighborRole::Load)]),
+        (
+            "emitter",
+            vec![
+                NeighborReq::required(NeighborRole::Load),
+                NeighborReq::optional(NeighborRole::Ref),
+            ],
+        ),
+        (
+            "base",
+            vec![
+                NeighborReq::optional(NeighborRole::Ref),
+                NeighborReq::optional(NeighborRole::Signal),
+            ],
+        ),
+    ]
+}
+
+/// FET (JFET / MOSFET) terminal requirements: a Load on AN output terminal
+/// (drain-load common-source OR a source-follower's source load), plus optional
+/// gate/source references and an optional series coupling on the gate.
+fn fet_terminal_requirements() -> Vec<(&'static str, Vec<NeighborReq>)> {
+    vec![
+        ("drain", vec![NeighborReq::required(NeighborRole::Load)]),
+        (
+            "source",
+            vec![
+                NeighborReq::required(NeighborRole::Load),
+                NeighborReq::optional(NeighborRole::Ref),
+            ],
+        ),
+        (
+            "gate",
+            vec![
+                NeighborReq::optional(NeighborRole::Ref),
+                NeighborReq::optional(NeighborRole::Signal),
+            ],
+        ),
+    ]
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Npn
@@ -168,6 +214,9 @@ impl Component for Npn {
         // All BJT ports (B-E, C-E, B-C) are nonlinear junctions.
         crate::compiler::component::PortSemantic::Nonlinear
     }
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        bjt_terminal_requirements()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -320,6 +369,9 @@ impl Component for Pnp {
         _pin_b: &str,
     ) -> crate::compiler::component::PortSemantic {
         crate::compiler::component::PortSemantic::Nonlinear
+    }
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        bjt_terminal_requirements()
     }
 }
 
@@ -496,6 +548,9 @@ impl Component for NJfet {
             crate::compiler::component::PortSemantic::ControlledConductance
         }
     }
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        fet_terminal_requirements()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -669,6 +724,9 @@ impl Component for PJfet {
             crate::compiler::component::PortSemantic::ControlledConductance
         }
     }
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        fet_terminal_requirements()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -814,6 +872,9 @@ impl Component for Nmos {
             crate::compiler::component::PortSemantic::ControlledConductance
         }
     }
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        fet_terminal_requirements()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -958,5 +1019,8 @@ impl Component for Pmos {
         } else {
             crate::compiler::component::PortSemantic::ControlledConductance
         }
+    }
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        fet_terminal_requirements()
     }
 }

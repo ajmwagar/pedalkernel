@@ -55,6 +55,9 @@ pub(in crate::compiler) fn build_state_space_stage(
         }
     };
 
+    // Track which pot components have already been bound so a 3-terminal pot
+    // (two edges) is handled exactly once on its first edge.
+    let mut bound_pots: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut pot_bindings = Vec::new();
     for &eidx in edge_indices {
         let e = &graph.edges[eidx];
@@ -67,9 +70,6 @@ pub(in crate::compiler) fn build_state_space_stage(
             .iter()
             .filter(|&&other| graph.edges[other].comp_idx == e.comp_idx)
             .count();
-        if comp_edge_count != 1 {
-            continue;
-        }
 
         let Some(pot) = comp
             .kind
@@ -78,19 +78,94 @@ pub(in crate::compiler) fn build_state_space_stage(
         else {
             continue;
         };
-        let position = 0.5;
-        let conductance = 1.0 / (pot.taper.apply(position) * pot.max_r).max(1.0);
-        pot_bindings.push(StateSpacePotBinding {
-            comp_id: comp.id.clone(),
-            max_r: pot.max_r,
-            taper: pot.taper,
-            position,
-            terminals: MnaPortTerminals::maybe_differential(
-                node_to_mna(e.node_a).map(MnaNodeId::new),
-                node_to_mna(e.node_b).map(MnaNodeId::new),
-            ),
-            conductance,
-        });
+
+        match comp_edge_count {
+            // ── 2-terminal rheostat (a→b, no wiper) ────────────────────────
+            // One edge: a single variable resistor spanning the two terminals.
+            // `build_mna` stamped it via the `is_pot()` → `stamp_mna` path
+            // (r = taper.apply(0.5)·max_r).max(1.0)), so the binding baseline
+            // matches that exact conductance for an exact delta update.
+            1 => {
+                let position = 0.5;
+                let r = (pot.taper.apply(position) * pot.max_r).max(1.0);
+                pot_bindings.push(StateSpacePotBinding {
+                    comp_id: comp.id.clone(),
+                    max_r: pot.max_r,
+                    taper: pot.taper,
+                    position,
+                    terminals: MnaPortTerminals::maybe_differential(
+                        node_to_mna(e.node_a).map(MnaNodeId::new),
+                        node_to_mna(e.node_b).map(MnaNodeId::new),
+                    ),
+                    conductance: 1.0 / r,
+                    complement: false,
+                });
+            }
+            // ── 3-terminal wiper divider (a→w, w→b) ────────────────────────
+            // GAP (a): two edges. `build_mna` stamped BOTH segments via
+            // `stamp_mna_multi`: r_aw = (taper.apply(0.5)·max_r).max(1.0) and
+            // r_wb = ((1−taper.apply(0.5))·max_r).max(1.0). Bind each segment
+            // as its own pot leaf with the synthetic `__aw`/`__wb` ids (the
+            // same convention WdfStage/SerialDelayedFeedbackStage use). At
+            // runtime `set_pot` drives BOTH segments with the same `pos`; the
+            // `__wb` binding carries `complement: true`, so it re-derives its
+            // (1−taper.apply(pos)) resistance and the two segments always sum to
+            // max_r and track the wiper together.
+            2 => {
+                if !bound_pots.insert(e.comp_idx) {
+                    continue;
+                }
+                // Resolve the wiper node so each segment's terminals can be
+                // identified independently (a→w vs w→b).
+                let w_node = graph
+                    .node_names
+                    .get(&format!("{}.w", comp.id))
+                    .or_else(|| graph.node_names.get(&format!("{}.wiper", comp.id)))
+                    .copied();
+                let a_node = graph.node_names.get(&format!("{}.a", comp.id)).copied();
+                let b_node = graph.node_names.get(&format!("{}.b", comp.id)).copied();
+                let (Some(w_node), Some(a_node), Some(b_node)) = (w_node, a_node, b_node) else {
+                    // Cannot identify the three terminals by name — fall back to
+                    // leaving the pot unbound (frozen at its stamped baseline)
+                    // rather than mis-binding segments.
+                    continue;
+                };
+
+                // a→w segment: R_aw = pos·max_R (tracks `position` directly).
+                let r_aw = (pot.taper.apply(0.5) * pot.max_r).max(1.0);
+                pot_bindings.push(StateSpacePotBinding {
+                    comp_id: format!("{}__aw", comp.id),
+                    max_r: pot.max_r,
+                    taper: pot.taper,
+                    position: 0.5,
+                    terminals: MnaPortTerminals::maybe_differential(
+                        node_to_mna(a_node).map(MnaNodeId::new),
+                        node_to_mna(w_node).map(MnaNodeId::new),
+                    ),
+                    conductance: 1.0 / r_aw,
+                    complement: false,
+                });
+
+                // w→b segment: R_wb = (1−taper.apply(pos))·max_R. Baseline
+                // matches the `stamp_mna_multi` complement form
+                // (1−taper.apply(0.5)) so the first delta is exact. The
+                // `complement: true` flag makes `set_pot` track 1−taper(pos).
+                let r_wb = ((1.0 - pot.taper.apply(0.5)) * pot.max_r).max(1.0);
+                pot_bindings.push(StateSpacePotBinding {
+                    comp_id: format!("{}__wb", comp.id),
+                    max_r: pot.max_r,
+                    taper: pot.taper,
+                    position: 0.5,
+                    terminals: MnaPortTerminals::maybe_differential(
+                        node_to_mna(w_node).map(MnaNodeId::new),
+                        node_to_mna(b_node).map(MnaNodeId::new),
+                    ),
+                    conductance: 1.0 / r_wb,
+                    complement: true,
+                });
+            }
+            _ => continue,
+        }
     }
 
     let input_node_id = built.injection_node_id();
