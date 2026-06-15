@@ -1,0 +1,120 @@
+* ============================================================================
+* TB-303 VCF — 4-pole differential diode-ladder lowpass filter
+* PedalKernel SPICE reference circuit
+* ============================================================================
+*
+* Topology from tb303_filter.pedal (pedalkernel-pro/crates/acidattack):
+*
+* Supply: 9V
+*
+* Ladder (8 diode-connected 2SC945 NPNs):
+*   Left chain: DL4->DL3->DL2->DL1 (top-to-bottom)
+*   Right chain: DR4->DR3->DR2->DR1
+*   Fed from: VCC -> R_bias_floor (10k) -> R_top_l/r (470) -> chain top
+*   Cross-coupled by: C4(33n), C3(33n), C2(33n), C1(18n)
+*
+* Input diff pair: Q12L / Q12R (2SC945)
+*   Q12L.base <- C_in(180n) <- audio_in
+*   Shared emitter -> Q11.collector (expo current sink)
+*
+* Expo converter: Q9(diode ref) / Q10(cutoff V input) / Q11(tail sink)
+*   Cutoff modeled as: Vcutoff = CUTOFF_V  (replaces expo pot chain)
+*
+* Resonance: QL4.emitter * RES_POS -> R_fb_limit(100k) -> QR1.emitter
+*
+* Output: QL4.emitter -> C_out(180n) -> R_out(100k) -> audio_out
+*
+* Parameterized (replaced by Rust test harness before invoking ngspice):
+*   {CUTOFF_V}  — DC voltage at Q10.base (1.5=low, 2.5=mid, 3.5=high cutoff)
+*   {RES_POS}   — resonance pot position scalar (0.0 = off, 0.175 = medium)
+*
+* IC values (filled per-config from DC OP):
+*   {IC_C4} {IC_C3} {IC_C2} {IC_C1}  — differential cap asymmetry (V)
+*   {IC_COUT}  — C_out pre-charged to v_l4_e DC value (blocks DC ramp)
+*   {IC_CIN}   — C_in pre-charged to -v_12l_b DC value
+*
+* Diodes modeled as simple 1-param D model (RS=5 for series resistance).
+* BJTs as simplified GP NPN (IS, BF, VAF, IKF only).
+* Convergence: UIC + explicit ICs, RELTOL=5e-3, TRAP, DELMAX=50us.
+* ============================================================================
+
+VCC vcc 0 DC 9
+R_bias_floor  vcc  v_feed  10k
+R_top_l  v_feed  v_l4_top  470
+R_top_r  v_feed  v_r4_top  470
+
+* Left diode chain (diode-connected 2SC945: anode=top, cathode=emitter node)
+DL4  v_l4_top  v_l4_e  D2SC945
+DL3  v_l3_top  v_l3_e  D2SC945
+DL2  v_l2_top  v_l2_e  D2SC945
+DL1  v_l1_top  v_l1_e  D2SC945
+Rw_l43  v_l4_e  v_l3_top  1m
+Rw_l32  v_l3_e  v_l2_top  1m
+Rw_l21  v_l2_e  v_l1_top  1m
+
+* Right diode chain
+DR4  v_r4_top  v_r4_e  D2SC945
+DR3  v_r3_top  v_r3_e  D2SC945
+DR2  v_r2_top  v_r2_e  D2SC945
+DR1  v_r1_top  v_r1_e  D2SC945
+Rw_r43  v_r4_e  v_r3_top  1m
+Rw_r32  v_r3_e  v_r2_top  1m
+Rw_r21  v_r2_e  v_r1_top  1m
+
+* Cross-ladder capacitors — ICs from DC OP to avoid transient stiffness
+C4  v_l4_e  v_r4_e  33n  IC={IC_C4}
+C3  v_l3_e  v_r3_e  33n  IC={IC_C3}
+C2  v_l2_e  v_r2_e  33n  IC={IC_C2}
+C1  v_l1_e  v_r1_e  18n  IC={IC_C1}
+
+* Input differential pair
+Q12L  v_l1_e  v_12l_b  v_12_e  NPN2SC945
+Q12R  v_r1_e  v_12r_b  v_12_e  NPN2SC945
+
+* Audio input coupling — IC pre-charges cap to DC operating point
+C_in  v_in  v_in_c  180n  IC={IC_CIN}
+R_in  v_in_c  v_12l_b  10k
+
+* VCO input (grounded in this test — no VCO)
+C_vco  0  v_vco_c  1u  IC={IC_CIN}
+R_vco  v_vco_c  v_12l_b  1k
+
+* Q12R reference: Q9 bias node wired directly to Q12R.base
+R_12r_ref  v_9_bc  v_12r_b  0
+
+* Expo converter
+R_q9_bias  vcc  v_9_bc  100k
+Q9   v_9_bc  v_9_bc  0          NPN2SC945
+Vcutoff  v_10_b  0  DC {CUTOFF_V}
+Q10  vcc   v_10_b  v_10_e       NPN2SC945
+Q11  v_12_e  v_11_b  v_11_e     NPN2SC945
+R_q10e_q11b  v_10_e  v_11_b  1
+R_q11_tail  v_11_e  0  1k
+
+* Resonance feedback: QL4.emitter * RES_POS -> R_fb_limit -> QR1.emitter
+Eresonance  v_res_wiper  0  v_l4_e  0  {RES_POS}
+R_fb_limit  v_res_wiper  v_r1_e  100k
+R_res_cv    0  v_res_wiper  100k
+
+* Output coupling — C_out pre-charged to v_l4_e DC so output starts near 0V
+C_out  v_l4_e  v_out_c  180n  IC={IC_COUT}
+R_out  v_out_c  v_out  100k
+R_load  v_out  0  100k
+
+* Input stimulus
+VIN  v_in  0  DC 0  SIN(0 0.05 440 0 0)
+
+* Models — simplified for convergence
+.MODEL D2SC945 D (IS=1e-14 N=1.0 RS=5)
+.MODEL NPN2SC945 NPN (IS=1e-14 BF=200 VAF=80 IKF=30m RB=100 RC=5 RE=1)
+
+* Solver options — relaxed tolerances for nonlinear BJT convergence
+.OPTIONS RELTOL=5e-3 ABSTOL=1e-7 VNTOL=1e-4
+.OPTIONS METHOD=TRAP TRTOL=7 MAXORD=2
+.OPTIONS ITL1=300 ITL2=150 ITL4=100 GMIN=1e-9
+.OPTIONS DELMAX=50e-6
+
+* 20ms transient at 48kHz (20.833us per step) — 8.8 cycles of 440Hz
+.TRAN 20.833e-6 20e-3 0 20.833e-6 UIC
+
+.END
