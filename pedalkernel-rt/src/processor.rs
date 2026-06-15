@@ -3529,7 +3529,49 @@ impl PedalProcessor for CompiledPedal {
             // stages, where `signal` is the additive blend.
             let mut stage_tap_output: crate::Wave = 0.0;
 
+            // Parallel-branch convergence summation (F13b): this WDF stage is a
+            // pure resistive mixer driven by >=2 upstream op-amp outputs. It does
+            // NOT run the WDF solver — it reads each driver's voltage from
+            // node_signals and sums by the precomputed superposition gains
+            // (O(N) multiply-adds, no per-sample matrix work).
             if is_wdf {
+                let is_convergence = matches!(
+                    &self.stages[stage_idx],
+                    Stage::Wdf(w) if w.convergence.is_some()
+                );
+                if is_convergence {
+                    let (out_value, out_node) = {
+                        let cs = match &self.stages[stage_idx] {
+                            Stage::Wdf(w) => w.convergence.as_ref().unwrap(),
+                            _ => unreachable!(),
+                        };
+                        let node_signals = &self.node_signals;
+                        let value = cs.evaluate(|node_id| {
+                            node_signals
+                                .iter()
+                                .rev()
+                                .filter(|(nid, _)| *nid == node_id)
+                                .map(|(_, v)| *v)
+                                .sum()
+                        });
+                        (value, cs.output_node_id)
+                    };
+                    let out_value = if out_value.is_finite() {
+                        out_value
+                    } else {
+                        0.0
+                    };
+                    if out_node != usize::MAX {
+                        self.node_signals.push((out_node, out_value));
+                    }
+                    signal = out_value;
+                    if stage_idx < crate::metering::MAX_STAGES {
+                        stage_levels[stage_idx] = out_value;
+                    }
+                    wdf_stage_counter += 1;
+                    continue;
+                }
+
                 let stage = if let Stage::Wdf(w) = &mut self.stages[stage_idx] {
                     w
                 } else {
@@ -3764,14 +3806,39 @@ impl PedalProcessor for CompiledPedal {
                 }
             } else if is_ss {
                 prev_was_clipping = false;
+                // F13b: parallel-branch state-space stages read their drive from
+                // node_signals[input_node_id] so sibling branches all see the same
+                // source rather than cascading down the serial chain.
+                let ss_in_node = match &self.stages[stage_idx] {
+                    Stage::StateSpace(s) => s.input_node_id,
+                    _ => usize::MAX,
+                };
+                let ss_input = if ss_in_node != usize::MAX {
+                    self.node_signals
+                        .iter()
+                        .rev()
+                        .find(|(nid, _)| *nid == ss_in_node)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(signal)
+                } else {
+                    signal
+                };
                 let ss_stage = if let Stage::StateSpace(s) = &mut self.stages[stage_idx] {
                     s
                 } else {
                     unreachable!()
                 };
-                signal = ss_stage.process(signal);
+                let ss_output = ss_stage.process(ss_input);
+                let ss_out_node = ss_stage.output_node_id;
+                // Parallel branches publish to the bus but must NOT clobber the
+                // serial chain (the convergence stage owns the serial output).
+                if ss_out_node != usize::MAX {
+                    self.node_signals.push((ss_out_node, ss_output));
+                } else {
+                    signal = ss_output;
+                }
                 if stage_idx < crate::metering::MAX_STAGES {
-                    stage_levels[stage_idx] = signal;
+                    stage_levels[stage_idx] = ss_output;
                 }
             } else if is_bf {
                 prev_was_clipping = false;
