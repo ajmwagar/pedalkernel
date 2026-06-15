@@ -1,0 +1,32 @@
+# Tape-head saturation validation circuit (engine side).
+#
+# Minimal standalone circuit that drives a single voltage-driven Jiles-Atherton
+# tape head from a line-level source through a build-out resistor into a load.
+# The head colours on its GAP VOLTAGE (H = kv*V), so it reaches its J-A knee at
+# ~1 V line level and THD climbs with drive — the property this test validates
+# against an ngspice behavioural J-A reference (see
+# spice-circuits/tape/tape_head_saturation.spice).
+#
+#   in --[R_pri 470Ω]--> TH.a   TH.b --> out, R_load(2.2k) --> gnd
+#
+# The head is the only nonlinear element; everything else is a plain resistor,
+# so an ngspice B-source J-A head produces a directly comparable V(out).
+#
+# Head model = the shipped STUDIO-HEAD defaults (compiler/components/tape_head.rs
+# ::studio_head, mirrored explicitly in the .spice .param block):
+#   Ms=3.5e5 A/m, a=1500, alpha=1.6e-3, k=30, c=0.65,
+#   kv=8000 A/m/V, Isat=200 uA, Gp=80 uS, h_bias=400 A/m, Rp=1 kΩ.
+
+pedal "Tape Head Saturation" {
+  components {
+    R_pri:  resistor(470)        # head build-out / source impedance
+    TH:     tape_head()          # voltage-driven Jiles-Atherton tape head
+    R_load: resistor(2.2k)       # head load
+  }
+  nets {
+    in -> R_pri.a
+    R_pri.b -> TH.a
+    TH.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}

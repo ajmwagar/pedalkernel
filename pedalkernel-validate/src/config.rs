@@ -138,6 +138,16 @@ pub struct TestCase {
     /// `GlobalConfig::warmup_trim_ms` value.
     #[serde(default)]
     pub warmup_trim_ms: Option<f64>,
+    /// Pending-reference flag.  When `true` AND the golden `.npy` is missing,
+    /// the test is reported as PENDING (skipped) and excluded from BOTH the
+    /// passed count and the total in the pass-rate gate — so a committed test
+    /// whose ngspice golden has not yet been generated does not move the gate
+    /// denominator.  Once the golden file is dropped in, the test runs and is
+    /// compared normally REGARDLESS of this flag (auto-activation, no code
+    /// change).  A `false` (default) test with a missing golden still FAILS
+    /// loudly, so accidental golden deletion is caught.
+    #[serde(default)]
+    pub pending_reference: bool,
 }
 
 /// Signal configuration.
@@ -443,6 +453,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -478,6 +489,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -511,6 +523,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -532,6 +545,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -574,6 +588,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -611,6 +626,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -657,6 +673,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
                 // Zener diode clipper (back-to-back 5.1V zeners)
@@ -693,6 +710,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -735,6 +753,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
                 tests
@@ -775,6 +794,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -812,6 +832,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -837,6 +858,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -874,6 +896,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -898,6 +921,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -922,6 +946,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -946,6 +971,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -978,6 +1004,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1010,6 +1037,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1034,6 +1062,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1064,6 +1093,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
                 tests
@@ -1110,6 +1140,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1133,6 +1164,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1155,6 +1187,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1188,6 +1221,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1223,6 +1257,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1246,6 +1281,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1269,6 +1305,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1292,6 +1329,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1314,6 +1352,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1336,6 +1375,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1381,6 +1421,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1412,6 +1453,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1433,6 +1475,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1484,6 +1527,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1524,6 +1568,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1562,6 +1607,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1603,6 +1649,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1652,6 +1699,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1688,6 +1736,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1725,6 +1774,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1762,6 +1812,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1795,6 +1846,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1843,6 +1895,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1891,6 +1944,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
                     },
                 );
 
@@ -1939,6 +1993,76 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
+                        pending_reference: false,
+                    },
+                );
+
+                tests
+            },
+        },
+    );
+
+    // Tape suite — voltage-driven Jiles-Atherton tape-head saturation.
+    //
+    // The tape head is a J-A magnetics element (same family as the magnetics_
+    // external transformer-core validation), but voltage-driven so it saturates
+    // at line level. It gets its own `tape` suite to keep the magnetics J-A
+    // *core* validation (current-driven, external LTspice CHAN golden) distinct
+    // from the *head* validation (voltage-driven, ngspice behavioural golden).
+    suites.insert(
+        "tape".to_string(),
+        TestSuite {
+            description: "Tape-head Jiles-Atherton saturation validation".to_string(),
+            tests: {
+                let mut tests = BTreeMap::new();
+
+                // PENDING until the ngspice behavioural J-A golden is generated
+                // (see spice-circuits/tape/tape_head_saturation.spice and
+                // docs/tape-head-validation.md). `pending_reference: true` keeps
+                // it out of the pass-rate gate denominator until the .npy lands,
+                // at which point it auto-activates with no code change.
+                //
+                // TOLERANCES BELOW ARE PROVISIONAL. They have NOT been measured
+                // against a real golden (none exists yet). They are deliberately
+                // loose placeholders sized like the other WDF-vs-SPICE nonlinear
+                // tests (~6-12 dB RMS/peak, THD comparison disabled). They MUST
+                // be tightened/re-honest once the golden is measured.
+                tests.insert(
+                    "tape_head_saturation".to_string(),
+                    TestCase {
+                        circuit: "tape/tape_head_saturation.pedal".to_string(),
+                        description:
+                            "Voltage-driven J-A tape head: clean->saturated vs ngspice (PENDING golden)"
+                                .to_string(),
+                        signals: vec![
+                            // Clean: well below the ~1 V J-A knee.
+                            SignalConfig::Sine {
+                                frequency: 120.0,
+                                amplitude: 0.1,
+                                duration: 0.05,
+                                label: Some("clean".to_string()),
+                            },
+                            // Hot: into saturation, several * the knee.
+                            SignalConfig::Sine {
+                                frequency: 120.0,
+                                amplitude: 2.0,
+                                duration: 0.05,
+                                label: Some("saturated".to_string()),
+                            },
+                        ],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 120.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // PROVISIONAL — not yet measured vs a golden.
+                            normalized_rms_error_db: Some(-6.0),
+                            peak_error_db: Some(-6.0),
+                            thd_error_db: Some(200.0), // THD diff disabled until golden measured
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
                     },
                 );
 
@@ -1970,6 +2094,7 @@ mod tests {
             metrics: vec![],
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: None,
+            pending_reference: false,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 10.0);
     }
@@ -1984,6 +2109,7 @@ mod tests {
             metrics: vec![],
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: Some(5.0),
+            pending_reference: false,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 5.0);
     }
@@ -1998,6 +2124,7 @@ mod tests {
             metrics: vec![],
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: Some(0.0),
+            pending_reference: false,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 0.0);
     }

@@ -63,10 +63,17 @@ pub struct ValidationReport {
 /// Summary of all test results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportSummary {
+    /// Number of tests counted by the gate (passed + failed). PENDING tests are
+    /// EXCLUDED from this total so the pass-rate denominator is unaffected by a
+    /// committed-but-not-yet-generated reference.
     pub total_tests: usize,
     pub passed: usize,
     pub failed: usize,
     pub skipped: usize,
+    /// Tests in the PENDING state (golden not generated, `pending_reference`).
+    /// Excluded from both `passed` and `total_tests`.
+    #[serde(default)]
+    pub pending: usize,
     pub pass_rate: f64,
 }
 
@@ -76,6 +83,10 @@ pub struct SuiteResult {
     pub description: String,
     pub passed: usize,
     pub failed: usize,
+    /// Pending tests in this suite (golden not generated). Excluded from the
+    /// gate's passed/total counts.
+    #[serde(default)]
+    pub pending: usize,
     pub tests: BTreeMap<String, TestResult>,
 }
 
@@ -83,6 +94,11 @@ pub struct SuiteResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
     pub passed: bool,
+    /// `true` when the test is a pending reference (golden missing + the test
+    /// is flagged `pending_reference`). A pending test is neither passed nor
+    /// failed; it is excluded from the gate denominator entirely.
+    #[serde(default)]
+    pub pending: bool,
     pub error: Option<String>,
     pub signals: Vec<SignalResult>,
 }
@@ -92,6 +108,9 @@ pub struct TestResult {
 pub struct SignalResult {
     pub label: String,
     pub passed: bool,
+    /// `true` when this signal's golden is missing and the test is pending.
+    #[serde(default)]
+    pub pending: bool,
     pub comparison: Option<ComparisonMetrics>,
     pub error: Option<String>,
 }
@@ -126,11 +145,16 @@ impl ValidationReport {
         let mut total = 0;
         let mut passed = 0;
         let mut failed = 0;
+        let mut pending = 0;
 
         for suite in suites.values() {
+            // PENDING tests are excluded from the gate total entirely, so the
+            // pass-rate denominator does not move when a not-yet-generated
+            // reference is committed.
             total += suite.passed + suite.failed;
             passed += suite.passed;
             failed += suite.failed;
+            pending += suite.pending;
         }
 
         let pass_rate = if total > 0 {
@@ -150,6 +174,7 @@ impl ValidationReport {
                 passed,
                 failed,
                 skipped: 0,
+                pending,
                 pass_rate,
             },
         }
@@ -191,16 +216,38 @@ impl ValidationReport {
                 "FAIL".red().bold()
             };
 
+            let pend_note = if suite.pending > 0 {
+                format!(" [{} pending]", suite.pending)
+            } else {
+                String::new()
+            };
             println!(
-                "[{}] {} - {} ({}/{})",
+                "[{}] {} - {} ({}/{}){}",
                 status,
                 suite_name.bold(),
                 suite.description.dimmed(),
                 suite.passed,
-                suite.passed + suite.failed
+                suite.passed + suite.failed,
+                pend_note.yellow()
             );
 
             for (test_name, test) in &suite.tests {
+                if test.pending {
+                    // PENDING: golden not generated yet. Printed clearly and
+                    // excluded from the pass/fail counts above.
+                    let reason = test
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "golden not generated".to_string());
+                    println!(
+                        "  {} {} ({})",
+                        "[PEND]".yellow().bold(),
+                        test_name,
+                        reason.dimmed()
+                    );
+                    continue;
+                }
+
                 let test_status = if test.passed {
                     "✓".green()
                 } else {
@@ -245,12 +292,18 @@ impl ValidationReport {
         } else {
             format!("{} TESTS FAILED", self.summary.failed).red().bold()
         };
+        let pend_suffix = if self.summary.pending > 0 {
+            format!(" | {} pending", self.summary.pending)
+        } else {
+            String::new()
+        };
         println!(
-            "{} | {}/{} passed ({:.1}%)",
+            "{} | {}/{} passed ({:.1}%){}",
             overall_status,
             self.summary.passed,
             self.summary.total_tests,
-            self.summary.pass_rate * 100.0
+            self.summary.pass_rate * 100.0,
+            pend_suffix.yellow()
         );
         println!("{}\n", "═".repeat(60).bold());
     }
@@ -279,6 +332,19 @@ impl ValidationReport {
 
         for (suite_name, suite) in &self.suites {
             for (test_name, test) in &suite.tests {
+                if test.pending {
+                    rows.push(MetricRow {
+                        suite: suite_name.clone(),
+                        test: test_name.clone(),
+                        signal: "-".to_string(),
+                        rms_db: "-".to_string(),
+                        peak_db: "-".to_string(),
+                        thd_err: "-".to_string(),
+                        spectral: "-".to_string(),
+                        status: "PEND".to_string(),
+                    });
+                    continue;
+                }
                 for signal in &test.signals {
                     let (rms, peak, thd, spectral) = if let Some(ref c) = signal.comparison {
                         (
@@ -355,6 +421,7 @@ impl SignalResult {
         Self {
             label,
             passed,
+            pending: false,
             comparison: Some(comparison.into()),
             error: None,
         }
@@ -364,8 +431,20 @@ impl SignalResult {
         Self {
             label,
             passed: false,
+            pending: false,
             comparison: None,
             error: Some(error),
+        }
+    }
+
+    /// A pending signal: golden missing and the test is `pending_reference`.
+    pub fn pending(label: String, reason: String) -> Self {
+        Self {
+            label,
+            passed: false,
+            pending: true,
+            comparison: None,
+            error: Some(reason),
         }
     }
 }
@@ -383,6 +462,7 @@ mod tests {
                 description: "Test".to_string(),
                 passed: 3,
                 failed: 1,
+                pending: 0,
                 tests: BTreeMap::new(),
             },
         );
