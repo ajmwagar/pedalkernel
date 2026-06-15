@@ -1479,6 +1479,115 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // Unity-gain Sallen-Key low-pass (R=10k/10k, C=10n/10n, fc≈1.6 kHz).
+                // Tracked by pedalkernel-ht0o; wired here so ngspice + WDF goldens
+                // can be generated for the accuracy dashboard even while the
+                // active-filter extraction work is in progress.
+                tests.insert(
+                    "sallen_key_lowpass".to_string(),
+                    TestCase {
+                        circuit: "extraction/sallen_key_lowpass.pedal".to_string(),
+                        description: "Unity-gain Sallen-Key low-pass (R=10k/10k, C=10n/10n)"
+                            .to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 1000.0,
+                                amplitude: 0.5,
+                                duration: 0.1,
+                                label: Some("sine".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 100.0,
+                                f_end: 20000.0,
+                                amplitude: 0.5,
+                                duration: 0.1,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        // Loose criteria — active-filter extraction gap is known;
+                        // records the baseline rather than gating CI.
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(12.0),
+                            peak_error_db: Some(12.0),
+                            spectral_error_db: Some(12.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: false,
+                    },
+                );
+
+                // Unity-gain Sallen-Key high-pass (C=10n/10n, R=10k/10k, fc≈1.6 kHz).
+                tests.insert(
+                    "sallen_key_highpass".to_string(),
+                    TestCase {
+                        circuit: "extraction/sallen_key_highpass.pedal".to_string(),
+                        description: "Unity-gain Sallen-Key high-pass (C=10n/10n, R=10k/10k)"
+                            .to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 5000.0,
+                                amplitude: 0.5,
+                                duration: 0.1,
+                                label: Some("sine".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 100.0,
+                                f_end: 20000.0,
+                                amplitude: 0.5,
+                                duration: 0.1,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(12.0),
+                            peak_error_db: Some(12.0),
+                            spectral_error_db: Some(12.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: false,
+                    },
+                );
+
+                // Rauch/MFB high-pass with controlled shunt leg.
+                // Cutoff pot default 0.5 => position 0.525 => 52.5 kΩ shunt.
+                tests.insert(
+                    "mfb_highpass_controlled".to_string(),
+                    TestCase {
+                        circuit: "extraction/mfb_highpass_controlled.pedal".to_string(),
+                        description:
+                            "Rauch/MFB high-pass with controlled shunt (fc≈270 Hz at default)"
+                                .to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 1000.0,
+                                amplitude: 0.1,
+                                duration: 0.1,
+                                label: Some("sine".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 100.0,
+                                f_end: 20000.0,
+                                amplitude: 0.1,
+                                duration: 0.1,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(12.0),
+                            peak_error_db: Some(12.0),
+                            spectral_error_db: Some(12.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: false,
+                    },
+                );
+
                 tests
             },
         },
