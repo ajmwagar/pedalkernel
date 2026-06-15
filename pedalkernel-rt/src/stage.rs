@@ -1463,6 +1463,17 @@ pub struct WdfStage {
     /// This models voltage extraction at the circuit's output node when
     /// a pot sits between the NL junction and the output.
     pub output_probe: Option<String>,
+    /// Series-diode rectifier load-divider ratio `RL / (R1 + RL)`.
+    ///
+    /// A diode WDF root normally reports the diode *junction* voltage. That is
+    /// correct for shunt clippers and op-amp feedback clippers, but a *series*
+    /// rectifier `in -> R1 -> D1 -> RL -> gnd` taps the load voltage at the
+    /// D1/RL junction. By KVL around the loop the load voltage is
+    /// `V_RL = (Vin - V_diode) * RL/(R1+RL)`, which goes to ~0 when the diode
+    /// blocks (true half-wave rectification) instead of passing the signal.
+    /// When `Some(ratio)`, the diode output path computes the load voltage from
+    /// this ratio. `None` keeps the junction-voltage behaviour.
+    pub series_rectifier_divider: Option<crate::Wave>,
     /// Op-amp gain stage paired with a DiodePair/SingleDiode root.
     ///
     /// When an inverting op-amp has diodes in its feedback path (e.g., Tube Screamer,
@@ -1682,6 +1693,7 @@ impl WdfStage {
             feedback_ri_pot_max_r: 0.0,
             feedback_ri_pot_taper: crate::pot_taper::PotTaper::B,
             output_probe: None,
+            series_rectifier_divider: None,
             feedback_opamp: None,
             k_table: None,
             vcc_injection_coeff: 0.0,
@@ -2008,6 +2020,7 @@ impl WdfStage {
         let k_table = &self.k_table;
         let compensation = self.compensation;
         let output_probe = &self.output_probe;
+        let series_rectifier_divider = self.series_rectifier_divider;
         let feedback_opamp = &mut self.feedback_opamp;
         let vcc_injection_coeff = self.vcc_injection_coeff;
         let vcc_dc_ramp = &mut self.vcc_dc_ramp;
@@ -2412,7 +2425,23 @@ impl WdfStage {
                 | RootKind::ExplicitDiodePair(_)
                 | RootKind::ExplicitSingleDiode(_)
                 | RootKind::Zener(_)
-                | RootKind::ZenerPair(_) => -(a_root + b_tree) / 2.0,
+                | RootKind::ZenerPair(_) => {
+                    // Diode junction voltage (anode-cathode) in WDF wave terms.
+                    let v_diode = (a_root + b_tree) / 2.0;
+                    if let Some(divider) = series_rectifier_divider {
+                        // Series rectifier: output is the load voltage at the
+                        // D1/RL junction. By KVL around the series loop
+                        //   V_RL = (Vin - V_diode) * RL/(R1+RL)
+                        // which collapses to ~0 when the diode blocks (correct
+                        // half-wave rectification) and rises when it conducts.
+                        let v_in = sample * compensation;
+                        (v_in - v_diode) * divider
+                    } else {
+                        // Shunt clipper / op-amp feedback clipper: the junction
+                        // voltage IS the output.
+                        -v_diode
+                    }
+                }
                 _ => (a_root + b_tree) / 2.0,
             };
             out
