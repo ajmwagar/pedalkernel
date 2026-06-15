@@ -3,14 +3,16 @@ title: "Controls and pots"
 description: "How runtime control updates flow through the engine — binding, dispatch, and what each pot movement actually costs."
 section: "Internals"
 weight: 87
-source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
+source_commit: "222212fe33f0aa223f7d545d890a16654c17cca8"
 watches:
   - pedalkernel/src/compiler/spqr_control.rs
   - pedalkernel/src/compiler/compiled.rs
   - pedalkernel/src/compiler/stage.rs
   - pedalkernel/src/compiler/bind.rs
-  - pedalkernel/src/elements/nonlinear/opamp.rs
+  - pedalkernel-rt/src/elements/nonlinear/opamp.rs
   - pedalkernel/src/compiler/rigid/opamp_root.rs
+  - pedalkernel/src/compiler/rigid/state_space.rs
+  - pedalkernel/src/compiler/dsp_block.rs
 ---
 
 # Controls and Pots
@@ -193,21 +195,31 @@ The existing claim on `compiler-internals.md` that "pots can be swept at audio r
 
 A few items worth flagging:
 
-**`StateSpaceStage` pots are not yet bound.** The binding code has an explicit TODO:
-
-```rust
-Stage::StateSpace(_) => {
-    // TODO: StateSpaceStage G-matrix delta
-}
-```
-
-If a pot ends up inside a state-space stage, it currently has no effect at runtime. Any new state-space stage that wants pots will need the G-matrix delta path implemented first.
-
 **IIR tone-stack recompute is not throttled.** Transcendentals run every sample a tone pot is moving. Moving this to the same 32-sample schedule as the multi-NL scattering recompute would cut the observable cost by roughly 32×, at the expense of slightly coarser temporal resolution on the pot sweep — probably inaudible below audio rate.
 
 **The `set_control` lookup is linear.** Fine at N = 10; annoying at N = 100. If we ever get to composite pedalboards with combined control surfaces, a hash table would help.
 
 **OpAmpRoot's feedback-pot search** uses `get_pot_resistance(pot_id)` which is a linear tree walk. One-per-opamp-feedback-pot-per-recompute, so rare; but with many nested opamp feedbacks in one stage it could add up.
+
+## Fidelity fixes (2026-06)
+
+Two control-fidelity bugs surfaced during the LA-2A rebuild and were resolved at the *binding* level rather than per-stage — worth flagging because the symptom looked like a per-stage problem but the fix landed in `spqr_control`.
+
+**Stage-owned pot discovery.** Each runtime `Stage` variant now declares its own pot-target type — `Wdf → PotInStage`, `MultiNl → PotInMultiNlStage`, `Iir → PotInIirStage`, `BlackFeedback → PotInBlackFeedbackStage`, `Blockwise / SerialDelayedFeedback / StateSpace → PotInStage`. The compiler's `find_pot_bindings` asks each stage which kind of binding to use and threads the right target through. Pre-fix, IIR and StateSpace stages returned `None` and the binding fell through to a generic `PotInStage(0)` placeholder, so moving the pot at runtime did nothing.
+
+**Defaults are applied immediately, not through the smoother.** The pre-fix loop called the smoothed `set_control` to apply each `ctrl.default`. The smoother is initialised to `ctrl.default`, so `is_settled()` was already true and the actual `set_control_pot` never fired — leaving WDF / IIR / StateSpace leaves at their compile-time stamp (a `PassiveRType` pot at 0.5, say, regardless of what the `.pedal` file declared). The fix is one line in `spqr_control.rs`:
+
+```rust
+for ctrl in &pedal.controls {
+    compiled.set_control_immediate(&ctrl.label, ctrl.default);
+}
+```
+
+`set_control_immediate` writes straight into the leaf, re-derives the scattering on a WDF leaf, and re-runs the IIR coefficient sweep for an `IirPotBinding { comp_id, max_r, fixed_series_r, ri, position, role, feedback_r, non_inverting }`. The StateSpace path stashes the rebuilt `MnaSystem` in `stage.recompute_mna` so a pot wiggle re-derives the SS matrices without touching the audio sample loop's dispatch.
+
+## Controls inside DSP blocks
+
+Some controls live outside the SPQR pot system entirely — they bind through the [DSP block](./dsp-blocks.md) registry. A `delay_line` carries `DelayTime` and `DelayFeedback`; a `BBD delay` carries `BbdClockRate` and `BbdFeedback`; a `VCA` reads its CV from a bound `EnvelopeFollower` via `ModulationTarget::VcaCv`; a `spring reverb` carries `SpringDwell`, `SpringDecay`, `SpringDamping`, `SpringMix`. Each block's `bind_runtime` step upserts the relevant `ControlTarget` variant into the same `controls` vector that pots populate, so `pedal.set_control("Delay Time", 0.7)` works regardless of whether the underlying machinery is a WDF pot, an IIR coefficient sweep, or a DSP-block parameter.
 
 ## Where to look
 

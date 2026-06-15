@@ -3,7 +3,7 @@ title: "The Component trait"
 description: "How circuit elements plug into the compiler, and how to add a new one."
 section: "Internals"
 weight: 86
-source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
+source_commit: "222212fe33f0aa223f7d545d890a16654c17cca8"
 watches:
   - pedalkernel/src/compiler/component.rs
   - pedalkernel/src/compiler/components/
@@ -37,6 +37,8 @@ The methods group into these buckets:
 **Non-idealities.** `nonideal_fx()` returns a `Vec<NonIdealFx>` of post-processing effects — `OpAmpBandwidth` (GBW-derived lowpass), `RailSaturation` (per-device output swing). These are applied as a shared layer on stage outputs, not in the scattering matrix.
 
 **K-method candidacy.** `k_method_candidacy() -> (bool, usize, &'static str)` returns `(is_candidate, port_dims, rejection_reason)`. Memoryless monotonic nonlinearities are candidates: diodes / zeners report `(true, 1, ...)`, BJT / JFET / triode / MOSFET report `(true, 2, ...)`, pentodes report `(true, 3, ...)`. Linear or hysteretic devices return `(false, 0, ...)`. The compile-time generator in `compiler::k_method::generate_k_table` consults this method to decide whether to sample a stage's I-V curve into a `KTable`. A runtime mirror `RootKind::k_method_candidacy() -> (bool, usize)` covers the WDF root types in `pedalkernel-rt`. See [nonlinear elements](./nonlinear-elements.md) for the per-device classification.
+
+**Topology self-classification.** `classify_topology(ctx: &TopologyContext) -> Option<Topology>` lets a component inspect its neighbourhood (via the resolved-topology adjacency tables that the Pass 1.5 [topology classifier](./compiler-internals.md#pass-15-topology-classification) builds) and declare what role it plays — `UnityGain`, `Inverting`, `NonInverting`, `BridgedTResonator`, `Allpass`, `SallenKey`, etc. The default returns `None`, which means "let the central detector figure it out." Each override migrates a special case out of the monolithic `graph::find_opamp_feedback_loops` detector and into the component that owns the topology.
 
 **Controls and modulation.** `controls()` declares what the user can turn at runtime — typically a `PotPosition` on a pot, or `Rate`/`Depth` on an LFO. `modulation_sink()` says where modulation signals enter a component (JFET gate, photocoupler cell).
 
@@ -240,6 +242,14 @@ A `Potentiometer` implements `Component` like anything else. The differences are
 - `is_variable()` returns `true`. Stages that hold variable components register for recompute when the pot is moved.
 
 `controls()` returns a single `ControlParam { name: "position", kind: ControlParamKind::PotPosition }`. That's what the binding pass in `spqr_control.rs` wires to the user-visible control name. The runtime update path — how moving a pot propagates through port resistances, opamp gain, and post-processing — is a separate story covered in [Controls and pots](./controls-and-pots.md).
+
+## DSP blocks: the parallel mechanism
+
+Not every behavioural element fits the `Component` trait shape. Delay lines, BBDs, VCOs, VCAs, and spring reverbs all have ports (inputs and outputs) but they don't have a meaningful WDF scattering — there is no per-sample wave-domain equation to solve. They're behavioural islands embedded in an otherwise wave-domain circuit.
+
+These elements are still parsed as components in the DSL (they have a `type_tag` like `"delay line"` or `"spring reverb"`), but at compile time they're claimed by the [DSP block](./dsp-blocks.md) registry rather than the SPQR pipeline. Each block kind is a unit struct implementing the `DspBlock` trait (`fn handles(type_tag) -> bool`, `fn io() -> Vec<(String, BlockIo)>`, `fn bind_runtime(...)`). The registry walks itself; nothing in `spqr_build` names a specific block kind.
+
+The two mechanisms coexist. A pedal whose schematic is just a `delay_line` and a couple of pots compiles to a `DelayLineBinding` plus a tiny pot-binding pass. A pedal whose schematic is a Tube Screamer plus a built-in BBD chorus compiles to op-amp WDF stages around the Tube Screamer plus a `BbdDelayLine` binding for the chorus. SPQR knows nothing about the BBD; the DSP-block pass knows nothing about scattering matrices. The two share the same `CompiledPedal` and the same control-binding system.
 
 ## Extending externally
 

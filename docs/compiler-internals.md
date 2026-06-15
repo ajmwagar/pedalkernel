@@ -3,7 +3,7 @@ title: "Compiler internals"
 description: "SPQR decomposition, stage routing, and the compiler passes that turn a .pedal file into a runnable processor."
 section: "Internals"
 weight: 85
-source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
+source_commit: "222212fe33f0aa223f7d545d890a16654c17cca8"
 watches:
   - pedalkernel/src/compiler/mod.rs
   - pedalkernel/src/compiler/compile.rs
@@ -16,6 +16,12 @@ watches:
   - pedalkernel/src/compiler/blockwise.rs
   - pedalkernel/src/compiler/k_method.rs
   - pedalkernel/src/compiler/bias_analysis.rs
+  - pedalkernel/src/compiler/topology.rs
+  - pedalkernel/src/compiler/opamp_analysis.rs
+  - pedalkernel/src/compiler/dsp_block.rs
+  - pedalkernel-rt/src/routing.rs
+  - pedalkernel-rt/src/route.rs
+  - pedalkernel-rt/src/boundary_math.rs
 ---
 
 # Compiler Internals
@@ -42,6 +48,18 @@ This is exactly what an **SPQR decomposition** does in graph theory: it breaks a
       │                                    │
       ▼                                    ▼
    PedalDef  ── build ─────────▶  CircuitGraph
+                                           │
+                                           ▼
+                         topology::classify_topologies
+                          (Pass 1.5: per-op-amp context)
+                                           │
+                                           ▼
+                         opamp_analysis::analyze_opamps
+                          (Pass 2: feedback loop extraction)
+                                           │
+                                           ▼
+                          dsp_block: behavioural gaps split,
+                          generator nodes seeded
                                            │
                                            ▼
                                  Signal-flow groups
@@ -74,6 +92,15 @@ This is exactly what an **SPQR decomposition** does in graph theory: it breaks a
                           topological order
                                       │
                                       ▼
+                            DspBlock::bind_runtime
+                          (delay, BBD, VCO, VCA, spring)
+                                      │
+                                      ▼
+                          routing::StageRoutePlan
+                          (incident-wave coupling
+                           between sub-networks)
+                                      │
+                                      ▼
                                 CompiledPedal
                                       │
                            Control binding, ready to run
@@ -93,6 +120,30 @@ pub enum OutputImpedance {
 ```
 
 This trait is what makes the next pass possible.
+
+## Pass 1.5: topology classification
+
+Some routing decisions need a richer view of a component's neighbourhood than the bare graph gives. `compiler::topology` is a Pass 1.5 between graph construction and signal-flow grouping. It builds a `ResolvedTopology` from the `PedalDef` — union-find pin resolution plus per-component adjacency tables — and hands every component a `TopologyContext` so it can self-classify.
+
+The motivating case is op-amps. A `Component::classify_topology()` override looks at its neighbours and returns one of `UnityGain`, `Inverting`, `NonInverting`, `BridgedTResonator`, `Allpass`, `Sallen-Key`, etc. Over time, each new topology migrates into the component's `classify_topology()` impl, shrinking the monolithic detector that used to live in `graph::find_opamp_feedback_loops()`.
+
+## Pass 2: op-amp feedback analysis
+
+`compiler::opamp_analysis::analyze_opamps()` is the merge step: it takes the Pass 1.5 self-classifications from each op-amp and reconciles them against the central feedback detector in `graph::find_opamp_feedback_loops()`. The output is a per-op-amp `OpAmpFeedbackInfo` plus a `DiodePairedOpAmp` shortlist for the Tube Screamer family (op-amps that share an NL junction with a diode clipper).
+
+`build_opamp_feedback_stages()` then emits `WdfStage`s with the correct `OpAmpRoot` and `FeedbackConfig`. This is the place where `Rf` and `Ri` are extracted off the graph, the gain becomes `Rf/Ri` (inverting) or `1 + Rf/Ri` (non-inverting), and the feedback-pot pathway is set up so a runtime knob move recomputes the closed-loop gain in place.
+
+Op-amp non-idealities (GBW, slew, rail saturation) attach to whatever stage ends up holding the op-amp output — they are not part of the scattering matrix and not part of this pass. See [NonIdealFxState](#nonidealfxstate) below.
+
+## DSP block pre-pass
+
+A small registry of high-level circuit elements — delay line / tap, BBD, VCO, VCA, spring reverb — never goes through SPQR. The `DspBlock` trait (see [DSP blocks](./dsp-blocks.md) for the full design) is consulted three times during compile:
+
+1. **Terminal seeding.** Every block instance's input and output nodes are pushed into the SPQR terminal list, so the surrounding flow groups end cleanly at the block boundary rather than trying to reduce through it.
+2. **Generator output injection.** Zero-input blocks (a `vco()` with no audio inputs) contribute their output nodes as signal sources — downstream stages don't need an upstream WDF stage to feed them.
+3. **Behavioural-gap splitting.** A flow group that crosses a block boundary is split via union-find on the group's edges, with the block's ports as fixed cut points.
+
+After every WDF / multi-NL / op-amp stage has been built, `bind_runtime_all()` walks the registry one more time and calls each block's `bind_runtime()` to attach its runtime body (`DelayLineBinding`, `VcoBinding`, …) to the `CompiledPedal`. A final `reject_unlowered_behavioral()` pass refuses to ship a `CompiledPedal` whose high-level components didn't end up with a binding — that's the "never ship silent" gate.
 
 ## Signal-flow grouping
 
@@ -183,15 +234,17 @@ A previous `BlackFeedbackStage` for single-VCVS feedback groups was prototyped a
 Stage routing happens in `compiler::plan::plan_stages` (not in a `classify_rigid()` function — that name is gone). The decision tree, in order, for each signal-flow group:
 
 1. **Multiple nonlinear elements** in one rigid group → `MultiNlPlan`. The R-type adaptor stamps every nonlinearity as an exposed port, and the runtime solves them all together.
-2. **Single nonlinear element**, coupled to passives. Before defaulting to a plain WDF tree, three upgrade checks run in order:
+2. **Single nonlinear element**, coupled to passives. Before defaulting to a plain WDF tree, four upgrade checks run in order:
    - `try_varimu_3port` — promotes a vari-mu triode to a 3-port group with grid + plate exposed.
    - `try_bjt_two_port` — promotes a BJT to a 2-port group with base + collector exposed.
    - `try_linearized_ota` — promotes an envelope-controlled OTA into a coupled multi-NL solve.
+   - `try_common_cathode_triode` — routes a common-cathode 12AX7-style stage (triode + cathode network + plate load + input coupling, typically a 6-edge group) to a `MultiNlStage` with the cathode and plate exposed as ports. Pre-2026-06 the check only matched 1-edge groups, so common-cathode triodes fell through to a plain `WdfStage` and the cathode-bypass cap interacted incorrectly with the plate resistor.
    If any of those fire, the group becomes a `MultiNlStage` with a coupled device group instead of a `WdfStage`. Otherwise it falls through to `plan_single_nl` and the single-NL WDF path.
-3. **All-passive** — falls to a feedforward `WdfStage` build, then either keeps wave-domain semantics (passive RootKind) or, for a linear rigid block, ends up wrapped inside a `MultiNlStage` with the `iir` or `state_space` field populated for fast evaluation.
-4. **Unclaimed op-amps** (bridged-T, multi-path) trigger a nullor fallback that absorbs the op-amp into a synthetic `MultiNlPlan` with VCVS stamping into the MNA.
+3. **Parallel active branches at a convergence node.** When two active sub-trees (a triode plate and a JFET drain summing into the same coupling cap, for instance) share an output node, `plan_stages` sums them as parallel current sources into the convergence node rather than treating each as an isolated stage that races for ownership of the cap. This is the F13b rule and it landed the 808 snare convergence behaviour.
+4. **All-passive** — falls to a feedforward `WdfStage` build, then either keeps wave-domain semantics (passive RootKind) or, for a linear rigid block, ends up wrapped inside a `MultiNlStage` with the `iir` or `state_space` field populated for fast evaluation. A non-SP passive R-node that would otherwise reduce to zero stages now routes to `Rigid` / MNA instead of being silently dropped.
+5. **Unclaimed op-amps** (bridged-T, multi-path) trigger a nullor fallback that absorbs the op-amp into a synthetic `MultiNlPlan` with VCVS stamping into the MNA.
 
-The coupling-aware legality checks from the previous section gate paths 3 and 4: if a subgraph would otherwise lower to a linear IIR/state-space form but `has_nl_reactive_coupling()` is true, it falls back to a heavier solver.
+The coupling-aware legality checks from the previous section gate paths 4 and 5: if a subgraph would otherwise lower to a linear IIR/state-space form but `has_nl_reactive_coupling()` is true, it falls back to a heavier solver.
 
 There used to be a "pot divider special case" path. It is gone. Pots are passive edges that participate in the normal SPQR reduction; the three-terminal split (`__aw` / `__wb`) is a control-binding concern, documented in the [controls and pots](./controls-and-pots.md) page.
 
@@ -320,6 +373,45 @@ The same machinery feeds the K-method generator: when a 2D table is sampled, the
 
 The old hardcoded constants are gone from the live source — they survive only as constructor-level fallbacks (`-2.0` for `TriodeRoot::new()`, `-8.0` for `PentodeRoot::new()`, `0.0` for `BjtRoot::new()`) used if `set_bias` is never called, which is rare in practice. Any tube or BJT stage built through the normal compile pipeline gets its operating point from the circuit graph.
 
+## Cross-network coupling
+
+A faithful LA-2A — or any rack unit that runs an input transformer, an internal gain cell, and an output transformer in series — is several galvanically isolated networks chained together. Inside one network, scattering and wave-domain math hold. Across a network boundary (a transformer primary → secondary, an optocoupler LED → photoresistor), the wave on one side has to drive a voltage on the other without sharing a node.
+
+The runtime layer that does this lives in `pedalkernel-rt::routing` and `pedalkernel-rt::boundary_math`. It is **not** a fresh MNA stamp across the boundary — the implementation is wave-domain voltage injection that reuses the ideal-voltage-source reflection rule a stage already runs internally:
+
+```rust
+pub fn ideal_voltage_source_reflection(self, incident: IncidentWave) -> ReflectedWave {
+    ReflectedWave(2.0 * self.0 - incident.0)
+}
+```
+
+The donor stage publishes a `PortVoltage` at one of its boundary bindings. The compiler resolves the matching coupling port on the recipient stage by walking the blockwise (`BKM`) coupling-element adjacency and emits a `BkmBoundaryDrive`. Per sample, `push_differential_voltage_drives_for_ports` converts the donor's `PortVoltage` into a signed `IncidentWave` offset and sums it into the recipient port's incident vector *before* the WDF scattering matrix multiply runs. No matrix re-derivation, no extra solve.
+
+`boundary_math.rs` carries the type-safety scaffolding for this: phantom-typed `DomainIndex<D>` distinguishes graph node IDs from MNA node IDs from scattering port IDs from processor port IDs, so the runtime cannot accidentally use a graph-side ID where a scattering port is expected. The conversion shapes (`PortVoltage`, `IncidentWave`, `ReflectedWave`, `PortOrientation`) are wrapper newtypes whose interconversions encode the orientation rules instead of letting hand-rolled `2V - a` math drift across sites.
+
+`routing::StageRoutePlan` is the compile-time output: a flat list of `(stage_idx, vs_bindings, output_port_indices, boundary_drives)` indices the audio processor uses without rediscovering topology each sample. The plan is built once during `compile_via_spqr_with_options` and lives on the `CompiledPedal`.
+
+## Diagnostic compile options
+
+`CompileOptions` carries a handful of knobs for differential testing and offline reference renders. They default to the values that yield the best per-sample behaviour; flipping them produces a deliberately weaker compile so a regression can be isolated.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `oversampling` | `X4` | Oversampling factor for the runtime processor. |
+| `tolerance` | `ideal()` | Component tolerance engine — Monte Carlo or worst-case. |
+| `thermal` | `false` | Enable thermal drift on tubes / BJTs / JFETs. |
+| `collapse_nl` | `false` | Force every NL element into one `MultiNlStage` (sidechain sub-circuits). |
+| `skip_k_tables` | `false` | Skip [K-method](#k-method-tables) table generation — NR fallback at runtime. Main compile-time saver for debug builds. |
+| `skip_blockwise` | `false` | Skip [blockwise decomposition](#blockwise-decomposition) and use a monolithic R-type adaptor. Available as `CompileOptions::force_monolithic()`. |
+| `force_serial_blockwise` | `false` | Build blockwise rungs as serial WDF stages instead of a delay-free coupling stage. Intentionally breaks delay-free feedback for ladder-rung isolation. |
+| `force_serial_blockwise_feedback_gain` | `0.0` | When `force_serial_blockwise` is on, wrap the serial chain in a one-sample feedback loop with this gain. |
+| `disable_iir` | `false` | Don't synthesize IIR stages from rigid subgraphs; rigid passives fall through to state-space, active feedback stays in WDF. |
+| `coupled_blockwise_newton` | `true` | Solve coupled blockwise K-method stages with full Newton/Jacobian iteration. Setting `false` uses table-driven fixed-point iteration — cheaper but less accurate near the operating-point boundary. |
+
+The differential-testing pattern is to compile the same circuit twice — once with `CompileOptions::default()`, once with `force_monolithic()` — and compare sample-wise. Any deviation means blockwise is behaving as a dialect change rather than a pure optimisation, which is a bug.
+
+The `compile_pedal_cached()` build.rs helper hashes all of these options into the cache key so a flag flip invalidates stale postcards.
+
 ## NonIdealFxState
 
 Op-amp character — the reason a TL072 sounds different from an LM308 — mostly lives in the stage-independent post-processor:
@@ -423,11 +515,15 @@ If you want to follow the code:
 - **`compiler::spqr_build`** — top-level compiler entry point. `compile_via_spqr_with_options` is the function the rest of this page describes.
 - **`compiler::spqr`** — SPQR tree construction and pendant extraction.
 - **`compiler::signal_flow`** — directed BFS, OutputImpedance barriers, group assembly.
+- **`compiler::topology`** — Pass 1.5 per-op-amp neighbourhood classifier; backs `Component::classify_topology()`.
+- **`compiler::opamp_analysis`** — Pass 2 feedback-loop extraction and `OpAmpRoot` stage emission.
+- **`compiler::dsp_block`** — registry for delay / BBD / VCO / VCA / spring reverb; see [DSP blocks](./dsp-blocks.md).
 - **`compiler::bias_analysis`** — `classify_group_bias()` and per-instance DC operating point extraction.
 - **`compiler::blockwise`** — `analyze_blockwise()` / `try_build_blockwise()` for cascaded multi-NL circuits.
 - **`compiler::k_method`** — `generate_k_table()` for 1D / 2D NL root tabulation.
 - **`compiler::coupling`** — `port_semantic()`-driven legality predicates (`has_coupling_barrier`, `has_nl_reactive_coupling`, `device_parallels_passive`).
 - **`compiler::rigid::mod`** — `classify_rigid()` and the lowering legality gates.
+- **`pedalkernel-rt::routing` / `route` / `boundary_math`** — runtime cross-network coupling via wave-domain incident-wave injection.
 - **`compiler::rigid::opamp_root`** — OpAmpRoot WDF element for multi-VCVS feedback.
 - **`compiler::spqr_control`** — control binding and pot update propagation.
 - **`pedalkernel-rt`** — runtime types: stages, `Stage` enum, `DynNode`, `LeafKind`, `WdfLeaf`, MNA, oversampling, loading, metering, thermal, nonlinear roots, and `crate::math` wrappers.
