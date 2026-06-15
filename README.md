@@ -80,7 +80,7 @@ PedalKernel is a Cargo workspace of four crates:
 | **`pedalkernel-layout`** | Schematic layout. Turns a parsed pedal into a positioned schematic for KiCad or plugin UIs. |
 | **`pedalkernel-validate`** | SPICE validation harness. Signal generation, spectral analysis, regression reports against ngspice ground truth. |
 
-Real-time-critical code lives in `pedalkernel-rt`, which compiles `no_std + alloc` so the engine can target embedded platforms (Daisy, etc.) without a heap dependency in the hot path.
+Real-time-critical code lives in `pedalkernel-rt`, which compiles `no_std + alloc` so the engine is ready for embedded targets. Production-quality bindings for VST3, VCV Rack, and Daisy Seed are available [commercially](#commercial-licenses-and-bindings).
 
 ## Documentation
 
@@ -114,6 +114,17 @@ Contributions welcome. See the [Contributing guide](https://docs.pedalkernel.com
 
 Especially valued: new vintage circuits with public schematics, SPICE reference circuits, bug reports with `.pedal` repros, and contributions to the [roadmap items](https://docs.pedalkernel.com/book/roadmap/).
 
+## Commercial licenses and bindings
+
+PedalKernel is AGPLv3 — free to use, modify, and redistribute under the AGPL. The same source tree powers a commercial product line maintained by **[Puget Audio](mailto:info@puget.audio)** for teams that need closed-source distribution, prebuilt host bindings, or vendor support:
+
+- **VST3 bindings** — plug PedalKernel circuits into any DAW (Ableton, Logic, Reaper, Bitwig, …) as a VST3 plug-in with multi-instance state, parameter automation, and DAW preset I/O.
+- **VCV Rack bindings** — exposes any `.pedal` as a Rack module with full CV/audio I/O, polyphony, and Rack's preset/automation surface.
+- **Daisy Seed runtime** — a tuned `no_std` build of `pedalkernel-rt` for the Electrosmith Daisy Seed family (Patch, Pod, Field), with hardware abstraction for the audio codec, knobs, and switches.
+- **Commercial license + support** — a closed-source license for the kernel and runtime crates, plus priority bug fixes, feature work, and direct engineering support.
+
+Contact **info@puget.audio** for licensing, pricing, and integration questions.
+
 ## License
 
-AGPLv3 © [Avery Wagar](https://github.com/ajmwagar). Contributions are licensed to the project under the [CLA](CLA.md). The runtime crate (`pedalkernel-rt`) ships under the same license; embedding it in a closed-source product requires either AGPL compliance or a separate commercial license — open an issue if that's relevant to you.
+AGPLv3 © [Avery Wagar](https://github.com/ajmwagar). Contributions are licensed to the project under the [CLA](CLA.md). Embedding the kernel or runtime in a closed-source product, or shipping the commercial bindings listed above, requires a commercial license from [Puget Audio](mailto:info@puget.audio).
