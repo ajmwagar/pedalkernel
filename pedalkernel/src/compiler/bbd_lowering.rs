@@ -364,6 +364,9 @@ fn upsert_control(
         .find(|b| b.label == ctrl.label && b.component_id == ctrl.component)
     {
         existing.target = target;
+        // Drop any stale coordinated pot/divider targets — this control is
+        // now a BBD modulation target, not a multi-stage pot.
+        existing.targets.clear();
     } else {
         let comp = pedal.components.iter().find(|c| c.id == ctrl.component);
         let max_r = comp.and_then(|c| c.kind.resistance()).unwrap_or(100_000.0);
@@ -373,6 +376,7 @@ fn upsert_control(
         compiled.controls.push(ControlBinding {
             label: ctrl.label.clone(),
             target,
+            targets: Vec::new(),
             component_id: ctrl.component.clone(),
             max_resistance: max_r,
             taper,

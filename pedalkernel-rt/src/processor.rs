@@ -709,11 +709,59 @@ pub use crate::routing::{
     StageRoutePlan,
 };
 
+/// Which physical half of a 3-terminal pot a stage binding drives.
+///
+/// A 3-terminal pot is split at compile time into two leaves, `{id}__aw`
+/// (a→wiper) and `{id}__wb` (wiper→b). Each owning stage binding records
+/// which half it re-stamps so dispatch can route the correctly-formatted
+/// leaf id and the (optionally complemented) position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum PotHalf {
+    /// The pot is not split in this stage — re-stamp the base component id.
+    Whole,
+    /// The a→wiper half (`{id}__aw`).
+    Aw,
+    /// The wiper→b half (`{id}__wb`).
+    Wb,
+}
+
+/// One coordinated stage update for a control.
+///
+/// A single logical control (one host parameter) can own several stage
+/// bindings when its pot STRADDLES a stage boundary — e.g. an LA-2A makeup
+/// pot whose two halves land in a WDF gain-reduction stage and a MultiNL
+/// tube-grid stage, with a wiper-divider tap at the boundary. Each binding
+/// re-stamps one stage (or applies one wiper divider) with the correct half
+/// and complement; `CompiledPedal::set_control` fans a single position out to
+/// every binding in the set.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StageBinding {
+    /// Which stage / element this binding updates, and how to reach it.
+    pub target: ControlTarget,
+    /// Which physical half of a split 3-terminal pot this binding drives.
+    pub half: PotHalf,
+    /// Invert the position (`1.0 - value`) for this binding. Used for the
+    /// ground-touching half of a split pot so the two halves sum to `max_R`.
+    pub complement: bool,
+}
+
 /// Control binding: maps a knob label to a parameter in the processing chain.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ControlBinding {
     pub label: String,
+    /// Primary / representative target (kept for back-compat with the many
+    /// readers of `.target`; for a multi-target pot it is the first stage).
     pub target: ControlTarget,
+    /// Coordinated stage-update set. ONE logical control = ONE host
+    /// parameter, but N coordinated stage updates. Empty for legacy /
+    /// non-pot bindings, in which case dispatch falls back to `target` +
+    /// the comp-id broadcast. When populated, dispatch iterates this set so
+    /// a pot straddling a stage boundary updates EVERY owning stage (and any
+    /// wiper-divider at the boundary).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub targets: Vec<StageBinding>,
     pub component_id: String,
     #[allow(dead_code)]
     pub max_resistance: crate::Wave,
@@ -725,7 +773,7 @@ pub struct ControlBinding {
     pub range: (crate::Wave, crate::Wave),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ControlTarget {
     /// Modify a pot in a specific WDF stage.
@@ -735,6 +783,18 @@ pub enum ControlTarget {
     /// Modify a pot inside a multi-NL stage (R-type adaptor approach).
     /// (multi_nl_stage_idx, passive_child_idx)
     PotInMultiNlStage(usize, usize),
+    /// Apply an inter-stage wiper-divider ratio after the given stage index.
+    ///
+    /// This is the cross-stage pot path: a 3-terminal pot whose wiper feeds a
+    /// downstream high-impedance load (e.g. a tube grid / BJT base in a LATER
+    /// stage) divides the signal by its position at the boundary. Used as one
+    /// of a multi-target [`StageBinding`] set alongside the per-stage leaf
+    /// re-stamps so the divided wiper voltage actually reaches the load. The
+    /// matching [`WiperDivider`] entry (keyed by component id) carries the
+    /// live position; this target marks that a divider exists for the control.
+    WiperDivider {
+        after_stage_idx: usize,
+    },
     /// Modify the feedback pot in a BlackFeedback stage (recomputes Rf → gain).
     PotInBlackFeedbackStage(usize),
     /// Forward a control change to a sidechain sub-circuit.
@@ -2206,7 +2266,8 @@ impl CompiledPedal {
             ControlTarget::PotInStage(_)
             | ControlTarget::PotInIirStage(_)
             | ControlTarget::PotInMultiNlStage(_, _)
-            | ControlTarget::PotInBlackFeedbackStage(_) => {
+            | ControlTarget::PotInBlackFeedbackStage(_)
+            | ControlTarget::WiperDivider { .. } => {
                 if let Some(smoother) = self
                     .pot_smoothers
                     .iter_mut()
@@ -2240,7 +2301,8 @@ impl CompiledPedal {
                 ControlTarget::PotInStage(_)
                 | ControlTarget::PotInIirStage(_)
                 | ControlTarget::PotInMultiNlStage(_, _)
-                | ControlTarget::PotInBlackFeedbackStage(_) => {
+                | ControlTarget::PotInBlackFeedbackStage(_)
+                | ControlTarget::WiperDivider { .. } => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
                     {
@@ -2251,6 +2313,11 @@ impl CompiledPedal {
                         let comp_id = self.controls[i].component_id.clone();
                         for stage in &mut self.stages {
                             stage.set_control_pot(&comp_id, value);
+                        }
+                        for wd in &mut self.wiper_dividers {
+                            if wd.pot_comp_id == comp_id {
+                                wd.position = wd.taper.apply(value);
+                            }
                         }
                         if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
                             self.bbd_wet_mix = value;
@@ -2392,26 +2459,29 @@ impl CompiledPedal {
                 ControlTarget::PotInStage(_)
                 | ControlTarget::PotInIirStage(_)
                 | ControlTarget::PotInMultiNlStage(_, _)
-                | ControlTarget::PotInBlackFeedbackStage(_) => {
+                | ControlTarget::PotInBlackFeedbackStage(_)
+                | ControlTarget::WiperDivider { .. } => {
                     if let Some(smoother) =
                         self.pot_smoothers.iter_mut().find(|s| s.control_idx == i)
                     {
                         smoother.current = value;
                         smoother.target = value;
                     }
-                    let comp_id = self.controls[i].component_id.clone();
-                    for stage in &mut self.stages {
-                        stage.set_control_pot(&comp_id, value);
-                    }
-                    for wd in &mut self.wiper_dividers {
-                        if wd.pot_comp_id == comp_id {
-                            wd.position = wd.taper.apply(value);
+                    if !self.fan_out_pot_targets(i, value) {
+                        let comp_id = self.controls[i].component_id.clone();
+                        for stage in &mut self.stages {
+                            stage.set_control_pot(&comp_id, value);
                         }
+                        for wd in &mut self.wiper_dividers {
+                            if wd.pot_comp_id == comp_id {
+                                wd.position = wd.taper.apply(value);
+                            }
+                        }
+                        if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+                            self.bbd_wet_mix = value;
+                        }
+                        self.apply_pot_mirrors(&comp_id, value);
                     }
-                    if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
-                        self.bbd_wet_mix = value;
-                    }
-                    self.apply_pot_mirrors(&comp_id, value);
                 }
                 _ => self.set_control(label, value),
             }
@@ -2429,6 +2499,65 @@ impl CompiledPedal {
         for trig in &mut self.triggers {
             trig.fire();
         }
+    }
+
+    /// Fan a single pot position out to EVERY coordinated stage binding.
+    ///
+    /// This is the multi-target dispatch path: a control whose pot straddles a
+    /// stage boundary owns several [`StageBinding`]s (one per stage the pot
+    /// touches, plus a wiper-divider at the boundary). Each binding re-stamps
+    /// its stage with the correctly-formatted half id (`{id}__aw` / `{id}__wb`
+    /// / base id) and the (optionally complemented) position, so a 3-terminal
+    /// pot spanning a WDF→MultiNL boundary updates both halves coherently and
+    /// the wiper-divider delivers the divided voltage to the downstream load.
+    ///
+    /// Returns true if any binding was applied. When the control has no
+    /// explicit `targets` set (legacy / non-pot bindings) the caller falls
+    /// back to the comp-id broadcast.
+    fn fan_out_pot_targets(&mut self, ctrl_idx: usize, value: crate::Wave) -> bool {
+        if self.controls[ctrl_idx].targets.is_empty() {
+            return false;
+        }
+        let comp_id = self.controls[ctrl_idx].component_id.clone();
+        // Clone the small target set to release the borrow on self.controls.
+        let targets = self.controls[ctrl_idx].targets.clone();
+        for sb in &targets {
+            let pos = if sb.complement { 1.0 - value } else { value };
+            let leaf_id = match sb.half {
+                PotHalf::Whole => comp_id.clone(),
+                PotHalf::Aw => format!("{comp_id}__aw"),
+                PotHalf::Wb => format!("{comp_id}__wb"),
+            };
+            match &sb.target {
+                ControlTarget::PotInStage(idx)
+                | ControlTarget::PotInIirStage(idx)
+                | ControlTarget::PotInBlackFeedbackStage(idx) => {
+                    if let Some(stage) = self.stages.get_mut(*idx) {
+                        stage.set_control_pot(&leaf_id, pos);
+                    }
+                }
+                ControlTarget::PotInMultiNlStage(idx, _) => {
+                    if let Some(stage) = self.stages.get_mut(*idx) {
+                        stage.set_control_pot(&leaf_id, pos);
+                    }
+                }
+                ControlTarget::WiperDivider { .. } => {
+                    for wd in &mut self.wiper_dividers {
+                        if wd.pot_comp_id == comp_id {
+                            wd.position = wd.taper.apply(pos);
+                        }
+                    }
+                }
+                // A coordinated set only ever holds pot/divider targets; any
+                // other kind is dispatched via its single-target path.
+                _ => {}
+            }
+        }
+        if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+            self.bbd_wet_mix = value;
+        }
+        self.apply_pot_mirrors(&comp_id, value);
+        true
     }
 
     /// Update mirrored pots (position = 1.0 - source) across all stages.
@@ -2470,25 +2599,31 @@ impl CompiledPedal {
             if self.pot_smoothers[si].advance() {
                 let ctrl_idx = self.pot_smoothers[si].control_idx;
                 let value = self.pot_smoothers[si].current;
-                let comp_id = self.controls[ctrl_idx].component_id.clone();
 
-                // Update all stages — each stage ignores pots it doesn't own.
-                // Complement halves automatically use 1-value via the complement flag.
-                for stage in &mut self.stages {
-                    stage.set_control_pot(&comp_id, value);
-                }
+                // Multi-target path: fan out to every coordinated stage binding
+                // (per-stage half/complement + wiper divider). Falls back to the
+                // comp-id broadcast for legacy/non-explicit bindings.
+                if !self.fan_out_pot_targets(ctrl_idx, value) {
+                    let comp_id = self.controls[ctrl_idx].component_id.clone();
 
-                // Update wiper dividers
-                for wd in &mut self.wiper_dividers {
-                    if wd.pot_comp_id == comp_id {
-                        wd.position = wd.taper.apply(value);
+                    // Update all stages — each stage ignores pots it doesn't own.
+                    // Complement halves automatically use 1-value via the complement flag.
+                    for stage in &mut self.stages {
+                        stage.set_control_pot(&comp_id, value);
                     }
-                }
 
-                if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
-                    self.bbd_wet_mix = value;
+                    // Update wiper dividers
+                    for wd in &mut self.wiper_dividers {
+                        if wd.pot_comp_id == comp_id {
+                            wd.position = wd.taper.apply(value);
+                        }
+                    }
+
+                    if self.bbd_mix_pot_id.as_deref() == Some(&*comp_id) {
+                        self.bbd_wet_mix = value;
+                    }
+                    self.apply_pot_mirrors(&comp_id, value);
                 }
-                self.apply_pot_mirrors(&comp_id, value);
             }
         }
 

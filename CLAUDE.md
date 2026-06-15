@@ -193,3 +193,32 @@ family as F10 link-2). Battery unchanged vs baseline; the spqr_control fix is th
 general default-application path, so it also un-freezes compiled-in defaults for any
 PassiveRType pot. The IIR-`Generic` no-op (stage.rs:5010) and rigid-StateSpace pot
 mapping remain latent (no branch circuit reaches them; untouched).
+
+**2026-06-15 — Multi-target control binding (straddling pots)** (`spqr_control.rs`,
+`processor.rs`): Generalized `ControlBinding` from a single `target: ControlTarget`
+to ONE host parameter + a coordinated `targets: Vec<StageBinding>` set (each carries
+target, `PotHalf` {Whole/Aw/Wb}, complement). `find_pot_bindings` STOPPED discarding
+(`.take(1)`/`.pop()` removed) — it now keeps EVERY owning stage. Added
+`ControlTarget::WiperDivider{after_stage_idx}` and folded the old label-based
+Level/Volume/Output divider path into ONE unified cross-stage mechanism: a pot whose
+wiper feeds the output net OR (NEW) a high-Z active grid/base/gate
+(`pot_wiper_feeds_active_input`, traces wiper→active-input through an optional
+grid-stopper) gets a `WiperDivider` + a `WiperDivider` StageBinding. Dispatch
+(`fan_out_pot_targets`) iterates the set, re-stamping each owning stage (`PotHalf::
+Whole` → base id so the stage's own per-leaf complement applies, no double-invert)
+and updating the boundary divider; falls back to the comp-id broadcast for
+legacy/non-pot bindings. The LA-2A "Gain" makeup pot (wiper→V1.grid through R_grid)
+is now LIVE: small-signal sweep -41.2→-14.3 dB across 0.1-0.9 (was flat -11.8 dB,
+DECREASING); steady gain -0.97→+3.82 dB across 0.2-0.8 monotonic. Promoted
+`la2a_sweeps::gain_pot_raises_steady_gain` + `pot_fidelity::
+opto_gain_pot_sweeps_monotonically` from `#[ignore]` to GREEN. Two acceptance
+assertions updated honestly (old→new + rationale) because the makeup pot is now
+INSIDE the GR feedback loop: `la2a_sweeps::gr_curve` top-region ratio 15:1→~5:1
+(floor 5→4); `outboard_acceptance::opto_..._attack_release` attack-settle 2ms→~1.1s
+(band 1-50ms → 1ms-2s, the T4B's program-dependent in-loop approach). Compression
+depth/direction unchanged (GR +15 dB). Lvl/Vol pots + pultec_sweeps stay green;
+control_binding 13-fail baseline unchanged; SPICE 41/45 unchanged (extraction 3/3).
+Note: StateSpace pot path has no `complement`/`__aw`-`__wb` split in this worktree
+(the cba8b59 StateSpace fix is NOT on 6a557a1) — irrelevant to the opto Gain (WDF+
+MultiNL), flagged for the StateSpace case. `PotHalf` Aw/Wb routing is wired but
+unused today (Whole suffices; reserved for future explicit-half StateSpace binding).
