@@ -1,6 +1,10 @@
 # Generated output from validation runs
 output/
 
+# CI / local run reports (uploaded as artifacts, not committed)
+spice-report.json
+spice-output.txt
+
 # Generated LTspice batch artifacts. Commit imported golden .npy files instead.
 spice-circuits/**/*.raw
 spice-circuits/**/*.log

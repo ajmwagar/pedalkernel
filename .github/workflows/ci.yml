@@ -13,9 +13,11 @@ env:
   # compile gap; gate it on a pass-rate threshold rather than all-green so it
   # stops blocking on noise. SPICE validation below is the firm quality gate.
   TEST_MIN_PASS_PCT: "70"
-  # SPICE validation is the meaningful physical-fidelity gate. 41/45 pass today
-  # (~91%); 90% = "do not regress". 4 known failures are tracked:
-  # push_pull_6l6, bigmuff_stage, fuzz_core, single_diode (mild_clipping).
+  # SPICE validation is the meaningful physical-fidelity gate. 48/52 pass today
+  # (~92%); 90% = "do not regress". Known failures (intentional):
+  #   bigmuff_stage, fuzz_core (engine model gap vs SPICE),
+  #   fet_leveler_level_sweep, fet_leveler_tone_burst (compressor engine gap,
+  #   documented in config.rs — expected red until G5 engine fix lands).
   SPICE_MIN_PASS_PCT: "90"
 
 jobs:
@@ -38,7 +40,7 @@ jobs:
         working-directory: pedalkernel-validate
         run: |
           set -o pipefail
-          cargo run -p pedalkernel-validate -- run --report spice-report.json 2>&1 \
+          cargo run -p pedalkernel-validate -- --report spice-report.json run 2>&1 \
             | tee spice-output.txt || true
           summary=$(grep -oE '[0-9]+/[0-9]+ passed' spice-output.txt | tail -1)
           if [ -z "$summary" ]; then
