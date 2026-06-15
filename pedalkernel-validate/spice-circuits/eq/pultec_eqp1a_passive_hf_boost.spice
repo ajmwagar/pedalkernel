@@ -1,0 +1,39 @@
+* ============================================================================
+* Pultec EQP-1A — Passive EQ section, HF BOOST configuration
+* PedalKernel Validation Circuit (bead pedalkernel-hcpb.1)
+* ============================================================================
+*
+* HF_Boost = 1.0 → rp = 10k (high-Z, tank resonates more freely)
+* HF_BW = 0.5 (linear) → rp = 5000Ω (mid bandwidth damping)
+* All other audio-taper controls at 0.0 → rp = 10Ω
+*
+* Tank resonance: f0 = 1/(2π√(47m·5.6n)) ≈ 3.1 kHz
+*
+* Switched-cap values frozen at position 0:
+*   CPS = 100n (0.1u, 20 Hz), KCS = 5600p (5.6n), HFA_sel = 3300p (3.3n)
+* ============================================================================
+
+Rin   v_in   n_lf   600
+
+Llf   n_lf   n_lb   2H
+R_lfboost  n_lb  0  10
+
+Ccps  n_lf   n_la   100n
+R_lfatten  n_la  0  10
+
+Rlf   n_lf   n_hf   56k
+
+Lhf   n_hf   n_hfb  47m
+Ckcs  n_hf   n_hfb  5600p
+* HF_Boost at 1.0: rp = 10k (tank has high-Z shunt — resonant peak)
+R_hfboost  n_hfb  0  10k
+
+* HF_BW at 0.5 (linear): rp = 5000Ω
+R_hfbw  n_hf  0  5000
+
+Chfas  n_hf   n_hfa_sw  3300p
+R_hfatten  n_hfa_sw  0  10
+
+Rhfa  n_hf   v_out   100k
+Rload  v_out  0  100k
+
