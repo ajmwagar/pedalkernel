@@ -3,8 +3,9 @@ title: "Metering and the metrics ring buffer"
 description: "Real-time-safe signal and state metrics — what's recorded, how the ring buffer works, and how a UI consumes it."
 section: "Internals"
 weight: 88
-source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
+source_commit: "222212fe33f0aa223f7d545d890a16654c17cca8"
 watches:
+  - pedalkernel-rt/src/metering.rs
   - pedalkernel/src/metering.rs
   - pedalkernel/src/compiler/compiled.rs
 ---
@@ -27,7 +28,7 @@ One snapshot — a `UiMetrics` struct — is published every block (every ~128 s
 
 **Per-stage levels.** `stage_levels[16]` — normalized RMS at the output of each stage in the pipeline. Every stage kind participates (`WdfStage`, `MultiNlStage`, `OpAmpStage`, `PushPullStage`). `stage_count` reports how many are active.
 
-**Device state.** `tube_plate_current[12]` (mA) and `tube_dissipation[12]` (W) for up to 12 tubes, ready to drive a glow shader. `supply_voltage` and `supply_sag` for a "B+ droops under load" meter. `transformer_flux[4]` — currently a stub (zeroed; transformer saturation isn't computed yet).
+**Device state.** `tube_plate_current[12]` (mA) and `tube_dissipation[12]` (W) for up to 12 tubes, ready to drive a glow shader. `supply_voltage` and `supply_sag` for a "B+ droops under load" meter. `transformer_flux[4]` — currently a stub (zeroed; the [Jiles-Atherton transformer model](./nonlinear-elements.md#stateful-devices) now carries `H`, `Hdot`, `M`, `Mdot` per sample in `JaState`, so the underlying data is available — what's missing is a way for the accumulator to walk the WDF leaf list and pull each transformer core's `M` and `B`).
 
 ## The ring buffer
 
@@ -121,7 +122,7 @@ When metering is disabled, `self.metrics_accumulator` is `None` and the per-samp
 
 Four things worth flagging for contributors:
 
-- **Transformer flux is a stub.** `transformer_flux[4]` is zeroed every block. Computing real core saturation requires exposing the transformer's internal flux state to the accumulator, which isn't wired yet. `// TODO: implement` sits at the responsible line.
+- **Transformer flux is a stub.** `transformer_flux[4]` is zeroed every block. The Jiles-Atherton core now carries `M` (magnetisation) and `B` (flux density, derivable from `M` and `H`) per sample in `JaState`, so the underlying data is live — what's missing is the accumulator pass that walks each transformer's WDF leaf and copies the right scalar out. Shovel-ready follow-up.
 - **Peak decay happens on the audio thread.** `peak *= 0.9995` per block means peak holds decay at ~73% per 10 ms. A UI layer should not apply its own decay on top — you'd end up double-smoothing and the meters would look sluggish.
 - **Polling only.** No `wait_next_frame()` or callback API. A UI thread pinned to `vsync` is fine; a latency-sensitive consumer that needs "new data" signalling would have to build that on top.
 - **Single consumer.** The SPSC design means only one reader. Multiple panels sharing a pedal need to share an `Arc<MetricsRingBuffer>` and pull from the same slot, or the architecture needs a broadcast layer.
