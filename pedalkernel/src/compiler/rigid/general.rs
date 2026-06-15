@@ -552,6 +552,29 @@ fn classify_nl_devices(
                     }
                 }
             }
+            // Pentode with a connected grid: same 2-port layout as triode.
+            // Port 0 = grid-cathode (Vgk), port 1 = plate-cathode (Vpk).
+            // This matches PentodeThreePort's NlDeviceGroupIv::eval() port ordering.
+            NonlinearKind::Pentode {
+                plate_node,
+                cathode_node,
+                grid_node: Some(grid),
+                ..
+            } => {
+                let grid = *grid;
+                let plate = *plate_node;
+                let cathode = *cathode_node;
+                nl_terminals.push((grid, cathode));   // port 0: grid-cathode
+                nl_terminals.push((plate, cathode));  // port 1: plate-cathode
+                for &n in &[grid, plate, cathode] {
+                    if !node_set.contains(&n)
+                        && n != graph.gnd_node
+                        && !graph.supply_nodes.contains(&n)
+                    {
+                        node_set.push(n);
+                    }
+                }
+            }
             _ => {
                 nl_terminals.push((e.node_a, e.node_b));
             }
@@ -1169,9 +1192,11 @@ fn assemble_multi_nl_stage(
                         initial_v[off + 1] = sign * supply_voltage * 0.5;
                     }
                 }
-                NlDeviceGroupKind::TriodeThreePort(_) | NlDeviceGroupKind::VariMuThreePort(_) => {
+                NlDeviceGroupKind::TriodeThreePort(_)
+                | NlDeviceGroupKind::VariMuThreePort(_)
+                | NlDeviceGroupKind::PentodeThreePort(_) => {
                     // Port 0 = Vgk: start at 0 (cold grid, no bias signal yet).
-                    // Port 1 = Vpk: warm-start at half supply for faster convergence.
+                    // Port 1 = Vpk: warm-start at half supply for faster NR convergence.
                     if off + 1 < n_nl {
                         initial_v[off + 1] = supply_voltage * 0.5;
                     }
