@@ -5,8 +5,8 @@ use hashbrown::HashMap;
 use crate::compiler::classify::NonlinearKind;
 use crate::compiler::component::{
     Component, ComponentEdge, EdgeKind, GraphRole, KMethodSpec, ModulationSink, ModulationSinkKind,
-    PinConfig, PinDirection, SignalTerminals, StampResult, K_AXIS_INCIDENT_CONTROL_2D,
-    K_AXIS_INCIDENT_CONTROL_CONTROL_3D,
+    NeighborReq, NeighborRole, PinConfig, PinDirection, SignalTerminals, StampResult,
+    K_AXIS_INCIDENT_CONTROL_2D, K_AXIS_INCIDENT_CONTROL_CONTROL_3D,
 };
 use crate::compiler::graph::NodeId;
 use crate::tree::MnaSystem;
@@ -156,6 +156,29 @@ impl Component for Triode {
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
+
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        // Output terminals each declare a Required Load; the device-level rule
+        // is "a Load on AN output terminal" — common-cathode (plate-load) OR
+        // cathode-follower (cathode-load) both satisfy it.
+        vec![
+            ("plate", vec![NeighborReq::required(NeighborRole::Load)]),
+            (
+                "cathode",
+                vec![
+                    NeighborReq::required(NeighborRole::Load),
+                    NeighborReq::optional(NeighborRole::Ref),
+                ],
+            ),
+            (
+                "grid",
+                vec![
+                    NeighborReq::optional(NeighborRole::Ref),
+                    NeighborReq::optional(NeighborRole::Signal),
+                ],
+            ),
+        ]
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -303,6 +326,30 @@ impl Component for Pentode {
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
     }
+
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        vec![
+            ("plate", vec![NeighborReq::required(NeighborRole::Load)]),
+            (
+                "cathode",
+                vec![
+                    NeighborReq::required(NeighborRole::Load),
+                    NeighborReq::optional(NeighborRole::Ref),
+                ],
+            ),
+            (
+                "screen",
+                vec![NeighborReq::optional(NeighborRole::Ref)],
+            ),
+            (
+                "grid",
+                vec![
+                    NeighborReq::optional(NeighborRole::Ref),
+                    NeighborReq::optional(NeighborRole::Signal),
+                ],
+            ),
+        ]
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -447,5 +494,27 @@ impl Component for VariMu {
     }
     fn model_name(&self) -> Option<&str> {
         Some(&self.model)
+    }
+
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        // Vari-mu (e.g. 6386 / remote-cutoff) is used as a gain-reduction
+        // element; like a triode it needs a Load on an output terminal.
+        vec![
+            ("plate", vec![NeighborReq::required(NeighborRole::Load)]),
+            (
+                "cathode",
+                vec![
+                    NeighborReq::required(NeighborRole::Load),
+                    NeighborReq::optional(NeighborRole::Ref),
+                ],
+            ),
+            (
+                "grid",
+                vec![
+                    NeighborReq::optional(NeighborRole::Ref),
+                    NeighborReq::optional(NeighborRole::Signal),
+                ],
+            ),
+        ]
     }
 }

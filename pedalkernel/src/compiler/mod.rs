@@ -25,6 +25,7 @@ mod dyn_node;
 mod graph;
 mod helpers;
 mod k_method;
+pub mod neighbor_roles;
 mod rigid;
 mod signal_flow;
 mod split;
@@ -46,7 +47,12 @@ pub use compile::compile_pedal_cached;
 pub use compile::{compile_cache_key, compile_pedal, compile_pedal_with_options, CompileOptions};
 pub(crate) use compiled::extract_precomputed_from_compiled;
 pub use compiled::CompiledPedal;
-pub use component::{Component, PinDirection};
+pub use component::{
+    Cardinality, Component, NeighborReq, NeighborRole, PinDirection,
+};
+pub use neighbor_roles::{
+    completeness_errors, infer_neighbor_roles, InferredNeighbor,
+};
 pub use split::{compile_split_pedal, SplitCompiledPedal};
 pub use spqr_build::{compile_via_spqr, compile_via_spqr_with_options};
 pub use validate::{validate_pedal, validate_pedal_files, PedalWarning, Severity};

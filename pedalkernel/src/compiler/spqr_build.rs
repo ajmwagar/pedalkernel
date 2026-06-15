@@ -113,6 +113,13 @@ pub fn compile_via_spqr_with_options(
             .downcast_ref::<super::components::EnvelopeFollower>()
             .is_some()
     });
+    // Connectivity-based completeness check: every active device that declares
+    // `terminal_requirements()` must have its Required neighbour roles present
+    // (e.g. a triode must have a Load reachable from an output terminal). This
+    // is additive and behaviour-neutral — it only rejects circuits that are
+    // genuinely missing a required neighbour; it never changes how complete
+    // circuits compile. Gated false-positive-free on the working corpus.
+    super::neighbor_roles::validate_completeness(&graph)?;
     let supply_voltage = pedal.supplies.first().map_or(9.0, |s| s.config.voltage);
     let delay_lines = build_delay_line_bindings(pedal, sample_rate);
     // Behavioral islands (bbd(), vca(), ...) lower to per-instance runtime DSP

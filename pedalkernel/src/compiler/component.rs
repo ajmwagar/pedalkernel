@@ -459,6 +459,88 @@ pub enum BiasResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Per-terminal neighbor requirements (boundary-arbitration groundwork)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Device-agnostic classification of what a neighbouring passive (or active)
+/// element *does* for an active device's terminal.
+///
+/// This is the durable, role-based replacement for the role-blind topology
+/// heuristic that currently sets stage boundaries. A later "arbitration" phase
+/// will consume these roles to decide where stages split; **this declaration +
+/// inference + completeness pass changes no audio behaviour** — its only
+/// runtime-visible effect is a compile-time completeness diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NeighborRole {
+    /// Develops the device's output. Terminates at a supply rail (plate /
+    /// collector / drain load; a cathode-follower's cathode load) — and may
+    /// equally be a transformer winding or another active device acting as the
+    /// load. Conceptually **absorbed** into the device's stage.
+    Load,
+    /// DC operating-point / AC-grounded support: grid leak, base divider,
+    /// cathode / emitter bias R, cathode / screen bypass C, screen dropper.
+    /// **Absorbed**.
+    Ref,
+    /// Series through-path to the NEXT active stage: coupling cap, grid stopper.
+    /// This is the future stage **boundary** (and ordering edge).
+    Signal,
+}
+
+impl NeighborRole {
+    /// Human-readable label for diagnostics.
+    pub fn label(self) -> &'static str {
+        match self {
+            NeighborRole::Load => "Load",
+            NeighborRole::Ref => "Ref",
+            NeighborRole::Signal => "Signal",
+        }
+    }
+}
+
+/// How many neighbours of a given [`NeighborRole`] a terminal expects.
+///
+/// A `Vec<NeighborReq>` (rather than an integer count) is used deliberately so
+/// future requirements can be expressed compositionally without an arithmetic
+/// model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cardinality {
+    /// Must be present — its absence is a completeness error.
+    Required,
+    /// May be present; never an error if absent.
+    Optional,
+    /// Zero or more — informational only, never an error.
+    Repeatable,
+}
+
+/// A single neighbour requirement declared by an active device terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NeighborReq {
+    pub role: NeighborRole,
+    pub card: Cardinality,
+}
+
+impl NeighborReq {
+    pub const fn required(role: NeighborRole) -> Self {
+        Self {
+            role,
+            card: Cardinality::Required,
+        }
+    }
+    pub const fn optional(role: NeighborRole) -> Self {
+        Self {
+            role,
+            card: Cardinality::Optional,
+        }
+    }
+    pub const fn repeatable(role: NeighborRole) -> Self {
+        Self {
+            role,
+            card: Cardinality::Repeatable,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Component trait
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -832,6 +914,28 @@ pub trait Component: std::fmt::Debug {
     /// Check for suspicious or invalid component values.
     fn validate_values(&self, _comp_id: &str) -> Vec<(Severity, String)> {
         vec![]
+    }
+
+    // ── Neighbor requirements (boundary-arbitration groundwork) ───────────
+
+    /// Per-terminal neighbour requirements for active devices.
+    ///
+    /// Returns `(terminal_name, requirements)` pairs declaring what each
+    /// terminal needs from its connectivity to function as a circuit element.
+    /// The completeness pass classifies each terminal's actual neighbours
+    /// ([`NeighborRole`]) and reports a compile error when a [`Cardinality::
+    /// Required`] role is missing.
+    ///
+    /// **Config tolerance:** a [`NeighborRole::Load`] declared on more than one
+    /// terminal of the same device (e.g. both `plate` and `cathode` of a triode)
+    /// is satisfied if *any* of those terminals carries a Load. This lets a
+    /// common-cathode stage (plate-load) AND a cathode-follower (cathode-load,
+    /// plate straight to B+) both validate without a false positive.
+    ///
+    /// Default: empty (passive / non-active components declare nothing and are
+    /// never checked).
+    fn terminal_requirements(&self) -> Vec<(&'static str, Vec<NeighborReq>)> {
+        Vec::new()
     }
 
     // ── Classification (detailed) ────────────────────────────────────────
