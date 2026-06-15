@@ -798,6 +798,36 @@ pub struct NamedPortBinding {
     pub stage_idx: usize,
 }
 
+/// Compiler-synthesized INTERNAL delayed port (Phase 2b) — NOT user-overridable.
+///
+/// Carries a solved boundary-node value across a one-sample (z⁻¹) gap, so a
+/// de-fused sub-network (e.g. the LA-2A detector) can read its taps one sample
+/// late and solve as its own sub-network with NO intra-sample ordering
+/// dependency. This is the GENERAL realization of the `cv_delayed` cross-sample
+/// precedent (`SidechainProcessor`): the value at `source_node_id` is WRITTEN to
+/// `prev_value` at end-of-sample, and INJECTED at `consumer_node_id` (via
+/// `node_signals`) at the START of the next sample.
+///
+/// * `gain` scales the injected value (a superposition transfer weight from the
+///   detector resistive mix; `1.0` for a pass-through carry).
+/// * `consumer_node_id == usize::MAX` means "carry only" — the solved value is
+///   stored in `prev_value` for a later phase to consume (Phase 3 reads the
+///   detector `EL_drive` carry to drive the photocoupler LED), but nothing is
+///   injected this phase.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct InternalPortBinding {
+    /// Circuit graph node whose SOLVED value is captured at end-of-sample.
+    pub source_node_id: usize,
+    /// Circuit graph node where `prev_value * gain` is injected at the start of
+    /// the NEXT sample. `usize::MAX` = carry-only (store, do not inject).
+    pub consumer_node_id: usize,
+    /// Superposition / carry gain applied to the injected value.
+    pub gain: crate::Wave,
+    /// The z⁻¹ register: last sample's solved value at `source_node_id`.
+    pub prev_value: crate::Wave,
+}
+
 pub use crate::routing::{
     BindingId, BkmVsRouteBinding, GraphRoutedBkm, PortBinding, Route, StageRouteDebug,
     StageRoutePlan,
@@ -1536,6 +1566,11 @@ pub struct CompiledPedal {
     /// Input ports: written by external code via set_port() before process().
     /// Output ports: written by process(), read via get_port() after.
     pub port_values: Vec<crate::Wave>,
+    /// Compiler-synthesized INTERNAL delayed ports (Phase 2b) — the z⁻¹ carry
+    /// table for de-fused sub-networks (e.g. the LA-2A detector taps + EL_drive).
+    /// Not user-overridable; written/read entirely inside `process()`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub internal_ports: Vec<InternalPortBinding>,
     /// Auto-init flag: cache_all_vs_pointers runs once on first process() call.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub initialized: bool,
@@ -3173,6 +3208,19 @@ impl PedalProcessor for CompiledPedal {
             }
         }
 
+        // INTERNAL delayed ports (Phase 2b): the z⁻¹ READ. Inject each carried
+        // value (last sample's solved value at `source_node_id`) at its consumer
+        // node, scaled by the superposition/carry gain. Because the value is from
+        // LAST sample, the consuming sub-network has no intra-sample ordering
+        // dependency on its driver — this is the cross-sample (cv_delayed-style)
+        // persistence that lets the de-fused detector solve as its own network.
+        for ip in &self.internal_ports {
+            if ip.consumer_node_id != usize::MAX {
+                self.node_signals
+                    .push((ip.consumer_node_id, ip.prev_value * ip.gain));
+            }
+        }
+
         // Advance pot smoothers — smoothly interpolate pot values toward targets.
         // This eliminates zipper noise and clicks when knobs are turned.
         self.advance_smoothers();
@@ -4346,6 +4394,27 @@ impl PedalProcessor for CompiledPedal {
                     .find(|(nid, _)| *nid == port.node_id)
                     .map(|(_, v)| *v)
                     .unwrap_or(output);
+            }
+        }
+
+        // INTERNAL delayed ports (Phase 2b): the z⁻¹ WRITE. After the full sample
+        // has solved, capture the value at each `source_node_id` from
+        // `node_signals` (rev-find = the last writer, same convention as output
+        // ports) into `prev_value`, where it waits one sample for the consumer.
+        // For the detector this captures the mixed tap value at the front node
+        // AND the solved `EL_drive` node (carry-only, consumer = MAX) so Phase 3
+        // can drive the photocoupler LED from it.
+        if !self.internal_ports.is_empty() {
+            for idx in 0..self.internal_ports.len() {
+                let src = self.internal_ports[idx].source_node_id;
+                if let Some(&(_, v)) = self
+                    .node_signals
+                    .iter()
+                    .rev()
+                    .find(|(nid, _)| *nid == src)
+                {
+                    self.internal_ports[idx].prev_value = v;
+                }
             }
         }
 

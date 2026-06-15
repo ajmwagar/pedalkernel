@@ -806,6 +806,71 @@ pub fn detector_control_nodes(graph: &CircuitGraph) -> Vec<NodeId> {
     seeds
 }
 
+/// All circuit nodes belonging to the DELAYED detector SUB-NETWORK (Phase 2b).
+///
+/// Seeded at the detector control electrode(s) ([`detector_control_nodes`]) and
+/// grown across EVERY graph edge (passive AND active device couplings, via
+/// `coupled_nodes`) so the whole sidechain — the front-end tap network, the
+/// sidechain amplifier tube(s), the driver tube, and the EL-drive winding —
+/// is captured. Traversal is BLOCKED at the forward boundary nodes (`in`/`out`)
+/// and at rails, so it never leaks into the forward audio path or the supplies.
+///
+/// Used by stage formation to mark detector stages `bypass_serial` (so they do
+/// NOT overwrite the forward serial signal) and to node-route the detector as
+/// its own sub-network reading the delayed taps. Empty when there is no
+/// cross-network detector (the common case), leaving all other circuits
+/// untouched.
+pub fn detector_subnetwork_nodes(graph: &CircuitGraph) -> HashSet<NodeId> {
+    let seeds = detector_control_nodes(graph);
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    if seeds.is_empty() {
+        return visited;
+    }
+    // Forward boundary nodes are hard barriers: the detector sub-network must
+    // never absorb the global `in`/`out` (those belong to the forward path).
+    let blocked = |n: NodeId| -> bool {
+        n == graph.in_node || n == graph.out_node || node_is_rail(graph, n)
+    };
+    let mut stack: Vec<NodeId> = Vec::new();
+    for &s in &seeds {
+        if !blocked(s) && visited.insert(s) {
+            stack.push(s);
+        }
+    }
+    while let Some(node) = stack.pop() {
+        // Walk every graph edge incident on `node` (passive R/C/L AND the
+        // active-device virtual bridges in `graph.edges`).
+        for e in graph.edges.iter() {
+            let other = if e.node_a == node {
+                e.node_b
+            } else if e.node_b == node {
+                e.node_a
+            } else {
+                continue;
+            };
+            if blocked(other) {
+                continue;
+            }
+            if visited.insert(other) {
+                stack.push(other);
+            }
+        }
+        // Walk device couplings (transformer primary↔secondary, tube
+        // grid↔plate↔cathode) so the sidechain tubes + EL-drive winding join.
+        if let Some(others) = graph.coupled_nodes.get(&node) {
+            for &other in others {
+                if blocked(other) {
+                    continue;
+                }
+                if visited.insert(other) {
+                    stack.push(other);
+                }
+            }
+        }
+    }
+    visited
+}
+
 /// Public diagnostic view of the Phase-2a cut set for a `PedalDef`: the cut
 /// edges' owning component ids, and the already-isolated (Behavioral) coupling
 /// component ids. Mirrors [`classify_edges`] as the external-test entry point
@@ -926,6 +991,83 @@ pub fn delayed_cut_edges(graph: &CircuitGraph) -> DelayedCutSet {
             }
         }
     }
+
+    // (4b — Phase 2b) Cut the FEED-FORWARD fork-arm mouth(s).
+    //
+    // The faithful LA-2A's Limit/Compress selector is wired as
+    // `in -> fork(LC, [gnd, R_ff.a])`. `expand_forks` turns this into TWO
+    // synthetic SwitchedResistor components, BOTH with `.a == in_node`:
+    //   * path 0 (`__fork_N_path_0`): `in -> gnd`  — the Compress shunt, which
+    //     in the DEFAULT (Compress) mode is the active/low-R arm and therefore
+    //     SHORTS the live forward `in` straight to ground (it sits on the same
+    //     node as `T_in.a`). This is the "4th-cause" collapse.
+    //   * path 1 (`__fork_N_path_1`): `in -> R_ff.a` — the feed-forward trickle
+    //     into the detector front-end (R_ff.a is in `detector_closure`).
+    // Both arms must STOP conducting on the forward audio `in`: the fork + the
+    // LC switch belong INSIDE the detector sub-network (where the switch gates
+    // the feed-forward contribution against the feedback tap), NOT on the
+    // forward path. Step (4) above already skips the `in -> gnd` arm (rail
+    // interior) and would only cut the `in -> R_ff.a` arm — leaving the gnd
+    // shunt to keep `in` shorted. So we DERIVE the full fork-arm cut here.
+    //
+    // Derivation (narrow — gated on `graph.fork_paths` membership + a sibling
+    // of the SAME fork reaching the detector closure, so non-detector forks are
+    // untouched): group every fork-path component by its controlling switch and
+    // its source (seed) node; if ANY arm of that fork reaches the detector
+    // closure (its non-seed endpoint is in `detector_closure`), cut EVERY arm of
+    // that fork whose source is the seed — including the gnd-shunt arm whose
+    // interior is the rail (the relaxation of step (4)'s rail-interior skip,
+    // applied ONLY to fork arms with a detector-reaching sibling).
+    if !graph.fork_paths.is_empty() {
+        use std::collections::HashMap as Map;
+        // Key a fork instance by (switch_id, source seed node). Value: the list
+        // of (edge_idx, interior_node) arms whose source is that seed.
+        let mut fork_arms: Map<(String, NodeId), Vec<(usize, NodeId)>> = Map::new();
+        for (eidx, e) in graph.edges.iter().enumerate() {
+            let Some(info) = graph.fork_paths.get(&e.comp_idx) else {
+                continue;
+            };
+            // A fork-path component is `source -> .a` ... `.b -> dest`; the graph
+            // edge is the resistor's `.a`/`.b` pair. Identify the seed (source)
+            // endpoint and the interior (destination) endpoint.
+            let a_is_seed = seeds.contains(&e.node_a);
+            let b_is_seed = seeds.contains(&e.node_b);
+            // Only fork arms whose SOURCE is a forward boundary seed matter here
+            // (the `in`-side feed-forward mouth). An arm with neither end a seed
+            // is internal to the detector and is handled by the mix, not a cut.
+            if a_is_seed == b_is_seed {
+                continue;
+            }
+            let interior = if a_is_seed { e.node_b } else { e.node_a };
+            let seed = if a_is_seed { e.node_a } else { e.node_b };
+            fork_arms
+                .entry((info.switch_id.clone(), seed))
+                .or_default()
+                .push((eidx, interior));
+        }
+        for ((_switch, _seed), arms) in fork_arms.iter() {
+            // Does ANY sibling arm of this fork reach the detector closure?
+            let sibling_reaches_detector = arms
+                .iter()
+                .any(|&(_, interior)| detector_closure.contains(&interior));
+            if !sibling_reaches_detector {
+                continue; // non-detector fork — leave it entirely untouched.
+            }
+            // Cut EVERY arm of this fork at its source seed (including the
+            // gnd-shunt arm whose interior is the rail — the narrow relaxation).
+            for &(eidx, _interior) in arms {
+                if set.cuts.insert(eidx, Directive::NonMergeCut).is_none() {
+                    let e = &graph.edges[eidx];
+                    for n in [e.node_a, e.node_b] {
+                        if !node_is_rail(graph, n) && !boundary.contains(&n) {
+                            boundary.push(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     set.boundary_nodes = boundary;
     set
 }

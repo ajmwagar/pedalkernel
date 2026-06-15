@@ -218,6 +218,7 @@ pub fn compile_via_spqr_with_options(
             original_passive_values: hashbrown::HashMap::new(),
             ports: Vec::new(),
             port_values: Vec::new(),
+            internal_ports: Vec::new(),
             initialized: false,
         };
         compiled.set_supply_voltage(supply_voltage);
@@ -280,6 +281,7 @@ pub fn compile_via_spqr_with_options(
             original_passive_values: hashbrown::HashMap::new(),
             ports: Vec::new(),
             port_values: Vec::new(),
+            internal_ports: Vec::new(),
             initialized: false,
         };
         compiled.set_supply_voltage(supply_voltage);
@@ -2085,6 +2087,7 @@ pub fn compile_via_spqr_with_options(
         original_passive_values: hashbrown::HashMap::new(),
         ports: Vec::new(),
         port_values: Vec::new(),
+        internal_ports: Vec::new(),
         initialized: false,
     };
     compiled.set_supply_voltage(supply_voltage);
@@ -2173,11 +2176,146 @@ pub fn compile_via_spqr_with_options(
         compiled.port_values = port_values;
     }
 
+    // Phase 2b: build the internal delayed-port table for a DELAYED detector.
+    // Compiler-synthesized (separate from the user `ports` Vec): cross-sample
+    // (z⁻¹) carries that deliver the cut forward taps into the de-fused detector
+    // sub-network one sample late, and store the detector output (`EL_drive`) for
+    // Phase 3. NARROW: fires only when `detector_control_nodes` found a true
+    // cross-network feedback detector (LA-2A opto leveler) AND the broker cut a
+    // tap mouth — non-detector circuits get an empty table (byte-identical).
+    populate_detector_internal_ports(
+        &mut compiled,
+        &graph,
+        &cut_edges,
+        &detector_seed_nodes,
+        &stage_comp_ids,
+    );
+
     // Cache raw pointers to all VS leaves for zero-cost runtime access.
     // Must be after port binding (wrap_leaf_with_vs) and recompute.
     compiled.cache_all_vs_pointers();
 
     Ok(compiled)
+}
+
+/// Phase 2b — populate `compiled.internal_ports` for a DELAYED feedback detector.
+///
+/// The broker (`delayed_cut_edges`) de-fuses the detector from the forward audio
+/// path by cutting the tap-mouth edges (the `out -> C_sc` feedback mouth and the
+/// `in -> fork`/`R_ff` feed-forward mouth — see step 4 + 4b of `delayed_cut_edges`).
+/// After the cut the forward `in` is no longer shorted by the Compress fork arm,
+/// and the de-fused detector sub-chain (front-end → V4 → V5 → `EL_drive`) solves
+/// on the program signal it still sees through the forward serial routing (the
+/// feed-forward tap), producing a program-dependent EL-drive value.
+///
+/// This routine wires the genuinely-new cross-sample (z⁻¹) piece — the EL-DRIVE
+/// CARRY port — that captures and stores that detector output:
+///
+///   * EL-DRIVE CARRY port: `source = the Behavioral coupler's LED-anode node`
+///     (the detector output, `EL_drive.b == PC1.led.a`), `consumer = usize::MAX`
+///     (carry-only). The detector's solved EL-drive value is captured every
+///     sample into `prev_value`, AVAILABLE for Phase 3 (which will set
+///     `consumer = PC1.led` to apply gain reduction from the carried value) and
+///     for the 2b tracking measurement (`la2a_detector_el_drive_tracks_program`).
+///     NO gain reduction is applied here — 2b only COMPUTES and STORES it.
+///
+/// To make the EL-drive node observable for the carry, the stage that owns the
+/// EL-drive driver component is told to PUBLISH its solved output node into
+/// `node_signals` (`output_node_id = el_node`); this does NOT alter the serial
+/// audio signal, it only ALSO exposes the node for the end-of-sample z⁻¹ capture.
+///
+/// The DELAYED feedback-tap mix (re-injecting the `out` node into the detector
+/// front one sample late) belongs to Phase 3, where the GR loop is actually
+/// closed; in 2b the detector is open-loop (no GR) so the feed-forward solve
+/// suffices to demonstrate program tracking. The internal-port table + carry
+/// generalize the `SidechainProcessor.cv_delayed` precedent and subsume it.
+fn populate_detector_internal_ports(
+    compiled: &mut CompiledPedal,
+    graph: &CircuitGraph,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
+    detector_seeds: &std::collections::HashSet<super::graph::NodeId>,
+    stage_comp_ids: &[Vec<String>],
+) {
+    use pedalkernel_rt::processor::{InternalPortBinding, Stage};
+    use super::component::EdgeKind;
+
+    // Narrow gate: only a true delayed detector with a broker tap-mouth cut.
+    if detector_seeds.is_empty() || cut_edges.cuts.is_empty() {
+        return;
+    }
+
+    // The detector OUTPUT node = the cross-network coupler's LED-anode node
+    // (the node that drives the photocoupler LED — `EL_drive.b == PC1.led.a`).
+    // Derive it from the Behavioral coupling edge's `pin_a` (the driven side).
+    // Also record the coupler component id so we can EXCLUDE it when finding the
+    // detector-side driver component that owns that node.
+    let mut el_drive_node: Option<super::graph::NodeId> = None;
+    let mut coupler_comp_id: Option<String> = None;
+    for comp in &graph.components {
+        for edge in comp.kind.edges() {
+            if edge.kind != EdgeKind::Behavioral {
+                continue;
+            }
+            if let Some(&n) = graph.node_names.get(&format!("{}.{}", comp.id, edge.pin_a)) {
+                el_drive_node = Some(n);
+                coupler_comp_id = Some(comp.id.clone());
+            }
+        }
+    }
+
+    let Some(el_node) = el_drive_node else {
+        return;
+    };
+
+    // The detector-side component that DRIVES el_node (e.g. the `EL_drive`
+    // transformer winding `EL_drive.b`) — any conductive component, other than
+    // the coupler, with a graph edge on el_node.
+    let driver_comp_id: Option<String> = graph
+        .edges
+        .iter()
+        .filter(|e| e.node_a == el_node || e.node_b == el_node)
+        .map(|e| graph.components[e.comp_idx].id.clone())
+        .find(|id| Some(id) != coupler_comp_id.as_ref());
+
+    // Make the stage that owns the EL-drive driver PUBLISH its solved output node
+    // value into `node_signals` (set `output_node_id = el_node`). The non-feed-
+    // forward WDF stage publish path (`processor.rs`) then writes el_node every
+    // sample, where the carry-only internal port captures it at end-of-sample.
+    // This does NOT change the serial audio signal (the stage still drives the
+    // chain as before) — it only ALSO publishes the node for the z⁻¹ capture.
+    if let Some(ref drv) = driver_comp_id {
+        for (si, comp_ids) in stage_comp_ids.iter().enumerate() {
+            if comp_ids.iter().any(|c| c == drv) {
+                if let Some(stage) = compiled.stages.get_mut(si) {
+                    match stage {
+                        Stage::Wdf(w) => w.output_node_id = el_node,
+                        Stage::MultiNl(m) => m.output_node_id = el_node,
+                        _ => {}
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // EL-drive carry-only port (the detector output, for Phase 3 + measurement).
+    let internal_ports = vec![InternalPortBinding {
+        source_node_id: el_node,
+        consumer_node_id: usize::MAX,
+        gain: 1.0,
+        prev_value: 0.0,
+    }];
+
+    #[cfg(test)]
+    {
+        eprintln!(
+            "  [2b] detector internal-ports: el_node={el_node} driver={driver_comp_id:?} \
+             coupler={coupler_comp_id:?} in={} out={} cut_boundary={:?}",
+            graph.in_node, graph.out_node, cut_edges.boundary_nodes
+        );
+    }
+
+    compiled.internal_ports = internal_ports;
 }
 
 /// Build the initial `DelayLineBinding`s (with real tap ratios and configured

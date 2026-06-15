@@ -80,7 +80,13 @@ fn la2a_output_network_is_not_one_fused_group() {
     let mut both = None;
     for (i, stage) in compiled.stages.iter().enumerate() {
         let label = stage_label(stage);
-        eprintln!("[Stage {i}] {stage:?} label={label:?}");
+        let (byp, inj, outn) = match stage {
+            Stage::Wdf(w) => (w.bypass_serial, w.injection_node_id, w.output_node_id),
+            Stage::MultiNl(m) => (m.bypass_serial, m.injection_node_id, m.output_node_id),
+            _ => (false, usize::MAX, usize::MAX),
+        };
+        eprintln!("[Stage {i}] label={label:?} bypass={byp} inj={inj} out={outn}");
+        let _ = stage;
         if label.contains("T_in") && label.contains("T_out") {
             both = Some((i, label));
         }
@@ -145,13 +151,23 @@ fn t_in_is_not_in_the_detector_group() {
 }
 
 /// MASK 8 — LEVEL: full LA-2A forward gain at 1 kHz must clear the silence
-/// floor (> -40 dB). BLOCKED BY A THIRD CAUSE independent of the detector-loop
-/// fusion (see `forward_only_chain_is_collapsed_even_without_sidechain`).
+/// floor (> -40 dB).
 ///
-/// RED: ~-121.8 dB post 4-terminal rewire. The output network is now DE-FUSED
-/// (structural gate green), so this is NOT transformer wiring or mask-8 fusion.
+/// GREEN since Phase 2b. History of the four causes, all now resolved:
+///   1-2. mask-8 detector-loop over-fusion + transformer 4-terminal rewire
+///        (`la2a_output_network_is_not_one_fused_group`).
+///   3.   transformer Tight-coupling (broker `is_tight_coupled_link` honored by
+///        the reachability + flow-distance analyses): the forward cascade passes
+///        (`forward_only_chain_is_collapsed_even_without_sidechain` ~+9.6 dB).
+///   4.   the Limit/Compress fork short. `expand_forks` turns
+///        `in -> fork(LC, [gnd, R_ff.a])` into two synthetic resistors BOTH on
+///        the live `in` node; path 0 (`in -> gnd`, the Compress shunt) shorted
+///        the input transformer to ground (-99.5 dB). Phase 2b's broker step (4b)
+///        in `delayed_cut_edges` cuts BOTH fork arms at the `in` seed (the
+///        gnd-shunt arm via a narrow rail-interior relaxation gated on a sibling
+///        arm reaching the detector closure), so the fork no longer conducts on
+///        the forward `in`. The full LA-2A forward path now reads ~+50 dB.
 #[test]
-#[ignore = "THIRD CAUSE (transformer Tight-coupling) is FIXED: T_in primary is no longer bypass_serial and the output group sorts after V1 (broker `is_tight_coupled_link` honored by bias_analysis reachability + the flow-distance BFS). The forward path now PASSES — a 4-terminal forward-only LA-2A reads +17 dB, and removing only the `in -> fork(LC, [gnd, R_ff.a])` arm from the full netlist gives +23 dB. The remaining full-LA-2A collapse (-99.5 dB) is a SEPARATE, fourth cause: that Limit/Compress fork's `in -> gnd` arm shares the `in` node with T_in.a and shorts the live input (it is the detector feed-forward mouth at the `in` seed, skipped by `delayed_cut_edges` because its interior is the gnd rail). Un-bypassing T_in (correctly) exposed that pre-existing short. Fixing it is detector/fork de-fusion work, out of scope for the transformer-coupling task. Left ignored pending the fork de-fuse."]
 fn la2a_forward_path_passes_signal() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[
@@ -171,6 +187,69 @@ fn la2a_forward_path_passes_signal() {
     assert!(
         gain > -40.0,
         "MASK 8/level: LA-2A forward gain {gain:+.1} dB collapsed (expected > -40 dB)"
+    );
+}
+
+/// PHASE 2b — the de-fused detector OUTPUT (`EL_drive`) must TRACK the program
+/// signal: a louder input must produce a larger detector drive. The detector is
+/// driven by the internal delayed-port carries (the cut `in`/`out` taps delivered
+/// one sample late); its solved `EL_drive` value is captured every sample into
+/// the carry-only internal port's `prev_value` (AVAILABLE for Phase 3 — NO gain
+/// reduction is applied in 2b). This measures that carry directly.
+///
+/// Because NO GR is applied, the forward gain is unchanged from the de-fused
+/// forward path (no compression) — verified separately by
+/// `la2a_forward_path_passes_signal`. Here we only assert the detector RESPONDS.
+#[test]
+fn la2a_detector_el_drive_tracks_program() {
+    let src = example_pedal_source(LA2A);
+    let def = parse_pedal_file(&src).expect("parse la2a");
+
+    // Compile twice (independent processors) and drive each at a different input
+    // amplitude; the detector EL-drive carry must be larger for the louder input.
+    let peak_el_drive = |amp: f64| -> f64 {
+        let mut proc = compile_pedal(&def, SAMPLE_RATE).expect("compile la2a");
+        for &(label, val) in &[
+            ("Gain", 0.6f64),
+            ("Peak Reduction", 0.5),
+            ("Limit/Compress", 0.0),
+        ] {
+            proc.set_control(label, val);
+        }
+        // The carry-only internal port (consumer == MAX) is the EL-drive output.
+        let el_idx = proc
+            .internal_ports
+            .iter()
+            .position(|p| p.consumer_node_id == usize::MAX)
+            .expect("EL_drive carry-only internal port must exist");
+
+        let n = (SAMPLE_RATE * 0.2) as usize; // 200 ms, past the settling transient
+        let mut peak = 0.0f64;
+        for i in 0..n {
+            let t = i as f64 / SAMPLE_RATE;
+            let s = amp * (2.0 * std::f64::consts::PI * PROBE_HZ * t).sin();
+            let _ = proc.process(s);
+            // Read AFTER process(): end-of-sample z⁻¹ write stored this sample's
+            // solved EL-drive value into prev_value.
+            if i > n / 2 {
+                peak = peak.max(proc.internal_ports[el_idx].prev_value.abs());
+            }
+        }
+        peak
+    };
+
+    let quiet = peak_el_drive(0.02);
+    let loud = peak_el_drive(0.20);
+    eprintln!("EL_drive peak: quiet(0.02)={quiet:.6e}  loud(0.20)={loud:.6e}");
+
+    assert!(
+        loud > quiet * 1.5,
+        "PHASE 2b: detector EL_drive must track program — louder input ({loud:.3e}) \
+         should drive the detector harder than quiet ({quiet:.3e})"
+    );
+    assert!(
+        loud > 0.0,
+        "PHASE 2b: detector EL_drive is dead (no program tracking): {loud:.3e}"
     );
 }
 
