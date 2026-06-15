@@ -34,7 +34,7 @@
 //! directed, rail-blocked signal flow from [`super::signal_flow`] (Defect B's
 //! `directed_signal_distances_from_in`). The broker does not re-derive flow.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::component::{Component, EdgeKind, ModulationSinkKind, SignalTerminals};
 use super::graph::{CircuitGraph, NodeId};
@@ -602,4 +602,217 @@ fn passive_closure_from(graph: &CircuitGraph, seed: NodeId) -> HashSet<NodeId> {
 /// helper for coverage assertions in the proof diagnostic.
 pub fn distinct_classes(ports: &[ClassifiedPort]) -> HashSet<&'static str> {
     ports.iter().map(|p| p.class.label()).collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase 2a — broker-DERIVED delayed-coupling cut set
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// The set of edges a delayed-coupling formation pass must CUT before grouping,
+/// plus the tap-mouth boundary nodes each cut exposes as a stage port.
+///
+/// This is the Phase-2a consumer of the Phase-1 [`BoundaryPolicy`] rules: it
+/// DERIVES (does not hand-list) the passive edges that bridge a feedback
+/// DETECTOR front-end (whose control electrode is reached from the output side —
+/// a [`BoundaryPolicy::DelayedSense`] sink) to the forward audio network. Cutting
+/// those tap-mouth edges de-fuses the detector group from the forward chain so
+/// the forward solve stays causal (the detector is sensed one sample late by a
+/// later phase; 2a only de-fuses).
+///
+/// `cuts` is keyed by index into `graph.edges`; the [`Directive`] records WHY the
+/// edge was cut (`NonMergeCut` for a sense tap). `boundary_nodes` are the cut
+/// edges' endpoints — the tap-mouth nodes that each become a stage port.
+#[derive(Debug, Clone, Default)]
+pub struct DelayedCutSet {
+    /// Edge index (into `graph.edges`) → the directive that justifies the cut.
+    pub cuts: HashMap<usize, Directive>,
+    /// Tap-mouth nodes (cut-edge endpoints) to register as SPQR terminals.
+    pub boundary_nodes: Vec<NodeId>,
+    /// Component indices (into `graph.components`) of cross-network couplers
+    /// whose coupling edge (e.g. `EL_drive -> PC1.led`) is ALREADY isolated as
+    /// `EdgeKind::Behavioral` in Phase 1 — the graph builder never instantiates
+    /// that edge (`GraphRole::Edge` makes only the LDR side), so it is recorded
+    /// here for diagnostics only and NEVER added to `cuts` (no double-cut, no
+    /// double boundary-node).
+    pub already_isolated: Vec<usize>,
+}
+
+/// The nodes of every [`PortClass::ControlInput`] electrode that is fed from the
+/// output side (a [`BoundaryPolicy::DelayedSense`] sense sink) AND whose circuit
+/// contains a cross-network coupler — i.e. a true DELAYED feedback detector's
+/// control electrode (LA-2A's `V4.grid`).
+///
+/// Derivation: a control electrode whose node lands in `passive_closure_from(out)`
+/// is driven from the output (the back-edge oracle, reused verbatim). Gated on a
+/// `EdgeKind::Behavioral`-coupling component being present so it never fires on
+/// op-amp/tube/passive feedback. Returns an empty vec for forward-only / passive
+/// / resistive-feedback circuits.
+pub fn detector_control_nodes(graph: &CircuitGraph) -> Vec<NodeId> {
+    // A DELAYED detector closes its feedback loop through a CROSS-NETWORK
+    // COUPLER — a galvanically-isolated transducer whose coupling edge is
+    // declared `EdgeKind::Behavioral` (photocoupler LED, OTA, VCA: the
+    // modulation source and the controlled device live in SEPARATE networks).
+    // An op-amp's inverting feedback electrode is also a back-edge ControlInput
+    // in passive_closure_from(out), but its loop closes RESISTIVELY
+    // (instantaneous) — NOT a delayed detector. A tube's `vgk` modulation pin
+    // classifies Transducer(Control) but is INTERNAL to the device (no
+    // Behavioral coupling edge, same network) — also not a cross-network
+    // detector. Gate on the presence of a Behavioral-coupling component so the
+    // cut fires ONLY on true cross-network feedback detectors (opto levelers),
+    // never on op-amp/tube/passive feedback. (2b will tighten this to "the
+    // sidechain that actually drives the coupler"; 2a's presence gate is safe —
+    // see boundary_rules tests + the golden byte-identity gate.)
+    let has_cross_network_coupler = graph.components.iter().any(|comp| {
+        comp.kind
+            .edges()
+            .iter()
+            .any(|e| e.kind == EdgeKind::Behavioral)
+    });
+    if !has_cross_network_coupler {
+        return Vec::new();
+    }
+
+    let out_closure = passive_closure_from(graph, graph.out_node);
+    let mut seeds: Vec<NodeId> = Vec::new();
+    for comp in graph.components.iter() {
+        let cfg = comp.kind.pin_config();
+        for &pin in cfg.valid_pins {
+            let key = format!("{}.{}", comp.id, pin);
+            let Some(&node) = graph.node_names.get(&key) else {
+                continue;
+            };
+            let class = PortClass::from_pin_in_graph(comp.kind.as_ref(), pin, node, graph);
+            if class == PortClass::ControlInput
+                && out_closure.contains(&node)
+                && !seeds.contains(&node)
+            {
+                seeds.push(node);
+            }
+        }
+    }
+    seeds
+}
+
+/// Public diagnostic view of the Phase-2a cut set for a `PedalDef`: the cut
+/// edges' owning component ids, and the already-isolated (Behavioral) coupling
+/// component ids. Mirrors [`classify_edges`] as the external-test entry point
+/// (the internal [`delayed_cut_edges`] takes a compiled `CircuitGraph`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DelayedCutDiagnostic {
+    /// Component ids owning a cut tap-mouth edge (sorted, deduped).
+    pub cut_comp_ids: Vec<String>,
+    /// Component ids owning an already-isolated Behavioral coupling edge.
+    pub already_isolated_comp_ids: Vec<String>,
+}
+
+/// Compute the Phase-2a [`DelayedCutDiagnostic`] for a parsed `pedal`.
+pub fn delayed_cut_diagnostic(pedal: &crate::dsl::PedalDef) -> DelayedCutDiagnostic {
+    let graph = CircuitGraph::from_pedal(pedal);
+    let set = delayed_cut_edges(&graph);
+    let mut cut_comp_ids: Vec<String> = set
+        .cuts
+        .keys()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+        .collect();
+    cut_comp_ids.sort();
+    cut_comp_ids.dedup();
+    let mut already_isolated_comp_ids: Vec<String> = set
+        .already_isolated
+        .iter()
+        .map(|&cidx| graph.components[cidx].id.clone())
+        .collect();
+    already_isolated_comp_ids.sort();
+    already_isolated_comp_ids.dedup();
+    DelayedCutDiagnostic {
+        cut_comp_ids,
+        already_isolated_comp_ids,
+    }
+}
+
+/// Derive the delayed-coupling cut set for `graph` (Phase 2a).
+///
+/// # Derivation (broker-owned; formation only consults this)
+///
+/// 1. Find the DELAYED feedback-detector control electrodes via
+///    [`detector_control_nodes`] (a ControlInput in `passive_closure_from(out)`,
+///    gated on a cross-network `EdgeKind::Behavioral` coupler being present).
+/// 2. `detector_closure = ⋃ passive_closure_from(control_electrode)` — the
+///    passive front-end that reaches the sense sink(s) (the tap network).
+/// 3. CUT every passive edge with ONE endpoint a boundary seed (`in_node` /
+///    `out_node`) and the OTHER endpoint inside `detector_closure`. These are
+///    the tap-mouth edges (LA-2A: `C_sc` on the out side, the `R_ff`/fork arm
+///    on the in side). This is the gap-cut idiom, broker-driven.
+///
+/// `EdgeKind::Behavioral` coupling edges (the photocoupler LED drive) are
+/// already isolated in Phase 1; they are recorded in `already_isolated` and
+/// never added to `cuts`.
+pub fn delayed_cut_edges(graph: &CircuitGraph) -> DelayedCutSet {
+    let mut set = DelayedCutSet::default();
+
+    // (Diagnostics) record cross-network couplers whose coupling edge is a
+    // Behavioral edge (the LED side) — already isolated in Phase 1. The graph
+    // builder never instantiates that edge, so detect it from the component's
+    // edge declarations (mirrors `coupler_boundary_nodes`).
+    for (cidx, comp) in graph.components.iter().enumerate() {
+        if comp
+            .kind
+            .edges()
+            .iter()
+            .any(|e| e.kind == EdgeKind::Behavioral)
+        {
+            set.already_isolated.push(cidx);
+        }
+    }
+
+    // (1)+(2) Find every ControlInput electrode node fed from the output side
+    //     (a DelayedSense sense sink — the feedback DETECTOR's control electrode).
+    let detector_seeds = detector_control_nodes(graph);
+
+    if detector_seeds.is_empty() {
+        // No feedback-detector electrode → no delayed cut (the common case:
+        // forward cascades, passive pedals, op-amp gain). Empty cut set.
+        return set;
+    }
+
+    // (3) Union the passive closures seeded at each detector electrode — the
+    //     tap network reaching the sense sink(s).
+    let mut detector_closure: HashSet<NodeId> = HashSet::new();
+    for &seed in &detector_seeds {
+        detector_closure.extend(passive_closure_from(graph, seed));
+    }
+
+    // (4) Cut the tap-mouth edges: a passive edge with ONE endpoint a boundary
+    //     seed (in/out) and the OTHER inside the detector closure.
+    let seeds = [graph.in_node, graph.out_node];
+    let mut boundary: Vec<NodeId> = Vec::new();
+    for (eidx, e) in graph.edges.iter().enumerate() {
+        if graph.effective_edge_kind(eidx) == EdgeKind::Behavioral {
+            continue; // already isolated; never double-cut.
+        }
+        let comp = &graph.components[e.comp_idx];
+        if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+            continue;
+        }
+        let a_is_seed = seeds.contains(&e.node_a);
+        let b_is_seed = seeds.contains(&e.node_b);
+        // Exactly one endpoint is a boundary seed (the tap mouth straddles the
+        // boundary). An edge with BOTH ends seeds, or NEITHER, is not a mouth.
+        if a_is_seed == b_is_seed {
+            continue;
+        }
+        let interior = if a_is_seed { e.node_b } else { e.node_a };
+        if node_is_rail(graph, interior) {
+            continue; // e.g. the fork's `in -> gnd` arm is not a tap mouth.
+        }
+        if detector_closure.contains(&interior) {
+            set.cuts.insert(eidx, Directive::NonMergeCut);
+            for n in [e.node_a, e.node_b] {
+                if !boundary.contains(&n) {
+                    boundary.push(n);
+                }
+            }
+        }
+    }
+    set.boundary_nodes = boundary;
+    set
 }

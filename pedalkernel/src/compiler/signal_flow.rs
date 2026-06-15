@@ -217,9 +217,15 @@ fn build_passive_adjacency(
     graph: &CircuitGraph,
     rails: &HashSet<NodeId>,
     active_edge_set: &HashSet<usize>,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
 ) -> BTreeMap<NodeId, Vec<(usize, NodeId)>> {
     let mut adj: BTreeMap<NodeId, Vec<(usize, NodeId)>> = BTreeMap::new();
     for &eidx in edge_indices {
+        // Phase 2a: skip broker-cut tap-mouth edges (mirrors the active-edge
+        // skip below) so a delayed-coupling boundary can't bridge two groups.
+        if cut_edges.cuts.contains_key(&eidx) {
+            continue;
+        }
         // Skip active element edges — we only traverse passive signal paths
         if active_edge_set.contains(&eidx) {
             continue;
@@ -1487,8 +1493,14 @@ pub(in crate::compiler) fn find_flow_groups(
         }];
     }
 
+    // Phase 2a: consult the broker ONCE for the delayed-coupling cut set. The
+    // rule logic lives entirely in `boundary_rules::delayed_cut_edges`; formation
+    // only excludes the returned tap-mouth edges from grouping. Empty for every
+    // circuit without a feedback-detector control electrode (the common case).
+    let cut_edges = super::boundary_rules::delayed_cut_edges(graph);
+
     let active_edge_set: HashSet<usize> = active_elements.iter().map(|e| e.edge_idx).collect();
-    let adj = build_passive_adjacency(edge_indices, graph, &rails, &active_edge_set);
+    let adj = build_passive_adjacency(edge_indices, graph, &rails, &active_edge_set, &cut_edges);
 
     // Build directed flow graph and find SCCs
     let flow_adj = build_flow_graph(&active_elements, &adj, &rails, graph);
@@ -1954,6 +1966,14 @@ pub(in crate::compiler) fn find_flow_groups(
     let mut isolated_edges: Vec<usize> = Vec::new();
     for &eidx in edge_indices {
         if claimed.contains(&eidx) {
+            continue;
+        }
+        // Phase 2a: a broker-cut tap-mouth edge is the delayed-coupling
+        // boundary — it must NOT re-fuse the detector front-end to the forward
+        // network through the unclaimed-passive connectivity grouping. Exclude
+        // it (its endpoints become stage ports via the SPQR terminal set).
+        if cut_edges.cuts.contains_key(&eidx) {
+            claimed.insert(eidx);
             continue;
         }
         let e = &graph.edges[eidx];

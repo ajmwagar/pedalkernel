@@ -23,8 +23,8 @@
 use std::path::{Path, PathBuf};
 
 use pedalkernel::compiler::boundary_rules::{
-    classify_control_path, classify_edges, classify_ports, smoke_classify, BoundaryPolicy, Domain,
-    PortClass,
+    classify_control_path, classify_edges, classify_ports, delayed_cut_diagnostic, smoke_classify,
+    BoundaryPolicy, Domain, PortClass,
 };
 use pedalkernel::dsl::parse_pedal_file;
 
@@ -238,6 +238,67 @@ fn la2a_has_exactly_one_light_transducer_port() {
     );
     assert_eq!(light_ports[0].comp_id, "PC1");
     assert_eq!(light_ports[0].pin, "led");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 2a — broker-derived delayed-coupling cut set
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn la2a_delayed_cut_is_tap_mouths_with_led_already_isolated() {
+    let src = read_example("outboard/compressor/la2a.pedal");
+    let pedal = parse_pedal_file(&src).expect("parse la2a");
+
+    let diag = delayed_cut_diagnostic(&pedal);
+
+    // The detector tap reaches V4.grid (a DelayedSense control electrode in
+    // passive_closure_from(out)). The broker DERIVES the tap-mouth cut edges:
+    //   * C_sc       — the out-side tap mouth (`out -> C_sc.a`)
+    //   * the in-side feed-forward arm: the fork path `in -> __fork_*` whose `.b`
+    //     reaches R_ff (or R_ff itself) — the Limit feed-forward trickle.
+    assert!(
+        diag.cut_comp_ids.iter().any(|c| c == "C_sc"),
+        "C_sc (out-side tap mouth) must be cut; got {:?}",
+        diag.cut_comp_ids
+    );
+    let in_side_cut = diag
+        .cut_comp_ids
+        .iter()
+        .any(|c| c == "R_ff" || c.starts_with("__fork_"));
+    assert!(
+        in_side_cut,
+        "the in-side feed-forward arm (R_ff / fork path) must be cut; got {:?}",
+        diag.cut_comp_ids
+    );
+
+    // The EL_drive -> PC1.led coupling is already Behavioral-isolated (Phase 1);
+    // it is recorded as already_isolated and NEVER added to the cut set.
+    assert!(
+        diag.already_isolated_comp_ids.iter().any(|c| c == "PC1"),
+        "PC1 LED edge must be flagged already_isolated; got {:?}",
+        diag.already_isolated_comp_ids
+    );
+    assert!(
+        !diag.cut_comp_ids.iter().any(|c| c == "PC1"),
+        "the Behavioral LED edge must NOT be double-cut; got {:?}",
+        diag.cut_comp_ids
+    );
+}
+
+#[test]
+fn non_opto_pedal_yields_empty_cut_set() {
+    // A plain diode clipper has no feedback-detector control electrode, so the
+    // broker must derive an EMPTY cut set (the de-fusion fires ONLY where a
+    // control electrode is in passive_closure_from(out)).
+    let src = read_validate_circuit("nonlinear/diode_clipper.pedal");
+    let pedal = parse_pedal_file(&src).expect("parse diode_clipper");
+
+    let diag = delayed_cut_diagnostic(&pedal);
+    assert!(
+        diag.cut_comp_ids.is_empty(),
+        "diode clipper must have NO delayed cut edges; got {:?}",
+        diag.cut_comp_ids
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

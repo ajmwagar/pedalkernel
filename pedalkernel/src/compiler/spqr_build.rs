@@ -295,9 +295,19 @@ pub fn compile_via_spqr_with_options(
         "  [compile] Step 1: find_flow_groups ({} edges)...",
         all_edges.len()
     );
+    // Phase 2a: the same broker cut set find_flow_groups consulted. Threaded
+    // into the merge passes so a cut tap-mouth edge can never be re-absorbed
+    // back across the delayed-coupling boundary.
+    let cut_edges = super::boundary_rules::delayed_cut_edges(&graph);
+    // Detector control-electrode nodes (DelayedSense sinks) — used below to mark
+    // the de-fused detector group bypass_serial so it can't hijack the chain.
+    let detector_seed_nodes: std::collections::HashSet<super::graph::NodeId> =
+        super::boundary_rules::detector_control_nodes(&graph)
+            .into_iter()
+            .collect();
     let mut feedback_groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
-    merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph);
-    merge_input_coupling_into_active_groups(&mut feedback_groups, &graph);
+    merge_cross_reactive_groups_into_active_groups(&mut feedback_groups, &graph, &cut_edges);
+    merge_input_coupling_into_active_groups(&mut feedback_groups, &graph, &cut_edges);
     // DSP-block pedals: bbd(), vca(), ... are GraphRole::Virtual, so the
     // netlist is galvanically cut at their in/out pins. Split any group that
     // spans a behavioral gap (the sides stay "connected" through ground only)
@@ -348,6 +358,15 @@ pub fn compile_via_spqr_with_options(
     // dangling group probes 0). Kept as a sibling of `all_boundary_nodes` so
     // the DspBlock registry and the coupler concern stay cleanly separated.
     for node in coupler_boundary_nodes(&graph) {
+        if !terminals.contains(&node) {
+            terminals.push(node);
+        }
+    }
+    // Phase 2a: each side of a broker-cut delayed-coupling boundary becomes a
+    // stage port — register the tap-mouth nodes as SPQR terminals (sibling of
+    // `coupler_boundary_nodes`) so the de-fused detector group and the forward
+    // group each get an entry/exit node at the cut.
+    for &node in &cut_edges.boundary_nodes {
         if !terminals.contains(&node) {
             terminals.push(node);
         }
@@ -541,11 +560,18 @@ pub fn compile_via_spqr_with_options(
         // an independent serial audio stage.
         let has_signal_transformer =
             group_has_signal_transformer_boundary(group, &graph, graph.in_node, graph.out_node);
-        let is_bypass = (matches!(
+        // Phase 2a: the de-fused detector group (holds the DelayedSense control
+        // electrode, no non-cut path to in/out after the tap-mouth cut) computes
+        // state/metering but must NOT hijack the forward serial signal — bypass
+        // it. Its input is floating in 2a (driven by internal delayed ports in
+        // 2b); de-fusing + feeding the forward path is all 2a proves.
+        let is_detector_bypass = is_delayed_detector_group(group, &graph, &detector_seed_nodes);
+        let is_bypass = ((matches!(
             group_bias[gi],
             super::bias_analysis::GroupBiasKind::StaticBias { .. }
         ) || is_nonlinear_modulator_group(group, &graph))
-            && !has_signal_transformer;
+            && !has_signal_transformer)
+            || is_detector_bypass;
 
         #[cfg(test)]
         {
@@ -3669,6 +3695,7 @@ fn is_ground_clip_group(
 fn merge_input_coupling_into_active_groups(
     groups: &mut Vec<super::signal_flow::FlowGroup>,
     graph: &super::graph::CircuitGraph,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
 ) {
     // Build node sets for each active group (include all edges — active,
     // feedback, and pendant — so we can find the coupling junction J even
@@ -3745,6 +3772,10 @@ fn merge_input_coupling_into_active_groups(
 
         let mut target: Option<usize> = None;
         for &eidx in &edges {
+            // Phase 2a: a broker-cut tap-mouth edge can't be a merge bridge.
+            if cut_edges.cuts.contains_key(&eidx) {
+                continue;
+            }
             let e = &graph.edges[eidx];
             // One side must be a "source" node.
             let (src_side, other_side) = if is_source_node(e.node_a) {
@@ -3824,6 +3855,7 @@ fn merge_input_coupling_into_active_groups(
 fn merge_cross_reactive_groups_into_active_groups(
     groups: &mut Vec<super::signal_flow::FlowGroup>,
     graph: &super::graph::CircuitGraph,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
 ) {
     let rails = super::signal_flow::rail_nodes(graph);
     let is_boundary_node = |node: super::graph::NodeId| -> bool {
@@ -3871,6 +3903,8 @@ fn merge_cross_reactive_groups_into_active_groups(
         let reactive_edges: Vec<usize> = group
             .all_edges()
             .into_iter()
+            // Phase 2a: a broker-cut tap-mouth edge can't be a merge bridge.
+            .filter(|eidx| !cut_edges.cuts.contains_key(eidx))
             .filter(|&eidx| graph.effective_edge_kind(eidx) == super::component::EdgeKind::Reactive)
             .collect();
         if reactive_edges.is_empty() {
@@ -3953,6 +3987,35 @@ fn can_absorb_cross_reactive_passives(
         !(comp.kind.is_diode_family()
             && (rails.contains(&edge.node_a) || rails.contains(&edge.node_b)))
     })
+}
+
+/// Phase 2a: true if `group` is the de-fused DELAYED detector group — it holds a
+/// DelayedSense control electrode (a node in `detector_seeds`) AND, after the
+/// broker tap-mouth cut, has NO edge touching the global `in`/`out` nodes (no
+/// non-cut path to the forward chain). Such a group must compute (state/metering)
+/// but NOT overwrite the forward serial signal, so it is marked `bypass_serial`.
+fn is_delayed_detector_group(
+    group: &super::signal_flow::FlowGroup,
+    graph: &super::graph::CircuitGraph,
+    detector_seeds: &std::collections::HashSet<super::graph::NodeId>,
+) -> bool {
+    if detector_seeds.is_empty() {
+        return false;
+    }
+    let mut holds_seed = false;
+    let mut touches_io = false;
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        for n in [e.node_a, e.node_b] {
+            if detector_seeds.contains(&n) {
+                holds_seed = true;
+            }
+            if n == graph.in_node || n == graph.out_node {
+                touches_io = true;
+            }
+        }
+    }
+    holds_seed && !touches_io
 }
 
 fn is_nonlinear_modulator_group(

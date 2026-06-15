@@ -94,6 +94,56 @@ fn la2a_output_network_is_not_one_fused_group() {
     );
 }
 
+/// PHASE 2a (broker-driven de-fusion) — STRUCTURAL: `T_in` must NOT share a
+/// stage with the detector front-end (`PR`/`R37a`/`R_ff`/`C37`). Before 2a, the
+/// detector feedback tap fused `C_sc,R37a,PR,R_ff,...,T_in,R_load` into ONE
+/// passive group, stranding `T_in` at a large signal-flow distance and starving
+/// the forward V1 group. The broker `delayed_cut_edges` cuts the tap-mouth edges
+/// (`C_sc` out-side, the `R_ff`/fork arm in-side) so the detector de-fuses into
+/// its own stage. GREEN since Phase 2a.
+#[test]
+fn t_in_is_not_in_the_detector_group() {
+    let src = example_pedal_source(LA2A);
+    let def = parse_pedal_file(&src).expect("parse la2a");
+    let compiled = compile_pedal(&def, SAMPLE_RATE).expect("compile la2a");
+
+    // The stage holding the detector front-end (the Peak-Reduction tap network).
+    let mut detector_stage = None;
+    let mut t_in_stage = None;
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        let label = stage_label(stage);
+        let comps: Vec<&str> = label.split(',').collect();
+        eprintln!("[Stage {i}] label={label:?}");
+        // Detector front-end = the Peak-Reduction pot tap network (PR/R37a).
+        if comps.iter().any(|c| *c == "PR") && comps.iter().any(|c| *c == "R37a") {
+            detector_stage = Some(i);
+        }
+        if comps.iter().any(|c| *c == "T_in") {
+            t_in_stage = Some(i);
+        }
+    }
+
+    let detector_stage = detector_stage.expect("detector front-end (PR/R37a) must compile");
+    let t_in_stage = t_in_stage.expect("T_in must compile into a stage");
+    assert_ne!(
+        detector_stage, t_in_stage,
+        "PHASE 2a: T_in (stage {t_in_stage}) is still fused with the detector \
+         front-end (stage {detector_stage}) — the tap-mouth cut did not de-fuse"
+    );
+
+    // And the detector front-end must NOT drag T_in OR the output load in.
+    let det_label = stage_label(&compiled.stages[detector_stage]);
+    let det_comps: Vec<&str> = det_label.split(',').collect();
+    assert!(
+        !det_comps.contains(&"T_in"),
+        "detector stage must not contain T_in: {det_label:?}"
+    );
+    assert!(
+        !det_comps.contains(&"R_load") && !det_comps.contains(&"T_out"),
+        "detector stage must not contain the output network: {det_label:?}"
+    );
+}
+
 /// MASK 8 — LEVEL: full LA-2A forward gain at 1 kHz must clear the silence
 /// floor (> -40 dB). BLOCKED BY A THIRD CAUSE independent of the detector-loop
 /// fusion (see `forward_only_chain_is_collapsed_even_without_sidechain`).
@@ -101,7 +151,7 @@ fn la2a_output_network_is_not_one_fused_group() {
 /// RED: ~-121.8 dB post 4-terminal rewire. The output network is now DE-FUSED
 /// (structural gate green), so this is NOT transformer wiring or mask-8 fusion.
 #[test]
-#[ignore = "BLOCKED BY CASCADE ROUTING (§3 signal-flow): post 4-terminal rewire the output network de-fuses (structural gate green) but the multi-stage forward path does not chain — T_in is pulled into the sidechain group via the Limit feed-forward fork, and the heuristic inter-stage routing does not carry the forward signal (~-121.8 dB). Needs the signal-flow/cascade-routing work."]
+#[ignore = "PHASE 2a de-fuses the detector (T_in is OUT of the detector group; the detector front-end C37/PR/R37a/R_ff is its own stage) — full LA-2A rose -175.6 dB -> -127.2 dB at 1 kHz. Still blocked by the THIRD CAUSE (forward-cascade routing): the T_in secondary (T_in.c) is a stage boundary with no port, so the V1 group is not yet fed to level. 2a only proves de-fusion; the T_in.c forward-cascade port is later work."]
 fn la2a_forward_path_passes_signal() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[
