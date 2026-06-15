@@ -70,20 +70,21 @@ board.set_interstage_loading(
 
 ## Hardware export
 
-With the `hardware` feature enabled:
+KiCad netlist export and the heuristic voltage check are both first-class Rust APIs:
 
 ```rust
-use pedalkernel::{hw, kicad};
+use pedalkernel::compiler::check_voltage_compatibility;
+use pedalkernel::kicad;
 
-let bom = hw::build_bom(&def, None);
-println!("{}", hw::format_bom_table(&def.name, &bom, 1));
-
-let warnings = hw::check_voltage_with_specs(&def, 18.0, &limits);
 let netlist = kicad::export_kicad_netlist(&def);
 std::fs::write("circuit.net", netlist)?;
+
+for w in check_voltage_compatibility(&def, 18.0) {
+    println!("[{:?}] {}: {}", w.severity, w.component_id, w.message);
+}
 ```
 
-See [Hardware export](./hardware.md) for the larger story.
+Mouser BOM generation lives in `tools/mouser_bom.py` and reads `.pedal` + companion `.pedalhw` files directly. See [Hardware export](./hardware.md) for the larger story.
 
 ## Where to go next
 

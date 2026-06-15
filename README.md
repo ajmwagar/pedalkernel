@@ -63,9 +63,15 @@ cargo run --release --example process -- \
   in.wav out.wav Drive=0.7
 
 # Or fire up the live JACK + TUI front end:
-cargo run --release --bin tui -- \
+cargo run --release --bin pedalkernel -- tui \
   pedalkernel/examples/pedals/distortion/proco_rat.pedal
+
+# Generate a Mouser-ready BOM CSV from the same file:
+python3 tools/mouser_bom.py \
+  pedalkernel/examples/pedals/fuzz/big_muff.pedal --qty 5 --csv bom.csv
 ```
+
+KiCad netlist export is available as a Rust function (`pedalkernel::kicad::export_kicad_netlist`); see [Hardware export](https://docs.pedalkernel.com/book/hardware/) for the integration story.
 
 The `examples/pedals/` library ships circuit-accurate ports of common pedals — Tube Screamer, ProCo RAT, Big Muff, Klon Centaur, Fuzz Face, Boss DM-2, Boss CE-2, Memory Man, Phase 90, MXR Dyna Comp, Fulltone OCD, SD-1, Blues Driver — plus tube amps (Bassman 5F6-A, Marshall JTM45, Tweed Deluxe 5E3) and a small synth set (MiniMoog-style minisynth, CEM3340 VCO, Moog ladder VCF).
 
@@ -75,7 +81,7 @@ PedalKernel is a Cargo workspace of four crates:
 
 | Crate | Role |
 |---|---|
-| **`pedalkernel`** | DSL parser, WDF compiler, runtime glue, KiCad / BOM exporters, optional JACK + TUI front ends. |
+| **`pedalkernel`** | DSL parser, WDF compiler, runtime glue, KiCad netlist export, optional JACK + TUI front ends. |
 | **`pedalkernel-rt`** | The `no_std` audio runtime — WDF stages, nonlinear roots, DSP blocks, metering. Embeddable. |
 | **`pedalkernel-layout`** | Schematic layout. Turns a parsed pedal into a positioned schematic for KiCad or plugin UIs. |
 | **`pedalkernel-validate`** | SPICE validation harness. Signal generation, spectral analysis, regression reports against ngspice ground truth. |

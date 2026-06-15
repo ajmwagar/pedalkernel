@@ -38,7 +38,15 @@ Schematic-level export (positioned symbols rather than just connectivity) lives 
 
 ## Bill of materials
 
-The BOM engine maps each component to a real Mouser part number from a curated database:
+The Python tool under [`tools/mouser_bom.py`](./tools.md) reads a `.pedal` file directly and emits a CSV ready to upload to Mouser:
+
+```bash
+python3 tools/mouser_bom.py \
+    pedalkernel/examples/pedals/fuzz/big_muff.pedal \
+    --qty 5 --csv bom.csv
+```
+
+The mapper resolves each component to a real Mouser part from a curated database:
 
 - **Resistors** — Yageo metal film (RC series) and carbon composition for vintage circuits
 - **Capacitors** — WIMA film, Nichicon electrolytic, ceramic disc where appropriate
@@ -46,16 +54,7 @@ The BOM engine maps each component to a real Mouser part number from a curated d
 - **Transistors / op-amps / ICs** — current-production replacements for vintage parts where the originals are unavailable
 - **Tubes** — JJ Electronic for common preamp and power types
 
-```rust
-use pedalkernel::hw;
-
-let bom = hw::build_bom(&def, None);
-print!("{}", hw::format_bom_table(&def.name, &bom, 1));
-```
-
-The `hardware` feature must be enabled in `Cargo.toml` to use `pedalkernel::hw`.
-
-There is also a Python tool under [`tools/mouser_bom.py`](./tools.md) that reads a `.pedal` file directly and emits a CSV ready to upload to Mouser.
+There is no longer a Rust-side BOM API — the previous `pedalkernel::hw` module was removed in mid-2026 as verified-dead public surface. If you need to script BOM generation from a Rust toolchain, shell out to `mouser_bom.py` or open an issue.
 
 ## Voltage safety (`.pedalhw` files)
 
@@ -68,15 +67,17 @@ Q2: vce_max(32) part("AC128")
 C2: voltage_rating(16)
 ```
 
-The voltage checker reads this against a planned supply rail and returns warnings:
+The `.pedalhw` file is consumed by the Python tooling (`mouser_bom.py` uses it for part-name overrides; `schematic.py` reads it for annotated drawings). The Rust compiler itself ships a coarser, heuristic voltage check that does not need a `.pedalhw` file:
 
 ```rust
-use pedalkernel::hw;
+use pedalkernel::compiler::{check_voltage_compatibility, WarningSeverity};
 
-let warnings = hw::check_voltage_with_specs(&def, 18.0, &limits);
-// [Danger] Q1: Germanium transistor exceeds Vce(max) 32V at 18V
+for w in check_voltage_compatibility(&def, 18.0) {
+    println!("[{:?}] {}: {}", w.severity, w.component_id, w.message);
+}
+// [Danger] Q1: Germanium transistor exceeds Vce(max) at 18V (typical Ge PNP rated 15-32V)
 // [Info]   V1: Tube needs 150-400V plate supply; at 18V the WDF model
 //              runs fine but a physical build needs a B+ supply
 ```
 
-Without a `.pedalhw` file, heuristic checks still catch common mistakes: germanium transistors in fuzz circuits above 12 V, undersized electrolytic caps, tubes running at pedal voltages.
+The heuristics catch common mistakes — germanium transistors in fuzz circuits above 12 V, undersized electrolytic caps, tubes running at pedal voltages — without requiring annotation. For a strict check that uses the declared `.pedalhw` ratings, the Python tooling is the path today.
