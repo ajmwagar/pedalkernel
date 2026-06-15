@@ -2307,6 +2307,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 tests.insert(
                     "fet_leveler_level_sweep".to_string(),
                     TestCase {
+                        pending_reference: false,
                         circuit: "compressor/fet_leveler.pedal".to_string(),
                         description:
                             "FET Leveler 1176-style: static gain curve (-40..0 dBVU, 9 levels)"
@@ -2341,6 +2342,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 tests.insert(
                     "fet_leveler_tone_burst".to_string(),
                     TestCase {
+                        pending_reference: false,
                         circuit: "compressor/fet_leveler.pedal".to_string(),
                         description:
                             "FET Leveler 1176-style: attack/release timing via tone burst"
