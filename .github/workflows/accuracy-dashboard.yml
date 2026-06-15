@@ -1,0 +1,146 @@
+name: Accuracy Dashboard
+
+# Nightly accuracy snapshot: build validate binary, run compare-goldens,
+# generate per-circuit PNGs + accuracy.json + history, upload as CI artifact.
+# The owner pulls these artifacts into the in-repo Hugo site manually (sasf.2).
+#
+# This workflow is PYTHON-only on the analysis side — the Rust step only runs
+# the pre-existing pedalkernel-validate binary. No new Rust code is added here.
+
+on:
+  schedule:
+    # 02:00 UTC nightly (after the CI run window)
+    - cron: "0 2 * * *"
+  # Manual trigger for testing / on-demand snapshots
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Validation suite to run (default: all)"
+        required: false
+        default: "all"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  accuracy-dashboard:
+    name: Generate accuracy dashboard
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------
+      # Rust toolchain + cache
+      # ----------------------------------------------------------------
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install libjack-dev (required by pedalkernel-validate deps)
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Keyed separately from the CI cache to avoid cross-contamination
+          prefix-key: "accuracy-dashboard"
+
+      # ----------------------------------------------------------------
+      # Python + pinned deps
+      # ----------------------------------------------------------------
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dashboard dependencies
+        run: pip install -r tools/dashboard/requirements.txt
+
+      # ----------------------------------------------------------------
+      # Run pedalkernel-validate to produce the JSON report.
+      #
+      # We run the `run` subcommand (live WDF vs committed ngspice goldens)
+      # because WDF goldens are not yet committed (bead 85by.3).  When
+      # compare-goldens is ready (both golden sets committed), swap to:
+      #   cargo run -p pedalkernel-validate -- \
+      #     --golden pedalkernel-validate/golden \
+      #     --report report.json \
+      #     compare-goldens --suite ${{ ... }}
+      # ----------------------------------------------------------------
+      - name: Run validation and produce JSON report
+        working-directory: pedalkernel-validate
+        run: |
+          SUITE="${{ github.event.inputs.suite || 'all' }}"
+          cargo run -p pedalkernel-validate -- \
+            --report report.json \
+            run --suite "$SUITE" \
+            2>&1 | tee validate-output.txt || true
+
+          if [ ! -f report.json ]; then
+            echo "::error::pedalkernel-validate did not produce report.json"
+            exit 1
+          fi
+          echo "Report generated: $(wc -c < report.json) bytes"
+
+      # ----------------------------------------------------------------
+      # Generate dashboard: PNGs + accuracy.json + history.json
+      #
+      # --timestamp is passed in from the environment so the tool never
+      # calls datetime.now() inside reproducible logic.
+      # --history-json points to a file that accumulates across runs via
+      # the CI artifact (fetched if present, uploaded again with new data).
+      # ----------------------------------------------------------------
+      - name: Restore history from previous run (if exists)
+        id: restore-history
+        uses: actions/cache/restore@v4
+        with:
+          path: dashboard-history.json
+          key: accuracy-history-${{ runner.os }}
+          # Restore from any previous run even if key doesn't match exactly
+          restore-keys: |
+            accuracy-history-${{ runner.os }}
+
+      - name: Generate dashboard PNGs and accuracy.json
+        env:
+          RUN_TIMESTAMP: ${{ github.run_id }}
+        run: |
+          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "Run timestamp: $TIMESTAMP"
+
+          python3 tools/dashboard/generate_dashboard.py \
+            --report-json pedalkernel-validate/report.json \
+            --golden-dir pedalkernel-validate/golden \
+            --out-dir dashboard-output \
+            --timestamp "$TIMESTAMP" \
+            --history-json dashboard-history.json \
+            2>&1 | tee dashboard-output.txt
+
+      # ----------------------------------------------------------------
+      # Cache updated history for next nightly run
+      # ----------------------------------------------------------------
+      - name: Save updated history
+        uses: actions/cache/save@v4
+        with:
+          path: dashboard-history.json
+          key: accuracy-history-${{ runner.os }}-${{ github.run_id }}
+
+      # ----------------------------------------------------------------
+      # Upload all artifacts
+      # ----------------------------------------------------------------
+      - name: Upload dashboard artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: accuracy-dashboard-${{ github.run_id }}
+          # Include per-circuit PNGs, summary matrix, accuracy.json, history,
+          # and raw validate report for debugging.
+          path: |
+            dashboard-output/
+            dashboard-history.json
+            pedalkernel-validate/report.json
+          retention-days: 90
+
+      # ----------------------------------------------------------------
+      # Surface summary to the Actions job log for quick inspection
+      # ----------------------------------------------------------------
+      - name: Print dashboard summary
+        if: always()
+        run: python3 tools/dashboard/print_summary.py dashboard-output/accuracy.json || true
