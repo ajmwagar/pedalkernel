@@ -38,6 +38,10 @@ pub mod math;
 // ── Fast math (LUT-based exp/tanh for embedded) ─────────────────────────
 pub mod fast_math;
 
+// ── Fault injection (testing only — always-false stubs) ─────────────────
+#[cfg(feature = "fault-injection")]
+pub mod fault_injection;
+
 // ── Shared types (no dependencies) ───────────────────────────────────────
 pub mod nonideal_fx;
 pub mod pot_taper;

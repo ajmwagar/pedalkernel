@@ -398,11 +398,13 @@ impl RTypeAdaptor {
         // Power-wave scatter: a̅_n = Σ S̅[n-1][j] · b̅_j, then a_n = a̅_n · √R_n
         // Since port n is adapted (S̅[n-1][n-1]≈0), only children contribute.
         let n = self.num_ports;
-        let mut sum_power = 0.0;
-        for j in 0..(n - 1) {
-            sum_power +=
-                self.power_scattering[(n - 1) * n + j] * b_children[j] * self.inv_sqrt_r[j];
-        }
+        let row_off = (n - 1) * n;
+        let sum_power: crate::Wave = b_children[..n - 1]
+            .iter()
+            .zip(&self.inv_sqrt_r[..n - 1])
+            .enumerate()
+            .map(|(j, (b, inv_r))| self.power_scattering[row_off + j] * b * inv_r)
+            .sum();
         sum_power * self.sqrt_r[n - 1]
     }
 
@@ -412,11 +414,13 @@ impl RTypeAdaptor {
     pub fn scatter_up_gain(&self, child_gains: &[crate::Wave]) -> crate::Wave {
         debug_assert_eq!(child_gains.len(), self.num_ports - 1);
         let n = self.num_ports;
-        let mut sum_power = 0.0;
-        for j in 0..(n - 1) {
-            sum_power +=
-                self.power_scattering[(n - 1) * n + j] * child_gains[j] * self.inv_sqrt_r[j];
-        }
+        let row_off = (n - 1) * n;
+        let sum_power: crate::Wave = child_gains[..n - 1]
+            .iter()
+            .zip(&self.inv_sqrt_r[..n - 1])
+            .enumerate()
+            .map(|(j, (g, inv_r))| self.power_scattering[row_off + j] * g * inv_r)
+            .sum();
         sum_power * self.sqrt_r[n - 1]
     }
 
@@ -431,13 +435,21 @@ impl RTypeAdaptor {
         // a_parent enters as power wave: b̅_parent = a_parent / √R_parent
         let b_parent_power = a_parent * self.inv_sqrt_r[n - 1];
 
-        for i in 0..(n - 1) {
-            let mut sum_power = self.power_scattering[i * n + n - 1] * b_parent_power;
-            for j in 0..(n - 1) {
-                sum_power +=
-                    self.power_scattering[i * n + j] * self.b_children[j] * self.inv_sqrt_r[j];
+        for (i, (a_child, &sqrt_r_i)) in a_children
+            .iter_mut()
+            .zip(&self.sqrt_r[..n - 1])
+            .enumerate()
+        {
+            let row = &self.power_scattering[i * n..i * n + n];
+            let mut sum_power = row[n - 1] * b_parent_power;
+            for ((&b_c, &inv_r_j), &s_ij) in self.b_children[..n - 1]
+                .iter()
+                .zip(&self.inv_sqrt_r[..n - 1])
+                .zip(&row[..n - 1])
+            {
+                sum_power += s_ij * b_c * inv_r_j;
             }
-            a_children[i] = sum_power * self.sqrt_r[i];
+            *a_child = sum_power * sqrt_r_i;
         }
 
         a_children
@@ -447,12 +459,12 @@ impl RTypeAdaptor {
     /// the `a_parent` part of `scatter_down`; cached child waves are constants.
     pub fn scatter_down_parent_gains(&self) -> Vec<crate::Wave> {
         let n = self.num_ports;
-        let mut gains = vec![0.0; n - 1];
-        for i in 0..(n - 1) {
-            gains[i] =
-                self.power_scattering[i * n + n - 1] * self.inv_sqrt_r[n - 1] * self.sqrt_r[i];
-        }
-        gains
+        let inv_sqrt_r_parent = self.inv_sqrt_r[n - 1];
+        (0..n - 1)
+            .map(|i| {
+                self.power_scattering[i * n + n - 1] * inv_sqrt_r_parent * self.sqrt_r[i]
+            })
+            .collect()
     }
 
     /// Perform full N×N scatter: `a = S · b_all` using power-normalized waves.
@@ -476,12 +488,18 @@ impl RTypeAdaptor {
         let n = self.num_ports;
         debug_assert_eq!(b_all.len(), n);
         debug_assert!(a_out.len() >= n);
-        for i in 0..n {
-            let mut sum_power = 0.0;
-            for j in 0..n {
-                sum_power += self.power_scattering[i * n + j] * b_all[j] * self.inv_sqrt_r[j];
-            }
-            a_out[i] = sum_power * self.sqrt_r[i];
+        for (i, (a_i, &sqrt_r_i)) in a_out[..n]
+            .iter_mut()
+            .zip(&self.sqrt_r[..n])
+            .enumerate()
+        {
+            let row = &self.power_scattering[i * n..i * n + n];
+            let sum_power: crate::Wave = row
+                .iter()
+                .zip(b_all.iter().zip(&self.inv_sqrt_r[..n]))
+                .map(|(&s, (&b, &inv_r))| s * b * inv_r)
+                .sum();
+            *a_i = sum_power * sqrt_r_i;
         }
     }
 
@@ -668,6 +686,7 @@ impl MnaSystem {
     /// Primary: nodes p+ to p- (voltage source vsrc_p)
     /// Secondary: nodes s+ to s- (voltage source vsrc_s)
     /// Turns ratio: n = V_primary / V_secondary
+    #[allow(clippy::too_many_arguments)] // transformer stamp requires all terminal/source indices
     pub fn stamp_transformer(
         &mut self,
         p_pos: Option<usize>,
@@ -776,6 +795,7 @@ impl MnaSystem {
     /// * `aol` — open-loop voltage gain (dimensionless)
     /// * `ro` — output resistance in Ohms (use 0.0 for ideal nullor)
     /// * `vsrc_idx` — auxiliary MNA branch index (must be < num_vsources)
+    #[allow(clippy::too_many_arguments)] // VCVS stamp requires all node/source/gain parameters
     pub fn stamp_vcvs(
         &mut self,
         pos: Option<usize>,
@@ -2363,8 +2383,6 @@ pub struct ScatteringInterpolationTable {
     scattering_matrices: Vec<Vec<crate::Wave>>,
     /// K VS injection vectors, each n_ports entries.
     vs_injection_vectors: Vec<Vec<crate::Wave>>,
-    /// Number of WDF ports.
-    n_ports: usize,
 }
 
 impl ScatteringInterpolationTable {
@@ -2377,6 +2395,7 @@ impl ScatteringInterpolationTable {
     /// - `ports`: WDF port definitions (reactive ports, no pot port)
     /// - `vs_idx`: voltage source index for VS injection (None for standard mode)
     /// - `k`: number of table entries
+    #[allow(clippy::too_many_arguments)] // table builder: each arg is a distinct circuit parameter
     pub fn build(
         mna: &MnaSystem,
         pot_node_pos: Option<usize>,
@@ -2447,7 +2466,6 @@ impl ScatteringInterpolationTable {
             resistances,
             scattering_matrices,
             vs_injection_vectors,
-            n_ports,
         }
     }
 
@@ -2473,19 +2491,18 @@ impl ScatteringInterpolationTable {
         let frac = idx_f - lo as crate::Wave;
 
         // Linear interpolation of scattering matrix entries
-        let n2 = self.n_ports * self.n_ports;
-        let mut scat = vec![0.0; n2];
-        for i in 0..n2 {
-            scat[i] = self.scattering_matrices[lo][i]
-                + frac * (self.scattering_matrices[hi][i] - self.scattering_matrices[lo][i]);
-        }
+        let scat: Vec<crate::Wave> = self.scattering_matrices[lo]
+            .iter()
+            .zip(&self.scattering_matrices[hi])
+            .map(|(&a, &b)| a + frac * (b - a))
+            .collect();
 
         // Linear interpolation of VS injection vector
-        let mut vs = vec![0.0; self.n_ports];
-        for i in 0..self.n_ports {
-            vs[i] = self.vs_injection_vectors[lo][i]
-                + frac * (self.vs_injection_vectors[hi][i] - self.vs_injection_vectors[lo][i]);
-        }
+        let vs: Vec<crate::Wave> = self.vs_injection_vectors[lo]
+            .iter()
+            .zip(&self.vs_injection_vectors[hi])
+            .map(|(&a, &b)| a + frac * (b - a))
+            .collect();
 
         (scat, vs)
     }

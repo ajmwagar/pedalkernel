@@ -123,14 +123,14 @@ fn find_active_elements(edge_indices: &[usize], graph: &CircuitGraph) -> Vec<Act
                 // MOSFETs, and any future NL shunt device.
                 let is_shunt_modulator = {
                     let sem = comp.kind.port_semantic(
-                        &comp.kind.edges().first().map_or("", |e| e.pin_a),
-                        &comp.kind.edges().first().map_or("", |e| e.pin_b),
+                        comp.kind.edges().first().map_or("", |e| e.pin_a),
+                        comp.kind.edges().first().map_or("", |e| e.pin_b),
                     );
                     matches!(
                         sem,
                         super::component::PortSemantic::Nonlinear
                             | super::component::PortSemantic::ControlledConductance
-                    ) && device_parallels_passive(&comp.id, &e, edge_indices, graph)
+                    ) && device_parallels_passive(&comp.id, e, edge_indices, graph)
                 };
                 let mut output_nodes = vec![out_node];
                 if !is_shunt_modulator {
@@ -1555,7 +1555,7 @@ pub(in crate::compiler) fn find_flow_groups(
 
             let (pendant_edges, ground_shunt_edges) = if should_claim_local_passives {
                 claim_passive_edges(
-                    &scc,
+                    scc,
                     &active_elements,
                     &active_edges,
                     &[], // no feedback edges
@@ -1810,7 +1810,7 @@ pub(in crate::compiler) fn find_flow_groups(
         // Claim passive edges (ground shunts and pendants) adjacent to
         // the active + feedback edges.
         let (pendant_edges, ground_shunt_edges) = claim_passive_edges(
-            &scc,
+            scc,
             &active_elements,
             &active_edges,
             &feedback_edges,

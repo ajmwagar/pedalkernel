@@ -112,11 +112,11 @@ pub struct GummelPoonModel {
 }
 
 impl GummelPoonModel {
-    /// Look up a Gummel-Poon BJT model by name from the embedded SPICE model library.
-    ///
-    /// All parameters (IS, BF, BR, NF, NR, VAF, VAR, IKF, IKR, ISE, ISC, NE, NC,
-    /// CJE, VJE, MJE, CJC, VJC, MJC, TF, TR) are populated from the SPICE model file.
-    ///
+    // Look up a Gummel-Poon BJT model by name from the embedded SPICE model library.
+    //
+    // All parameters (IS, BF, BR, NF, NR, VAF, VAR, IKF, IKR, ISE, ISC, NE, NC,
+    // CJE, VJE, MJE, CJC, VJC, MJC, TF, TR) are populated from the SPICE model file.
+    //
     // TODO: move to pedalkernel as extension impl
     // pub fn by_name(name: &str) -> Self { ... }
     // pub fn try_by_name(name: &str) -> Option<Self> { ... }

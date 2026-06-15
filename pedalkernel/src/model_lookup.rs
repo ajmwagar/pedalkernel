@@ -26,7 +26,7 @@ pub fn jfet_model_by_name(name: &str) -> JfetModel {
 
 /// Try to look up a JFET model by name. Returns `None` if not found.
 pub fn jfet_try_by_name(name: &str) -> Option<JfetModel> {
-    jfet_by_name(name).map(|s| jfet_from_spice(&s))
+    jfet_by_name(name).map(|s| jfet_from_spice(s))
 }
 
 fn jfet_from_spice(s: &SpiceJfetModel) -> JfetModel {
@@ -59,7 +59,7 @@ pub fn triode_model_by_name(name: &str) -> TriodeModel {
 
 /// Look up a triode model by name, returning None if not found.
 pub fn triode_try_by_name(name: &str) -> Option<TriodeModel> {
-    triode_by_name(name).map(|s| triode_from_spice(&s))
+    triode_by_name(name).map(|s| triode_from_spice(s))
 }
 
 fn triode_from_spice(spice: &SpiceTriodeModel) -> TriodeModel {
@@ -88,7 +88,7 @@ pub fn pentode_model_by_name(name: &str) -> PentodeModel {
 
 /// Look up a pentode model by name, returning None if not found.
 pub fn pentode_try_by_name(name: &str) -> Option<PentodeModel> {
-    pentode_by_name(name).map(|s| pentode_from_spice(&s))
+    pentode_by_name(name).map(|s| pentode_from_spice(s))
 }
 
 fn pentode_from_spice(spice: &SpicePentodeModel) -> PentodeModel {
@@ -115,7 +115,7 @@ pub fn bjt_model_by_name(name: &str) -> GummelPoonModel {
 
 /// Try to look up a Gummel-Poon model by name. Returns `None` if not found.
 pub fn bjt_try_by_name(name: &str) -> Option<GummelPoonModel> {
-    bjt_by_name(name).map(|s| bjt_from_spice(&s))
+    bjt_by_name(name).map(|s| bjt_from_spice(s))
 }
 
 fn bjt_from_spice(spice: &SpiceBjtModel) -> GummelPoonModel {

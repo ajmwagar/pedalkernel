@@ -2419,7 +2419,7 @@ impl WdfStage {
             // For feedback_opamp stages: V_out = V_diode because the diode
             // is across the feedback path (V_out - V_neg) and V_neg ≈ 0
             // (virtual ground). The diode clamps V_out to ±Vf.
-            let out = match root {
+            match root {
                 RootKind::DiodePair(_)
                 | RootKind::SingleDiode(_)
                 | RootKind::ExplicitDiodePair(_)
@@ -2443,8 +2443,7 @@ impl WdfStage {
                     }
                 }
                 _ => (a_root + b_tree) / 2.0,
-            };
-            out
+            }
         });
 
         // Inverting all-pass feedback (Phase 90 topology).
@@ -3928,17 +3927,20 @@ impl PushPullStage {
         // 2. Compute known_a for each NL port
         let b_adapted = sample;
         let mut known_a = vec![0.0; n_nl];
-        for i in 0..n_nl {
-            let mut a_i = if let Some(ref k) = adaptor.vs_injection {
-                k[i] * b_adapted
+        for (i, a_i_out) in known_a.iter_mut().enumerate() {
+            let mut a_i = if let Some(ref vs_inj) = adaptor.vs_injection {
+                vs_inj[i] * b_adapted
             } else {
                 adaptor.scattering.s_nl_adapted[i] * b_adapted
             };
-            for k in 0..n_passive {
-                a_i += adaptor.scattering.s_nl_passive[i * n_passive + k] * b_passive[k];
+            for (&bp, &s) in b_passive[..n_passive]
+                .iter()
+                .zip(&adaptor.scattering.s_nl_passive[i * n_passive..i * n_passive + n_passive])
+            {
+                a_i += s * bp;
             }
             a_i += adaptor.dc_bias[i] * dc_scale;
-            known_a[i] = a_i;
+            *a_i_out = a_i;
         }
 
         // 3. NR solve
@@ -4744,8 +4746,11 @@ impl BiquadTable {
                 let frac = p - i0 as crate::Wave;
                 let base0 = i0 * Self::COEFF_COUNT;
                 let base1 = (i0 + 1) * Self::COEFF_COUNT;
-                for c in 0..5 {
-                    out[c] = self.coeffs[base0 + c] * (1.0 - frac) + self.coeffs[base1 + c] * frac;
+                for (o, (&c0, &c1)) in out
+                    .iter_mut()
+                    .zip(self.coeffs[base0..base0 + 5].iter().zip(&self.coeffs[base1..base1 + 5]))
+                {
+                    *o = c0 * (1.0 - frac) + c1 * frac;
                 }
             }
             2 => {
@@ -4765,27 +4770,31 @@ impl BiquadTable {
                 let w10 = f0 * (1.0 - f1);
                 let w01 = (1.0 - f0) * f1;
                 let w11 = f0 * f1;
-                for c in 0..5 {
-                    out[c] = self.coeffs[idx00 + c] * w00
-                        + self.coeffs[idx10 + c] * w10
-                        + self.coeffs[idx01 + c] * w01
-                        + self.coeffs[idx11 + c] * w11;
+                for (o, ((&c00, &c10), (&c01, &c11))) in out.iter_mut().zip(
+                    self.coeffs[idx00..idx00 + 5]
+                        .iter()
+                        .zip(&self.coeffs[idx10..idx10 + 5])
+                        .zip(
+                            self.coeffs[idx01..idx01 + 5]
+                                .iter()
+                                .zip(&self.coeffs[idx11..idx11 + 5]),
+                        ),
+                ) {
+                    *o = c00 * w00 + c10 * w10 + c01 * w01 + c11 * w11;
                 }
             }
             _ => {
                 // Fallback: nearest-neighbor for 3+ dims
                 let mut flat_idx = 0usize;
                 let mut stride = 1usize;
-                for d in 0..n_dims {
-                    let p = positions[d].clamp(0.0, 1.0) * max_idx as crate::Wave;
+                for &pos in &positions[..n_dims] {
+                    let p = pos.clamp(0.0, 1.0) * max_idx as crate::Wave;
                     let i = (p as usize).min(max_idx);
                     flat_idx += i * stride;
                     stride *= self.steps;
                 }
                 let base = flat_idx * Self::COEFF_COUNT;
-                for c in 0..5 {
-                    out[c] = self.coeffs[base + c];
-                }
+                out.copy_from_slice(&self.coeffs[base..base + 5]);
             }
         }
     }
@@ -5741,13 +5750,19 @@ impl MultiNlStage {
                 let n = ss.n_states;
                 // x[n] = A · x[n-1] + b · u[n]
                 work.resize(n, 0.0);
-                for i in 0..n {
-                    let mut v = ss.b_vector[i] * sample;
+                for (i, (w, &b_i)) in work[..n]
+                    .iter_mut()
+                    .zip(&ss.b_vector[..n])
+                    .enumerate()
+                {
                     let row_start = i * n;
-                    for j in 0..n {
-                        v += ss.a_matrix[row_start + j] * ss.x[j];
+                    let mut v = b_i * sample;
+                    for (&a_ij, &x_j) in
+                        ss.a_matrix[row_start..row_start + n].iter().zip(&ss.x[..n])
+                    {
+                        v += a_ij * x_j;
                     }
-                    work[i] = flush_denormal(v);
+                    *w = flush_denormal(v);
                 }
 
                 // Op-amp rail saturation: apply tanh soft-clip to every state.
@@ -5756,8 +5771,8 @@ impl MultiNlStage {
                 // limit cycle whose frequency is set by the RC network.
                 // Cap voltages are also clipped since they can't exceed Vcc.
                 if v_rail > 0.0 {
-                    for i in 0..n {
-                        work[i] = v_rail * crate::fast_math::fast_tanh(work[i] / v_rail);
+                    for w in &mut work[..n] {
+                        *w = v_rail * crate::fast_math::fast_tanh(*w / v_rail);
                     }
                 }
 
@@ -5765,8 +5780,8 @@ impl MultiNlStage {
 
                 // Output extraction: y[n] = c · x[n] + d · u[n]
                 let mut y_raw = ss.d_feedthrough * sample;
-                for i in 0..n {
-                    y_raw += ss.c_vector[i] * work[i];
+                for (&c_i, &w) in ss.c_vector[..n].iter().zip(&work[..n]) {
+                    y_raw += c_i * w;
                 }
                 // 2-sample moving average: kills Nyquist (-1 eigenvalue)
                 // parasitics from unreduced VCVS algebraic constraints.
@@ -5875,13 +5890,25 @@ impl MultiNlStage {
             //             + S_nl_adapted[i] * b_adapted
             //             + dc_bias[i]  (VCC supply contribution, precomputed constant)
             let known_a = &mut self.work_known_a[..n_nl];
-            for i in 0..n_nl {
-                let mut a_i = self.scattering.s_nl_adapted[i] * b_adapted;
-                for k in 0..n_passive {
-                    a_i += self.scattering.s_nl_passive[i * n_passive + k] * b_passive[k];
+            for (i, (ka, (&s_adapt, &dc))) in known_a
+                .iter_mut()
+                .zip(
+                    self.scattering.s_nl_adapted[..n_nl]
+                        .iter()
+                        .zip(&self.dc_bias[..n_nl]),
+                )
+                .enumerate()
+            {
+                let mut a_i = s_adapt * b_adapted;
+                for (&s, &bp) in self.scattering.s_nl_passive
+                    [i * n_passive..i * n_passive + n_passive]
+                    .iter()
+                    .zip(&b_passive[..n_passive])
+                {
+                    a_i += s * bp;
                 }
-                a_i += self.dc_bias[i] * dc_scale;
-                known_a[i] = a_i;
+                a_i += dc * dc_scale;
+                *ka = a_i;
             }
 
             #[cfg(feature = "debug-trace")]
@@ -6475,8 +6502,12 @@ impl MultiNlStage {
                     // Re-extract dc_bias and vcc_bias_all from VCC injection vector
                     if self.vcc_vs_index.is_some() {
                         // The interp table's vs_injection is the VCC injection vector
-                        for i in 0..n_nl.min(new_vs.len()) {
-                            self.dc_bias[i] = new_vs[i] * self.supply_voltage;
+                        for (dc, &vs) in self.dc_bias[..n_nl]
+                            .iter_mut()
+                            .zip(new_vs.iter())
+                            .take(n_nl.min(new_vs.len()))
+                        {
+                            *dc = vs * self.supply_voltage;
                         }
                         self.vcc_bias_all =
                             new_vs.iter().map(|&k| k * self.supply_voltage).collect();
@@ -6609,8 +6640,12 @@ impl MultiNlStage {
                 }
 
                 // Re-extract dc_bias and vcc_bias_all from VCC injection vector
-                for i in 0..n_nl.min(vcc_inj.len()) {
-                    self.dc_bias[i] = vcc_inj[i] * self.supply_voltage;
+                for (dc, &inj) in self.dc_bias[..n_nl]
+                    .iter_mut()
+                    .zip(vcc_inj.iter())
+                    .take(n_nl.min(vcc_inj.len()))
+                {
+                    *dc = inj * self.supply_voltage;
                 }
                 self.vcc_bias_all = vcc_inj.iter().map(|&k| k * self.supply_voltage).collect();
 
@@ -6880,19 +6915,14 @@ fn default_control_from_drive() -> bool {
     true
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BlockwiseSolveMode {
+    #[default]
     Cascade,
     CoupledFixedPoint,
     CoupledNewton,
     DiodeLadderCore,
-}
-
-impl Default for BlockwiseSolveMode {
-    fn default() -> Self {
-        Self::Cascade
-    }
 }
 
 /// Circuit data needed to map cutoff CV to diode small-signal resistance.
@@ -6955,6 +6985,7 @@ pub struct DiodeLadderCore {
 }
 
 impl DiodeLadderCore {
+    #[allow(clippy::too_many_arguments)] // ladder constructor: each arg is a distinct circuit parameter
     pub fn new(
         tanh_table: KTable,
         cap_values: Vec<crate::Wave>,
@@ -8062,13 +8093,13 @@ impl BlockwiseStage {
                 output = block_output;
             }
         }
-        for i in 0..self.n_ports {
+        for (i, b_i) in b_out.iter_mut().enumerate().take(self.n_ports) {
             if self.port_is_block_owned(i) {
                 continue;
             } else if let Some(passive_idx) = self.coupling_passive_index(i) {
                 let one_port_idx = self.coupling_passives[passive_idx].one_port_idx;
                 let one_port = self.coupling_one_ports[one_port_idx];
-                b_out[i] = one_port.wdf_reflected(&self.coupling_runtime_state);
+                *b_i = one_port.wdf_reflected(&self.coupling_runtime_state);
                 if update_state {
                     one_port.wdf_set_incident(
                         a.get(i).copied().unwrap_or(0.0),
@@ -8076,14 +8107,14 @@ impl BlockwiseStage {
                     );
                 }
             } else if self.output_port_index == Some(i) {
-                b_out[i] = a.get(i).copied().unwrap_or(0.0);
+                *b_i = a.get(i).copied().unwrap_or(0.0);
             } else if let Some(&(block_idx, _)) = self
                 .feedback_port_map
                 .iter()
                 .find(|(_, port_idx)| *port_idx == i)
             {
                 if !self.feedback_port_is_active(i) {
-                    b_out[i] = 0.0;
+                    *b_i = 0.0;
                     continue;
                 }
                 let v = if block_idx == self.output_block {
@@ -8091,15 +8122,15 @@ impl BlockwiseStage {
                 } else {
                     self.b_warm.get(block_idx).copied().unwrap_or(0.0)
                 };
-                b_out[i] = 2.0 * v - a.get(i).copied().unwrap_or(0.0);
+                *b_i = 2.0 * v - a.get(i).copied().unwrap_or(0.0);
             } else if let Some(v) = self.vs_voltage_for_port(i, vs_signals) {
-                b_out[i] = 2.0 * v - a.get(i).copied().unwrap_or(0.0);
+                *b_i = 2.0 * v - a.get(i).copied().unwrap_or(0.0);
             } else {
-                b_out[i] = -a.get(i).copied().unwrap_or(0.0);
+                *b_i = -a.get(i).copied().unwrap_or(0.0);
             }
 
-            if !b_out[i].is_finite() {
-                b_out[i] = -a.get(i).copied().unwrap_or(0.0);
+            if !b_i.is_finite() {
+                *b_i = -a.get(i).copied().unwrap_or(0.0);
             }
         }
         output
@@ -8144,7 +8175,7 @@ impl BlockwiseStage {
         }
 
         let mut output_derivative_by_block = alloc::vec![0.0; self.block_count()];
-        for block_idx in 0..self.block_count() {
+        for (block_idx, d_slot) in output_derivative_by_block.iter_mut().enumerate() {
             let Some(primary_port) = self.primary_port_for_block(block_idx) else {
                 continue;
             };
@@ -8167,7 +8198,7 @@ impl BlockwiseStage {
             let d_refl = d_refl.clamp(-1.0e6, 1.0e6);
             let d_out = if d_out.is_finite() { d_out } else { 0.0 };
             let d_refl = if d_refl.is_finite() { d_refl } else { 0.0 };
-            output_derivative_by_block[block_idx] = d_out;
+            *d_slot = d_out;
 
             if self.k_method_block(block_idx).is_some() {
                 if let Some((positive_port, negative_port, output_port)) =
@@ -8192,7 +8223,7 @@ impl BlockwiseStage {
                     );
                     let d_out = d_out.clamp(-1.0e6, 1.0e6);
                     let d_out = if d_out.is_finite() { d_out } else { 0.0 };
-                    output_derivative_by_block[block_idx] = d_out;
+                    *d_slot = d_out;
 
                     if positive_port < n {
                         db_da[positive_port * n + positive_port] = 2.0 * d_out - 1.0;
@@ -8824,6 +8855,7 @@ impl BlockwiseStage {
     /// 3. Serial cascade: each block processes, output feeds next block
     /// 4. Newton iteration: re-run cascade with updated feedback until convergence
     /// 5. Backward sweep to update reactive state (cap voltages)
+    ///
     /// Process one sample. `vs_signals` contains one voltage per VS port
     /// in scattering order (matching `vs_port_map`). These are the input
     /// signals (audio, VCO, CV) that drive the coupling network.

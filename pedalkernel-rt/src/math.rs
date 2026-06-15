@@ -376,14 +376,14 @@ pub use inner::*;
 use crate::Wave;
 
 /// π constant — Wave-typed so it can be used directly in Wave expressions.
-pub const PI: Wave = 3.14159265358979323846264338327950288 as Wave;
+pub const PI: Wave = core::f64::consts::PI as Wave;
 /// τ = 2π
-pub const TAU: Wave = 6.28318530717958647692528676655900577 as Wave;
+pub const TAU: Wave = core::f64::consts::TAU as Wave;
 /// e
-pub const E: Wave = 2.71828182845904523536028747135266250 as Wave;
+pub const E: Wave = core::f64::consts::E as Wave;
 /// ln(2)
-pub const LN_2: Wave = 0.69314718055994530941723212145817656 as Wave;
+pub const LN_2: Wave = core::f64::consts::LN_2 as Wave;
 /// ln(10)
-pub const LN_10: Wave = 2.30258509299404568401799145468436421 as Wave;
+pub const LN_10: Wave = core::f64::consts::LN_10 as Wave;
 /// 1/sqrt(2)
-pub const FRAC_1_SQRT_2: Wave = 0.70710678118654752440084436210484904 as Wave;
+pub const FRAC_1_SQRT_2: Wave = core::f64::consts::FRAC_1_SQRT_2 as Wave;

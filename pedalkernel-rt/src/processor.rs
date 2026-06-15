@@ -28,6 +28,7 @@ use crate::stage::{
 ///
 /// Owns its data directly — no index indirection. The `stages` vec
 /// on [`CompiledPedal`] holds these in processing order.
+#[allow(clippy::large_enum_variant)] // boxing WdfStage would require 58+ callsite changes; deferred to tech-debt
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Stage {
     Wdf(WdfStage),
@@ -355,6 +356,10 @@ impl Stage {
 
 /// Legacy alias — being migrated to `Stage`.
 pub type StageRef = Stage;
+
+/// Return type for [`CompiledPedal::multi_nl_debug_info`]:
+/// `(stage_index, n_nl, scattering_flat, adapted_resistance, dc_bias)`.
+pub type MultiNlDebugInfo = (usize, usize, Vec<crate::Wave>, crate::Wave, Vec<crate::Wave>);
 
 #[cfg(test)]
 mod tests {
@@ -1777,15 +1782,7 @@ impl CompiledPedal {
     }
 
     /// Debug: return multi-NL stage scattering info.
-    pub fn multi_nl_debug_info(
-        &self,
-    ) -> Vec<(
-        usize,
-        usize,
-        Vec<crate::Wave>,
-        crate::Wave,
-        Vec<crate::Wave>,
-    )> {
+    pub fn multi_nl_debug_info(&self) -> Vec<MultiNlDebugInfo> {
         self.stages
             .iter()
             .enumerate()
@@ -2539,7 +2536,7 @@ impl CompiledPedal {
     pub fn debug_dump(&self) -> String {
         let mut s = String::new();
         s.push_str("═══════════════════════════════════════════════════════════════════════════\n");
-        s.push_str(&"CompiledPedal Debug Dump\n".to_string());
+        s.push_str("CompiledPedal Debug Dump\n");
         s.push_str(
             "═══════════════════════════════════════════════════════════════════════════\n\n",
         );
@@ -3889,12 +3886,12 @@ impl PedalProcessor for CompiledPedal {
 
         // Process sidechains: tap the audio output and compute CV for next sample.
         // The 1-sample delay is inherent and correct for discrete-time feedback.
-        for (_i, sc) in self.sidechains.iter_mut().enumerate() {
+        for sc in self.sidechains.iter_mut() {
             let cv = sc.process(signal);
             #[cfg(feature = "debug-trace")]
             if trace_on {
                 std::eprintln!(
-                    "  [SC {_i}] tap={signal:.6e} cv_out={cv:.6e} cv_prev={:.6e}",
+                    "  [SC] tap={signal:.6e} cv_out={cv:.6e} cv_prev={:.6e}",
                     sc.cv_delayed
                 );
             }

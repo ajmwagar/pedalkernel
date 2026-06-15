@@ -395,10 +395,13 @@ impl MetricsAccumulator {
 
         // Compute per-stage RMS levels (normalized to 0-1 for shader)
         let mut stage_levels = [0.0f32; MAX_STAGES];
-        for i in 0..self.stage_count {
-            let rms = math::sqrt(self.stage_sum_sq[i] / n);
+        for (level, sq) in stage_levels[..self.stage_count]
+            .iter_mut()
+            .zip(&self.stage_sum_sq[..self.stage_count])
+        {
+            let rms = math::sqrt(*sq / n);
             // Normalize: assume +/-1.0 is full scale, RMS of 0.7 = full
-            stage_levels[i] = ((rms / 0.7) as f32).min(1.0);
+            *level = ((rms / 0.7) as f32).min(1.0);
         }
 
         // Supply sag: fraction of voltage drop from nominal

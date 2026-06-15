@@ -527,6 +527,7 @@ pub fn solve_small_linear(n: usize, a: &mut [crate::Wave], b: &mut [crate::Wave]
 ///
 /// # Returns
 /// Reflected wave `b[i]` for each NL port.
+#[allow(clippy::too_many_arguments)] // physics solver: each arg is a distinct physical quantity
 pub fn multi_port_nr_solve(
     n_nl: usize,
     s_nl: &[crate::Wave],
@@ -553,6 +554,7 @@ pub fn multi_port_nr_solve(
 }
 
 /// Like `multi_port_nr_solve`, but writes results into `ws.b_nl` to avoid allocation.
+#[allow(clippy::too_many_arguments)] // physics solver: each arg is a distinct physical quantity
 pub fn multi_port_nr_solve_into(
     n_nl: usize,
     s_nl: &[crate::Wave],
@@ -732,7 +734,7 @@ pub fn multi_port_nr_solve_into(
             let embed_err = (a_i - a_scatter).abs();
             if embed_err > 1e-4 || cond > 1e6 {
                 #[cfg(feature = "std")]
-                eprintln!(
+                std::eprintln!(
                     "[NR] port R cond={cond:.1e} embed_err[{i}]={embed_err:.2e} residual={last_residual:.2e}"
                 );
             }
@@ -791,6 +793,7 @@ pub fn multi_port_nr_solve_into(
 ///           - R_i · ∂i_i/∂v_k                              (if k ∈ device(i))
 ///           - Σ_j S[i][j] · R_j · ∂i_j/∂v_k               (j ∈ device(k))
 /// ```
+#[allow(clippy::too_many_arguments)] // physics solver: each arg is a distinct physical quantity
 pub fn multi_port_nr_solve_grouped(
     n_nl: usize,
     s_nl: &[crate::Wave],             // n_nl × n_nl scattering sub-block
@@ -820,6 +823,7 @@ pub fn multi_port_nr_solve_grouped(
 }
 
 /// Like `multi_port_nr_solve_grouped`, but writes results into `ws.b_nl` to avoid allocation.
+#[allow(clippy::too_many_arguments)] // physics solver: each arg is a distinct physical quantity
 pub fn multi_port_nr_solve_grouped_into(
     n_nl: usize,
     s_nl: &[crate::Wave],
@@ -894,11 +898,13 @@ pub fn multi_port_nr_solve_grouped_into(
             if solve_small_linear(n_nl, &mut ws.jac_copy[..n_nl * n_nl], &mut ws.rhs[..n_nl])
                 && ws.rhs[..n_nl].iter().all(|v| v.is_finite())
             {
-                for i in 0..n_nl {
-                    v_guess[i] -= ws.rhs[i];
-                    let (g, lp) = ws.port_group[i];
+                for (v, (&step, &(g, lp))) in v_guess[..n_nl]
+                    .iter_mut()
+                    .zip(ws.rhs[..n_nl].iter().zip(&ws.port_group[..n_nl]))
+                {
+                    *v -= step;
                     let (lo, hi) = device_groups[g].v_clamp_port(lp);
-                    v_guess[i] = v_guess[i].clamp(lo, hi);
+                    *v = (*v).clamp(lo, hi);
                 }
             }
             // Fall through to normal NR loop with updated v_guess
@@ -917,14 +923,13 @@ pub fn multi_port_nr_solve_grouped_into(
                 entry.iterations = iter as u32 + 1;
             }
             // Clamp voltages
-            for i in 0..n_nl {
-                let (g, lp) = ws.port_group[i];
+            for (v, &(g, lp)) in v_guess[..n_nl].iter_mut().zip(&ws.port_group[..n_nl]) {
                 let (lo, hi) = device_groups[g].v_clamp_port(lp);
-                let clamped = v_guess[i].clamp(lo, hi);
-                if clamped != v_guess[i] {
+                let clamped = (*v).clamp(lo, hi);
+                if clamped != *v {
                     clamp_hit = true;
                 }
-                v_guess[i] = clamped;
+                *v = clamped;
             }
 
             // Evaluate all device groups
@@ -970,7 +975,7 @@ pub fn multi_port_nr_solve_grouped_into(
                 static DBG_CTR: AtomicU32 = AtomicU32::new(0);
                 if iter == 0 && max_f > 100.0 && n_nl >= 4 && DBG_CTR.load(AO::Relaxed) < 5 {
                     DBG_CTR.fetch_add(1, AO::Relaxed);
-                    eprintln!(
+                    std::eprintln!(
                         "[NR-diag] n_nl={} iter0_residual={:.4e} known_a={:?} port_R={:?} v={:?}",
                         n_nl,
                         max_f,
@@ -1027,20 +1032,22 @@ pub fn multi_port_nr_solve_grouped_into(
 
             // Apply damped Newton step
             let mut max_dv = 0.0 as crate::Wave;
-            for i in 0..n_nl {
-                let mut dv = ws.rhs[i];
+            for (v, (&step_raw, &(g, lp))) in v_guess[..n_nl]
+                .iter_mut()
+                .zip(ws.rhs[..n_nl].iter().zip(&ws.port_group[..n_nl]))
+            {
+                let mut dv = step_raw;
                 if dv.abs() > 5.0 {
                     dv *= 0.5;
                     step_limited = true;
                 }
-                v_guess[i] -= dv;
-                let (g, lp) = ws.port_group[i];
+                *v -= dv;
                 let (lo, hi) = device_groups[g].v_clamp_port(lp);
-                let clamped = v_guess[i].clamp(lo, hi);
-                if clamped != v_guess[i] {
+                let clamped = (*v).clamp(lo, hi);
+                if clamped != *v {
                     clamp_hit = true;
                 }
-                v_guess[i] = clamped;
+                *v = clamped;
                 max_dv = max_dv.max(dv.abs());
             }
 
@@ -1050,11 +1057,10 @@ pub fn multi_port_nr_solve_grouped_into(
         }
 
         // Ensure v_guess is clean: if NaN leaked through, reset to midpoint of clamp range
-        for i in 0..n_nl {
-            if !v_guess[i].is_finite() {
-                let (g, lp) = ws.port_group[i];
+        for (v, &(g, lp)) in v_guess[..n_nl].iter_mut().zip(&ws.port_group[..n_nl]) {
+            if !v.is_finite() {
                 let (lo, hi) = device_groups[g].v_clamp_port(lp);
-                v_guess[i] = (lo + hi) * 0.5;
+                *v = (lo + hi) * 0.5;
             }
         }
 
@@ -1111,7 +1117,7 @@ pub fn multi_port_nr_solve_grouped_into(
             let embed_err = (a_i - a_scatter).abs();
             if embed_err > 1e-4 || cond > 1e6 {
                 #[cfg(feature = "std")]
-                eprintln!(
+                std::eprintln!(
                     "[NR-grouped] port R cond={cond:.1e} embed_err[{i}]={embed_err:.2e} residual={last_residual:.2e}"
                 );
             }
@@ -1164,6 +1170,7 @@ pub fn multi_port_nr_solve_grouped_into(
 /// - `step_limit`: If the raw Newton step exceeds this, the step is halved
 ///   to prevent overshoot. Pass `None` for standard (undamped) Newton.
 /// - `device_iv`: Closure returning `(i, di_dv)` for a given voltage
+#[allow(clippy::too_many_arguments)] // physics solver: each arg is a distinct physical quantity
 #[inline]
 pub fn newton_raphson_solve<F>(
     a: crate::Wave,

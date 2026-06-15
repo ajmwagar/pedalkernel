@@ -143,7 +143,7 @@ pub struct SidechainInfo {
 ///
 /// Named states expand to physics-based voltages at compile time:
 /// - BJT NPN: `saturated` → [Vbe=0.75, Vce=0.1], `cutoff` → [Vbe=0.0, Vce=supply],
-///            `active` → [Vbe=0.65, Vce=supply/2]
+///   `active` → [Vbe=0.65, Vce=supply/2]
 /// - Diode: `forward` → Vd=0.7, `reverse` → Vd=-supply/2
 /// - PNP signs are flipped automatically.
 #[derive(Debug, Clone, PartialEq)]
@@ -867,8 +867,7 @@ pub struct ControlDef {
     pub default: f64,
 }
 
-/// MIDI binding: maps a component trigger to a specific MIDI note number.
-///
+// MIDI binding: maps a component trigger to a specific MIDI note number.
 
 /// Monitor definition for real-time metering visualization.
 ///
