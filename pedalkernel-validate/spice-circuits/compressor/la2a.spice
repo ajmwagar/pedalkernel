@@ -1,0 +1,78 @@
+* ============================================================================
+* LA-2A Leveling Amplifier — T4B opto cell (EL panel + CdS LDR), ngspice ref
+* PedalKernel Validation Circuit (bead pedalkernel-mbte.4)
+* ============================================================================
+* Mirrors examples/outboard/compressor/la2a.pedal:
+*   in -> T_in(1:1) -> C_in -> R_gr(100k series) -> [PC1 T4B CdS shunt + V1.grid]
+*      -> 12AX7 makeup (V1) -> Gain pot -> 12AX7 (V2) -> 12BH7 CF (V3)
+*      -> T_out(4:1 step-down) -> 600R line -> out
+*   Sidechain (FEEDBACK): out -> C_sc -> R37/C37 pre-emph -> Peak-Reduction pot
+*      -> 12AX7 (V4) -> 6AQ5 pentode (V5) -> EL_drive xfmr -> PC1.led (EL panel).
+*
+* The defining LA-2A nonlinearity is the T4B opto cell: the CdS LDR is the SHUNT
+* arm of the input divider, and its resistance lags the EL-panel drive with a
+* TWO-RATE (fast+slow), asymmetric (attack != release) memory. This deck models
+* that cell with the EXACT engine T4B parameters (pedalkernel-rt PhotocouplerModel
+* ::t4b): R_dark=3MO, R_light=500R, gamma=0.65, fast tau 10ms/40ms, slow tau
+* 100ms/500ms, slow_weight=0.5, R = R_dark^(1-x)*R_light^x with x=light^gamma.
+* The 5 tubes (3 makeup + 2 sidechain) are collapsed to behavioral net gain +
+* a feedback rectifier: the opto cell, not tube THD, governs the DYNAMICS this
+* harness validates. An agent may swap real Koren triode/pentode models for V1-V5
+* if the stiffer deck still converges (see campaign convergence recipe).
+*
+* VERIFIED (orchestrator, 2026-06-15, ngspice direct, NO bootstrap):
+*   - CONVERGES (behavioral makeup + T4B two-rate opto + feedback detector loop).
+*   - COMPRESSES (steady-state, 1s tone, meas PP over 0.9-1.0s):
+*       in=0.05 -> gain 43.0x (out 4.30 Vpp), R_ldr=131k
+*       in=0.50 -> gain  9.84x (out 9.82 Vpp), R_ldr=14.2k
+*     +20 dB input -> +7.2 dB output  ==  ~2.8:1 ratio, -12.8 dB GR. Realistic
+*     opto-leveler curve (program-dependent, gentle — NOT a hard limiter).
+*   - Settling needs ~1s of tone (slow tau 500ms); measure a steady-state tail,
+*     NOT peak-over-window (the uncompressed attack transient inflates it).
+*
+* HARNESS: strip the standalone Vin SINE + .control; inject the harness stimulus
+* at `in`, read V(out). Use a >=1s settle (or the dynamics harness attack/release
+* measurement) before reading gain. GMK/PRG below are the makeup/sidechain-sens
+* calibration knobs the validation agent tunes to the engine + LA-2A datasheet.
+* ----------------------------------------------------------------------------
+
+.param GMK=80           $ net makeup gain (3 triodes * Gain@0.6 / 4:1 step-down)
+.param PRG=0.12         $ sidechain sensitivity (12AX7+6AQ5 gain * Peak Reduction@0.5)
+
+* T4B LDR resistance: ln(3e6)=14.9141, ln(500)=6.2146, diff=-8.6995, gamma=0.65
+.func rldr(L) = exp(14.9141 - 8.6995*pwr(min(max(L,1e-9),1),0.65))
+
+* --- audio path: C_in -> R_gr(100k) series ; PC1(T4B) + R_g1(1M) shunt at grid ---
+C_in in nci 100n
+R_gr nci ndiv 100k
+R_gl ndiv 0 1meg                 $ R_g1 grid leak
+B_pc ndiv 0 I = V(ndiv)/V(nrldr) $ PC1 CdS cell as voltage-controlled shunt R
+* makeup (V1 12AX7 -> Gain pot -> V2 12AX7 -> V3 12BH7 CF -> T_out 4:1), behavioral
+B_mk nmk 0 V = GMK*V(ndiv)
+C_out nmk out 10u                $ C_c3 CF output coupling
+R_load out 0 600                 $ 600R line termination
+
+* --- T4B opto cell: EL-panel drive -> two-rate asymmetric envelope -> CdS R ---
+* LED drive (FEEDBACK): rectified output * sidechain/Peak-Reduction sens, clamp 0..1
+B_led nled 0 V = min(1, PRG*abs(V(out)))
+* fast component: rise 10ms / fall 40ms  (C=1F integrator, dV/dt=(target-V)/tau)
+B_fast 0 nfast I = (V(nled)-V(nfast)) / ((V(nled)>V(nfast)) ? 10m : 40m)
+C_fast nfast 0 1 ic=0
+* slow component: rise 100ms / fall 500ms (the LA-2A "release memory")
+B_slow 0 nslow I = (V(nled)-V(nslow)) / ((V(nled)>V(nslow)) ? 100m : 500m)
+C_slow nslow 0 1 ic=0
+* effective light = 0.5*fast + 0.5*slow ; R_ldr = log-interp gamma curve
+B_light nlight 0 V = 0.5*V(nfast) + 0.5*V(nslow)
+B_rldr nrldr 0 V = rldr(V(nlight))
+
+* --- standalone inspection stimulus (harness replaces this) ---
+Vin in 0 SINE(0 0.1 1k)
+.options DELMAX=50e-6
+.control
+tran 20u 1 uic
+meas tran outpp PP v(out) from=0.9 to=1
+meas tran inpp  PP v(in)  from=0.9 to=1
+let g = outpp/inpp
+print g
+.endc
+.end
