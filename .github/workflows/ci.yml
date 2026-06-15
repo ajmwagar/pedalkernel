@@ -67,9 +67,9 @@ jobs:
 
   # ----------------------------------------------------------------
   # Test (feature matrix) — gated at TEST_MIN_PASS_PCT, NOT all-green,
-  # because the suite is currently flaky and the no-features row has a
-  # known compile gap. Catches catastrophic breakage without blocking
-  # on the flaky tail.
+  # because the suite is currently flaky. serde+build-cache are added to
+  # every minimal row to close the compile_pedal_cached gap that would
+  # otherwise silently produce zero test runs.
   # ----------------------------------------------------------------
   test:
     name: test (${{ matrix.label }}, gate)
@@ -79,14 +79,14 @@ jobs:
       matrix:
         include:
           - label: "no features"
-            args: "--no-default-features"
+            args: "--no-default-features --features serde,build-cache"
           - label: "tui only"
-            args: "--no-default-features --features tui"
+            args: "--no-default-features --features tui,serde,build-cache"
           - label: "jack-rt only"
-            args: "--no-default-features --features jack-rt"
+            args: "--no-default-features --features jack-rt,serde,build-cache"
             jack: true
           - label: "ebers-moll"
-            args: "--no-default-features --features ebers-moll"
+            args: "--no-default-features --features ebers-moll,serde,build-cache"
           - label: "all features"
             args: ""
             jack: true
@@ -145,14 +145,14 @@ jobs:
       matrix:
         include:
           - label: "no features"
-            args: "--no-default-features"
+            args: "--no-default-features --features serde,build-cache"
           - label: "tui only"
-            args: "--no-default-features --features tui"
+            args: "--no-default-features --features tui,serde,build-cache"
           - label: "jack-rt only"
-            args: "--no-default-features --features jack-rt"
+            args: "--no-default-features --features jack-rt,serde,build-cache"
             jack: true
           - label: "ebers-moll"
-            args: "--no-default-features --features ebers-moll"
+            args: "--no-default-features --features ebers-moll,serde,build-cache"
           - label: "all features"
             args: "--all-features"
             jack: true
@@ -182,55 +182,23 @@ jobs:
       - run: cargo build --examples
 
   # ----------------------------------------------------------------
-  # Benchmarks (informational — never fails the build)
+  # Realtime gate — BLOCKING per-PR check.
+  # Compiles each public example pedal, processes 4096 samples at 48 kHz,
+  # and asserts ≥ 2× realtime headroom. Runs in release for meaningful
+  # performance numbers. Fast (seconds). No criterion overhead.
+  # Full criterion microbench suite runs nightly — see bench-nightly.yml.
   # ----------------------------------------------------------------
-  bench:
-    name: benchmarks
+  realtime-gate:
+    name: realtime gate (blocking)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libjack-dev
         run: sudo apt-get update && sudo apt-get install -y libjack-dev
       - uses: Swatinem/rust-cache@v2
-
-      # Restore baseline from main (if exists)
-      - name: Restore benchmark baseline
-        uses: actions/cache/restore@v4
-        with:
-          path: target/criterion
-          key: bench-baseline-${{ runner.os }}
-
-      # Run benchmarks
-      - name: Run benchmarks
-        run: cargo bench --bench wdf_bench 2>&1 | tee bench-output.txt
-
-      # Save baseline on main pushes
-      - name: Save benchmark baseline
-        if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
-        with:
-          path: target/criterion
-          key: bench-baseline-${{ runner.os }}-${{ github.sha }}
-
-      # Upload results
-      - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: benchmark-results
-          path: |
-            bench-output.txt
-            target/criterion/
-
-      # Check for regressions (>20% slower = warning in PR comment)
-      - name: Check for regressions
-        if: github.event_name == 'pull_request'
-        run: |
-          if grep -q "regressed" bench-output.txt; then
-            echo "::warning::Benchmark regression detected — check bench-output.txt artifact"
-          fi
+      - name: Run realtime gate
+        run: cargo test --release --test realtime_gate -- --nocapture
 
   # ----------------------------------------------------------------
   # License + supply-chain policy (cargo-deny)
@@ -268,7 +236,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-about
-        run: cargo install cargo-about --locked
+        run: cargo install cargo-about --locked --features=cli
       - name: Render attribution HTML
         run: cargo about generate about.hbs --output-file third_party_licenses.html
       - name: Upload attribution artifact

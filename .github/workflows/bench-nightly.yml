@@ -1,0 +1,52 @@
+name: Bench (nightly)
+
+# Full criterion microbench suite. Non-blocking — never fails a PR.
+# Runs nightly (plus on-demand) so regressions surface within 24 hours.
+# Per-PR blocking gate lives in ci.yml (realtime-gate job).
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC daily
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: benchmarks (criterion)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libjack-dev
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+      - uses: Swatinem/rust-cache@v2
+
+      # Restore baseline from main (if exists)
+      - name: Restore benchmark baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion
+          key: bench-baseline-${{ runner.os }}
+
+      # Run full criterion suite
+      - name: Run benchmarks
+        run: cargo bench --bench wdf_bench 2>&1 | tee bench-output.txt
+
+      # Save baseline after each successful nightly run
+      - name: Save benchmark baseline
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion
+          key: bench-baseline-${{ runner.os }}-${{ github.sha }}
+
+      # Upload results as artifact (retained 90 days by default)
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: |
+            bench-output.txt
+            target/criterion/
