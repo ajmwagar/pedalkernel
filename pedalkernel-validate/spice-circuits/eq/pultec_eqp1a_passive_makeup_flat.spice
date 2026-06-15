@@ -1,0 +1,137 @@
+* ============================================================================
+* Pultec EQP-1A — Passive EQ + 12AX7/12AU7 Tube Makeup, FLAT configuration
+* PedalKernel Validation Circuit (bead pedalkernel-hcpb.3)
+* ============================================================================
+*
+* Mirrors pultec_eqp1a_passive_makeup.pedal exactly (no transformers).
+* Supply: 285V B+ with 1k impedance.
+*
+* Pot model: WdfPot rp = taper.apply(pos) * max_R, min = max_R * 0.001
+*   Audio taper (A): taper.apply(p) = (10^p - 1) / 9
+*   Linear taper (B): taper.apply(p) = p
+*   Minimum resistance floor: max_R * 0.001 = 10k * 0.001 = 10Ω
+*
+* Control positions (FLAT — all EQ off, default 0.0 except HF_BW=0.5):
+*   LF_Boost = 0.0  → rp = (10^0-1)/9 * 10k = 0 → floored at 10Ω
+*   LF_Atten = 0.0  → rp = 10Ω
+*   HF_Boost = 0.0  → rp = 10Ω
+*   HF_BW    = 0.5  → rp = 0.5 * 10k = 5000Ω (linear taper B)
+*   HF_Atten = 0.0  → rp = 10Ω
+*
+* Switched-cap values (frozen at position 0 = index 0):
+*   CPS     = 100n  (0.1u → 20 Hz LF corner)
+*   KCS     = 5600p (5.6n → ~3.1 kHz HF boost tank)
+*   HFA_sel = 3300p (3.3n → ~5 kHz HF atten corner)
+*
+* Source: R_in = 600Ω. Load: R_load = 100k (passive termination).
+* Supply: Vb = 285V, Zb = 1k.
+* Output node: v_out (after C_out coupling cap, before R_out load).
+*
+* Convergence recipe (stiff-deck):
+*   RELTOL=5e-3 ABSTOL=1e-9 VNTOL=1e-6
+*   METHOD=TRAP MAXORD=2 DELMAX=5e-6
+*   ITL1=2000 ITL2=500 ITL4=200
+*   .ic for tube operating points
+* ============================================================================
+
+* B+ supply (285V with 1k source impedance)
+Vb   vb  vb_raw  0
+Rb   vb_raw  0  1
+Vbsrc  vb_raw  0  DC 285
+
+* Source impedance
+Rin   v_in   n_lf   600
+
+* ── LOW FREQUENCY shelf ──────────────────────────────────────────────────────
+Llf   n_lf   n_lb   2H
+* LF_Boost at 0.0: rp = 10Ω
+R_lfboost  n_lb  0  10
+
+Ccps  n_lf   n_la   100n
+* LF_Atten at 0.0: rp = 10Ω
+R_lfatten  n_la  0  10
+
+* Series bridge to HF section
+Rlf   n_lf   n_hf   56k
+
+* ── HIGH FREQUENCY BOOST section ─────────────────────────────────────────────
+Lhf   n_hf   n_hfb  47m
+Ckcs  n_hf   n_hfb  5600p
+* HF_Boost at 0.0: rp = 10Ω
+R_hfboost  n_hfb  0  10
+
+* HF_BW at 0.5 (linear taper): rp = 0.5 * 10k = 5000Ω
+R_hfbw  n_hf  0  5000
+
+* ── HIGH FREQUENCY ATTEN shelf ───────────────────────────────────────────────
+Chfas  n_hf   n_hfa_sw  3300p
+* HF_Atten at 0.0: rp = 10Ω
+R_hfatten  n_hfa_sw  0  10
+
+* Bridge to n_out
+Rhfa  n_hf   n_out   100k
+
+* Passive load
+Rload  n_out  0  100k
+
+* ── 12AX7 Koren triode — common-cathode gain stage ───────────────────────────
+* Grid: n_out (via direct connection — no coupling cap into grid as in pedal)
+* Plate load: Rp1 = 100k to B+
+* Cathode: Rk1 = 1.5k, bypassed by Ck1 = 25u
+Rp1   vb   n_plate1  100k
+X1    n_plate1  n_out  n_cath1  TRIODE_12AX7
+Rk1   n_cath1  0  1.5k
+Ck1   n_cath1  0  25u
+
+* ── Interstage coupling 12AX7 plate → 12AU7 grid ────────────────────────────
+Cc    n_plate1  n_grid2  0.047u
+Rg2   n_grid2  0  1MEG
+
+* ── 12AU7 Koren triode — cathode follower ────────────────────────────────────
+* Plate: directly to B+
+* Cathode: Rk2 = 10k to ground
+X2    vb   n_grid2  n_cath2  TRIODE_12AU7
+Rk2   n_cath2  0  10k
+
+* ── Output coupling ──────────────────────────────────────────────────────────
+Cout  n_cath2  v_out  47n
+Rout  v_out  0  1MEG
+
+* ── Initial conditions for DC operating point ───────────────────────────────
+.ic  V(n_plate1)=180  V(n_cath1)=1.5  V(n_grid2)=0  V(n_cath2)=2  V(v_out)=0
+
+* ── 12AX7 Koren subcircuit ───────────────────────────────────────────────────
+.SUBCKT TRIODE_12AX7 anode grid cathode
+.PARAM MU=100 EX=1.4 KG1=1060 KP=600 KVB=300
+Bgk gk 0 V = V(grid,cathode)
+Bak ak 0 V = V(anode,cathode)
+Bip anode cathode I = {
++ (PWR(
++   LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2)))))
++   * MAX(V(ak), 0.001) / KP,
++   EX)
++ / KG1)
++ * (1 + SGN(LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2))))) * MAX(V(ak),0.001) / KP)) / 2
++ }
+Dgc grid cathode DGRID
+.MODEL DGRID D(IS=1e-12 N=1.5 RS=1k)
+.ENDS TRIODE_12AX7
+
+* ── 12AU7 Koren subcircuit ───────────────────────────────────────────────────
+* Koren parameters for 12AU7: MU=21.5, EX=1.35, KG1=1460, KP=84, KVB=300
+.SUBCKT TRIODE_12AU7 anode grid cathode
+.PARAM MU=21.5 EX=1.35 KG1=1460 KP=84 KVB=300
+Bgk gk 0 V = V(grid,cathode)
+Bak ak 0 V = V(anode,cathode)
+Bip anode cathode I = {
++ (PWR(
++   LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2)))))
++   * MAX(V(ak), 0.001) / KP,
++   EX)
++ / KG1)
++ * (1 + SGN(LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2))))) * MAX(V(ak),0.001) / KP)) / 2
++ }
+Dgc grid cathode DGRID
+.MODEL DGRID D(IS=1e-13 N=1.5 RS=2k)
+.ENDS TRIODE_12AU7
+

@@ -1,0 +1,144 @@
+# PK:
+# Pultec EQP-1A — Passive EQ + tube makeup (bead pedalkernel-hcpb.3)
+# Type: equalizer
+#
+# Scope: passive RLC section + 12AX7 voltage-amp -> 12AU7 cathode-follower makeup.
+# No input/output transformers (deferred to a later child).
+# No switched caps (frozen at position 0, same convention as pultec_eqp1a_passive.pedal).
+#
+# Switched-cap values FROZEN at position 0:
+#   CPS     = 0.1u   (position 0 → 20 Hz LF selector)
+#   KCS     = 5.6n   (position 0 → ~3 kHz HF boost selector)
+#   HFA_sel = 3.3n   (position 0 → ~5 kHz HF atten selector)
+#
+# Makeup chain (from pultec_eqp1a.pedal):
+#   12AX7 common-cathode: Rk1=1.5k / Ck1=25u / Rp1=100k
+#   Cc=0.047u interstage coupling
+#   Rg2=1M grid leak to 12AU7
+#   12AU7 cathode follower: Rk2=10k
+#
+# Supply: 285V B+ (same as pultec_eqp1a.pedal)
+#
+# Source impedance R_in = 600 Ω (mirrors passive variant).
+# Output: 12AU7 cathode (low-Z, no output transformer).
+#
+# Signal flow:
+#   in -> R_in -> [LF shelf] -> [HF boost tank] -> [HF atten shelf]
+#       -> 12AX7 gain -> Cc -> 12AU7 cathode follower -> out
+
+pedal "Pultec EQP-1A (Passive+Makeup)" subtitle "Passive EQ + 12AX7/12AU7 tube makeup — no transformers" {
+
+  supply 285V {
+    impedance: 1k
+    filter_cap: 40u
+    rectifier: solid_state
+  }
+
+  components {
+    # Source impedance (stands in for bridging input transformer)
+    R_in: resistor(600)
+
+    # ── LOW FREQUENCY section (shelf) ──────────────────────────────────────
+    # Frozen at position 0: CPS = 0.1u (20 Hz corner).
+    CPS:      cap(100n)        # cap_switched frozen at position 0 = 0.1u
+    L_lf:     inductor(2H)
+    LF_Boost: pot(10k, a)
+    LF_Atten: pot(10k, a)
+    R_lf:     resistor(56k)
+
+    # ── HIGH FREQUENCY BOOST section (peaking tank) ─────────────────────────
+    # Frozen at position 0: KCS = 5.6n → f0 = 1/(2π√(47m·5.6n)) ≈ 3.1 kHz.
+    KCS:      cap(5600p)       # cap_switched frozen at position 0 = 5.6n
+    L_hf:     inductor(47m)
+    HF_Boost: pot(10k, a)
+    HF_BW:    pot(10k)
+
+    # ── HIGH FREQUENCY ATTEN section (shelf) ────────────────────────────────
+    # Frozen at position 0: HFA_sel = 3.3n → ~5 kHz shelf corner.
+    HFA_sel:  cap(3300p)       # cap_switched frozen at position 0 = 3.3n
+    HF_Atten: pot(10k, a)
+    R_hfa:    resistor(100k)
+
+    # Output load ahead of the makeup grid
+    R_load: resistor(100k)
+
+    # ── Makeup: 12AX7 common-cathode gain stage ──────────────────────────────
+    V1:   triode(12ax7)
+    Rk1:  resistor(1.5k)       # cathode bias
+    Ck1:  cap(25u, electrolytic) # cathode bypass — full gain
+    Rp1:  resistor(100k)       # plate load
+    Cc:   cap(0.047u)          # interstage coupling cap
+    Rg2:  resistor(1M)         # grid leak to 12AU7
+
+    # ── Makeup: 12AU7 cathode follower ──────────────────────────────────────
+    V2:   triode(12au7)
+    Rk2:  resistor(10k)        # follower cathode resistor
+    C_out: cap(47n)            # output coupling (keeps DC off the output node)
+    R_out: resistor(1M)        # output load
+  }
+
+  nets {
+    in -> R_in.a
+    R_in.b -> n_lf
+
+    # LF shelf: shunt L_lf to boost pot; shunt CPS to atten pot; R_lf bridges to n_hf
+    n_lf -> L_lf.a, CPS.a, R_lf.a
+    L_lf.b -> LF_Boost.a
+    LF_Boost.b -> gnd
+    CPS.b -> LF_Atten.a
+    LF_Atten.b -> gnd
+    R_lf.b -> n_hf
+
+    # HF boost tank: L_hf || KCS shunt to boost pot; HF_BW damps from n_hf
+    n_hf -> L_hf.a, KCS.a
+    L_hf.b -> HF_Boost.a
+    KCS.b -> HF_Boost.a
+    HF_Boost.b -> gnd
+    n_hf -> HF_BW.a
+    HF_BW.b -> gnd
+
+    # n_hf passes straight into HF atten node
+    n_hf -> n_hfa
+
+    # HF atten shelf: HFA_sel shunts to atten pot; R_hfa bridges to n_out
+    n_hfa -> HFA_sel.a, R_hfa.a
+    HFA_sel.b -> HF_Atten.a
+    HF_Atten.b -> gnd
+    R_hfa.b -> n_out
+
+    # Output load to ground (passive termination into makeup grid)
+    n_out -> R_load.a
+    R_load.b -> gnd
+
+    # 12AX7 common-cathode gain stage
+    n_out -> V1.grid
+    vcc -> Rp1.a
+    Rp1.b -> V1.plate
+    V1.cathode -> Rk1.a, Ck1.a
+    Rk1.b -> gnd
+    Ck1.b -> gnd
+
+    # Interstage coupling to 12AU7 grid
+    V1.plate -> Cc.a
+    Cc.b -> Rg2.a, V2.grid
+    Rg2.b -> gnd
+
+    # 12AU7 cathode follower
+    V2.plate -> vcc
+    V2.cathode -> Rk2.a
+    Rk2.b -> gnd
+
+    # Output coupling
+    V2.cathode -> C_out.a
+    C_out.b -> R_out.a, out
+    R_out.b -> gnd
+  }
+
+  controls {
+    LF_Boost.position -> "LF Boost"     [0.0, 1.0] = 0.0
+    LF_Atten.position -> "LF Atten"     [0.0, 1.0] = 0.0
+    HF_Boost.position -> "HF Boost"     [0.0, 1.0] = 0.0
+    HF_BW.position    -> "HF Bandwidth" [0.0, 1.0] = 0.5
+    HF_Atten.position -> "HF Atten"     [0.0, 1.0] = 0.0
+  }
+}
