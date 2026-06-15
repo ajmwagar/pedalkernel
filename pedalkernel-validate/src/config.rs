@@ -2016,23 +2016,24 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
             tests: {
                 let mut tests = BTreeMap::new();
 
-                // PENDING until the ngspice behavioural J-A golden is generated
+                // Validated against the committed ngspice behavioural J-A golden
                 // (see spice-circuits/tape/tape_head_saturation.spice and
-                // docs/tape-head-validation.md). `pending_reference: true` keeps
-                // it out of the pass-rate gate denominator until the .npy lands,
-                // at which point it auto-activates with no code change.
+                // docs/tape-head-validation.md). Active in the gate (not pending).
                 //
-                // TOLERANCES BELOW ARE PROVISIONAL. They have NOT been measured
-                // against a real golden (none exists yet). They are deliberately
-                // loose placeholders sized like the other WDF-vs-SPICE nonlinear
-                // tests (~6-12 dB RMS/peak, THD comparison disabled). They MUST
-                // be tightened/re-honest once the golden is measured.
+                // PASSES at the real match tolerances below. The earlier "known
+                // divergence" (clean RMS -4.1dB / saturated spectral 33dB) was NOT
+                // an engine/model defect: bead pedalkernel-x0mv Phase 0 traced it
+                // to a NETLIST topology mismatch — the .pedal wired the head in
+                // SERIES while this golden deck models it as a SHUNT at v_out.
+                // Rewiring the .pedal to the shunt topology the deck documents
+                // makes the WDF output match the golden to ~70 dB on both labels;
+                // the J-A element itself is unchanged.
                 tests.insert(
                     "tape_head_saturation".to_string(),
                     TestCase {
                         circuit: "tape/tape_head_saturation.pedal".to_string(),
                         description:
-                            "Voltage-driven J-A tape head: clean->saturated vs ngspice (KNOWN DIVERGENCE — engine-side, tracked)"
+                            "Voltage-driven J-A tape head: clean->saturated vs ngspice (shunt topology, matches reference)"
                                 .to_string(),
                         signals: vec![
                             // Clean: well below the ~1 V J-A knee.
@@ -2056,13 +2057,13 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         ],
                         pass_criteria: PassCriteria {
                             // Real match targets vs the ngspice J-A golden. The WDF
-                            // tape head currently FAILS these (measured 2026-06-15:
-                            // clean RMS -4.1dB/THD 9.57dB, saturated RMS -4.8dB/
-                            // spectral 33.4dB/THD 17.74dB). Surfaced as a live gate
-                            // failure rather than hidden — engine-side divergence,
-                            // tracked for fix (port-R adaptation + discrete H-step
-                            // integration vs ngspice continuous). Test passes once
-                            // the element matches the reference.
+                            // tape head PASSES these comfortably once the .pedal is
+                            // wired in the shunt topology the golden deck models
+                            // (measured 2026-06-15 after the netlist fix: clean RMS
+                            // -72dB/peak -73dB/spectral 0.2dB/THD 0.01dB, saturated
+                            // RMS -70dB/peak -70dB/spectral 0.0dB/THD 0.0dB). The
+                            // criteria are intentionally NOT loosened — the element
+                            // matches the reference with ~64 dB of margin.
                             normalized_rms_error_db: Some(-6.0),
                             peak_error_db: Some(-6.0),
                             thd_error_db: Some(3.0),
