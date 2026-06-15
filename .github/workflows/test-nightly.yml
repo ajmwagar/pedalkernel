@@ -1,0 +1,59 @@
+name: Nightly characterization tests
+
+on:
+  schedule:
+    # Run at 03:00 UTC every day.
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Run the full test suite including tests marked #[ignore], which covers the
+  # expensive opto characterization sweeps (8 s/point T4B steady-state sims)
+  # that are excluded from per-PR runs to keep CI fast.
+  #
+  # Non-blocking: failures here signal characterization regressions but must
+  # not block the PR gate. Investigators should check the nightly run log.
+  characterization:
+    name: characterization (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: "no features"
+            args: "--no-default-features"
+            jack: false
+          - label: "serde + build-cache"
+            args: "--no-default-features --features serde,build-cache"
+            jack: false
+          - label: "all features"
+            args: ""
+            jack: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install libjack-dev
+        if: matrix.jack
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Run characterization suite (--include-ignored)
+        run: |
+          cargo test ${{ matrix.args }} --no-fail-fast -- --include-ignored 2>&1 | tee nightly-output.txt || true
+          passed=$(grep -hoE '[0-9]+ passed' nightly-output.txt | awk '{s+=$1} END{print s+0}')
+          failed=$(grep -hoE '[0-9]+ failed' nightly-output.txt | awk '{s+=$1} END{print s+0}')
+          ignored=$(grep -hoE '[0-9]+ ignored' nightly-output.txt | awk '{s+=$1} END{print s+0}')
+          echo "Nightly (${{ matrix.label }}): ${passed} passed, ${failed} failed, ${ignored} ignored"
+          if [ "$failed" -gt 0 ]; then
+            echo "::warning::${failed} characterization test(s) failed — see nightly-output.txt artifact"
+          fi
+      - name: Upload nightly output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-characterization-${{ matrix.label }}
+          path: nightly-output.txt
