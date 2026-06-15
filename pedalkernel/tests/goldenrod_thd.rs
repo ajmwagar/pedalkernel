@@ -1,12 +1,39 @@
 use pedalkernel::PedalProcessor;
 use std::f64::consts::PI;
 
-const GOLDENROD: &str =
-    include_str!("/Users/ajmwagar/src/pedalkernel/pedalkernel-pro/pedals/legends/goldenrod.pedal");
+/// Load the goldenrod pedal from the sibling pro repo at runtime.
+/// Returns `None` when the pro repo is absent (public CI).
+fn load_goldenrod() -> Option<String> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    for levels in 2..=6 {
+        let prefix: String = "../".repeat(levels);
+        let candidate = format!(
+            "{manifest_dir}/{prefix}pedalkernel-pro/pedals/legends/goldenrod.pedal"
+        );
+        if let Ok(s) = std::fs::read_to_string(&candidate) {
+            eprintln!("  loaded goldenrod.pedal ({} bytes) from {candidate}", s.len());
+            return Some(s);
+        }
+    }
+    None
+}
+
+macro_rules! skip_if_missing_goldenrod {
+    ($name:expr) => {
+        match load_goldenrod() {
+            Some(s) => s,
+            None => {
+                eprintln!("  SKIP: goldenrod.pedal not found (pro repo not present)");
+                return;
+            }
+        }
+    };
+}
 
 #[test]
 fn goldenrod_gain_affects_harmonics() {
-    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let goldenrod_src = skip_if_missing_goldenrod!("goldenrod.pedal");
+    let pedal = pedalkernel::dsl::parse_pedal_file(&goldenrod_src).expect("parse");
     let sr = 48000.0;
     let freq = 440.0;
     let amplitude = 1.0; // 0dBFS — calibrate_input_level attenuates internally
@@ -201,7 +228,6 @@ fn goldenrod_gain_affects_harmonics() {
         engine.set_control("Output", 0.7);
         engine.set_control("Treble", 0.5);
         // Process and capture peak NR voltage
-        let mut max_v = 0.0f64;
         for i in 0..8192 {
             let x = amplitude * (2.0 * PI * freq * i as f64 / sr).sin();
             engine.process(x);
@@ -240,7 +266,8 @@ fn goldenrod_gain_affects_harmonics() {
 
 #[test]
 fn goldenrod_fft_spectrum() {
-    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let goldenrod_src = skip_if_missing_goldenrod!("goldenrod.pedal");
+    let pedal = pedalkernel::dsl::parse_pedal_file(&goldenrod_src).expect("parse");
     let sr = 48000.0;
     let freq = 440.0;
     let amplitude = 0.03;
@@ -275,7 +302,6 @@ fn goldenrod_fft_spectrum() {
         );
         eprintln!("{:<6} {:<10} {:<10} {:<10}", "H#", "Freq(Hz)", "Mag", "dB");
 
-        let mut noise_floor = 0.0f64;
         let mut harmonics_above_noise = 0usize;
         let mut total_harmonic_power = 0.0f64;
         let mut fundamental_mag = 0.0f64;
@@ -342,7 +368,8 @@ fn goldenrod_fft_spectrum() {
 
 #[test]
 fn goldenrod_gain_at_different_input_levels() {
-    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let goldenrod_src = skip_if_missing_goldenrod!("goldenrod.pedal");
+    let pedal = pedalkernel::dsl::parse_pedal_file(&goldenrod_src).expect("parse");
     let sr = 48000.0;
     let freq = 440.0;
     let n_samples = 4096;
@@ -356,7 +383,7 @@ fn goldenrod_gain_at_different_input_levels() {
     for db in [-40.0, -30.0, -20.0, -12.0, -6.0, 0.0] {
         let amplitude = 10.0_f64.powf(db / 20.0);
 
-        let mut thd_at = |gain: f64| -> f64 {
+        let thd_at = |gain: f64| -> f64 {
             let mut engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
             engine.set_control("Gain", gain);
             engine.set_control("Output", 0.7);
@@ -414,16 +441,17 @@ fn goldenrod_gain_at_different_input_levels() {
 
 #[test]
 fn goldenrod_calibrated_pre_gain() {
-    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let goldenrod_src = skip_if_missing_goldenrod!("goldenrod.pedal");
+    let pedal = pedalkernel::dsl::parse_pedal_file(&goldenrod_src).expect("parse");
     let sr = 48000.0;
-    let engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
+    let _engine = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
 
     // pre_gain and output_gain are pub(super) — check via control_debug_info proxy
     // Instead, test the actual behavior: send 0dBFS and measure THD
     let freq = 440.0;
     let n_samples = 4096;
 
-    let mut thd_at = |gain_knob: f64| -> f64 {
+    let thd_at = |gain_knob: f64| -> f64 {
         let mut e = pedalkernel::compiler::compile_pedal(&pedal, sr).expect("compile");
         e.set_control("Gain", gain_knob);
         e.set_control("Output", 0.7);
@@ -485,8 +513,8 @@ fn goldenrod_calibrated_pre_gain() {
 
 #[test]
 fn goldenrod_treble_topology_debug() {
-    let src = GOLDENROD;
-    let pedal = pedalkernel::dsl::parse_pedal_file(src).expect("parse");
+    let goldenrod_src = skip_if_missing_goldenrod!("goldenrod.pedal");
+    let pedal = pedalkernel::dsl::parse_pedal_file(&goldenrod_src).expect("parse");
     let sr = 48000.0;
 
     // Compile and check what opamp stages were created
@@ -511,7 +539,8 @@ fn goldenrod_treble_topology_debug() {
 
 #[test]
 fn goldenrod_treble_changes_spectrum() {
-    let pedal = pedalkernel::dsl::parse_pedal_file(GOLDENROD).expect("parse");
+    let goldenrod_src = skip_if_missing_goldenrod!("goldenrod.pedal");
+    let pedal = pedalkernel::dsl::parse_pedal_file(&goldenrod_src).expect("parse");
     let sr = 48000.0;
     let n_samples = 4096;
     // Low gain + low amplitude: keep signal below clipping threshold so
@@ -561,7 +590,7 @@ fn goldenrod_treble_changes_spectrum() {
     }
     assert!(
         max_effect_db.abs() > 0.5,
-        "Treble pot should affect spectrum by ≥0.5dB at some frequency, best was {:.2}dB",
+        "Treble pot should affect spectrum by >=0.5dB at some frequency, best was {:.2}dB",
         max_effect_db
     );
 }

@@ -1,15 +1,9 @@
 mod regression_harness;
 
 use regression_harness::{
-    run_circuit_matrix, run_circuit_matrix_named, CircuitRegressionSpec, CompileVariant,
-    ControlCheck, STANDARD_VARIANTS,
+    load_pro_pedal_sub, run_circuit_matrix, run_circuit_matrix_named, CircuitRegressionSpec,
+    CompileVariant, ControlCheck, STANDARD_VARIANTS,
 };
-
-const GOLDENROD_SRC: &str = include_str!("../../../pedalkernel-pro/pedals/legends/goldenrod.pedal");
-const RATKING_SRC: &str =
-    include_str!("../../../pedalkernel-pro/pedals/legends/ratking_non_invert_v1a.pedal");
-const SCREAMER_SRC: &str = include_str!("../../../pedalkernel-pro/pedals/legends/screamer.pedal");
-const SD1_SRC: &str = include_str!("../../../pedalkernel-pro/pedals/legends/sd1.pedal");
 
 const GOLDENROD_CHECKS: &[ControlCheck] = &[
     ControlCheck::drive("Gain", 0.0),
@@ -35,40 +29,63 @@ const SD1_CHECKS: &[ControlCheck] = &[
     ControlCheck::output("Level", 8.0),
 ];
 
-const LEGENDS: &[CircuitRegressionSpec] = &[
-    CircuitRegressionSpec {
-        name: "Goldenrod",
-        source: GOLDENROD_SRC,
-        checks: GOLDENROD_CHECKS,
-    },
-    CircuitRegressionSpec {
-        name: "Ratking",
-        source: RATKING_SRC,
-        checks: RATKING_CHECKS,
-    },
-    CircuitRegressionSpec {
-        name: "Screamer",
-        source: SCREAMER_SRC,
-        checks: SCREAMER_CHECKS,
-    },
-    CircuitRegressionSpec {
-        name: "SD-1",
-        source: SD1_SRC,
-        checks: SD1_CHECKS,
-    },
-];
+/// Load all four legend pedals at runtime.  Returns `None` when the pro repo
+/// is absent (public CI), allowing callers to skip.
+fn load_legends() -> Option<Vec<CircuitRegressionSpec>> {
+    let goldenrod = load_pro_pedal_sub("pedals/legends/goldenrod.pedal")?;
+    let ratking = load_pro_pedal_sub("pedals/legends/ratking_non_invert_v1a.pedal")?;
+    let screamer = load_pro_pedal_sub("pedals/legends/screamer.pedal")?;
+    let sd1 = load_pro_pedal_sub("pedals/legends/sd1.pedal")?;
+
+    Some(vec![
+        CircuitRegressionSpec {
+            name: "Goldenrod",
+            source: goldenrod,
+            checks: GOLDENROD_CHECKS,
+        },
+        CircuitRegressionSpec {
+            name: "Ratking",
+            source: ratking,
+            checks: RATKING_CHECKS,
+        },
+        CircuitRegressionSpec {
+            name: "Screamer",
+            source: screamer,
+            checks: SCREAMER_CHECKS,
+        },
+        CircuitRegressionSpec {
+            name: "SD-1",
+            source: sd1,
+            checks: SD1_CHECKS,
+        },
+    ])
+}
 
 #[test]
 fn legends_audio_regression_matrix() {
-    run_circuit_matrix(LEGENDS, STANDARD_VARIANTS);
+    let legends = match load_legends() {
+        Some(v) => v,
+        None => {
+            eprintln!("  SKIP: legends not found (pro repo not present)");
+            return;
+        }
+    };
+    run_circuit_matrix(&legends, STANDARD_VARIANTS);
 }
 
 #[test]
 fn legends_stage_impl_differential_smoke() {
+    let legends = match load_legends() {
+        Some(v) => v,
+        None => {
+            eprintln!("  SKIP: legends not found (pro repo not present)");
+            return;
+        }
+    };
     const VARIANTS: &[CompileVariant] = &[
         CompileVariant::Default,
         CompileVariant::DisableIir,
         CompileVariant::SkipBlockwise,
     ];
-    run_circuit_matrix_named("audio_matrix_stage_differential", LEGENDS, VARIANTS);
+    run_circuit_matrix_named("audio_matrix_stage_differential", &legends, VARIANTS);
 }
