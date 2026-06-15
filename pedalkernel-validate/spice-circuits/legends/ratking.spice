@@ -1,0 +1,93 @@
+* ============================================================================
+* ProCo RAT v1a — Full Signal Path
+* PedalKernel Legends Validation Circuit
+* ============================================================================
+*
+* Topology (mirrors ratking_non_invert_v1a.pedal in pedalkernel-pro/pedals/legends/):
+*   1. Input network   — C1 (22nF) DC-block + R1 (1M) pulldown + R2 (1M) bias to Vref
+*                        R3 (1k) input protection + C2 (1nF) RF shunt to ground
+*   2. Gain stage      — U1 ideal VCVS non-inverting opamp (LM308 equivalent)
+*                        Feedback: Distortion pot (100k, pos=0.5 → 50k) in parallel
+*                          with C3 (30pF compensation) and C4 (100pF HF rolloff)
+*                        Ground leg: R4 (47Ω)+C5 (2.2µF) // R5 (560Ω)+C6 (4.7µF)
+*   3. Clipping stage  — C7 (4.7µF) AC coupling + R6 (1k) current limiter
+*                        D1/D2 1N914 anti-parallel hard clip to ground
+*   4. Tone control    — Filter pot (100k, pos=0.3 → 30k) + R7 (1.5k) + C8 (3.3nF)
+*                        passive variable lowpass (fc ≈ 1.5kHz at pos=0.3)
+*   5. Output stage    — C_out (4.7µF) coupling + Volume pot (100k, pos=0.5)
+*
+* Control positions (nominal, mid-settings):
+*   Distortion = 0.5  → 50k in feedback
+*   Filter     = 0.3  → 30k in tone RC (fc ≈ 1/(2π×31.5k×3.3nF) ≈ 1.5kHz)
+*   Volume     = 0.5  → Rvol_top=50k, Rvol_bot=50k (wiper at v_out)
+*
+* Supply: VCC = 9V
+*   Vref = 4.5V (ideal voltage source, models R2-to-VCC bias path)
+*   In the real RAT, R2 (1M) biases the non-inverting input to VCC/2 via R1 (1M to gnd)
+*
+* Op-amp model: ideal VCVS (gain=100000)
+*   The LM308's 0.3 V/µs slew rate is not modelled — this validates the linear/
+*   nonlinear frequency response, not the slew distortion character.
+*
+* Diode model: 1N914 (standard silicon)
+*   Is=4.35n N=1.906 Rs=0.6 Cjo=2p
+* ============================================================================
+
+* ---- Supply -----------------------------------------------------------------
+VCC  vcc  0    DC 9
+Vref vref 0    DC 4.5
+
+* ---- Input network ----------------------------------------------------------
+* C1 blocks DC. R1 pulldown, R2 biases to Vref. R3 protects opamp input. C2 RF shunt.
+C1   v_in    v_in_r  22n
+R1   v_in_r  0       1MEG
+R2   v_in_r  vref    1MEG
+R3   v_in_r  v_u1pos 1k
+C2   v_u1pos 0       1n
+
+* ---- Non-inverting gain stage (U1) -----------------------------------------
+* Feedback: Distortion pot (pos=0.5, audio taper ≈ 50k linear approx) + C3 // C4.
+* pedal: U1.out → Distortion.a, Distortion.b → U1.neg (2-terminal pot)
+Rdist  v_u1out v_u1neg 50k
+
+* Compensation cap C3 (30pF, LM308 dominant-pole pin 1/8)
+C3     v_u1out v_u1neg 30p
+
+* HF rolloff cap C4 (100pF) across feedback
+C4     v_u1out v_u1neg 100p
+
+* Ground leg 1: R4 (47Ω) + C5 (2.2µF) series, HPF pole at ~1539Hz
+R4     v_u1neg v_r4c5  47
+C5     v_r4c5  0       2.2u
+
+* Ground leg 2: R5 (560Ω) + C6 (4.7µF) series, HPF pole at ~60Hz
+R5     v_u1neg v_r5c6  560
+C6     v_r5c6  0       4.7u
+
+* U1: ideal VCVS non-inverting opamp
+Eu1    v_u1out 0       v_u1pos v_u1neg  100000
+
+* ---- Hard clipping to ground -----------------------------------------------
+* C7: AC coupling (4.7µF). R6: current limiter (1k).
+* D1 clips positive swings; D2 clips negative swings.
+C7     v_u1out v_c7out 4.7u
+R6     v_c7out v_clip  1k
+D1     v_clip  0       D1N914
+D2     0       v_clip  D1N914
+.model D1N914 D(Is=4.35n N=1.906 Rs=0.6 Cjo=2p)
+
+* ---- Passive tone control (variable lowpass) --------------------------------
+* pedal: R6.b → Filter.a, Filter.b → R7.a, R7.b → C8.a, C8.b → gnd
+* Filter pot (pos=0.3, linear approx → 30k), R7 (1.5k), C8 (3.3nF) shunts HF.
+* fc = 1/(2π × (Rfilter + R7) × C8) = 1/(2π × 31.5k × 3.3n) ≈ 1.5kHz
+Rfilter v_clip      v_filt_mid 30k
+R7      v_filt_mid  v_c8_top   1.5k
+C8      v_c8_top    0          3.3n
+
+* ---- Output stage ----------------------------------------------------------
+* pedal: R7.b → C_out.a, C_out.b → Volume.a, Volume.w → out, Volume.b → gnd
+* C_out (4.7µF) blocks DC. Volume pot (100k, pos=0.5) bleeds to ground.
+C_out    v_c8_top  v_cvol  4.7u
+Rvol_top v_cvol    v_out   50k
+Rvol_bot v_out     0       50k
+

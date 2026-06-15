@@ -1,0 +1,122 @@
+* ============================================================================
+* Boss SD-1 Super OverDrive — Full Signal Path
+* PedalKernel Legends Validation Circuit
+* ============================================================================
+*
+* Topology (mirrors sd1.pedal in pedalkernel-pro/pedals/legends/):
+*   1. Bias network    — R_v1 (10k) / R_v2 (10k) → VB = 4.5V (C_v 47µF bypass)
+*   2. Input coupling  — Cin (47nF) + R_in (470k) shunt to ground
+*   3. Clipping stage  — U1 (JRC4558) non-inverting:
+*                          C_c1 (1µF) input coupling + R_b1 (10k) bias to VB
+*                          Feedback: Drive pot (500k, pos=0.5→250k) in feedback path
+*                            Minimum R_clip (4.7k) + C_clip (39pF) HF rolloff
+*                          HP rolloff: R_hp (4.7k) + C_hp (47nF) in neg-feedback-to-gnd
+*                          ASYMMETRIC diodes: D_si (1N914 silicon) + D_ge (germanium)
+*                            antiparallel in feedback — different forward voltages
+*                            D_si: ~0.6V clips positive; D_ge: ~0.25V clips negative
+*   4. Tone control    — R_t1 (1k) + Tone pot (20k, pos=0.5) passive RC network
+*                          Bass: C_t1 (220nF) shunt; Treble: R_t2 (1k) + C_t2 (47nF)
+*                          U2 (JRC4558) unity-gain voltage follower
+*   5. Output stage    — C_c2 (1µF) coupling + Level pot (100k, pos=0.7)
+*                          C_out (10µF) + R_out_s (1k) series + R_out_g (10k) shunt
+*
+* Control positions (nominal, mid-drive):
+*   Drive  = 0.5  → Rdrive: top=250k, bot=250k (feeds back to U1.neg through R_clip)
+*   Tone   = 0.5  → Rtone: top=10k, bot=10k
+*   Level  = 0.7  → Rlevel: top=30k, bot=70k (audio taper)
+*
+* Supply: VCC = 9V, VB = 4.5V (ideal voltage source for clarity)
+*
+* Op-amp model: ideal VCVS (gain=100000) for both U1 (JRC4558) and U2.
+*   The JRC4558's moderate slew rate character is not modelled here.
+*
+* Diode models:
+*   D_si (1N914 silicon): Is=4.35n N=1.906 Rs=0.6 Cjo=2p  (Vf≈0.6V)
+*   D_ge (germanium, D9E-type): Is=200n N=1.4 Rs=20 Cjo=2p (Vf≈0.25V)
+*
+* The asymmetry between D_si and D_ge is the defining SD-1 character:
+*   - Positive half: clipped at ~0.6V (harder, more symmetric with TS808)
+*   - Negative half: clipped at ~0.25V (softer, earlier, more even harmonics)
+* ============================================================================
+
+* ---- Supply and bias -------------------------------------------------------
+VCC  vcc  0  DC 9
+Vbias vb  0  DC 4.5
+
+R_v1  vcc  vb1   10k
+R_v2  vb1  0     10k
+C_v   vb1  0     47u
+
+* ---- Input coupling --------------------------------------------------------
+* Cin blocks DC; R_in shunts to ground (pedal input impedance).
+Cin   v_in    v_in_r   47n
+R_in  v_in_r  0        470k
+
+* ---- Clipping stage (U1, non-inverting) ------------------------------------
+* C_c1 couples input to U1+ ; R_b1 biases U1+ to VB.
+C_c1  v_in_r  v_u1pos  1u
+R_b1  v_u1pos vb1      10k
+
+* HP network in negative feedback:
+* R_hp from U1.neg to v_hp; C_hp from v_hp to ground.
+* fc ≈ 1/(2π × 4.7k × 47n) ≈ 720Hz (same as TS808).
+R_hp  v_u1neg  v_hp    4.7k
+C_hp  v_hp     0       47n
+
+* Drive pot (500k, pos=0.5 → 250k each half):
+* pedal: U1.out → Drive.a, Drive.b → R_clip → U1.neg
+Rdrive_top  v_u1out   v_drive_w   250k
+Rdrive_bot  v_drive_w v_rclip_in  250k
+
+* Minimum feedback resistor (4.7k, lower than TS808's 51k)
+R_clip  v_rclip_in  v_u1neg  4.7k
+
+* ASYMMETRIC diode pair in feedback:
+* D_si: anode at U1.out → cathode at U1.neg — clips POSITIVE half at ~0.6V
+* D_ge: anode at U1.neg → cathode at U1.out — clips NEGATIVE half at ~0.25V
+D_si  v_u1out  v_u1neg  DSilicon
+D_ge  v_u1neg  v_u1out  DGermanium
+.model DSilicon   D(Is=4.35n N=1.906 Rs=0.6 Cjo=2p)
+.model DGermanium D(Is=200n  N=1.4   Rs=20  Cjo=2p)
+
+* HF rolloff cap in feedback (39pF — slightly tighter than TS808's 47pF)
+C_clip  v_u1out  v_u1neg  39p
+
+* U1: ideal VCVS non-inverting opamp
+Eu1  v_u1out  0  v_u1pos v_u1neg  100000
+
+* ---- Tone control (passive RC blend) + U2 unity buffer ---------------------
+* R_t1 from U1 output to tone network junction v_tone_in.
+R_t1  v_u1out  v_tone_in  1k
+
+* Tone pot (20k, pos=0.5 → 10k each half):
+* top half: v_tone_in → wiper v_tone_w (drives U2.pos)
+* bottom half: v_tone_w → v_tone_bot → C_t1 to gnd (bass path)
+Rtone_top  v_tone_in  v_tone_w    10k
+Rtone_bot  v_tone_w   v_tone_bot  10k
+C_t1       v_tone_bot 0           220n
+
+* Treble path: R_t2 + C_t2 shunt from v_tone_in to ground.
+* (47nF vs 100nF on TS808 — brighter character)
+R_t2  v_tone_in  v_t2c   1k
+C_t2  v_t2c      0       47n
+
+* U2: unity-gain voltage follower (out = in = v_tone_w)
+Eu2  v_u2out  0  v_tone_w v_u2out  100000
+
+* ---- Output: coupling, level, output network --------------------------------
+* C_c2: DC blocking 1µF.
+C_c2  v_u2out  v_level_in  1u
+
+* Level pot (100k, pos=0.7 audio taper):
+* Audio taper at 0.7: bottom ≈ 70k, top ≈ 30k.
+Rlevel_top  v_level_in  v_level_w  30k
+Rlevel_bot  v_level_w   0          70k
+
+* C_out: output coupling 10µF.
+C_out  v_level_w  v_cout_out  10u
+
+* Output network: R_out_s (1k) series, R_out_g (10k) shunt to ground.
+R_out_s  v_cout_out  v_out  1k
+R_out_g  v_out       0      10k
+
