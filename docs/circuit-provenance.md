@@ -11,18 +11,45 @@ Every `.pedal` file in the repo, stamped for provenance. Generated 2026-06-12
 from file headers, `git log` dates, and the 2026-06-12 outboard/Eurorack audit
 (`reports/outboard-gear-audit-2026-06-12.md`,
 `reports/outboard-fix-and-product-plan-2026-06-12.md`).
+**Re-stamped 2026-06-13** under a stricter `[V]` rule (see Stamp semantics):
+`[V]` now requires no-simplifications topology fidelity, demoting eight
+previously-`[V]` inspired/simplified circuits to the new `[S]` tier.
 
 ## Stamp semantics
 
-- **[V] Verified** — the header cites a schematic-level source AND the
-  component values were cross-checked against that source (either during the
-  2026-06-12 research session, or at the file's own documented verification
-  date). Several [V] files additionally flag *individual* values as `[V]`
-  (verified) or `[A]` (approximate/adapted) inline — the Eurorack headers are
-  the exemplar.
+> **Definition tightened 2026-06-13 (owner direction).** `[V] Verified` now
+> requires *topology fidelity with no simplifications* — a circuit whose
+> `.pedal` header carries a `SIMPLIFICATIONS` section, or that is "inspired-by"
+> / topology-simplified, can no longer be `[V]` regardless of how well its
+> component values are sourced. Such circuits move to the new `[S]` tier. The
+> earlier (2026-06-12) registry over-credited several inspired/simplified
+> circuits as `[V]` for merely having sourced values; this re-stamp corrects
+> that.
+
+The stamp is provenance-only (three axes: topology fidelity, citation quality,
+value cross-check). It is **separate** from the Engine-status column, which
+records what the engine actually does with the circuit.
+
+- **[V] Verified** — the topology is faithful to the cited real schematic
+  (**no `SIMPLIFICATIONS` section**, not "inspired-by"), the citation is a
+  real schematic-level source (not "names only"), **and** the component values
+  are cross-checked against that source. This is the full bar: faithful
+  topology + no simplifications + real cited schematic + sourced values. Any
+  behavioral/SPICE validation is noted separately in Engine-status — it is a
+  bonus, not part of the `[V]` bar, but a circuit cannot be `[V]` on
+  behavioral grounds alone.
+- **[S] Sourced / Inspired** — real-sourced component values, **but** the
+  topology is simplified (the header carries a `SIMPLIFICATIONS` section)
+  and/or the circuit is "inspired-by" rather than a faithful 1:1 recreation,
+  and/or its behavior is unvalidated/known-wrong. The values are trustworthy;
+  the *circuit* is not a faithful copy. Most of the 2026-06-12 outboard and
+  Eurorack circuits live here. Several `[S]` files additionally flag
+  *individual* values as `[V]` (verified) or `[A]` (approximate/adapted)
+  inline — the Eurorack headers are the exemplar of that per-value format.
 - **[C] Cited** — the header names a source (e.g. "ElectroSmash analysis",
-  "R.G. Keen"), but the values have not been independently re-checked this
-  session. Last-checked = not re-verified; the git date is the best bound.
+  "R.G. Keen"), but the values have not been independently cross-checked, or
+  the citation is names-only with no schematic-level cross-check. Last-checked
+  = not re-verified; the git date is the best bound.
 - **[U] Uncited** — the header describes the modeled unit but names no
   schematic source. Needs provenance work before any accuracy claim.
 
@@ -105,10 +132,10 @@ datasheets) — **names only, no URLs were recorded in these headers**.
 
 | Circuit | Models | Source (as cited in header) | Stamp | Last checked | Engine status (2026-06-12) |
 |---|---|---|---|---|---|
-| `compressor/fet_leveler.pedal` | Urei 1176LN rev D "blackface" (1970) | unit-level provenance block (topology, time constants, ratios); source family per audit report — names only | [V] | 2026-06-12 | Envelope→JFET path live (F5 fixed) but feedback detector starved: ~0 dB GR until makeup-gain (G5) and transformer ~19 dB defects are fixed |
-| `compressor/opto_leveler.pedal` | Teletronix LA-2A (~1962) | unit-level provenance block (T4B time constants) — names only | [V] | 2026-06-12 | **Wrong-direction dynamics** — photocoupler modeled as series gain, produces expansion not compression, pending F6; also F14 LSB nondeterminism |
-| `compressor/vca_bus_comp.pedal` | SSL 4000 G bus comp / dbx 160 hybrid | unit-level provenance block (dbx 202C/2180, SSL auto-release RC pairs, dbx RMS detector) — names only | [V] | 2026-06-12 | **No compression** — `vca()` is an unstamped stub (`vcas: Vec::new()`), pending F8; inverting op-amp stages compile to silence (F3) |
-| `eq/passive_lc_eq.pedal` | Pultec EQP-1A (~1961), passive section | unit-level provenance block (real frequencies, real inductor taps 27–150 mH) — names only | [V] | 2026-06-12 | Works passive-only with responsive controls; every makeup stage flattens/kills the network (F10), switched components collapse to passthrough (F7) |
+| `compressor/fet_leveler.pedal` | Urei 1176LN rev D "blackface" (1970), 1176-INSPIRED | unit-level provenance block (topology, time constants, ratios); source family per audit report — names only; carries `SIMPLIFICATIONS` section | [S] | 2026-06-13 | Envelope→JFET path live (F5 fixed) but feedback detector starved: ~0 dB GR until makeup-gain (G5) and transformer ~19 dB defects are fixed |
+| `compressor/opto_leveler.pedal` | Teletronix LA-2A (~1962), LA-2A-INSPIRED | unit-level provenance block; T4B opto values named-only; carries `SIMPLIFICATIONS` section — uses an envelope-follower detector the real LA-2A lacks | [S] | 2026-06-13 | **Wrong-direction dynamics** — photocoupler modeled as series gain, produces expansion not compression; attack/behaviour wrong, pending F6; also F14 LSB nondeterminism. A true-`[V]` 1:1 LA-2A rebuild (no simplifications) is in progress. |
+| `compressor/vca_bus_comp.pedal` | SSL 4000 G bus comp / dbx 160 hybrid, INSPIRED | unit-level provenance block (dbx 202C/2180, SSL auto-release RC pairs, dbx RMS detector) — names only; carries `SIMPLIFICATIONS` section | [S] | 2026-06-13 | **No compression** — `vca()` is an unstamped stub (`vcas: Vec::new()`), pending F8; inverting op-amp stages compile to silence (F3) |
+| `eq/passive_lc_eq.pedal` | Pultec EQP-1A (~1961), passive section, SIMPLIFIED | unit-level provenance block (real frequencies, real inductor taps 27–150 mH) — names only; carries `SIMPLIFICATIONS` section | [S] | 2026-06-13 | Works passive-only with responsive controls; every makeup stage flattens/kills the network (F10), switched components collapse to passthrough (F7) |
 
 ## Eurorack (`pedalkernel/examples/eurorack/`)
 
@@ -118,9 +145,9 @@ is **untracked** (created this session, no git date yet; owned by another agent)
 
 | Circuit | Models | Source (as cited in header) | Stamp | Last checked | Engine status (2026-06-12) |
 |---|---|---|---|---|---|
-| `acid/tb303_vcf.pedal` | Roland TB-303 diode-ladder VCF | T. Stinchcombe filter papers (`timstinchcombe.co.uk`); x0xb0x BOM (`ladyada.net`); WimOliphant KiCad recreation — name only; Roland TB-303 service notes — name only | [V] | 2026-06-12 | Gated by F13 (Eurorack line); knob direction inverted vs hardware (documented); top common-base pair approximated as a fourth rung |
-| `drums/kick_808.pedal` | Roland TR-808 bass drum voice | Werner/Smith/Abel DAFx-14 paper — name only; Werner PhD thesis (`purl.stanford.edu/jy057cz8322`); Roland TR-808 service notes — name only; Tiptop BD808 manual — name only | [V] | 2026-06-12 | Resonator works; decay-regeneration feedback unbuildable (every wiring breaks the engine — F13a family), ships at hardware minimum-decay; trigger needs series R workaround |
-| `drums/snare_808.pedal` | Roland TR-808 snare (tonal path) | Werner TR-808 analysis series — name only; Werner PhD thesis (`purl.stanford.edu/jy057cz8322`); Roland TR-808 service notes — name only; Tiptop SD808 manual — name only | [V] | 2026-06-12 | Parallel resonator branches don't sum, blend pot inert (F13b); injection point moved vs hardware (documented); no noise "snappy" path (no noise primitive in DSL) |
+| `acid/tb303_vcf.pedal` | Roland TB-303 diode-ladder VCF, APPROXIMATED | T. Stinchcombe filter papers (`timstinchcombe.co.uk`); x0xb0x BOM (`ladyada.net`); WimOliphant KiCad recreation — name only; Roland TB-303 service notes — name only | [S] | 2026-06-13 | Gated by F13 (Eurorack line); knob direction inverted vs hardware (documented); top common-base pair approximated as a fourth rung (documented topology approximation — not a faithful copy) |
+| `drums/kick_808.pedal` | Roland TR-808 bass drum voice, SIMPLIFIED | Werner/Smith/Abel DAFx-14 paper — name only; Werner PhD thesis (`purl.stanford.edu/jy057cz8322`); Roland TR-808 service notes — name only; Tiptop BD808 manual — name only; carries `SIMPLIFICATIONS` section | [S] | 2026-06-13 | Resonator works; decay-regeneration feedback unbuildable (every wiring breaks the engine — F13a family), ships at hardware minimum-decay; trigger needs series R workaround |
+| `drums/snare_808.pedal` | Roland TR-808 snare (tonal path), SIMPLIFIED | Werner TR-808 analysis series — name only; Werner PhD thesis (`purl.stanford.edu/jy057cz8322`); Roland TR-808 service notes — name only; Tiptop SD808 manual — name only; carries `SIMPLIFICATIONS` section | [S] | 2026-06-13 | Parallel resonator branches don't sum, blend pot inert (F13b); injection point moved vs hardware (documented); no noise "snappy" path (no noise primitive in DSL) |
 
 ## Root-level (`ratking_*.pedal`)
 
@@ -128,8 +155,8 @@ The RAT product line's working files. Both git-dated 2026-04-22.
 
 | Circuit | Models | Source (as cited in header) | Stamp | Last checked | Engine status (2026-06-12) |
 |---|---|---|---|---|---|
-| `ratking_non_invert.pedal` | ProCo RAT (1978 / 1988 Whiteface), v5 non-inverting rewrite | "ElectroSmash verified schematic" — name only; full real BOM transcribed in header with derived pole frequencies | [V] | 2026-04-22 (v5 rewrite; ElectroSmash BOM cross-check documented in header) | — |
-| `ratking_non_invert_v1a.pedal` | Same, v5a variant | same as above | [V] | 2026-04-22 | JFET output buffer deliberately omitted — incomplete JFET Rds modeling kills the signal (documented in header); restore when JFET modeling is solid |
+| `ratking_non_invert.pedal` | ProCo RAT (1978 / 1988 Whiteface), v5 non-inverting rewrite | "ElectroSmash verified schematic"; full real BOM transcribed in header with derived pole frequencies, cross-checked | [V] | 2026-06-13 (v5 rewrite; ElectroSmash BOM cross-check documented in header; no `SIMPLIFICATIONS` section, full topology incl. JFET buffer) | — |
+| `ratking_non_invert_v1a.pedal` | Same, v5a variant, SIMPLIFIED | same BOM/citation as above | [S] | 2026-06-13 | JFET output buffer **deliberately omitted** — a documented topology deviation from the real circuit (incomplete JFET Rds modeling kills the signal); restore when JFET modeling is solid. Values sourced, topology not faithful → `[S]`. |
 
 ## Test fixtures (`pedalkernel/tests/test_pedals/`) — summarized
 
@@ -173,10 +200,42 @@ product and are itemized:
 
 ## Stamp totals (35 itemized circuits; 108 further fixtures summarized)
 
-- **[V] Verified: 9** — 4 outboard, 3 Eurorack, 2 ratking
-- **[C] Cited: 3** — fuzz_face, sd1, phase90
+Re-stamped 2026-06-13 under the tightened `[V]` rule (topology fidelity + no
+simplifications + real cited schematic + sourced values). The earlier registry
+counted 9 `[V]`; eight of those carried `SIMPLIFICATIONS` sections or
+documented "inspired-by"/approximated topology and have been demoted to the
+new `[S]` tier.
+
+- **[V] Verified: 1** — `ratking_non_invert.pedal` (faithful non-inverting RAT
+  topology incl. JFET buffer, ElectroSmash-cross-checked BOM, no
+  `SIMPLIFICATIONS` section).
+- **[S] Sourced / Inspired: 8** — `fet_leveler`, `opto_leveler`,
+  `vca_bus_comp`, `passive_lc_eq` (outboard); `tb303_vcf`, `kick_808`,
+  `snare_808` (Eurorack); `ratking_non_invert_v1a` (RAT, JFET buffer omitted).
+  All carry `SIMPLIFICATIONS` sections or documented topology
+  approximations/omissions — sourced values, but not faithful copies.
+- **[C] Cited: 3** — fuzz_face, sd1, phase90.
 - **[U] Uncited: 23** — 10 product pedals, 4 amps, 3 synths, 2 Pultec
-  validation references, 4 product-named test fixtures
+  validation references, 4 product-named test fixtures.
+
+## Path from [S] to [V] (topology-fidelity work)
+
+The eight `[S]` circuits already have sourced values; what blocks `[V]` is
+topology fidelity. To promote any of them: remove the `SIMPLIFICATIONS`
+section by actually implementing the omitted/approximated topology against the
+cited real schematic, then re-cross-check values. Priority:
+
+1. `examples/outboard/compressor/opto_leveler.pedal` — a true-`[V]` 1:1 LA-2A
+   rebuild (real photocoupler GR path, no envelope-follower detector) is in
+   progress; this is the flagship outboard target.
+2. `ratking_non_invert_v1a.pedal` — restore the JFET output buffer once JFET
+   Rds modeling is solid, then it matches `ratking_non_invert.pedal` (`[V]`).
+3. `examples/outboard/compressor/{fet_leveler,vca_bus_comp}.pedal` and
+   `examples/outboard/eq/passive_lc_eq.pedal` — blocked on engine fixes
+   (F5–F10) before a faithful topology is even renderable.
+4. `examples/eurorack/{drums/kick_808,drums/snare_808,acid/tb303_vcf}.pedal` —
+   blocked on the F13 Eurorack-line engine work; their simplifications are
+   currently engine-forced, not authoring choices.
 
 ## Needs provenance work (ranked by product importance)
 
