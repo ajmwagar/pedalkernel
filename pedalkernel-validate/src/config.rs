@@ -2032,7 +2032,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "tape/tape_head_saturation.pedal".to_string(),
                         description:
-                            "Voltage-driven J-A tape head: clean->saturated vs ngspice (PENDING golden)"
+                            "Voltage-driven J-A tape head: clean->saturated vs ngspice (KNOWN DIVERGENCE — engine-side, tracked)"
                                 .to_string(),
                         signals: vec![
                             // Clean: well below the ~1 V J-A knee.
@@ -2055,14 +2055,23 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             MetricConfig::Thd { fundamental: 120.0 },
                         ],
                         pass_criteria: PassCriteria {
-                            // PROVISIONAL — not yet measured vs a golden.
+                            // Real match targets vs the ngspice J-A golden. The WDF
+                            // tape head currently FAILS these (measured 2026-06-15:
+                            // clean RMS -4.1dB/THD 9.57dB, saturated RMS -4.8dB/
+                            // spectral 33.4dB/THD 17.74dB). Surfaced as a live gate
+                            // failure rather than hidden — engine-side divergence,
+                            // tracked for fix (port-R adaptation + discrete H-step
+                            // integration vs ngspice continuous). Test passes once
+                            // the element matches the reference.
                             normalized_rms_error_db: Some(-6.0),
                             peak_error_db: Some(-6.0),
-                            thd_error_db: Some(200.0), // THD diff disabled until golden measured
+                            thd_error_db: Some(3.0),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: true,
+                        // Golden generated from ngspice (2026-06-15). Active in the
+                        // gate; not hidden behind pending_reference.
+                        pending_reference: false,
                     },
                 );
 

@@ -79,24 +79,31 @@ BdmanH dmanh 0 V = Ms * LangD( (V(h) + Alpha*V(m)) / Aja ) / Aja
 *   den    = delta*k*(1-c) - alpha*diff       (sign-preserving eps guard)
 *   slope  = (1-c)*deltaM*diff/den + c*dM_an/dH       (>= c*dM_an/dH, >= 0)
 * --------------------------------------------------------------------------
-Bslope slope 0 V =
-+ ( max(
-+     ( (1-Cja) * (((V(man)-V(m))*(V(hdot)>=0 ? 1 : -1)) >= 0 ? 1 : 0) * (V(man)-V(m)) )
-+     / ( abs( (V(hdot)>=0 ? 1 : -1)*Kja*(1-Cja) - Alpha*(V(man)-V(m)) ) < 1e-9*(1+abs(V(man)-V(m)))
-+         ? ( ((V(hdot)>=0 ? 1 : -1)*Kja*(1-Cja) - Alpha*(V(man)-V(m))) >= 0 ? 1e-9*(1+abs(V(man)-V(m))) : -1e-9*(1+abs(V(man)-V(m))) )
-+         : ( (V(hdot)>=0 ? 1 : -1)*Kja*(1-Cja) - Alpha*(V(man)-V(m)) ) )
-+     + Cja*V(dmanh),
-+   Cja*V(dmanh) ) , 0 )
+* ngspice cannot parse the monolithic nested-ternary form LTspice accepts, so
+* the J-A slope is decomposed into intermediate behavioural nodes (same math):
+Bdelta  delta  0 V = (V(hdot) >= 0 ? 1 : -1)
+Bdiff   diff   0 V = V(man) - V(m)
+BdeltaM deltaM 0 V = ((V(diff)*V(delta)) >= 0 ? 1 : 0)
+Bden    den    0 V = V(delta)*Kja*(1-Cja) - Alpha*V(diff)
+* sign-preserving eps guard on the denominator (matches element/jiles_atherton.rs):
+Bdeng   deng   0 V = (abs(V(den)) < 1e-9*(1+abs(V(diff))) ? (V(den) >= 0 ? 1e-9*(1+abs(V(diff))) : -1e-9*(1+abs(V(diff)))) : V(den))
+* slope = (1-c)*deltaM*diff/den + c*dM_an/dH, clamped >= c*dM_an/dH (>= 0):
+Bslope  slope  0 V = max( (1-Cja)*V(deltaM)*V(diff)/V(deng) + Cja*V(dmanh), Cja*V(dmanh) )
 
 * --------------------------------------------------------------------------
 * Integrate M in TIME along the J-A trajectory:  dM/dt = (dM/dH)*(dH/dt)
 * (rate-independent slope -> identical H->M curve as the element).
 * Seed M at the anhysteretic value at the bias field (matches reset()):
 *   M0 = Ms*L(Hbias/a) approx (alpha*M term negligible at seed).
-* ic on the Sdt integrator sets the initial magnetization.
+* ic on the integrator sets the initial magnetization.
+* ngspice has no sdt()/idt(): realize the integral with a native 1 F capacitor
+* integrator — a current source drives charge dM = (slope*hdot) dt onto C_m, so
+* V(m) = (1/C)*integral = integral(slope*hdot) dt for C = 1 F. ic seeds M0.
 * --------------------------------------------------------------------------
 .param M0={Ms*( abs(Hbias/Aja) < 1e-4 ? ((Hbias/Aja)/3) : (1/tanh(Hbias/Aja) - Aja/Hbias) )}
-Bm m 0 V = sdt( V(slope)*V(hdot), M0 )
+B_mi 0 m I = V(slope)*V(hdot)
+C_m  m 0 1 ic={M0}
+R_m  m 0 1e12
 
 * --------------------------------------------------------------------------
 * Port current law:  i(V) = Gp*V + Isat*M/Ms, sunk by the head at v_out.

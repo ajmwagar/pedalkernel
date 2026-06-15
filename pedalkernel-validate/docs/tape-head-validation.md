@@ -19,20 +19,30 @@ The head is the only nonlinear element: `in -[R_pri 470]-> tape_head -> out`,
 reaches the J-A knee at ~1 V line level and THD climbs with drive — unlike the
 current-driven transformer core (`magnetics_external` suite).
 
-## Status: PENDING until the golden is generated
+## Status: ACTIVE — known engine-side divergence (2026-06-15)
 
-The test ships with `pending_reference: true`. While the golden `.npy` is
-missing, the runner reports it as **`[PEND]`** and **excludes it from both the
-passed count and the total** in the pass-rate gate — so committing the test
-before its golden exists does **not** move the `N/N passed` denominator.
+The ngspice golden was generated on 2026-06-15 (ngspice now available locally;
+the deck was ported off LTspice-only constructs — `sdt()` → a native 1 F
+capacitor integrator, and the monolithic nested-ternary `Bslope` decomposed into
+intermediate behavioural nodes). The test is now **active** (`pending_reference:
+false`) and **deliberately failing the gate** rather than hidden — we don't gate
+known failures.
 
-Once the golden files are dropped into
-`golden/tape/tape_head_saturation/{clean,saturated}.npy`, the test runs and is
-compared normally **regardless of the flag** — it auto-activates into the gate
-with no code change.
+Measured WDF-vs-ngspice divergence (96 kHz × 4):
 
-(A *non*-`pending_reference` test with a missing golden still **fails** loudly,
-so accidental golden deletion elsewhere is still caught.)
+| Signal | RMS err | Peak err | Spectral | THD err |
+| --- | --- | --- | --- | --- |
+| clean (0.1 V, below knee) | −4.1 dB | −3.7 dB | 9.4 dB | 9.57 dB |
+| saturated (2.0 V) | −4.8 dB | −4.3 dB | 33.4 dB | 17.74 dB |
+
+The reference deck faithfully models the ground-truth physics (explicit
+`R_pri`/`R_load` divider + head current law `i = Gp·V + Isat·M/Ms`, same M
+integral as the element), so the divergence is **engine-side**. Suspected
+mechanisms (build-confirm pending): the WDF port-resistance (`Rp`) adaptation vs
+the divider loading (clean-regime level error), and the element's
+one-implicit-field-step-per-sample H-domain integration vs ngspice's continuous
+integration through the `sign(dH)` branch kink (saturated harmonics). Tracked in
+bead **pedalkernel-x0mv**; the test passes once the element matches the golden.
 
 ## Regenerating the golden (requires ngspice)
 
