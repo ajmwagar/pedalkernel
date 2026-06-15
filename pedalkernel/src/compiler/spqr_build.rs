@@ -1786,6 +1786,36 @@ pub fn compile_via_spqr_with_options(
         (d, ff as u8) // false=0 sorts before true=1
     });
 
+    // F13b: wire parallel branches into the convergence mixer. The convergence
+    // stage reads its driver voltages from `node_signals`, so each upstream
+    // active branch whose output node is one of those drivers must PUBLISH its
+    // per-sample output to the bus (and stop overwriting the serial chain — the
+    // convergence stage owns the serial output). Branches keep reading the serial
+    // `signal`, which is the shared drive (stage 0's conditioned trigger): because
+    // branches publish to the bus and never to serial, sibling branches all see
+    // the same drive instead of cascading.
+    {
+        let driver_nodes: std::collections::HashSet<NodeId> = stages
+            .iter()
+            .filter_map(|s| match s {
+                Stage::Wdf(w) => w.convergence.as_ref(),
+                _ => None,
+            })
+            .flat_map(|cs| cs.branches.iter().map(|b| b.source_node_id))
+            .collect();
+        if !driver_nodes.is_empty() {
+            for stage in &mut stages {
+                if let Stage::StateSpace(ss) = stage {
+                    if let Some(out_node) = ss.output_binding.map(|b| b.binding_id.get()) {
+                        if driver_nodes.contains(&out_node) {
+                            ss.output_node_id = out_node;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // When thermal is enabled, snapshot base BJT models so apply_thermal()
     // can modulate them without accumulating multipliers.
     if options.thermal {
@@ -2617,7 +2647,153 @@ fn build_passive_rtype_stage(
         Oversampler::new(OversamplingFactor::X1),
     );
     wdf.output_probe = None;
+
+    // F13b: detect a parallel-branch convergence mixer and attach a superposition
+    // summation. NARROW by construction — only resistive groups whose boundary
+    // includes >=2 distinct op-amp-output nodes AND the global `out` qualify, so
+    // every single-source passive group is completely unaffected (zero-diff).
+    if let Some(cs) = try_build_convergence_sum(edge_indices, graph) {
+        wdf.convergence = Some(cs);
+    }
+
     Some(wdf)
+}
+
+/// Detect and build a parallel-branch convergence summation (F13b).
+///
+/// Predicate (intentionally narrow): the group's boundary nodes must include
+/// **two or more distinct op-amp output nodes** (driving ideal voltage sources)
+/// AND the group must touch the global `out` node. This is exactly the
+/// "several active branches mixed to the output" topology (the 808 snare's two
+/// bridged-T resonators into the blend pot). Single-source groups, bias
+/// dividers, tone stacks, and ordinary serial passives all fail the predicate
+/// and are untouched.
+///
+/// When it matches, the gains are solved by DC superposition (see
+/// [`ConvergenceSum::recompute_gains`]).
+fn try_build_convergence_sum(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+) -> Option<pedalkernel_rt::convergence::ConvergenceSum> {
+    use pedalkernel_rt::convergence::{ConvergenceBranch, ConvergenceSum, FixedBranch, PotBranch};
+
+    let is_ground = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+
+    let terminals = compute_group_terminals(edge_indices, graph, &[graph.in_node, graph.out_node]);
+
+    // Must reach the global output.
+    if !terminals.iter().any(|&t| t == graph.out_node) {
+        return None;
+    }
+
+    // Driver nodes = boundary terminals that are an op-amp `out` node of an
+    // op-amp NOT contained in this group (a genuine upstream voltage source).
+    let group_comps: std::collections::HashSet<usize> = edge_indices
+        .iter()
+        .map(|&e| graph.edges[e].comp_idx)
+        .collect();
+    let mut driver_nodes: Vec<NodeId> = Vec::new();
+    for &t in &terminals {
+        if t == graph.out_node || is_ground(t) {
+            continue;
+        }
+        let is_upstream_opamp_out = graph
+            .nullor_pins
+            .iter()
+            .any(|p| p.out_node == t && !group_comps.contains(&p.comp_idx));
+        if is_upstream_opamp_out && !driver_nodes.contains(&t) {
+            driver_nodes.push(t);
+        }
+    }
+    if driver_nodes.len() < 2 {
+        return None;
+    }
+
+    // Build the resistive network over this group's local nodes (excl. ground).
+    let mut local: Vec<NodeId> = Vec::new();
+    let mut local_index = |node: NodeId, local: &mut Vec<NodeId>| -> Option<usize> {
+        if is_ground(node) {
+            return None;
+        }
+        if let Some(p) = local.iter().position(|&n| n == node) {
+            Some(p)
+        } else {
+            local.push(node);
+            Some(local.len() - 1)
+        }
+    };
+
+    let mut fixed_branches: Vec<FixedBranch> = Vec::new();
+    let mut pot_branches: Vec<PotBranch> = Vec::new();
+    for &eidx in edge_indices {
+        let edge = &graph.edges[eidx];
+        let comp = &graph.components[edge.comp_idx];
+        let na = local_index(edge.node_a, &mut local);
+        let nb = local_index(edge.node_b, &mut local);
+        if na.is_none() && nb.is_none() {
+            continue;
+        }
+        if comp.kind.is_pot() {
+            if let Some(pot) = comp
+                .kind
+                .as_any()
+                .downcast_ref::<super::components::Potentiometer>()
+            {
+                let is_aw =
+                    pot_edge_is_aw_half_for_build(graph, &comp.id, edge.node_a, edge.node_b);
+                pot_branches.push(PotBranch {
+                    comp_id: comp.id.clone(),
+                    na,
+                    nb,
+                    max_r: pot.max_r,
+                    taper: pot.taper,
+                    is_aw,
+                    position: 0.5,
+                });
+            }
+        } else if let Some(r) = comp.kind.resistance() {
+            if r > 0.0 {
+                fixed_branches.push(FixedBranch {
+                    na,
+                    nb,
+                    conductance: 1.0 / r,
+                });
+            }
+        }
+        // Reactive/NL elements are intentionally ignored: convergence groups are
+        // resistive by the predicate above (a group containing an NL device would
+        // not have been routed through `build_passive_rtype_stage`).
+    }
+
+    let branches: Vec<ConvergenceBranch> = driver_nodes
+        .iter()
+        .filter_map(|&node| {
+            local
+                .iter()
+                .position(|&n| n == node)
+                .map(|source_local| ConvergenceBranch {
+                    source_node_id: node,
+                    source_local,
+                    gain: 0.0,
+                })
+        })
+        .collect();
+    if branches.len() < 2 {
+        return None;
+    }
+
+    let output_local = local.iter().position(|&n| n == graph.out_node);
+
+    let mut cs = ConvergenceSum {
+        branches,
+        output_node_id: graph.out_node,
+        num_nodes: local.len(),
+        output_local,
+        fixed_branches,
+        pot_branches,
+    };
+    cs.recompute_gains();
+    Some(cs)
 }
 
 fn stamp_linear_transformer_skeleton(
