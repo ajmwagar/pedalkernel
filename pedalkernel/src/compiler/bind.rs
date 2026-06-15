@@ -477,6 +477,7 @@ pub(super) fn build_envelope_bindings(
 ///      [`EnvelopeTapSource::StageOutput`] of the LAST serial stage (the
 ///      tap is output-coupled — a feedback detector, e.g. an 1176 rev D
 ///      tapping the output pot wiper).
+///
 ///    Active devices (transistors, tubes, op-amps, transformers, ...) are
 ///    deliberate walk barriers: a tap behind an amplifier is NOT the same
 ///    signal as the node on the amplifier's other side.

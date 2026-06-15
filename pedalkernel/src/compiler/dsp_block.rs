@@ -5,7 +5,7 @@
 //! per the roadmap — a spring reverb or a delay line) bridged across a
 //! galvanic gap in the netlist, instead of being stamped into the WDF/MNA
 //! core. Such a component contributes no electrical edges (`StampResult::Skip`
-//! + a `Behavioral` edge), so the circuit graph is galvanically cut at its
+//! \+ a `Behavioral` edge), so the circuit graph is galvanically cut at its
 //! audio pins; the surrounding passives compile into separate serial stages
 //! and the runtime block bridges the gap.
 //!

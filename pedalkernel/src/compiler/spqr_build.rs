@@ -1585,8 +1585,10 @@ pub fn compile_via_spqr_with_options(
                 let d = dist[&node];
                 if let Some(neighbors) = adj.get(&node) {
                     for &next in neighbors {
-                        if !dist.contains_key(&next) {
-                            dist.insert(next, d + 1);
+                        if let std::collections::btree_map::Entry::Vacant(e) =
+                            dist.entry(next)
+                        {
+                            e.insert(d + 1);
                             queue.push_back(next);
                         }
                     }
@@ -1851,7 +1853,7 @@ pub fn compile_via_spqr_with_options(
         for stage in &mut stages {
             if let Stage::Wdf(wdf) = stage {
                 if let RootKind::Bjt(bjt) = &wdf.root {
-                    wdf.base_bjt_model = Some(bjt.model.clone());
+                    wdf.base_bjt_model = Some(bjt.model);
                 }
             }
         }
@@ -2682,8 +2684,8 @@ fn build_passive_rtype_stage(
                             &resolved_cfg,
                             a,
                             b,
-                            &bias_node_voltages,
-                            &graph,
+                            bias_node_voltages,
+                            graph,
                         ),
                         _ => None,
                     }
@@ -2847,7 +2849,7 @@ fn try_build_convergence_sum(
     let terminals = compute_group_terminals(edge_indices, graph, &[graph.in_node, graph.out_node]);
 
     // Must reach the global output.
-    if !terminals.iter().any(|&t| t == graph.out_node) {
+    if !terminals.contains(&graph.out_node) {
         return None;
     }
 

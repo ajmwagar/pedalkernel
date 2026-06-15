@@ -65,7 +65,7 @@ const EXP_LUT: [Wave; EXP_LUT_SIZE] = {
 const fn const_exp(x: crate::Wave) -> crate::Wave {
     // Range reduction: exp(x) = 2^k * exp(r) where r = x - k*ln(2)
     // and k = round(x / ln(2))
-    const LN2: crate::Wave = 0.693147180559945309417232121458176568;
+    const LN2: crate::Wave = core::f64::consts::LN_2 as crate::Wave;
     const INV_LN2: crate::Wave = 1.0 / LN2;
 
     let k_f = x * INV_LN2;

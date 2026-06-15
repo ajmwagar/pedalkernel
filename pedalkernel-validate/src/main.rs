@@ -1084,6 +1084,7 @@ fn check_spice() -> anyhow::Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // import helper: each arg is a distinct CSV field selector
 fn import_csv_golden(
     cli: &Cli,
     csv: &std::path::Path,
@@ -1190,6 +1191,7 @@ fn import_csv_golden(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // import helper: each arg is a distinct trace selector
 fn import_ltspice_raw_golden(
     cli: &Cli,
     raw: &std::path::Path,

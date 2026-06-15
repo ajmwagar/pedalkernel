@@ -443,7 +443,7 @@ pub(in crate::compiler) fn build_biquad_table(
         let biquad = mna.build_iir(reactive_one_ports, vs_idx, out_mna, None, sample_rate, None);
 
         if let Some((b, a)) = biquad.filter(|(b, a)| iir_coeffs_are_stable_and_finite(b, a)) {
-            coeffs.push(b.get(0).copied().unwrap_or(0.0));
+            coeffs.push(b.first().copied().unwrap_or(0.0));
             coeffs.push(b.get(1).copied().unwrap_or(0.0));
             coeffs.push(b.get(2).copied().unwrap_or(0.0));
             coeffs.push(a.get(1).copied().unwrap_or(0.0));
@@ -513,12 +513,9 @@ pub(in crate::compiler) fn build_biquad_table(
             continue;
         }
 
-        let Some(nearest_valid) = (0..total_entries)
+        let nearest_valid = (0..total_entries)
             .filter(|&candidate| coeffs[candidate * 5].is_finite())
-            .min_by_key(|&candidate| candidate.abs_diff(entry))
-        else {
-            return None;
-        };
+            .min_by_key(|&candidate| candidate.abs_diff(entry))?;
 
         let nearest_base = nearest_valid * 5;
         for c in 0..5 {

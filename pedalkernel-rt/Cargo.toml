@@ -23,6 +23,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(DISABLED_needs_model_db)',
     'cfg(DISABLED_tests_in_pedalkernel)',
     'cfg(DISABLED_needs_pedalkernel)',
+    'cfg(feature, values("runtime-warnings"))',
 ] }
 
 [dependencies]
