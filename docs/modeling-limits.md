@@ -3,10 +3,10 @@ title: "Modeling limits"
 description: "Where PedalKernel is pure WDF, where it approximates, and why."
 section: "Internals"
 weight: 90
-source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
+source_commit: "222212fe33f0aa223f7d545d890a16654c17cca8"
 watches:
   - pedalkernel/src/compiler/stage.rs
-  - pedalkernel/src/elements/nonlinear/
+  - pedalkernel-rt/src/elements/nonlinear/
   - pedalkernel/src/compiler/rigid/
   - pedalkernel/src/loading.rs
   - pedalkernel/src/oversampling.rs
@@ -30,9 +30,11 @@ These are compiled through the Wave Digital Filter tree and solved per-sample.
 | NPN / PNP BJT | `BjtRoot` (full Gummel-Poon: Early effect, high-injection knees, B-E/B-C leakage, junction capacitances, ohmic Rb/Re/Rc, transit times), Newton-Raphson on `(Vbe, Vce)`. Optional 2D K-method lookup table replaces NR when generated. |
 | N- / P- JFET | WDF root, square-law |
 | N- / P- MOSFET | WDF root, square-law |
-| Triode, pentode, vari-mu | WDF root, Koren equation with softplus smoothing |
+| Triode, pentode, vari-mu | WDF root, Koren equation with softplus smoothing. Common-cathode triodes now route to a 2-port `MultiNlStage` (cathode + plate exposed) so the cathode-bypass cap interacts correctly with the plate load. |
 | OTA (CA3080) | WDF root, hyperbolic-tangent transconductance |
-| Transformers (audio, output, push-pull, center-tap) | Multi-port WDF element |
+| Transformers (audio, output, push-pull, center-tap) | Multi-port T-equivalent WDF model. The magnetizing-branch inductor can be replaced by a **Jiles-Atherton nonlinear core** (`DynNode::JaMagnetizingWithDcBias`) when the DSL config supplies `ja_ms` / `ja_a` / `ja_alpha` / `ja_k` / `ja_c`. Full B-H hysteresis: irreversible (`g`) plus reversible (`r`) magnetisation in the Chowdhury / Holters–Zölzer bulk susceptibility form, advanced by an implicit trapezoidal Newton solve (up to 12 iterations per sample). |
+| Spring reverb tank | DspBlock (Välimäki/Parker 2010): up to 6 parallel dispersive lines, each a cascade of M=32 stretched first-order Schroeder allpasses inside a fractional-delay feedback loop with a one-pole damping LPF. Outputs summed through a 40 Hz DC blocker. Models `type4`, `type8`, `type9`, and Roland `re201_tank`. |
+| Delay line / tap, BBD, VCO, VCA | DspBlock-routed; see [DSP blocks](./dsp-blocks.md). |
 
 Per-device parameters — Shockley `Is`/`n` for diodes, Koren parameters for tubes, full SPICE Gummel-Poon parameter sets for BJTs (from `pedalkernel/src/model_lookup.rs`), thermal coefficients for BJTs / JFETs / tubes — are sourced from datasheets where possible and from industry-standard empirical fits otherwise.
 
@@ -51,6 +53,8 @@ These are modeled with a physical story but simplified for real-time cost or for
 **Rail saturation** is device-aware but not circuit-exact. Op-amps use a symmetric quintic-knee clipper with per-type output swing. BJTs use asymmetric saturation (hard positive knee, soft negative cutoff). FETs use a square-law pinch-off shape. Tubes use grid-conduction / plate-cutoff asymmetry.
 
 **BBD delay** is a first-order physical model: per-stage charge leakage as a delay-dependent low-pass, NE571-style companding with mismatched attack/release, and clock feedthrough as a sine injection at the clock frequency. Real BBD nonlinearities (stage-to-stage variation, temperature drift, clock-to-signal intermodulation) are not captured.
+
+**Multi-network rack circuits** (LA-2A-style chains of input transformer → gain cell → output transformer) couple between galvanically isolated sub-networks using wave-domain incident-wave injection (`pedalkernel-rt::routing::BkmBoundaryDrive`), not a fresh MNA stamp across the boundary. The donor stage publishes a `PortVoltage` at its boundary binding; the recipient port's incident wave is offset by the signed `2V − a` reflection rule before its scattering matrix multiply. This preserves per-sample cost but means the coupling is unidirectional within a sample — back-action from the recipient to the donor lands one sample late, the same one-sample delay every blockwise coupling carries. For most audio circuits that is inaudible; for ultra-low-feedback servo loops it is the next refinement.
 
 **Interstage loading** between pedals is a first-order RC voltage divider. Real pedal-to-pedal interaction is frequency-dependent and slightly nonlinear — especially guitar pickup into a Fuzz Face.
 
