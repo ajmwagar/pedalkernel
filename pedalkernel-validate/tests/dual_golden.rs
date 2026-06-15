@@ -129,6 +129,7 @@ fn missing_wdf_golden_produces_missing_signal_result_not_panic() {
         SignalResult {
             label: "sine".to_string(),
             passed: false,
+            pending: false,
             comparison: None,
             error: Some(msg),
         }
@@ -165,6 +166,7 @@ fn missing_spice_golden_produces_missing_signal_result_not_panic() {
         SignalResult {
             label: "sine".to_string(),
             passed: false,
+            pending: false,
             comparison: None,
             error: Some(msg),
         }
@@ -197,6 +199,7 @@ fn missing_both_goldens_produces_missing_signal_result_not_panic() {
         SignalResult {
             label: "sine".to_string(),
             passed: false,
+            pending: false,
             comparison: None,
             error: Some(msg),
         }
@@ -235,6 +238,7 @@ fn report_json_shape_matches_run_format() {
         "tb303_vcf".to_string(),
         TestResult {
             passed: true,
+            pending: false,
             error: None,
             signals: vec![signal_result],
         },
@@ -247,6 +251,7 @@ fn report_json_shape_matches_run_format() {
             description: "Classic pedal core circuit validation".to_string(),
             passed: 1,
             failed: 0,
+            pending: 0,
             tests,
         },
     );

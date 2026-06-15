@@ -1212,12 +1212,12 @@ fn assemble_multi_nl_stage(
                 }
                 NlDeviceGroupKind::TriodeThreePort(_)
                 | NlDeviceGroupKind::VariMuThreePort(_)
-                | NlDeviceGroupKind::PentodeThreePort(_) => {
+                | NlDeviceGroupKind::PentodeThreePort(_)
+                    if off + 1 < n_nl =>
+                {
                     // Port 0 = Vgk: start at 0 (cold grid, no bias signal yet).
                     // Port 1 = Vpk: warm-start at half supply for faster NR convergence.
-                    if off + 1 < n_nl {
-                        initial_v[off + 1] = supply_voltage * 0.5;
-                    }
+                    initial_v[off + 1] = supply_voltage * 0.5;
                 }
                 _ => {}
             }
