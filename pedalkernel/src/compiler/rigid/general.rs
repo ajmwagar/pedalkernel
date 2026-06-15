@@ -20,7 +20,7 @@ use super::super::classify::NonlinearKind;
 use super::super::component::EdgeKind;
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
-use super::super::helpers::{gummel_poon_model, triode_model, vari_mu_model};
+use super::super::helpers::{gummel_poon_model, pentode_model, triode_model, vari_mu_model};
 use super::super::signal_flow::FlowGroup;
 use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
@@ -961,24 +961,29 @@ fn is_diode_connected_bjt(kind: &NonlinearKind) -> bool {
 
 /// Step 7: Create NL device kinds or grouped multi-port models.
 ///
-/// Triodes with a connected grid node → `TriodeThreePort` / `VariMuThreePort`
-/// grouped path (2 ports each: [Vgk, Vpk]).
+/// Tubes (triodes + pentodes) with a connected grid node → `TriodeThreePort` /
+/// `VariMuThreePort` / `PentodeThreePort` grouped path (2 ports each: [Vgk, Vpk]).
 /// BJTs → `BjtTwoPort` grouped path (2 ports each: [Vbe, Vce]).
 /// All other devices → single-port `NlDeviceKind` vector.
 ///
-/// `supply_voltage` sets the initial `v_max` on triode/vari-mu devices so that
-/// the MNA solver's plate-voltage shift (`vpk = v[1] + v_max`) is correct from
+/// `supply_voltage` sets the initial `v_max` on tube devices so that
+/// the MNA solver's plate-voltage interpretation is correct from
 /// the first Newton-Raphson iteration.
 fn create_nl_devices(
     nl_kinds: &[NonlinearKind],
     supply_voltage: f64,
 ) -> Result<(Vec<NlDeviceKind>, Option<MultiNlDeviceGroups>), String> {
-    // Check if all NL devices are triodes with a connected grid node.
-    let all_triode_with_grid = !nl_kinds.is_empty()
+    // Check if all NL devices are tubes (triodes or pentodes) with a connected grid node.
+    // Triodes and pentodes both use the 3-port grouped path [Vgk, Vpk] — the
+    // grid-context solve is essential for push-pull stages of either tube type.
+    let all_tube_with_grid = !nl_kinds.is_empty()
         && nl_kinds.iter().all(|k| {
             matches!(
                 k,
                 NonlinearKind::Triode {
+                    grid_node: Some(_),
+                    ..
+                } | NonlinearKind::Pentode {
                     grid_node: Some(_),
                     ..
                 }
@@ -998,7 +1003,7 @@ fn create_nl_devices(
         ) && !is_diode_connected_bjt(k)
     });
 
-    if all_triode_with_grid {
+    if all_tube_with_grid {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
         let mut offset = 0usize;
@@ -1024,6 +1029,16 @@ fn create_nl_devices(
                                 .with_parallel_count(*parallel_count),
                         ));
                     }
+                    offset += 2;
+                }
+                NonlinearKind::Pentode { model_name, .. } => {
+                    // Pentodes use the same 2-port grouped path as triodes: [Vgk, Vpk].
+                    // parallel_count is not carried on NonlinearKind::Pentode (always 1
+                    // per DSL element — the pedal def instantiates separate elements).
+                    let model = pentode_model(model_name);
+                    groups.push(NlDeviceGroupKind::PentodeThreePort(
+                        PentodeThreePort::new_gnd_referenced(model, supply_voltage),
+                    ));
                     offset += 2;
                 }
                 _ => unreachable!(),

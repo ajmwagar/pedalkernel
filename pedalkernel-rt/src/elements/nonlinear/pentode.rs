@@ -314,6 +314,16 @@ pub struct PentodeThreePort {
     pub model: PentodeModel,
     /// Maximum plate voltage (B+ supply rail).
     v_max: crate::Wave,
+    /// Plate voltage offset applied before the Koren model.
+    ///
+    /// - **VCC-referenced** (legacy/push-pull path): MNA ground = VCC, so port-1
+    ///   wave = `V_plate - V_supply` (negative). Set `v_offset = v_max` so that
+    ///   `vpk = v[1] + v_max`. Clamp: `(-v_max, 10)`.
+    /// - **GND-referenced** (general MNA path): MNA ground = GND, so port-1 wave =
+    ///   `V_plate` (positive). Set `v_offset = 0`. Clamp: `(0, v_max)`.
+    v_offset: crate::Wave,
+    /// Number of parallel tubes.
+    parallel_count: usize,
     /// Screen grid voltage (external parameter).
     vg2k: crate::Wave,
     /// Grid emission current (saturation current for grid diode).
@@ -328,6 +338,8 @@ impl PentodeThreePort {
         Self {
             model,
             v_max: 500.0,
+            v_offset: 500.0,
+            parallel_count: 1,
             vg2k,
             grid_is: 1e-9,
             grid_vt: 0.025,
@@ -335,10 +347,37 @@ impl PentodeThreePort {
     }
 
     pub fn new_with_v_max(model: PentodeModel, v_max: crate::Wave) -> Self {
+        let v_max = v_max.max(1.0);
         Self {
-            v_max: v_max.max(1.0),
+            v_max,
+            v_offset: v_max, // VCC-referenced: offset = supply voltage
             ..Self::new(model)
         }
+    }
+
+    /// Create a `PentodeThreePort` for use in a GND-referenced MNA context.
+    ///
+    /// In the general MNA path, VCC is an explicit voltage source rather than
+    /// the MNA reference node. Port-1 waves represent actual plate voltage above
+    /// GND (positive, 0..supply_voltage). No offset is needed; the clamp is
+    /// adjusted accordingly.
+    pub fn new_gnd_referenced(model: PentodeModel, supply_voltage: f64) -> Self {
+        let v_max = supply_voltage.max(1.0);
+        Self {
+            v_max,
+            v_offset: 0.0, // GND-referenced: port-1 is already the physical plate voltage
+            ..Self::new(model)
+        }
+    }
+
+    /// Set the number of parallel tubes (scales all currents and conductances).
+    pub fn with_parallel_count(mut self, count: usize) -> Self {
+        self.parallel_count = count.max(1);
+        self
+    }
+
+    pub fn parallel_count(&self) -> usize {
+        self.parallel_count
     }
 
     pub fn set_v_max(&mut self, v_max: crate::Wave) {
@@ -358,19 +397,20 @@ impl PentodeThreePort {
     }
 
     /// Grid current (diode model): i_g = I_gs × (exp(Vgk/Vt) - 1).
-    /// Returns (current, di_g/dv_gk).
+    /// Returns (current, di_g/dv_gk). Scaled by parallel_count.
     #[inline]
     fn grid_iv(&self, vgk: crate::Wave) -> (crate::Wave, crate::Wave) {
+        let pc = self.parallel_count as crate::Wave;
         let x = (vgk / self.grid_vt).clamp(-500.0, 500.0);
         let ev = crate::math::exp(x);
-        let ig = self.grid_is * (ev - 1.0);
-        let dig = self.grid_is * ev / self.grid_vt;
+        let ig = self.grid_is * (ev - 1.0) * pc;
+        let dig = self.grid_is * ev / self.grid_vt * pc;
         (ig, dig)
     }
 
     /// Plate current using the screen-referenced Koren pentode equation.
     /// Takes both Vg1k and Vpk as inputs (Vg2k is external).
-    /// Returns (Ip, ∂Ip/∂Vpk, ∂Ip/∂Vg1k).
+    /// Returns (Ip, ∂Ip/∂Vpk, ∂Ip/∂Vg1k). Scaled by parallel_count.
     #[inline]
     fn plate_iv(
         &self,
@@ -379,9 +419,10 @@ impl PentodeThreePort {
     ) -> (crate::Wave, crate::Wave, crate::Wave) {
         let m = &self.model;
         let vg2k = self.vg2k;
+        let pc = self.parallel_count as crate::Wave;
 
         if vpk <= 0.0 || vg2k <= 0.0 {
-            return (0.0, LEAKAGE_CONDUCTANCE, 0.0);
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
         }
 
         // Screen-referenced Koren: E1 = Kp * (1/mu + Vg1k/Vg2k)
@@ -390,7 +431,7 @@ impl PentodeThreePort {
         let ln_term = softplus(e1);
         let base = (vg2k / m.kp) * ln_term;
         if base <= 0.0 {
-            return (0.0, LEAKAGE_CONDUCTANCE, 0.0);
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
         }
 
         let ip_base = crate::math::powf(base, m.ex);
@@ -399,15 +440,15 @@ impl PentodeThreePort {
         let vpk_ratio = vpk / m.kvb;
         let plate_factor = crate::math::atan(vpk_ratio);
 
-        let ip = (ip_base / m.kg1) * plate_factor.max(0.0);
+        let ip = (ip_base / m.kg1) * plate_factor.max(0.0) * pc;
         if ip <= 0.0 {
-            return (0.0, LEAKAGE_CONDUCTANCE, 0.0);
+            return (0.0, LEAKAGE_CONDUCTANCE * pc, 0.0);
         }
 
         // ∂Ip/∂Vpk: only the plate saturation factor depends on Vpk
         // d/dVpk of atan(Vpk/KVB) = 1/(1 + (Vpk/KVB)^2) * 1/KVB
         let d_plate_factor = 1.0 / (1.0 + vpk_ratio * vpk_ratio) / m.kvb;
-        let dip_dvpk = ((ip_base / m.kg1) * d_plate_factor).max(LEAKAGE_CONDUCTANCE);
+        let dip_dvpk = ((ip_base / m.kg1) * d_plate_factor * pc).max(LEAKAGE_CONDUCTANCE * pc);
 
         // ∂Ip/∂Vg1k (transconductance):
         // E1 = Kp * (1/mu + Vg1k/Vg2k)
@@ -433,7 +474,8 @@ impl PentodeThreePort {
         };
 
         let dip_dvg1k = (m.ex * crate::math::powf(base, m.ex - 1.0) * sigmoid_e1 / m.kg1)
-            * plate_factor.max(0.0);
+            * plate_factor.max(0.0)
+            * pc;
 
         (ip, dip_dvpk, dip_dvg1k)
     }
@@ -447,10 +489,10 @@ impl NlDeviceGroupIv for PentodeThreePort {
     fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
         let vg1k = v[0]; // Port 0: grid-cathode
 
-        // Port 1: plate-cathode. In the R-type adaptor, the supply node (B+)
-        // is grounded in the MNA, so the WDF voltage v[1] represents
-        // V_plate - V_supply. Shift by +v_max to recover the actual Vpk.
-        let vpk = v[1] + self.v_max;
+        // Port 1: plate-cathode. Shift by v_offset to recover physical Vpk.
+        // - VCC-referenced (v_offset = v_max): v[1] = V_plate - V_supply → vpk = v[1] + v_max
+        // - GND-referenced (v_offset = 0):     v[1] = V_plate            → vpk = v[1]
+        let vpk = v[1] + self.v_offset;
 
         // Grid current (diode model)
         let (ig, dig_dvg1k) = self.grid_iv(vg1k);
@@ -474,7 +516,14 @@ impl NlDeviceGroupIv for PentodeThreePort {
             // tube latches in cutoff. At deep cutoff (Vgk << 0), Ig=Ip=0, so
             // the wide range is safe (no overflow in the current model).
             0 => (-500.0, 10.0),
-            _ => (-self.v_max, 10.0), // Plate: WDF range [-V_supply, ~0] (maps to actual [0, V_supply])
+            // VCC-referenced: wave is in [-v_max, ~0]. GND-referenced: wave is in [0, v_max].
+            _ => {
+                if self.v_offset > 0.0 {
+                    (-self.v_max, 10.0) // VCC-referenced
+                } else {
+                    (0.0, self.v_max) // GND-referenced
+                }
+            }
         }
     }
 }
