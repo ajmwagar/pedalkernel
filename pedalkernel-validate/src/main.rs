@@ -109,11 +109,30 @@ enum Commands {
     /// Generate analytical golden references for linear circuits
     GenerateLinear,
 
-    /// Bootstrap golden references from current WDF output (for regression testing)
+    /// Bootstrap WDF golden references from current WDF output (for regression testing).
+    ///
+    /// Writes to golden/{suite}/{test}/wdf/{signal}.npy.
+    /// Does NOT overwrite the ngspice golden at golden/{suite}/{test}/{signal}.npy.
     Bootstrap {
         /// Test suite to bootstrap
         #[arg(short, long, default_value = "all")]
         suite: String,
+    },
+
+    /// Compare committed WDF goldens vs committed ngspice goldens.
+    ///
+    /// Loads golden/{suite}/{test}/wdf/{signal}.npy (WDF) and
+    /// golden/{suite}/{test}/{signal}.npy (ngspice reference) and runs the
+    /// same metrics::compare + PassCriteria check as `run`.  Requires
+    /// neither a .pedal source file nor ngspice at runtime.
+    CompareGoldens {
+        /// Test suite to compare (or 'all')
+        #[arg(short, long, default_value = "all")]
+        suite: String,
+
+        /// Specific test to compare within the suite
+        #[arg(short, long)]
+        test: Option<String>,
     },
 
     /// Generate golden references from SPICE simulation
@@ -220,6 +239,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Bootstrap { suite }) => {
             bootstrap_golden(&cli, suite)?;
+        }
+        Some(Commands::CompareGoldens { suite, test }) => {
+            compare_goldens(&cli, suite, test.clone())?;
         }
         Some(Commands::GenerateSpice {
             suite,
@@ -533,11 +555,14 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
                 pedal.reset();
                 let output: Vec<f64> = input.iter().map(|&s| pedal.process(s)).collect();
 
-                // Save as golden
+                // Save as WDF golden — written to the wdf/ subdirectory so the
+                // ngspice golden at golden/{suite}/{test}/{signal}.npy is never
+                // clobbered.  Both artifacts are then compared by compare-goldens.
                 let golden_path = cli
                     .golden
                     .join(suite_name)
                     .join(test_name)
+                    .join("wdf")
                     .join(format!("{}.npy", label));
 
                 npy::write_f64(&golden_path, &output)?;
@@ -553,6 +578,218 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
             .bold()
     );
     println!("These can be used for regression testing future WDF changes.");
+
+    Ok(())
+}
+
+/// Compare committed WDF goldens against committed ngspice goldens.
+///
+/// For each circuit/signal pair:
+///   - WDF golden:    golden/{suite}/{test}/wdf/{signal}.npy
+///   - SPICE golden:  golden/{suite}/{test}/{signal}.npy
+///
+/// Runs metrics::compare + PassCriteria identically to `run`.
+/// Missing either file → "missing" row (not a panic).
+fn compare_goldens(
+    cli: &Cli,
+    suite: &str,
+    test_filter: Option<String>,
+) -> anyhow::Result<()> {
+    use pedalkernel_validate::npy;
+    use pedalkernel_validate::{metrics, report::ValidationReport};
+
+    println!(
+        "{} Comparing WDF goldens vs ngspice goldens...",
+        "▶".blue()
+    );
+
+    let validation_config = if cli.config.exists() {
+        ValidationConfig::load(&cli.config)?
+    } else {
+        println!("  {} Config not found, using defaults", "⚠".yellow());
+        ValidationConfig::default_config()
+    };
+
+    // Build the list of suites/tests to compare.
+    let suites_to_process: Vec<(String, pedalkernel_validate::TestSuite)> = if suite == "all" {
+        validation_config
+            .suites
+            .iter()
+            .map(|(n, s)| (n.clone(), s.clone()))
+            .collect()
+    } else {
+        let mut suite_config = validation_config
+            .suites
+            .get(suite)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Suite '{}' not found", suite))?;
+        if let Some(ref test_name) = test_filter {
+            let test_case = suite_config
+                .tests
+                .get(test_name)
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Test '{}' not found in suite '{}'", test_name, suite)
+                })?;
+            suite_config.tests.clear();
+            suite_config.tests.insert(test_name.clone(), test_case);
+        }
+        vec![(suite.to_string(), suite_config)]
+    };
+
+    let sample_rate = (cli.sample_rate * cli.oversample) as f64;
+
+    let mut suite_results = std::collections::BTreeMap::new();
+
+    for (suite_name, suite_config) in &suites_to_process {
+        println!("\n{} Suite: {}", "•".green(), suite_name.bold());
+
+        let mut test_results = std::collections::BTreeMap::new();
+        let mut suite_passed = 0usize;
+        let mut suite_failed = 0usize;
+
+        for (test_name, test_case) in &suite_config.tests {
+            println!("  {} Test: {}", "→".blue(), test_name);
+
+            let warmup_trim_ms =
+                test_case.effective_warmup_trim_ms(&validation_config.global);
+            let trim_samples =
+                ((warmup_trim_ms / 1000.0) * sample_rate).round() as usize;
+
+            let mut signal_results = vec![];
+            let mut test_passed = true;
+
+            for signal_config in &test_case.signals {
+                let label = signal_config.label();
+
+                let spice_path = cli
+                    .golden
+                    .join(&suite_name)
+                    .join(test_name)
+                    .join(format!("{}.npy", label));
+                let wdf_path = cli
+                    .golden
+                    .join(&suite_name)
+                    .join(test_name)
+                    .join("wdf")
+                    .join(format!("{}.npy", label));
+
+                let spice_exists = spice_path.exists();
+                let wdf_exists = wdf_path.exists();
+
+                if !spice_exists || !wdf_exists {
+                    let missing = if !spice_exists && !wdf_exists {
+                        format!(
+                            "missing both goldens: {} and {}",
+                            spice_path.display(),
+                            wdf_path.display()
+                        )
+                    } else if !spice_exists {
+                        format!("missing ngspice golden: {}", spice_path.display())
+                    } else {
+                        format!("missing WDF golden: {}", wdf_path.display())
+                    };
+                    println!(
+                        "    {} {} — {}",
+                        "⚠".yellow(),
+                        label.dimmed(),
+                        missing
+                    );
+                    signal_results.push(pedalkernel_validate::report::SignalResult {
+                        label: label.clone(),
+                        passed: false,
+                        comparison: None,
+                        error: Some(missing),
+                    });
+                    test_passed = false;
+                    continue;
+                }
+
+                let spice_golden = npy::read_f64(&spice_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", spice_path.display(), e))?;
+                let wdf_golden = npy::read_f64(&wdf_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", wdf_path.display(), e))?;
+
+                // Apply warmup trim identically to `run`.
+                let spice_trimmed = if trim_samples < spice_golden.len() {
+                    &spice_golden[trim_samples..]
+                } else {
+                    &spice_golden[..]
+                };
+                let wdf_trimmed = if trim_samples < wdf_golden.len() {
+                    &wdf_golden[trim_samples..]
+                } else {
+                    &wdf_golden[..]
+                };
+
+                let fundamental_hz = signal_config.fundamental_hz();
+                let comparison =
+                    metrics::compare(wdf_trimmed, spice_trimmed, sample_rate, fundamental_hz);
+                let passed = comparison.passes(&test_case.pass_criteria);
+
+                let status = if passed { "✓".green() } else { "✗".red() };
+                println!(
+                    "    {} {} | RMS: {:.1}dB | Peak: {:.1}dB | Spectral: {:.1}dB",
+                    status,
+                    label.dimmed(),
+                    comparison.normalized_rms_error_db,
+                    comparison.peak_error_db,
+                    comparison.spectral_error_db,
+                );
+
+                if !passed {
+                    test_passed = false;
+                }
+
+                signal_results.push(pedalkernel_validate::report::SignalResult::from_comparison(
+                    label,
+                    comparison,
+                    passed,
+                ));
+            }
+
+            if test_passed {
+                suite_passed += 1;
+            } else {
+                suite_failed += 1;
+            }
+
+            test_results.insert(
+                test_name.clone(),
+                pedalkernel_validate::report::TestResult {
+                    passed: test_passed,
+                    error: None,
+                    signals: signal_results,
+                },
+            );
+        }
+
+        suite_results.insert(
+            suite_name.clone(),
+            pedalkernel_validate::report::SuiteResult {
+                description: suite_config.description.clone(),
+                passed: suite_passed,
+                failed: suite_failed,
+                tests: test_results,
+            },
+        );
+    }
+
+    let report = ValidationReport::new(suite_results, cli.sample_rate, cli.oversample);
+    report.print_summary();
+
+    if cli.detailed {
+        report.print_detailed();
+    }
+
+    if let Some(ref path) = cli.report {
+        report.save_json(path)?;
+        println!("Report saved to: {}", path.display());
+    }
+
+    if report.summary.failed > 0 {
+        std::process::exit(1);
+    }
 
     Ok(())
 }
