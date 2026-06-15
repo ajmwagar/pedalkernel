@@ -81,8 +81,21 @@ fn drive(amp: f64, f0: f64) -> Vec<f64> {
 fn tape_head_circuit_compiles_runs_and_saturates() {
     let f0 = 120.0;
 
+    // Sweep clean -> knee -> past-knee. The J-A knee sits at ~1 V (H = kv*V
+    // reaches the Langevin saturation region), so output THD RISES into ~1 V and
+    // then RECEDES at 3 V: past the knee the saturating magnetic current
+    // (Isat*M/Ms) clamps to a near-constant offset, and in this stiff 470/2.2k
+    // divider its already-light contribution to V(out) shrinks relative to the
+    // fundamental. So the saturation witness is the KNEE THD (~1 V), not 3 V.
+    // The absolute THD is modest (~1.2% peak) because the head is a light shunt
+    // load here — this matches the ngspice ground truth for the same circuit
+    // (see spice-circuits/tape/tape_head_saturation.spice + bead pedalkernel-x0mv
+    // Phase 0). It is NOT the ~5%+ an earlier SERIES-miswired netlist showed by
+    // forcing the full signal current through the head; that topology did not
+    // match the shunt golden deck.
+    let amps = [0.05_f64, 0.25, 1.0, 3.0];
     let mut curve = Vec::new();
-    for &amp in &[0.05_f64, 0.25, 1.0, 3.0] {
+    for &amp in &amps {
         let w = drive(amp, f0);
         assert!(
             w.iter().all(|x| x.is_finite()),
@@ -93,17 +106,20 @@ fn tape_head_circuit_compiles_runs_and_saturates() {
         curve.push((amp, t));
     }
 
-    let low = curve.first().unwrap().1; // 0.05 V — clean
-    let high = curve.last().unwrap().1; // 3.0 V — saturated
+    let clean = curve[0].1; // 0.05 V — well below the knee
+    let knee = curve[2].1; //  1.0  V — at the J-A knee (peak coloration)
 
-    assert!(low < 0.02, "low-level THD should be clean (<2%), got {low:.5}");
     assert!(
-        high > 0.05,
-        "hard-driven THD should saturate (>5%), got {high:.5}"
+        clean < 0.01,
+        "low-level THD should be clean (<1%), got {clean:.5}"
     );
     assert!(
-        high > low * 3.0,
-        "THD must climb clearly with drive: {low:.5} -> {high:.5}"
+        knee > 0.01,
+        "knee-level THD should show saturation (>1%), got {knee:.5}"
+    );
+    assert!(
+        knee > clean * 3.0,
+        "THD must climb clearly into the knee: clean {clean:.5} -> knee {knee:.5}"
     );
 }
 

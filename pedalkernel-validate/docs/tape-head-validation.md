@@ -14,40 +14,53 @@ Suite: **`tape`** · test: **`tape_head_saturation`**.
 | Golden (generated) | `golden/tape/tape_head_saturation/<label>.npy` (`clean`, `saturated`) |
 | Registry | `src/config.rs` → `default_suites()` → `tape` suite |
 
-The head is the only nonlinear element: `in -[R_pri 470]-> tape_head -> out`,
-`R_load 2.2k` to ground. It colours on its gap **voltage** (`H = kv·V`), so it
-reaches the J-A knee at ~1 V line level and THD climbs with drive — unlike the
-current-driven transformer core (`magnetics_external` suite).
+The head is the only nonlinear element, wired as a **shunt** load on the output
+node: `in -[R_pri 470]-> out`, with `R_load 2.2k` and the `tape_head` BOTH from
+`out` to ground (the head sinks `i(V) = Gp·V + Isat·M/Ms` at `out`, exactly as
+the ngspice deck models it). It colours on its gap **voltage** (`H = kv·V`), so
+it reaches the J-A knee at ~1 V line level and THD climbs into the knee — unlike
+the current-driven transformer core (`magnetics_external` suite).
 
-## Status: ACTIVE — known engine-side divergence (2026-06-15)
+## Status: ACTIVE — PASSES the reference (2026-06-15)
 
-The ngspice golden was generated on 2026-06-15 (ngspice now available locally;
-the deck was ported off LTspice-only constructs — `sdt()` → a native 1 F
-capacitor integrator, and the monolithic nested-ternary `Bslope` decomposed into
-intermediate behavioural nodes). The test is now **active** (`pending_reference:
-false`) and **deliberately failing the gate** rather than hidden — we don't gate
-known failures.
+The ngspice golden was generated on 2026-06-15 (the deck was ported off
+LTspice-only constructs — `sdt()` → a native 1 F capacitor integrator, and the
+monolithic nested-ternary `Bslope` decomposed into intermediate behavioural
+nodes). The test is **active** (`pending_reference: false`) and **passes** the
+gate at the match tolerances in `src/config.rs`.
 
-Measured WDF-vs-ngspice divergence (96 kHz × 4):
+Measured WDF-vs-ngspice agreement (96 kHz × 4, shunt topology):
 
 | Signal | RMS err | Peak err | Spectral | THD err |
 | --- | --- | --- | --- | --- |
-| clean (0.1 V, below knee) | −4.1 dB | −3.7 dB | 9.4 dB | 9.57 dB |
-| saturated (2.0 V) | −4.8 dB | −4.3 dB | 33.4 dB | 17.74 dB |
+| clean (0.1 V, below knee) | −72 dB | −73 dB | 0.2 dB | 0.01 dB |
+| saturated (2.0 V) | −70 dB | −70 dB | 0.0 dB | 0.0 dB |
 
-The reference deck faithfully models the ground-truth physics (explicit
-`R_pri`/`R_load` divider + head current law `i = Gp·V + Isat·M/Ms`, same M
-integral as the element), so the divergence is **engine-side**. Suspected
-mechanisms (build-confirm pending): the WDF port-resistance (`Rp`) adaptation vs
-the divider loading (clean-regime level error), and the element's
-one-implicit-field-step-per-sample H-domain integration vs ngspice's continuous
-integration through the `sign(dH)` branch kink (saturated harmonics). Tracked in
-bead **pedalkernel-x0mv**; the test passes once the element matches the golden.
+### History — the earlier "engine-side divergence" was a netlist bug
+
+Before 2026-06-15 this test reported a large divergence (clean RMS −4.1 dB,
+saturated spectral 33 dB) and was suspected to be an engine/model defect (WDF
+port-`Rp` adaptation; discrete H-step integration vs ngspice's continuous
+integral). Bead **pedalkernel-x0mv** Phase 0 instrumented the compiled circuit
+against the golden sample-by-sample and **disproved both hypotheses**: the
+`.pedal` was wiring the head in **series** (`R_pri.b → TH.a`, `TH.b → out`) while
+the golden deck models it as a **shunt** at `v_out`. The series wiring's clean
+gain (0.459 = 2200/(470+2125+2200), head incremental R ≈ 2.1 kΩ) matched the WDF
+output exactly, while the shunt gain (0.697) matched the golden — pinning the
+failure on the netlist, not the element. Rewiring the `.pedal` to the shunt
+topology the deck documents made the WDF output match the golden to ~70 dB on
+both labels, with no change to the J-A element.
+
+Because this 470/2.2k divider is stiff (≈390 Ω at `out`), the head is a light
+shunt load and output THD is modest (≤~1.2%, peaking at the ~1 V knee and
+receding at 3 V as the magnetic current clamps to a near-constant offset). This
+is faithful to the ngspice ground truth for the same circuit — it is a
+mild-saturation reference, not a hard-clipping one.
 
 ## Regenerating the golden (requires ngspice)
 
-ngspice is **not** installed in the CI/dev sandbox, so the `.npy` cannot be
-produced here. On a machine with ngspice on `PATH`:
+ngspice may not be preinstalled in the sandbox (`apt-get install -y ngspice`).
+With ngspice on `PATH`:
 
 ```bash
 cd pedalkernel-validate
@@ -67,11 +80,11 @@ After the goldens exist, run the gate and the test auto-activates:
 cargo run -p pedalkernel-validate --no-default-features -- run
 ```
 
-> **Provisional tolerances.** The `pass_criteria` registered for this test
-> (`normalized_rms_error_db: -6`, `peak_error_db: -6`, THD diff disabled) are
-> **placeholders sized like the other WDF-vs-SPICE nonlinear tests** — they have
-> **not** been measured against a real golden. Tighten them to honest values
-> once the golden is generated and the WDF-vs-ngspice deltas are measured.
+> **Tolerances.** The `pass_criteria` registered for this test
+> (`normalized_rms_error_db: -6`, `peak_error_db: -6`, `thd_error_db: 3`) are
+> sized like the other WDF-vs-SPICE nonlinear tests. The element clears them with
+> ~64 dB of margin (measured −70 dB RMS), so they are deliberately left as-is
+> rather than tightened to the measured floor — the head matches the reference.
 
 ## Parameter mapping (element ↔ ngspice)
 
