@@ -45,6 +45,7 @@ const TRIODE_PREAMP: &str = r#"pedal "Triode Preamp" {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
+#[ignore = "Common-cathode triodes now compile via MultiNlStage (MNA) for ~0.1 dB SPICE accuracy. The K-table path is no longer used for this topology. K-table infrastructure is tested by bjt_stage_has_k_table in k_method_tests.rs."]
 fn triode_stage_has_k_table() {
     let pedal = parse_pedal_file(TRIODE_PREAMP).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
@@ -77,6 +78,7 @@ fn triode_stage_has_k_table() {
 }
 
 #[test]
+#[ignore = "Common-cathode triodes now compile via MultiNlStage (MNA) for ~0.1 dB SPICE accuracy. The K-table path is no longer used for this topology. K-table infrastructure is tested by bjt_stage_has_k_table in k_method_tests.rs."]
 fn triode_k_table_is_2d() {
     let pedal = parse_pedal_file(TRIODE_PREAMP).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
@@ -154,6 +156,7 @@ fn triode_k_table_vs_nr_pipeline() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
+#[ignore = "Common-cathode triodes now compile via MultiNlStage (MNA) for ~0.1 dB SPICE accuracy. The K-table path is no longer used for this topology. K-table infrastructure is tested by bjt_stage_has_k_table in k_method_tests.rs."]
 fn triode_k_table_values_finite() {
     let pedal = parse_pedal_file(TRIODE_PREAMP).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();
@@ -172,6 +175,7 @@ fn triode_k_table_values_finite() {
 }
 
 #[test]
+#[ignore = "Common-cathode triodes now compile via MultiNlStage (MNA) for ~0.1 dB SPICE accuracy. The K-table path is no longer used for this topology. K-table infrastructure is tested by bjt_stage_has_k_table in k_method_tests.rs."]
 fn triode_k_table_no_nan_across_range() {
     let pedal = parse_pedal_file(TRIODE_PREAMP).unwrap();
     let compiled = compile_via_spqr(&pedal, SR).unwrap();

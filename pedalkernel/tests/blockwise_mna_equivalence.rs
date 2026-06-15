@@ -483,15 +483,18 @@ fn tb303_diode_ladder_blockwise_matches_mna_driven() {
     assert_tight(&bw, &mna, "tb303_diode_ladder", "driven");
 }
 
-// ── 6. Common-cathode 12AX7 triode — KNOWN RED ──────────────────────────────
+// ── 6. Common-cathode 12AX7 triode ──────────────────────────────────────────
 //
-// INVARIANT VIOLATED: The 12AX7 blockwise path currently diverges from MNA
-// by ~4.3 dB RMS (quiet) due to a DC Q-point/supply parity bug in the blockwise
-// engine. This is tracked in bead pedalkernel-rk77.2.
+// EQUIVALENCE INVARIANT: Single common-cathode 12AX7 triode preamp stage.
+// Both blockwise and monolithic MNA must agree on the AC gain and harmonic
+// character. Both paths fall through to the same triode-context MNA build
+// (no blockwise split occurs — only 1 NL block detected).
 //
-// These tests are intentionally marked #[ignore] to document the failure
-// without blocking CI. When rk77.2 is merged, these tests will be un-ignored
-// and promoted to TIGHT assertions.
+// Fix landed in rk77.2: spqr_build.rs triode-with-grid detection generalized
+// from group_edges.len() == 1 to "any group with exactly 1 triode NL edge".
+// Before fix: 4.3 dB RMS clean error (blockwise vs MNA) due to SPQR building
+// a bare single-port WdfStage without cathode network → Vgk = 0 operating point.
+// After fix: -inf dB RMS (bit-identical paths), SPICE clean RMS -0.1 dB.
 
 const CC_12AX7_SRC: &str = r#"
 pedal "12AX7 Common Cathode" {
@@ -527,22 +530,28 @@ pedal "12AX7 Common Cathode" {
 "#;
 
 #[test]
-#[ignore = "pedalkernel-rk77.2: 12AX7 blockwise diverges from MNA — DC Q-point/supply parity bug; measured ~4.3 dB RMS error (quiet sine). Un-ignore when rk77.2 is merged."]
 fn cc_12ax7_blockwise_matches_mna_quiet() {
     // INVARIANT: Common-cathode triode preamp stage. Blockwise must agree with
-    // monolithic MNA on the AC gain and harmonic character. Currently FAILS
-    // due to blockwise not applying the high-voltage supply bias correctly,
-    // causing the triode to operate at the wrong Q-point.
+    // monolithic MNA on the AC gain and harmonic character.
+    //
+    // Fix (rk77.2): generalized the triode-with-grid detection in spqr_build.rs
+    // to fire on any non-feedback group containing exactly 1 triode NL edge,
+    // regardless of total group edge count. Previously the check required
+    // group_edges.len() == 1, but signal flow analysis groups the triode with
+    // its passive context (6 edges), so the check never fired. The SPQR path
+    // was building a bare single-port WdfStage with no cathode network, leaving
+    // the triode without DC self-bias (Vgk = 0, gain ~288x vs expected ~50x).
+    // After fix: -inf dB RMS (bit-identical), SPICE clean RMS -0.1 dB.
     let input = sine_at(440.0, QUIET_AMP, SIGNAL_DURATION_S, SR);
     let (bw, mna) = compile_both_and_process(CC_12AX7_SRC, &input, "cc_12ax7[quiet]");
     assert_tight(&bw, &mna, "cc_12ax7", "quiet");
 }
 
 #[test]
-#[ignore = "pedalkernel-rk77.2: 12AX7 blockwise diverges from MNA — DC Q-point/supply parity bug; measured ~4.3 dB RMS error. Un-ignore when rk77.2 is merged."]
 fn cc_12ax7_blockwise_matches_mna_driven() {
     // INVARIANT: Driven triode stage. Asymmetric soft-clipping must be
     // equivalent between paths once the Q-point bug (rk77.2) is fixed.
+    // After fix: -inf dB RMS (bit-identical), SPICE driven RMS -2.8 dB.
     let input = sine_at(440.0, DRIVEN_AMP, SIGNAL_DURATION_S, SR);
     let (bw, mna) = compile_both_and_process(CC_12AX7_SRC, &input, "cc_12ax7[driven]");
     assert_tight(&bw, &mna, "cc_12ax7", "driven");
