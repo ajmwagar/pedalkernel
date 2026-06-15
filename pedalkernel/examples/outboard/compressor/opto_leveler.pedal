@@ -1,0 +1,154 @@
+# PK:
+# Opto Leveler — Teletronix LA-2A-inspired electro-optical leveling amplifier.
+# Two knobs, no time-constant controls: the photocell IS the time constant.
+# Slow, smooth, program-dependent gain riding for vocals and bass.
+# Type: compressor (outboard studio gear)
+#
+# PROVENANCE — Teletronix LA-2A (Jim Lawrence, ~1962; later UA reissues)
+#   Topology: audio passes through a PASSIVE gain-reduction attenuator —
+#   a series resistor working against the T4B optical attenuator's CdS
+#   photocell shunting to ground — then into a 12AX7 voltage amplifier and a
+#   12BH7 cathode-follower output driving the output transformer. The
+#   sidechain amplifier rectifies the OUTPUT signal (feedback detector) and
+#   drives the T4B's electroluminescent (EL) panel.
+#
+# KEY TIME CONSTANTS (real unit — set by the T4B's EL panel + CdS cells,
+# NOT by any RC network):
+#   Attack:  ~10 ms
+#   Release: two-stage — ~40-80 ms for the first ~50% of recovery, then a
+#            program-dependent tail of 0.5 s up to ~5 s after sustained GR.
+#   Ratio:   soft, program dependent; "Limit" / "Compress" switch changes
+#            sidechain drive.
+#
+# AS MODELED HERE:
+#   in -> C_in -> R_gr series / PC1 photocoupler(t4b) CdS cell shunt to gnd
+#      -> Gain pot -> V1 (12AX7, 100k plate / 1.5k bypassed cathode, B+ 250V)
+#      -> C_out -> R_load -> out
+#   Sidechain: EF1 envelope follower drives PC1.led (the EL panel).
+#     EF1 = (10k, 1u, 470k, 4.7u, 20k)
+#       attack  tau = 10 kΩ × 1 µF   = 10 ms  (matches T4B attack)
+#       release tau = 470 kΩ × 4.7 µF ≈ 2.2 s (middle of the 0.5-5 s tail)
+#
+# SIMPLIFICATIONS vs real unit (audit notes):
+#   1. NO input or output transformers (real: bridged input transformer,
+#      UTC A-24 style output). Coupling caps + resistive load instead.
+#   2. Single 12AX7 gain stage only — the 12BH7 cathode follower and the
+#      push-pull output stage are omitted; output drive character differs.
+#   3. The T4B's TWO-STAGE release (fast 40-80 ms phase + multi-second
+#      memory tail) is collapsed into ONE RC release (~2.2 s). The
+#      photocoupler t4b model in the engine contributes its own dynamics,
+#      but the dual-time-constant CdS memory effect is not explicit.
+#   4. FEEDBACK detector (updated 2026-06-12, F4+F5 fixed): the engine now
+#      honors the `EF1.in -> C_out.b` output tap, so detection is a true
+#      feedback sidechain as in the hardware.
+#   5. No Limit/Compress switch, no sidechain pre-emphasis (R37 trim).
+#      PEAK REDUCTION GAP (2026-06-12 control sweeps): the real unit's
+#      second knob — Peak Reduction, which scales the sidechain drive into
+#      the EL panel — cannot be honestly expressed in the current DSL:
+#      `controls` entries bind only pot positions; the envelope binding
+#      resolves only a DIRECT `EF1.out -> PC1.led` net (a pot inserted in
+#      that path is not a modulation sink and would silently kill the
+#      sidechain); and envelope_follower's sensitivity_r is a fixed
+#      component parameter, not control-bindable. Candidate engine feature:
+#      control-bindable EF sensitivity. Until then this model has leveling
+#      depth fixed by EF1's component values.
+#   6. GR DIRECTION (updated 2026-06-12, F6 fixed): the LDR now compiles as
+#      a controlled-resistance MNA child in its netlist position, so the
+#      shunt CdS cell produces real downward compression. Measured
+#      (48 kHz, 1 kHz probes, 8 s settle per point, Gain 0.6): quiet (0.05)
+#      gain +14.3 dB, loud (0.5) gain -1.8 dB -> 16.0 dB GR; attack 2.0 ms,
+#      release 1.78 s; gain falls monotonically from -40 to 0 dB input with
+#      an effective top-region ratio ~15:1. The v1 expansion finding is
+#      obsolete.
+#   7. GAIN POT GAP (updated 2026-06-13): the Gain pot (3-terminal divider
+#      into the 12AX7 grid) still has NO authority in the compiled processor —
+#      small-signal gain measured -11.78/-11.79/-11.81/-11.85/-12.07 dB at
+#      positions 0.1/0.3/0.5/0.7/0.9, i.e. flat and slightly DECREASING. The
+#      grid-leak resistor R_grid (1M, circuit-accurate — every 12AX7 stage has
+#      one) was ADDED on 2026-06-13 to define the wiper divider's load; it did
+#      NOT make the knob live. Root cause is now isolated as an ENGINE TOPOLOGY
+#      gap, not a circuit one: the pot is split (Gain__aw/Gain__wb) and
+#      STRADDLES the WDF GR-attenuator stage and the MultiNL tube-grid stage,
+#      and the wiper-into-active-grid divider is modeled insensitively/inverted.
+#      Same family as F10 link-2 (pots swallowed into an active device's group
+#      go inert). Needs a human topology decision. Red tests:
+#      tests/la2a_sweeps.rs::gain_pot_raises_steady_gain,
+#      tests/pot_fidelity.rs::opto_gain_pot_sweeps_monotonically (both #[ignore]'d).
+#   8. PROGRAM-DEPENDENT RELEASE not reproduced (consequence of item 3):
+#      release after 3 s of heavy GR measures 1.49 s vs 2.11 s after a
+#      0.5 s light hit — the hardware's CdS memory predicts the opposite
+#      ordering. See tests/la2a_sweeps.rs::program_dependent_release_measured.
+
+equipment "Opto Leveler LA-2A" {
+  supplies {
+    B+: 250V               # Real unit ~ +250-285 V plate supply
+  }
+
+  components {
+    # === Passive gain-reduction attenuator ===
+    C_in: cap(100n)        # Input coupling
+    R_gr: resistor(100k)   # Series arm working against the photocell
+    PC1: photocoupler(t4b) # T4B: EL panel + CdS cells — the heart of the LA-2A
+
+    # === Gain control (drive into the tube makeup amp) ===
+    Gain: pot(1M, a)       # "Gain" — real unit places it after the GR network
+
+    # === 12AX7 makeup gain stage ===
+    V1: triode(12ax7)
+    R_grid: resistor(1M)               # Grid-leak resistor (defines the Gain
+                                       # pot's wiper divider into the high-Z
+                                       # grid; real 12AX7 stages always have one)
+    R_plate: resistor(100k)            # Plate load
+    R_k: resistor(1.5k)                # Cathode bias resistor
+    C_k: cap(25u, electrolytic)        # Cathode bypass — full gain
+
+    # === Output coupling ===
+    C_out: cap(22n)        # Output coupling cap
+    R_load: resistor(100k) # Output load / level reference
+
+    # === Sidechain ===
+    # envelope_follower(attack_r, attack_c, release_r, release_c, sens_r)
+    # Attack 10k x 1u = 10 ms; Release 470k x 4.7u ~= 2.2 s
+    EF1: envelope_follower(10k, 1u, 470k, 4.7u, 20k)
+  }
+
+  nets {
+    # --- Passive GR divider: series R, photocell shunt to ground ---
+    in -> C_in.a
+    C_in.b -> R_gr.a
+    R_gr.b -> PC1.a, Gain.a
+    PC1.b -> gnd
+
+    # --- Gain pot into the triode grid ---
+    Gain.b -> gnd
+    Gain.w -> V1.grid, R_grid.a
+    R_grid.b -> gnd
+
+    # --- 12AX7 stage: 100k plate to B+, bypassed 1.5k cathode ---
+    B+ -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_k.a, C_k.a
+    R_k.b -> gnd
+    C_k.b -> gnd
+
+    # --- Output coupling ---
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+
+    # --- Sidechain: output-tapped (feedback) detector drives the EL panel ---
+    # NOTE: engine currently reads EF input from the global pedal input; this
+    # net documents the real feedback topology (see header, item 4).
+    EF1.in -> C_out.b
+    EF1.out -> PC1.led
+  }
+
+  controls {
+    Gain.position -> "Gain" [0.0, 1.0] = 0.6
+  }
+
+  monitors {
+    V1.plate_current -> "12AX7" [glow]
+    output -> "Output" [vu]
+  }
+}

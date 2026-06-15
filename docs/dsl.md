@@ -504,7 +504,7 @@ DL1: delay_line(80ms, 1200ms, allpass, medium: bbd_leakage)
 
 Delay line pins: `delay_time` (control target), `feedback` (control target), `speed_mod` (modulation target for LFO wow/flutter).
 
-**Tap** — Read-only output port into a parent delay line at a fixed ratio of the base delay time. Multiple taps model multi-head tape machines (e.g., RE-201 heads at 1×, 2×, 4× base delay).
+**Tap** — Read-only output port into a parent delay line at a fixed ratio of the base delay time. Multiple taps model multi-head tape machines (e.g., RE-201 heads at 1×, 2×, 3× base delay — the three playback heads are evenly spaced along the tape path, per the Roland RE-201 service manual).
 
 ```
 TAP1: tap(DL1, 1.0)    # reads at 1× base delay

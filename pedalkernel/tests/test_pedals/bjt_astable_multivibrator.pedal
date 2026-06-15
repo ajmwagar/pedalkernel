@@ -1,0 +1,76 @@
+# 909 Kick — BJT astable multivibrator (EXPERIMENTAL ENGINE PROBE)
+#
+# This pedal is a PROBE to determine whether the WDF compiler can handle
+# a BJT astable multivibrator topology. It is NOT a production voice.
+#
+# Topology: classic symmetric NPN astable multivibrator.
+#   - Q1, Q2: NPN transistors (2N3904 proxy for 2SC1583)
+#   - R_c1, R_c2: collector pull-up resistors (10kΩ)
+#   - R_b1, R_b2: base timing resistors (100kΩ)
+#   - C_t1: Q1.collector → Q2.base timing cap (10nF)
+#   - C_t2: Q2.collector → Q1.base timing cap (10nF)
+#   - f ≈ 1/(1.4 × R_b × C_t) = 1/(1.4 × 100k × 10n) ≈ 714 Hz
+#     (using standard astable formula; target ~100 Hz would need R_b ≈ 714kΩ
+#      or C_t ≈ 71nF; we use a compact probe topology here)
+#
+# WHY 714 Hz not 100 Hz: the 909 BD oscillates at ~50-190 Hz but requires
+# a large-valued RC timing network. For the engine probe we use the compact
+# values (100kΩ, 10nF) to minimize solver complexity and still test the
+# cross-coupled BJT topology. If this compiles, tuning to 100 Hz is trivial.
+#
+# Output tapped from Q1.collector via AC coupling capacitor.
+#
+# ENGINE GAP HYPOTHESIS: the WDF compiler handles BJTs in static amplifier
+# topologies. The astable multivibrator has no stable DC operating point —
+# both BJTs oscillate between saturated and cut-off states. The multi-NL
+# grouped solver (BjtTwoPort) may find a DC fixed point at zero and fail
+# to oscillate. If this test compiles but produces no AC output, it confirms
+# the "DC fixed point capture" gap documented in ROADMAP M4.
+pedal "909 BD BJT Probe" {
+  supply 9V
+  components {
+    Q1: npn(2n3904)
+    Q2: npn(2n3904)
+    R_c1: resistor(10k)
+    R_c2: resistor(10k)
+    R_b1: resistor(100k)
+    R_b2: resistor(100k)
+    C_t1: cap(10n)
+    C_t2: cap(10n)
+    C_out: cap(100n)
+    R_out: resistor(100k)
+  }
+  nets {
+    # Collector pull-ups from supply
+    vcc -> R_c1.a
+    R_c1.b -> Q1.collector, C_t1.a
+
+    vcc -> R_c2.a
+    R_c2.b -> Q2.collector, C_t2.a
+
+    # Cross-coupling: Q1.collector → C_t1 → Q2.base → R_b2 → gnd
+    C_t1.b -> Q2.base, R_b2.a
+    R_b2.b -> gnd
+
+    # Cross-coupling: Q2.collector → C_t2 → Q1.base → R_b1 → gnd
+    C_t2.b -> Q1.base, R_b1.a
+    R_b1.b -> gnd
+
+    # Emitters to ground
+    Q1.emitter -> gnd
+    Q2.emitter -> gnd
+
+    # AC-coupled output from Q1.collector
+    Q1.collector -> C_out.a
+    C_out.b -> R_out.a
+    R_out.b -> gnd
+    C_out.b -> out
+
+    # Trigger input: inject pulse into Q1.base to break symmetry
+    in -> Q1.base
+  }
+  init {
+    Q1: saturated
+    Q2: cutoff
+  }
+}

@@ -568,8 +568,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             },
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(4.0), // Allow 4dB (WDF vs SPICE difference)
-                            peak_error_db: Some(6.0),
+                            normalized_rms_error_db: Some(-9.4), // Allow 4dB (WDF vs SPICE difference)
+                            peak_error_db: Some(-7.3),
                             thd_error_db: Some(200.0), // THD comparison not meaningful at low levels
                             ..Default::default()
                         },
@@ -605,8 +605,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             },
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(6.0), // Allow 6dB for WDF vs SPICE
-                            peak_error_db: Some(8.0),
+                            normalized_rms_error_db: Some(-10.9), // Allow 6dB for WDF vs SPICE
+                            peak_error_db: Some(-7.7),
                             thd_error_db: Some(200.0),
                             ..Default::default()
                         },
@@ -650,10 +650,10 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             MetricConfig::Spectral,
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(6.0), // Allow 6dB for WDF vs SPICE
+                            normalized_rms_error_db: Some(5.1), // Allow 6dB for WDF vs SPICE
                             peak_error_db: Some(8.0),
                             thd_error_db: Some(200.0),
-                            spectral_error_db: Some(250.0), // Spectral comparison not primary metric
+                            spectral_error_db: Some(173.4), // Spectral comparison not primary metric
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -687,8 +687,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             },
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(6.0),
-                            peak_error_db: Some(8.0),
+                            normalized_rms_error_db: Some(-6.7),
+                            peak_error_db: Some(3.5),
                             thd_error_db: Some(200.0),
                             ..Default::default()
                         },
@@ -728,10 +728,10 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             MetricConfig::Spectral,
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(8.0),
-                            peak_error_db: Some(10.0),
+                            normalized_rms_error_db: Some(5.3),
+                            peak_error_db: Some(7.8),
                             thd_error_db: Some(150.0),
-                            spectral_error_db: Some(150.0),
+                            spectral_error_db: Some(146.8),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -770,8 +770,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
                             // Very loose criteria - source follower topology not properly modeled
-                            normalized_rms_error_db: Some(60.0), // Allow huge error
-                            peak_error_db: Some(60.0),
+                            normalized_rms_error_db: Some(1.0), // Allow huge error
+                            peak_error_db: Some(1.0),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -806,8 +806,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             MetricConfig::Thd { fundamental: 440.0 },
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(18.0),
-                            peak_error_db: Some(20.0),
+                            normalized_rms_error_db: Some(2.1),
+                            peak_error_db: Some(2.4),
                             thd_error_db: Some(200.0), // THD comparison not meaningful for fuzz
                             ..Default::default()
                         },
@@ -866,11 +866,11 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
                         pass_criteria: PassCriteria {
                             // JFET nonlinearity makes spectral match looser
-                            normalized_rms_error_db: Some(6.0),
-                            peak_error_db: Some(8.0),
+                            normalized_rms_error_db: Some(1.0),
+                            peak_error_db: Some(1.0),
                             // Sweep magnitude/phase match is excellent in time-domain; the
                             // Blackman-window spectral metric is intentionally loose here.
-                            spectral_error_db: Some(300.0),
+                            spectral_error_db: Some(279.4),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -893,8 +893,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
                             // Photocoupler has slow dynamics, allow some error
-                            normalized_rms_error_db: Some(10.0),
-                            peak_error_db: Some(12.0),
+                            normalized_rms_error_db: Some(-47.0),
+                            peak_error_db: Some(-15.7),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -917,8 +917,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
                             // MOSFET modeling may have some differences
-                            normalized_rms_error_db: Some(10.0),
-                            peak_error_db: Some(12.0),
+                            normalized_rms_error_db: Some(0.7),
+                            peak_error_db: Some(0.8),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -941,8 +941,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
                             // Source follower should have near-unity gain
-                            normalized_rms_error_db: Some(10.0),
-                            peak_error_db: Some(12.0),
+                            normalized_rms_error_db: Some(1.0),
+                            peak_error_db: Some(1.7),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -972,8 +972,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         ],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(10.0),
-                            peak_error_db: Some(12.0),
+                            normalized_rms_error_db: Some(0.9),
+                            peak_error_db: Some(0.9),
                             // THD comparison not meaningful for linear amplifier
                             ..Default::default()
                         },
@@ -1004,8 +1004,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         ],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(10.0),
-                            peak_error_db: Some(12.0),
+                            normalized_rms_error_db: Some(1.0),
+                            peak_error_db: Some(1.4),
                             // THD comparison not meaningful for linear amplifier
                             ..Default::default()
                         },
@@ -1029,8 +1029,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
                             // OTA modeling may differ from SPICE behavioral model
-                            normalized_rms_error_db: Some(12.0),
-                            peak_error_db: Some(15.0),
+                            normalized_rms_error_db: Some(1.0),
+                            peak_error_db: Some(1.0),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1105,8 +1105,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         ],
                         metrics: vec![],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(5.0), // Allow 5dB for coupling/freq effects
-                            peak_error_db: Some(7.0),
+                            normalized_rms_error_db: Some(-58.1), // Allow 5dB for coupling/freq effects
+                            peak_error_db: Some(-45.0),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1128,8 +1128,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         }],
                         metrics: vec![],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(5.0), // Allow 5dB for coupling/freq effects
-                            peak_error_db: Some(7.0),
+                            normalized_rms_error_db: Some(-89.7), // Allow 5dB for coupling/freq effects
+                            peak_error_db: Some(-89.2),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1183,8 +1183,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         ],
                         metrics: vec![],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(5.0), // Allow 5dB for WDF Q-factor differences
-                            peak_error_db: Some(7.0),
+                            normalized_rms_error_db: Some(-4.3), // Allow 5dB for WDF Q-factor differences
+                            peak_error_db: Some(6.4),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1218,8 +1218,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(3.0), // 3dB tolerance for gain accuracy
-                            peak_error_db: Some(5.0),
+                            normalized_rms_error_db: Some(-30.6), // 3dB tolerance for gain accuracy
+                            peak_error_db: Some(-15.9),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1241,8 +1241,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(3.0),
-                            peak_error_db: Some(5.0),
+                            normalized_rms_error_db: Some(-30.6),
+                            peak_error_db: Some(-15.9),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1264,8 +1264,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(3.0), // Allow 3dB for op-amp gain accuracy
-                            peak_error_db: Some(5.0),
+                            normalized_rms_error_db: Some(-48.8), // Allow 3dB for op-amp gain accuracy
+                            peak_error_db: Some(-15.7),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1287,8 +1287,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(3.0), // Allow 3dB for op-amp gain accuracy
-                            peak_error_db: Some(5.0),
+                            normalized_rms_error_db: Some(-30.6), // Allow 3dB for op-amp gain accuracy
+                            peak_error_db: Some(-15.7),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1309,8 +1309,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(3.0), // Allow 3dB for op-amp gain accuracy
-                            peak_error_db: Some(5.0),
+                            normalized_rms_error_db: Some(-30.6), // Allow 3dB for op-amp gain accuracy
+                            peak_error_db: Some(-15.7),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1331,8 +1331,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(3.0), // Frequency-dependent, allow more tolerance
-                            peak_error_db: Some(5.0),
+                            normalized_rms_error_db: Some(2.9), // Frequency-dependent, allow more tolerance
+                            peak_error_db: Some(3.2),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1375,9 +1375,9 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         ],
                         metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(8.0),
-                            peak_error_db: Some(10.0),
-                            spectral_error_db: Some(8.0),
+                            normalized_rms_error_db: Some(6.5),
+                            peak_error_db: Some(6.5),
+                            spectral_error_db: Some(3.3),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1408,7 +1408,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         pass_criteria: PassCriteria {
                             normalized_rms_error_db: Some(-35.0),
                             peak_error_db: Some(-25.0),
-                            spectral_error_db: Some(2.0),
+                            spectral_error_db: Some(1.0),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
@@ -1478,8 +1478,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             },
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(10.0), // Baseline: 6.6dB currently
-                            peak_error_db: Some(10.0),
+                            normalized_rms_error_db: Some(9.1), // Baseline: 6.6dB currently
+                            peak_error_db: Some(9.7),
                             thd_error_db: Some(200.0), // Very loose - THD comparison not meaningful at low levels
                             ..Default::default()
                         },
@@ -1516,8 +1516,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             },
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(10.0), // Baseline: 7.6dB currently
-                            peak_error_db: Some(10.0),
+                            normalized_rms_error_db: Some(6.3), // Baseline: 7.6dB currently
+                            peak_error_db: Some(7.8),
                             // Very loose until op-amp gain detection is implemented; keep the
                             // fixture as a wiring/runtime sanity check rather than THD equivalence.
                             thd_error_db: Some(200.0),
@@ -1837,8 +1837,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             },
                         ],
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(6.0),
-                            peak_error_db: Some(8.0),
+                            normalized_rms_error_db: Some(-4.2),
+                            peak_error_db: Some(1.2),
                             thd_error_db: Some(200.0), // Loose until SPICE golden refs available
                             ..Default::default()
                         },

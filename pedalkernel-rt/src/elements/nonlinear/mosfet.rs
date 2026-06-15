@@ -75,6 +75,77 @@ impl MosfetModel {
             is_n_channel: false,
         }
     }
+
+    /// Drain current `Ids(Vgs, Vds)` — enhancement-mode square-law model.
+    ///
+    /// - Cutoff: `Ids = 0` when the channel is off (N: `Vgs <= Vth`,
+    ///   P: `Vgs >= Vth`)
+    /// - Triode: `Ids = Kp * [2*Vov*|Vds| - Vds²] * sign(Vds)`
+    /// - Saturation: `Ids = Kp * Vov² * (1 + lambda*|Vds|) * sign(Vds)`
+    ///
+    /// The channel conducts symmetrically in both Vds polarities (drain and
+    /// source are interchangeable in the square-law model).
+    #[inline]
+    pub fn ids(&self, vgs: crate::Wave, vds: crate::Wave) -> crate::Wave {
+        let vov = match self.overdrive(vgs) {
+            Some(vov) => vov,
+            None => return 0.0,
+        };
+
+        let vds_abs = vds.abs();
+        let vds_sign = vds.signum();
+
+        let ids_magnitude = if vds_abs < vov {
+            // Triode (linear) region
+            self.kp * (2.0 * vov * vds_abs - vds_abs * vds_abs)
+        } else {
+            // Saturation region with channel-length modulation
+            self.kp * vov * vov * (1.0 + self.lambda * vds_abs)
+        };
+
+        ids_magnitude * vds_sign
+    }
+
+    /// Derivative `dIds/dVds` at fixed Vgs.
+    ///
+    /// Returns `LEAKAGE_CONDUCTANCE` in cutoff so Newton-Raphson always sees
+    /// a non-zero slope.
+    #[inline]
+    pub fn ids_vds_derivative(&self, vgs: crate::Wave, vds: crate::Wave) -> crate::Wave {
+        let vov = match self.overdrive(vgs) {
+            Some(vov) => vov,
+            None => return LEAKAGE_CONDUCTANCE,
+        };
+
+        let vds_abs = vds.abs();
+
+        if vds_abs < vov {
+            // Triode: dIds/dVds = Kp * 2*(Vov - |Vds|)
+            self.kp * 2.0 * (vov - vds_abs)
+        } else {
+            // Saturation: dIds/dVds = Kp * Vov² * lambda
+            self.kp * vov * vov * self.lambda
+        }
+    }
+
+    /// Overdrive voltage magnitude `Vov`, or `None` when in cutoff.
+    ///
+    /// N-channel: `Vov = Vgs - Vth` (conducts when `Vgs > Vth`).
+    /// P-channel: `Vov = Vth - Vgs` (conducts when `Vgs < Vth`, Vth < 0).
+    #[inline]
+    fn overdrive(&self, vgs: crate::Wave) -> Option<crate::Wave> {
+        if self.is_n_channel {
+            if vgs <= self.vth {
+                return None;
+            }
+            Some(vgs - self.vth)
+        } else {
+            if vgs >= self.vth {
+                return None;
+            }
+            Some(self.vth - vgs)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,82 +193,32 @@ impl MosfetRoot {
 
     /// Compute drain current for given Vds at current Vgs.
     ///
-    /// Enhancement-mode square-law model:
-    /// - Cutoff: Ids = 0 when |Vgs| < |Vth|
-    /// - Triode: Ids = Kp * [2*(Vgs-Vth)*Vds - Vds²]
-    /// - Saturation: Ids = Kp * (Vgs-Vth)² * (1 + lambda*|Vds|)
+    /// See [`MosfetModel::ids`] for the enhancement-mode square-law model.
     #[inline]
     pub fn drain_current(&self, vds: crate::Wave) -> crate::Wave {
-        let vth = self.model.vth;
-        let kp = self.model.kp;
-        let lambda = self.model.lambda;
-        let vgs = self.vgs;
-
-        // Cutoff check
-        if self.model.is_n_channel {
-            if vgs <= vth {
-                return 0.0;
-            }
-        } else {
-            // P-channel: conducts when Vgs < Vth (Vth is negative)
-            if vgs >= vth {
-                return 0.0;
-            }
-        }
-
-        // Overdrive voltage
-        let vov = if self.model.is_n_channel {
-            vgs - vth
-        } else {
-            vth - vgs // positive magnitude for P-channel
-        };
-
-        let vds_abs = vds.abs();
-        let vds_sign = vds.signum();
-
-        let ids_magnitude = if vds_abs < vov {
-            // Triode (linear) region
-            kp * (2.0 * vov * vds_abs - vds_abs * vds_abs)
-        } else {
-            // Saturation region with channel-length modulation
-            kp * vov * vov * (1.0 + lambda * vds_abs)
-        };
-
-        ids_magnitude * vds_sign
+        self.model.ids(self.vgs, vds)
     }
 
     /// Compute derivative of drain current w.r.t. Vds.
     #[inline]
     fn drain_current_derivative(&self, vds: crate::Wave) -> crate::Wave {
-        let vth = self.model.vth;
-        let kp = self.model.kp;
-        let lambda = self.model.lambda;
-        let vgs = self.vgs;
+        self.model.ids_vds_derivative(self.vgs, vds)
+    }
+}
 
-        // Cutoff: small conductance
-        if self.model.is_n_channel {
-            if vgs <= vth {
-                return LEAKAGE_CONDUCTANCE;
-            }
-        } else if vgs >= vth {
-            return LEAKAGE_CONDUCTANCE;
-        }
+impl super::solver::NlDeviceIv for MosfetRoot {
+    /// I(Vds) at current Vgs — drain-source as a 1-port nonlinear element.
+    ///
+    /// Mirrors the JFET/OTA pattern so the MOSFET can participate in
+    /// multi-NL MNA solves once `NlDeviceKind` grows a `Mosfet` variant.
+    #[inline]
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
+        (self.drain_current(v), self.drain_current_derivative(v))
+    }
 
-        let vov = if self.model.is_n_channel {
-            vgs - vth
-        } else {
-            vth - vgs
-        };
-
-        let vds_abs = vds.abs();
-
-        if vds_abs < vov {
-            // Triode: dIds/dVds = Kp * 2*(Vov - Vds)
-            kp * 2.0 * (vov - vds_abs)
-        } else {
-            // Saturation: dIds/dVds = Kp * Vov^2 * lambda
-            kp * vov * vov * lambda
-        }
+    #[inline]
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
+        (-20.0, 20.0)
     }
 }
 

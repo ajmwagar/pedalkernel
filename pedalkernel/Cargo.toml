@@ -38,6 +38,10 @@ pro-pedals = []
 # Adds postcard serialization so build scripts get a single-call
 # compile + cache + serialize utility.
 build-cache = ["dep:postcard", "pedalkernel-rt/serde"]
+# Pure-buffer audio analysis utilities (rms, peak, thd, spectral_centroid,
+# spectral_distance, rms_envelope, assert_healthy, goertzel_power, etc.).
+# std-only — off by default so no_std/embedded (Daisy) builds are unaffected.
+analysis = ["std"]
 
 [dependencies]
 # Runtime crate (WDF engine, elements, tree)

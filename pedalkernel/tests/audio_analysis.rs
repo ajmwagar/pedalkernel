@@ -3,9 +3,23 @@
 //! Provides Goertzel-based spectral analysis, THD measurement, modulation
 //! detection, and convenience wrappers for compiling + processing pedals.
 //! No external FFT crate — pure Rust math.
+//!
+//! # DRY notice
+//!
+//! All pure-buffer analysis functions (rms, peak, thd, spectral_centroid,
+//! spectral_distance, rms_envelope, assert_healthy, goertzel_power, etc.) live
+//! in `pedalkernel::analysis` (feature-gated behind `analysis`).  When the
+//! `analysis` feature is enabled this shim re-exports them verbatim.  When it
+//! is not enabled (e.g. plain `cargo test` without explicit features) the
+//! original implementations remain here as a fallback so the 48 consuming test
+//! files continue to compile unchanged.
+//!
+//! Run tests with the promoted module:
+//!   cargo test -p pedalkernel --features analysis
 
 #![allow(dead_code)]
 
+use std::cmp::Ordering;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -13,7 +27,6 @@ use pedalkernel::compiler::{compile_pedal, compile_pedal_with_options, CompileOp
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::wav::{read_wav_mono, write_wav};
 use pedalkernel::PedalProcessor;
-use std::cmp::Ordering;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -32,7 +45,7 @@ pub static CLEAN_GUITAR: LazyLock<(Vec<f64>, u32)> = LazyLock::new(|| {
 });
 
 // ---------------------------------------------------------------------------
-// Signal generators
+// Signal generators (test-only — not part of the public analysis API)
 // ---------------------------------------------------------------------------
 
 /// Generate a sine wave at `freq_hz` with amplitude 0.5.
@@ -84,11 +97,49 @@ pub fn step_then_zero(
     buf
 }
 
+/// Tone-burst stimulus for attack/release measurement.
+pub fn tone_burst(
+    freq_hz: f64,
+    amp_lo: f64,
+    amp_hi: f64,
+    lo_secs: f64,
+    hi_secs: f64,
+    tail_secs: f64,
+    sample_rate: f64,
+) -> Vec<f64> {
+    let n_lo = (lo_secs * sample_rate) as usize;
+    let n_hi = (hi_secs * sample_rate) as usize;
+    let n_tail = (tail_secs * sample_rate) as usize;
+    (0..n_lo + n_hi + n_tail)
+        .map(|i| {
+            let amp = if i >= n_lo && i < n_lo + n_hi {
+                amp_hi
+            } else {
+                amp_lo
+            };
+            let t = i as f64 / sample_rate;
+            amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin()
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
-// Basic measurements
+// Pure-buffer analysis functions
+//
+// When the `analysis` feature is enabled, these are re-exported from
+// `pedalkernel::analysis` (single canonical implementation — DRY).
+// When not enabled, the original implementations are compiled inline here
+// so that all 48 consumers compile without requiring `--features analysis`.
 // ---------------------------------------------------------------------------
 
-/// RMS level.
+#[cfg(feature = "analysis")]
+pub use pedalkernel::analysis::{
+    assert_healthy, band_energy_ratio, correlation, count_subnormals, crest_factor, db_to_lin,
+    dc_offset, energy, goertzel_mag, goertzel_power, lin_to_db, peak, rms, rms_envelope,
+    spectral_centroid, spectral_distance, thd,
+};
+
+#[cfg(not(feature = "analysis"))]
 pub fn rms(buf: &[f64]) -> f64 {
     if buf.is_empty() {
         return 0.0;
@@ -96,12 +147,12 @@ pub fn rms(buf: &[f64]) -> f64 {
     (buf.iter().map(|x| x * x).sum::<f64>() / buf.len() as f64).sqrt()
 }
 
-/// Peak absolute amplitude.
+#[cfg(not(feature = "analysis"))]
 pub fn peak(buf: &[f64]) -> f64 {
     buf.iter().fold(0.0f64, |m, x| m.max(x.abs()))
 }
 
-/// DC offset (mean).
+#[cfg(not(feature = "analysis"))]
 pub fn dc_offset(buf: &[f64]) -> f64 {
     if buf.is_empty() {
         return 0.0;
@@ -109,7 +160,7 @@ pub fn dc_offset(buf: &[f64]) -> f64 {
     buf.iter().sum::<f64>() / buf.len() as f64
 }
 
-/// Crest factor = peak / RMS. Lower means more compressed/clipped.
+#[cfg(not(feature = "analysis"))]
 pub fn crest_factor(buf: &[f64]) -> f64 {
     let r = rms(buf);
     if r < 1e-20 {
@@ -118,7 +169,7 @@ pub fn crest_factor(buf: &[f64]) -> f64 {
     peak(buf) / r
 }
 
-/// Normalized cross-correlation between two buffers.
+#[cfg(not(feature = "analysis"))]
 pub fn correlation(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len()) as f64;
     if n == 0.0 {
@@ -139,17 +190,22 @@ pub fn correlation(a: &[f64], b: &[f64]) -> f64 {
     cov / (va.sqrt() * vb.sqrt())
 }
 
-/// Energy of a buffer (sum of squares).
+#[cfg(not(feature = "analysis"))]
 pub fn energy(buf: &[f64]) -> f64 {
     buf.iter().map(|x| x * x).sum()
 }
 
-// ---------------------------------------------------------------------------
-// Goertzel algorithm — efficient single-bin DFT
-// ---------------------------------------------------------------------------
+#[cfg(not(feature = "analysis"))]
+pub fn lin_to_db(lin: f64) -> f64 {
+    20.0 * lin.max(1e-12).log10()
+}
 
-/// Goertzel algorithm: returns magnitude² of DFT at `target_hz`.
-/// O(N) per bin — much cheaper than full FFT when we only need a few bins.
+#[cfg(not(feature = "analysis"))]
+pub fn db_to_lin(db: f64) -> f64 {
+    10f64.powf(db / 20.0)
+}
+
+#[cfg(not(feature = "analysis"))]
 pub fn goertzel_power(buf: &[f64], sample_rate: f64, target_hz: f64) -> f64 {
     let n = buf.len() as f64;
     let k = (target_hz * n / sample_rate).round();
@@ -165,22 +221,16 @@ pub fn goertzel_power(buf: &[f64], sample_rate: f64, target_hz: f64) -> f64 {
         s1 = s0;
     }
 
-    // Power = s1² + s2² - coeff * s1 * s2
     let power = s1 * s1 + s2 * s2 - coeff * s1 * s2;
-    power / (n * n / 4.0) // Normalize so a full-scale sine gives ~1.0
+    power / (n * n / 4.0)
 }
 
-/// Goertzel magnitude (square root of power).
+#[cfg(not(feature = "analysis"))]
 pub fn goertzel_mag(buf: &[f64], sample_rate: f64, target_hz: f64) -> f64 {
     goertzel_power(buf, sample_rate, target_hz).max(0.0).sqrt()
 }
 
-// ---------------------------------------------------------------------------
-// Spectral analysis
-// ---------------------------------------------------------------------------
-
-/// THD: ratio of harmonic energy (harmonics 2-8) to fundamental energy.
-/// Returns a value in [0, ∞). 0 = pure sine, >1 = harmonics dominate.
+#[cfg(not(feature = "analysis"))]
 pub fn thd(buf: &[f64], sample_rate: f64, fundamental_hz: f64) -> f64 {
     let fund_power = goertzel_power(buf, sample_rate, fundamental_hz);
     if fund_power < 1e-30 {
@@ -199,8 +249,7 @@ pub fn thd(buf: &[f64], sample_rate: f64, fundamental_hz: f64) -> f64 {
     (harmonic_power / fund_power).sqrt()
 }
 
-/// Energy in frequency band [lo_hz, hi_hz] relative to total wideband energy.
-/// Steps through band at `step_hz` resolution.
+#[cfg(not(feature = "analysis"))]
 pub fn band_energy_ratio(
     buf: &[f64],
     sample_rate: f64,
@@ -222,8 +271,7 @@ pub fn band_energy_ratio(
     band / total_energy
 }
 
-/// Spectral centroid — perceptual "brightness" in Hz.
-/// Computed over linearly-spaced bins from 50 Hz to Nyquist/2.
+#[cfg(not(feature = "analysis"))]
 pub fn spectral_centroid(buf: &[f64], sample_rate: f64) -> f64 {
     let nyquist = sample_rate / 2.0;
     let step = 50.0;
@@ -243,6 +291,66 @@ pub fn spectral_centroid(buf: &[f64], sample_rate: f64) -> f64 {
     }
     weighted_sum / total_power
 }
+
+#[cfg(not(feature = "analysis"))]
+pub fn spectral_distance(a: &[f64], b: &[f64], sample_rate: f64, step_hz: f64) -> f64 {
+    let nyquist = sample_rate / 2.0;
+    let mut freq = step_hz;
+    let mut accum = 0.0;
+    let mut bins = 0.0;
+    while freq < nyquist {
+        let pa = goertzel_power(a, sample_rate, freq).max(1e-18);
+        let pb = goertzel_power(b, sample_rate, freq).max(1e-18);
+        let diff = (pa.log10() - pb.log10()).abs();
+        accum += diff;
+        bins += 1.0;
+        freq += step_hz;
+    }
+    if bins < 1.0 {
+        0.0
+    } else {
+        accum / bins
+    }
+}
+
+#[cfg(not(feature = "analysis"))]
+pub fn count_subnormals(buf: &[f64]) -> usize {
+    buf.iter().filter(|x| x.is_subnormal()).count()
+}
+
+#[cfg(not(feature = "analysis"))]
+pub fn rms_envelope(buf: &[f64], window_secs: f64, sample_rate: f64) -> Vec<f64> {
+    let w = ((window_secs * sample_rate) as usize).max(1);
+    let mut out = Vec::with_capacity(buf.len());
+    let mut sum_sq = 0.0;
+    for i in 0..buf.len() {
+        sum_sq += buf[i] * buf[i];
+        if i >= w {
+            sum_sq -= buf[i - w] * buf[i - w];
+        }
+        let n = (i + 1).min(w);
+        out.push((sum_sq.max(0.0) / n as f64).sqrt());
+    }
+    out
+}
+
+#[cfg(not(feature = "analysis"))]
+pub fn assert_healthy(buf: &[f64], name: &str, max_peak: f64) {
+    assert!(
+        buf.iter().all(|x| x.is_finite()),
+        "{name}: output contains NaN/inf"
+    );
+    let p = peak(buf);
+    assert!(p > 1e-6, "{name}: output is silent (peak={p:.8})");
+    assert!(
+        p < max_peak,
+        "{name}: output too loud (peak={p:.4}, max={max_peak})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AliasSummary — pure-buffer struct (kept here; not yet in public API)
+// ---------------------------------------------------------------------------
 
 /// Summary of alias energy in the upper band.
 #[derive(Debug, Clone)]
@@ -299,88 +407,16 @@ pub fn alias_energy_summary(
     }
 }
 
-/// Count subnormal (denormalized) floating point values in buffer.
-pub fn count_subnormals(buf: &[f64]) -> usize {
-    buf.iter().filter(|x| x.is_subnormal()).count()
-}
-
-/// Downsample by 2 with a simple 3-tap lowpass prefilter.
-pub fn downsample_by_2(buf: &[f64]) -> Vec<f64> {
-    if buf.len() < 2 {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(buf.len() / 2 + 1);
-    let mut i = 0;
-    while i + 1 < buf.len() {
-        let x0 = buf[i];
-        let x1 = buf[i + 1];
-        let x2 = if i + 2 < buf.len() { buf[i + 2] } else { x1 };
-        out.push((x0 + 2.0 * x1 + x2) * 0.25);
-        i += 2;
-    }
-    out
-}
-
-/// Resample buffer from `src_rate` to `dst_rate` using linear interpolation.
-pub fn resample_linear(buf: &[f64], src_rate: f64, dst_rate: f64) -> Vec<f64> {
-    if buf.is_empty() {
-        return Vec::new();
-    }
-    let duration = buf.len() as f64 / src_rate;
-    let dst_len = (duration * dst_rate).round() as usize;
-    if dst_len == 0 {
-        return Vec::new();
-    }
-
-    let mut out = Vec::with_capacity(dst_len);
-    for n in 0..dst_len {
-        let t = n as f64 / dst_rate;
-        let src_pos = t * src_rate;
-        let idx = src_pos.floor() as usize;
-        let frac = src_pos - idx as f64;
-        let a = buf.get(idx).copied().unwrap_or(*buf.last().unwrap());
-        let b = buf.get(idx + 1).copied().unwrap_or(a);
-        out.push(a + (b - a) * frac);
-    }
-    out
-}
-
-/// Spectral log-magnitude distance between two buffers.
-pub fn spectral_distance(a: &[f64], b: &[f64], sample_rate: f64, step_hz: f64) -> f64 {
-    let nyquist = sample_rate / 2.0;
-    let mut freq = step_hz;
-    let mut accum = 0.0;
-    let mut bins = 0.0;
-    while freq < nyquist {
-        let pa = goertzel_power(a, sample_rate, freq).max(1e-18);
-        let pb = goertzel_power(b, sample_rate, freq).max(1e-18);
-        let diff = (pa.log10() - pb.log10()).abs();
-        accum += diff;
-        bins += 1.0;
-        freq += step_hz;
-    }
-    if bins < 1.0 {
-        0.0
-    } else {
-        accum / bins
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Modulation detection
 // ---------------------------------------------------------------------------
 
 /// Detect dominant modulation rate by amplitude-envelope analysis.
-///
-/// 1. Compute amplitude envelope (rectify + lowpass)
-/// 2. Remove DC from envelope
-/// 3. Find peak frequency in 0.1–20 Hz range via Goertzel
 pub fn detect_modulation_rate(buf: &[f64], sample_rate: f64) -> f64 {
     if buf.len() < 1000 {
         return 0.0;
     }
 
-    // Compute amplitude envelope: |x| smoothed with ~50 Hz lowpass
     let alpha = (-2.0 * std::f64::consts::PI * 50.0 / sample_rate).exp();
     let mut envelope = Vec::with_capacity(buf.len());
     let mut env = 0.0;
@@ -389,13 +425,11 @@ pub fn detect_modulation_rate(buf: &[f64], sample_rate: f64) -> f64 {
         envelope.push(env);
     }
 
-    // Remove DC
     let dc = envelope.iter().sum::<f64>() / envelope.len() as f64;
     for e in &mut envelope {
         *e -= dc;
     }
 
-    // Scan 0.1–20 Hz for peak modulation frequency
     let mut best_freq = 0.0;
     let mut best_power = 0.0;
     let mut freq = 0.1;
@@ -412,7 +446,6 @@ pub fn detect_modulation_rate(buf: &[f64], sample_rate: f64) -> f64 {
 }
 
 /// Check whether amplitude envelope varies significantly over time.
-/// Splits buffer into chunks and checks if RMS varies between them.
 pub fn has_amplitude_modulation(buf: &[f64], num_chunks: usize) -> bool {
     if buf.len() < num_chunks * 100 {
         return false;
@@ -428,13 +461,43 @@ pub fn has_amplitude_modulation(buf: &[f64], num_chunks: usize) -> bool {
     if max_rms < 1e-10 {
         return false;
     }
-    // More than 10% variation = modulation detected
     (max_rms - min_rms) / max_rms > 0.10
 }
 
 // ---------------------------------------------------------------------------
-// Compile + process helpers
+// Compile + process helpers (test-only — require PedalProcessor + filesystem)
 // ---------------------------------------------------------------------------
+
+/// Compile a .pedal source string into a fresh sample-by-sample process closure.
+pub fn pedal_processor(
+    pedal_src: &str,
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+) -> impl FnMut(f64) -> f64 {
+    let pedal = parse_pedal_file(pedal_src).expect("failed to parse pedal source");
+    let mut proc = compile_pedal(&pedal, sample_rate).expect("failed to compile pedal");
+    for &(label, val) in controls {
+        proc.set_control(label, val);
+    }
+    move |s| proc.process(s)
+}
+
+/// Read a .pedal source string from tests/test_pedals/.
+pub fn test_pedal_source(filename: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/test_pedals")
+        .join(filename);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
+
+/// Read a .pedal source string from examples/ (searches subdirectories).
+pub fn example_pedal_source(filename: &str) -> String {
+    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let path = find_file_recursive(&examples_dir, filename)
+        .unwrap_or_else(|| panic!("example file not found: {filename}"));
+    std::fs::read_to_string(&path).unwrap()
+}
 
 /// Compile a .pedal source string and process input through it.
 pub fn compile_and_process(
@@ -545,26 +608,160 @@ fn find_file_recursive(dir: &Path, filename: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Assertions
+// Outboard-gear measurements: frequency response, gain curves, dynamics
 // ---------------------------------------------------------------------------
 
-/// Assert that all samples are finite, non-silent, and bounded.
-pub fn assert_healthy(buf: &[f64], name: &str, max_peak: f64) {
-    assert!(
-        buf.iter().all(|x| x.is_finite()),
-        "{name}: output contains NaN/inf"
-    );
-    let p = peak(buf);
-    assert!(p > 1e-6, "{name}: output is silent (peak={p:.8})");
-    assert!(
-        p < max_peak,
-        "{name}: output too loud (peak={p:.4}, max={max_peak})"
-    );
+const MEASURE_SETTLE_SECS: f64 = 0.5;
+const MEASURE_WINDOW_SECS: f64 = 0.25;
+
+/// Measure small-signal frequency response in dB at each probe frequency.
+pub fn frequency_response_db<F, P>(
+    mut make_processor: F,
+    freqs_hz: &[f64],
+    amplitude: f64,
+    sample_rate: f64,
+) -> Vec<(f64, f64)>
+where
+    F: FnMut() -> P,
+    P: FnMut(f64) -> f64,
+{
+    freqs_hz
+        .iter()
+        .map(|&freq| {
+            let mut process = make_processor();
+            let cycles = (MEASURE_WINDOW_SECS * freq).ceil().max(4.0);
+            let window = (cycles * sample_rate / freq).round() as usize;
+            let settle = (MEASURE_SETTLE_SECS * sample_rate) as usize;
+            let input = sine_at(
+                freq,
+                amplitude,
+                (settle + window) as f64 / sample_rate,
+                sample_rate,
+            );
+            let output: Vec<f64> = input.iter().map(|&s| process(s)).collect();
+            let in_mag = goertzel_mag(&input[settle..], sample_rate, freq);
+            let out_mag = goertzel_mag(&output[settle..], sample_rate, freq);
+            (freq, lin_to_db(out_mag) - lin_to_db(in_mag))
+        })
+        .collect()
 }
 
-/// Assert one value is greater than another with context.
-pub fn assert_greater(a: f64, b: f64, msg: &str) {
-    assert!(a > b, "{msg}: expected {a:.6} > {b:.6}");
+/// Measure the static (steady-state) gain curve of a processor.
+pub fn static_gain_curve<F, P>(
+    mut make_processor: F,
+    input_levels_db: &[f64],
+    freq_hz: f64,
+    sample_rate: f64,
+) -> Vec<(f64, f64)>
+where
+    F: FnMut() -> P,
+    P: FnMut(f64) -> f64,
+{
+    let settle = (MEASURE_SETTLE_SECS * sample_rate) as usize;
+    let window = (MEASURE_WINDOW_SECS * sample_rate) as usize;
+    input_levels_db
+        .iter()
+        .map(|&in_db| {
+            let mut process = make_processor();
+            let input = sine_at(
+                freq_hz,
+                db_to_lin(in_db),
+                (settle + window) as f64 / sample_rate,
+                sample_rate,
+            );
+            let output: Vec<f64> = input.iter().map(|&s| process(s)).collect();
+            let out_db = lin_to_db(rms(&output[settle..]) * std::f64::consts::SQRT_2);
+            (in_db, out_db)
+        })
+        .collect()
+}
+
+/// Compression ratio over a region of a static gain curve.
+pub fn compression_ratio(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
+    let pts: Vec<(f64, f64)> = curve
+        .iter()
+        .copied()
+        .filter(|&(x, _)| x >= lo_db && x <= hi_db)
+        .collect();
+    assert!(
+        pts.len() >= 2,
+        "compression_ratio: need >= 2 curve points in [{lo_db}, {hi_db}], got {}",
+        pts.len()
+    );
+    let n = pts.len() as f64;
+    let mx = pts.iter().map(|p| p.0).sum::<f64>() / n;
+    let my = pts.iter().map(|p| p.1).sum::<f64>() / n;
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for &(x, y) in &pts {
+        sxy += (x - mx) * (y - my);
+        sxx += (x - mx) * (x - mx);
+    }
+    let slope = sxy / sxx;
+    if slope.abs() < 1e-9 {
+        f64::INFINITY
+    } else {
+        1.0 / slope
+    }
+}
+
+/// Gain reduction in dB between two points on a static gain curve.
+pub fn gain_reduction_db(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
+    assert!(!curve.is_empty(), "gain_reduction_db: empty curve");
+    let nearest = |target: f64| {
+        curve
+            .iter()
+            .min_by(|a, b| {
+                (a.0 - target)
+                    .abs()
+                    .partial_cmp(&(b.0 - target).abs())
+                    .unwrap_or(Ordering::Equal)
+            })
+            .unwrap()
+    };
+    let lo = nearest(lo_db);
+    let hi = nearest(hi_db);
+    (lo.1 - lo.0) - (hi.1 - hi.0)
+}
+
+// ---------------------------------------------------------------------------
+// Attack / release timing
+// ---------------------------------------------------------------------------
+
+const ENVELOPE_WINDOW_SECS: f64 = 0.002;
+const SETTLE_TOLERANCE_DB: f64 = 1.0;
+
+fn envelope_settle_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    assert!(
+        step_sample < output.len(),
+        "envelope_settle_seconds: step_sample {step_sample} out of range"
+    );
+    let env = rms_envelope(output, ENVELOPE_WINDOW_SECS, sample_rate);
+    let segment = &env[step_sample..];
+    let tail_start = segment.len() - segment.len() / 4;
+    let tail = &segment[tail_start..];
+    let target = tail.iter().sum::<f64>() / tail.len().max(1) as f64;
+    if target < 1e-12 {
+        return 0.0;
+    }
+    let lo = target * db_to_lin(-SETTLE_TOLERANCE_DB);
+    let hi = target * db_to_lin(SETTLE_TOLERANCE_DB);
+    let mut settle_idx = 0;
+    for (i, &e) in segment.iter().enumerate().take(tail_start) {
+        if e < lo || e > hi {
+            settle_idx = i + 1;
+        }
+    }
+    settle_idx as f64 / sample_rate
+}
+
+/// Attack time: seconds from a level step-up at `step_sample` until settled.
+pub fn measure_attack_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    envelope_settle_seconds(output, step_sample, sample_rate)
+}
+
+/// Release time: seconds from a level step-down at `step_sample` until settled.
+pub fn measure_release_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    envelope_settle_seconds(output, step_sample, sample_rate)
 }
 
 // ---------------------------------------------------------------------------
@@ -579,4 +776,50 @@ pub fn maybe_dump_wav(samples: &[f64], name: &str, sample_rate: u32) {
         let path = dir.join(format!("{name}.wav"));
         write_wav(samples, &path, sample_rate).unwrap();
     }
+}
+
+/// Assert one value is greater than another with context.
+pub fn assert_greater(a: f64, b: f64, msg: &str) {
+    assert!(a > b, "{msg}: expected {a:.6} > {b:.6}");
+}
+
+/// Downsample by 2 with a simple 3-tap lowpass prefilter.
+pub fn downsample_by_2(buf: &[f64]) -> Vec<f64> {
+    if buf.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(buf.len() / 2 + 1);
+    let mut i = 0;
+    while i + 1 < buf.len() {
+        let x0 = buf[i];
+        let x1 = buf[i + 1];
+        let x2 = if i + 2 < buf.len() { buf[i + 2] } else { x1 };
+        out.push((x0 + 2.0 * x1 + x2) * 0.25);
+        i += 2;
+    }
+    out
+}
+
+/// Resample buffer from `src_rate` to `dst_rate` using linear interpolation.
+pub fn resample_linear(buf: &[f64], src_rate: f64, dst_rate: f64) -> Vec<f64> {
+    if buf.is_empty() {
+        return Vec::new();
+    }
+    let duration = buf.len() as f64 / src_rate;
+    let dst_len = (duration * dst_rate).round() as usize;
+    if dst_len == 0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(dst_len);
+    for n in 0..dst_len {
+        let t = n as f64 / dst_rate;
+        let src_pos = t * src_rate;
+        let idx = src_pos.floor() as usize;
+        let frac = src_pos - idx as f64;
+        let a = buf.get(idx).copied().unwrap_or(*buf.last().unwrap());
+        let b = buf.get(idx + 1).copied().unwrap_or(a);
+        out.push(a + (b - a) * frac);
+    }
+    out
 }

@@ -1463,6 +1463,17 @@ pub struct WdfStage {
     /// This models voltage extraction at the circuit's output node when
     /// a pot sits between the NL junction and the output.
     pub output_probe: Option<String>,
+    /// Series-diode rectifier load-divider ratio `RL / (R1 + RL)`.
+    ///
+    /// A diode WDF root normally reports the diode *junction* voltage. That is
+    /// correct for shunt clippers and op-amp feedback clippers, but a *series*
+    /// rectifier `in -> R1 -> D1 -> RL -> gnd` taps the load voltage at the
+    /// D1/RL junction. By KVL around the loop the load voltage is
+    /// `V_RL = (Vin - V_diode) * RL/(R1+RL)`, which goes to ~0 when the diode
+    /// blocks (true half-wave rectification) instead of passing the signal.
+    /// When `Some(ratio)`, the diode output path computes the load voltage from
+    /// this ratio. `None` keeps the junction-voltage behaviour.
+    pub series_rectifier_divider: Option<crate::Wave>,
     /// Op-amp gain stage paired with a DiodePair/SingleDiode root.
     ///
     /// When an inverting op-amp has diodes in its feedback path (e.g., Tube Screamer,
@@ -1559,7 +1570,62 @@ pub struct WdfStage {
     /// leave this empty and continue to behave as one-input/one-output stages.
     #[cfg_attr(feature = "serde", serde(default))]
     pub boundary_bindings: Vec<WdfBoundaryBinding>,
+
+    /// Last-APPLIED controlled resistance per component id, for threshold
+    /// gating of photocoupler / `jfet_vr` scattering re-derivations.
+    ///
+    /// Physics: a CdS photocell's resistance trajectory is band-limited by
+    /// its own carrier dynamics (ms-to-s time constants — e.g. T4B attack
+    /// ~10 ms, release 0.5–5 s), and a sidechain-driven JFET Vgs is likewise
+    /// smoothed by the detector's RC network. Control content therefore
+    /// lives below a few hundred Hz, so re-deriving the MNA scattering
+    /// matrix (or WDF adaptor gammas) at audio rate is wasted work: between
+    /// recomputes the applied resistance lags the true value by less than
+    /// the gate epsilon. The element's internal state still updates every
+    /// sample, so attack/release timing physics are unaffected — only the
+    /// expensive re-derivation is skipped. Comparing against the
+    /// last-APPLIED value (not the last-seen one) lets sub-epsilon drift
+    /// accumulate and eventually trigger, bounding steady-state error by
+    /// the epsilon.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub ctrl_r_last_applied: Vec<CtrlRecomputeGate>,
+
+    /// Parallel-branch convergence summation (F13b).
+    ///
+    /// When `Some`, this stage is NOT processed as a normal WDF/serial stage.
+    /// Instead it sums several upstream op-amp-output branches read from
+    /// `node_signals`: `V_out = Σ_i g_i · node_signals[source_i]`. The transfer
+    /// gains `g_i` are solved by DC superposition at compile time and re-solved
+    /// only when a blend pot moves — the per-sample cost is `N` multiply-adds.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub convergence: Option<crate::convergence::ConvergenceSum>,
 }
+
+/// Per-component gating state for controlled-resistor recomputes.
+/// See [`WdfStage::ctrl_resistance_drifted`].
+pub struct CtrlRecomputeGate {
+    pub comp_id: String,
+    /// Resistance encoded in the currently-applied scattering matrix /
+    /// adaptor gammas (the last value that actually triggered a recompute).
+    pub last_applied_r: crate::Wave,
+}
+
+/// Relative resistance change below which a controlled-resistor
+/// (photocoupler LDR / JFET VR) scattering re-derivation is skipped.
+///
+/// 1e-3 relative resistance corresponds to well under 0.01 dB of gain
+/// error in a divider, far below measurement tolerances, while skipping
+/// the vast majority of per-sample recomputes once the envelope settles.
+///
+/// MEASURED (2026-06-13, opto_leveler/fet_leveler sweeps): eps = 1e-3
+/// shifts the opto GR curve by at most 0.006 dB and release timing by
+/// 0.01% — far inside the 0.1 dB / 5% acceptance band. Do NOT add a
+/// control-rate decimation on top of this check: a /16 decimation was
+/// measured to buy only ~14% throughput while aliasing the loud-input
+/// envelope ripple into a 0.154 dB GR shift (effective ratio 15.3 -> 17.9)
+/// — the check must stay at audio rate so every >eps resistance move is
+/// applied sample-accurately.
+pub const CTRL_R_RECOMPUTE_EPS: crate::Wave = 1e-3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1627,6 +1693,7 @@ impl WdfStage {
             feedback_ri_pot_max_r: 0.0,
             feedback_ri_pot_taper: crate::pot_taper::PotTaper::B,
             output_probe: None,
+            series_rectifier_divider: None,
             feedback_opamp: None,
             k_table: None,
             vcc_injection_coeff: 0.0,
@@ -1648,6 +1715,8 @@ impl WdfStage {
             main_vs_ptr: None,
             port_vs_ptrs: Vec::new(),
             boundary_bindings: Vec::new(),
+            ctrl_r_last_applied: Vec::new(),
+            convergence: None,
         }
     }
 
@@ -1951,6 +2020,7 @@ impl WdfStage {
         let k_table = &self.k_table;
         let compensation = self.compensation;
         let output_probe = &self.output_probe;
+        let series_rectifier_divider = self.series_rectifier_divider;
         let feedback_opamp = &mut self.feedback_opamp;
         let vcc_injection_coeff = self.vcc_injection_coeff;
         let vcc_dc_ramp = &mut self.vcc_dc_ramp;
@@ -2355,7 +2425,23 @@ impl WdfStage {
                 | RootKind::ExplicitDiodePair(_)
                 | RootKind::ExplicitSingleDiode(_)
                 | RootKind::Zener(_)
-                | RootKind::ZenerPair(_) => -(a_root + b_tree) / 2.0,
+                | RootKind::ZenerPair(_) => {
+                    // Diode junction voltage (anode-cathode) in WDF wave terms.
+                    let v_diode = (a_root + b_tree) / 2.0;
+                    if let Some(divider) = series_rectifier_divider {
+                        // Series rectifier: output is the load voltage at the
+                        // D1/RL junction. By KVL around the series loop
+                        //   V_RL = (Vin - V_diode) * RL/(R1+RL)
+                        // which collapses to ~0 when the diode blocks (correct
+                        // half-wave rectification) and rises when it conducts.
+                        let v_in = sample * compensation;
+                        (v_in - v_diode) * divider
+                    } else {
+                        // Shunt clipper / op-amp feedback clipper: the junction
+                        // voltage IS the output.
+                        -v_diode
+                    }
+                }
                 _ => (a_root + b_tree) / 2.0,
             };
             out
@@ -2483,6 +2569,10 @@ impl WdfStage {
     pub fn reset(&mut self) {
         self.tree.reset_with_state(&mut self.runtime_state);
         self.oversampler.reset();
+        // Reset returns controlled-resistor leaves to their dark/zero-bias
+        // resistance without re-deriving scattering; drop the gating
+        // baseline so the first post-reset control write recomputes.
+        self.ctrl_r_last_applied.clear();
         self.ensure_passive_rtype_child_runtime_states();
         if let Some(ref mut opamp) = self.paired_opamp {
             opamp.reset();
@@ -2704,6 +2794,198 @@ impl WdfStage {
             RootKind::JfetVr(j) => Some(j.vgs()),
             _ => None,
         }
+    }
+
+    /// Current effective resistance of the controlled-resistor leaf with
+    /// the given component id (WDF tree or PassiveRType MNA children).
+    fn controlled_leaf_resistance(&self, comp_id: &str) -> Option<crate::Wave> {
+        let probe = |leaf: &dyn crate::wdf_leaf::WdfLeaf| -> Option<crate::Wave> {
+            (leaf.comp_id() == Some(comp_id)).then(|| leaf.port_resistance())
+        };
+        if let Some(r) = self.tree.find_leaf(&probe) {
+            return Some(r);
+        }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            for child in children {
+                if let Some(r) = child.find_leaf(&probe) {
+                    return Some(r);
+                }
+            }
+        }
+        None
+    }
+
+    /// Threshold gate for controlled-resistor (photocoupler / `jfet_vr`)
+    /// scattering re-derivations. Returns `true` when the re-derivation
+    /// should run, recording the new resistance as the last-applied value.
+    ///
+    /// Physics justification: the CdS cell's resistance trajectory is
+    /// band-limited by its own ms-to-s time constants, so its control
+    /// content lives below a few hundred Hz — re-deriving the scattering
+    /// matrix at audio rate is wasted work. The element's internal state
+    /// (carrier dynamics / Vgs) still updates every sample upstream of this
+    /// gate, so timing physics are unaffected. The comparison is against
+    /// the last-APPLIED resistance, so sub-epsilon per-sample drift
+    /// accumulates and eventually triggers a recompute: steady-state gain
+    /// error is bounded by [`CTRL_R_RECOMPUTE_EPS`].
+    fn ctrl_resistance_drifted(&mut self, comp_id: &str) -> bool {
+        let Some(new_r) = self.controlled_leaf_resistance(comp_id) else {
+            // Can't read the leaf back — recompute unconditionally (safe).
+            return true;
+        };
+        for entry in self.ctrl_r_last_applied.iter_mut() {
+            if entry.comp_id == comp_id {
+                if (new_r - entry.last_applied_r).abs()
+                    <= CTRL_R_RECOMPUTE_EPS * entry.last_applied_r.abs()
+                {
+                    return false;
+                }
+                entry.last_applied_r = new_r;
+                return true;
+            }
+        }
+        self.ctrl_r_last_applied.push(CtrlRecomputeGate {
+            comp_id: String::from(comp_id),
+            last_applied_r: new_r,
+        });
+        true
+    }
+
+    /// Set Vgs on a `jfet_vr` LEAF anywhere in this stage — in the WDF tree
+    /// or among PassiveRType MNA children — and trigger the matching
+    /// impedance recompute.
+    ///
+    /// Gate-modulated JFETs compile to `jfet_vr` leaves (variable
+    /// resistors), not stage roots, so external modulation (LFO, envelope)
+    /// must reach the leaf; the root setter [`Self::set_jfet_vgs`] silently
+    /// no-ops for them. Returns `true` if the component was found.
+    ///
+    /// The leaf's Vgs/Rds state updates every sample; the expensive
+    /// adaptor/scattering re-derivation is threshold-gated — see
+    /// [`Self::ctrl_resistance_drifted`].
+    pub fn set_jfet_vr_vgs(&mut self, comp_id: &str, vgs: crate::Wave) -> bool {
+        if self.tree.set_jfet_vr_vgs(comp_id, vgs) {
+            if self.ctrl_resistance_drifted(comp_id) {
+                self.tree.recompute();
+            }
+            return true;
+        }
+        let mut found = false;
+        if let RootKind::PassiveRType { children, .. } = &mut self.root {
+            for child in children.iter_mut() {
+                if child.set_jfet_vr_vgs(comp_id, vgs) {
+                    found = true;
+                }
+            }
+        }
+        if found && self.ctrl_resistance_drifted(comp_id) {
+            if let RootKind::PassiveRType {
+                needs_recompute, ..
+            } = &mut self.root
+            {
+                *needs_recompute = true;
+            }
+            // Re-derive the scattering matrix with the JFET's new Rds.
+            self.flush_passive_rtype_recompute();
+        }
+        found
+    }
+
+    /// Whether this stage contains ANY leaf belonging to the given component
+    /// id (in the WDF tree or among PassiveRType MNA children), or owns it
+    /// as a pot. Used by envelope-tap resolution to map a detector's tap
+    /// node onto the stage that produces its signal.
+    pub fn contains_component(&self, comp_id: &str) -> bool {
+        let probe = |leaf: &dyn crate::wdf_leaf::WdfLeaf| -> Option<()> {
+            (leaf.comp_id() == Some(comp_id)).then_some(())
+        };
+        if self.tree.find_leaf(&probe).is_some() {
+            return true;
+        }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            if children.iter().any(|c| c.find_leaf(&probe).is_some()) {
+                return true;
+            }
+        }
+        self.has_pot(comp_id) || self.root_comp_id == comp_id
+    }
+
+    /// Whether this stage contains a `jfet_vr` leaf with the given component
+    /// id (in the WDF tree or among PassiveRType MNA children).
+    pub fn contains_jfet_vr(&self, comp_id: &str) -> bool {
+        let probe = |leaf: &dyn crate::wdf_leaf::WdfLeaf| -> Option<()> {
+            (leaf.type_tag() == "jfet_vr" && leaf.comp_id() == Some(comp_id)).then_some(())
+        };
+        if self.tree.find_leaf(&probe).is_some() {
+            return true;
+        }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            return children.iter().any(|c| c.find_leaf(&probe).is_some());
+        }
+        false
+    }
+
+    /// Whether this stage contains a photocoupler LEAF with the given
+    /// component id (in the WDF tree or among PassiveRType MNA children).
+    ///
+    /// A leaf is the photocoupler at its netlist position — a dynamic
+    /// resistance in the audio path. This deliberately does NOT look at
+    /// `input_photocouplers` (the op-amp input-path gain model): the two
+    /// representations are exclusive (audit gap G3) and binding resolution
+    /// must prefer the leaf.
+    pub fn contains_photocoupler(&self, comp_id: &str) -> bool {
+        let probe = |leaf: &dyn crate::wdf_leaf::WdfLeaf| -> Option<()> {
+            (leaf.type_tag() == "photocoupler" && leaf.comp_id() == Some(comp_id)).then_some(())
+        };
+        if self.tree.find_leaf(&probe).is_some() {
+            return true;
+        }
+        if let RootKind::PassiveRType { children, .. } = &self.root {
+            return children.iter().any(|c| c.find_leaf(&probe).is_some());
+        }
+        false
+    }
+
+    /// Set LED drive on a photocoupler LEAF anywhere in this stage — in the
+    /// WDF tree or among PassiveRType MNA children — and trigger the
+    /// matching impedance recompute. Returns `true` if the component was
+    /// found.
+    ///
+    /// Mirrors [`Self::set_jfet_vr_vgs`]: photocouplers inside a
+    /// PassiveRType stage are MNA variable-resistor children, so after the
+    /// LED drive updates the CdS resistance the scattering matrix must be
+    /// re-derived for the gain change to reach the audio path.
+    ///
+    /// The CdS carrier state updates every sample (the photocoupler's
+    /// attack/release physics live in the leaf); the expensive scattering
+    /// re-derivation is threshold-gated — see
+    /// [`Self::ctrl_resistance_drifted`].
+    pub fn set_photocoupler_led(&mut self, comp_id: &str, led_drive: crate::Wave) -> bool {
+        if self.tree.set_photocoupler_led(comp_id, led_drive) {
+            if self.ctrl_resistance_drifted(comp_id) {
+                self.tree.recompute();
+            }
+            return true;
+        }
+        let mut found = false;
+        if let RootKind::PassiveRType { children, .. } = &mut self.root {
+            for child in children.iter_mut() {
+                if child.set_photocoupler_led(comp_id, led_drive) {
+                    found = true;
+                }
+            }
+        }
+        if found && self.ctrl_resistance_drifted(comp_id) {
+            if let RootKind::PassiveRType {
+                needs_recompute, ..
+            } = &mut self.root
+            {
+                *needs_recompute = true;
+            }
+            // Re-derive the scattering matrix with the CdS cell's new R.
+            self.flush_passive_rtype_recompute();
+        }
+        found
     }
 
     /// Set the grid-cathode voltage for triode root elements.
@@ -3042,6 +3324,15 @@ impl WdfStage {
         }
         if self.update_feedback_ri_from_pot(comp_id, value) {
             found = true;
+        }
+        // Convergence-summation blend pot: stored outside the WDF tree, in the
+        // ConvergenceSum network. Re-solve the superposition gains (control-rate
+        // only — never per sample).
+        if let Some(ref mut cs) = self.convergence {
+            if cs.set_pot(comp_id, value) {
+                cs.recompute_gains();
+                found = true;
+            }
         }
         found
     }
@@ -4185,6 +4476,18 @@ pub struct MultiNlStage {
     /// Counts from 0 to DC_RAMP_SAMPLES, scaling dc_bias by ramp/N to let the
     /// NR solver track the operating point as supply voltage gradually increases.
     pub dc_ramp: u32,
+    /// Value to restore dc_ramp to on reset().
+    ///
+    /// Default is 0 (full ramp from zero on each reset). When init hints are
+    /// present for a stage (e.g. `init { Q1: saturated, Q2: cutoff }` in the
+    /// .pedal DSL), this is set to `DC_RAMP_SAMPLES` (256) so that reset()
+    /// restores dc_scale = 1.0 immediately. This preserves the hint-seeded
+    /// v_prev as a meaningful NR warm-start: with a near-zero excitation from
+    /// dc_scale ≈ 0, the NR solver converges to ≈0 regardless of the warm-start,
+    /// erasing the asymmetric seed. Skipping the ramp ensures the first sample
+    /// sees the full DC bias and the hinted Vce difference matters.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub initial_dc_ramp: u32,
     /// Physics-based initial v_prev values. Restored on reset() instead of zeroing,
     /// so the NR solver starts near the correct operating point after a DAW reset.
     pub initial_v_prev: Vec<crate::Wave>,
@@ -5139,6 +5442,22 @@ pub struct StateSpaceStage {
     /// Declarative graph output binding for shared stage routing.
     #[cfg_attr(feature = "serde", serde(default))]
     pub output_binding: Option<PortBinding>,
+    /// F13b: when this is a parallel branch feeding a convergence mixer, read the
+    /// per-sample input from `node_signals[input_node_id]` (the shared drive node)
+    /// instead of the serial chain, so sibling branches all see the same source
+    /// rather than cascading. `usize::MAX` = use the serial chain (default).
+    #[cfg_attr(feature = "serde", serde(default = "crate::stage::usize_max"))]
+    pub input_node_id: usize,
+    /// F13b: when set, publish this stage's per-sample output into
+    /// `node_signals[output_node_id]` so the convergence mixer can read it.
+    /// `usize::MAX` = do not publish (default).
+    #[cfg_attr(feature = "serde", serde(default = "crate::stage::usize_max"))]
+    pub output_node_id: usize,
+}
+
+/// serde default helper: `usize::MAX` (sentinel for "unbound node").
+pub fn usize_max() -> usize {
+    usize::MAX
 }
 
 #[derive(Debug, Clone)]
@@ -5177,6 +5496,8 @@ impl StateSpaceStage {
             state_map: StateSpaceStateMap::empty(n),
             input_binding: None,
             output_binding: None,
+            input_node_id: usize::MAX,
+            output_node_id: usize::MAX,
         };
         stage.bind_physical_one_ports();
         stage
@@ -5830,7 +6151,12 @@ impl MultiNlStage {
         // Reset 2-sample history for extrapolation warm-start.
         // Seed from initial_v_prev so extrapolation starts near the operating point.
         self.v_prev_2.copy_from_slice(&self.initial_v_prev);
-        self.dc_ramp = 0;
+        // When init hints are present (initial_dc_ramp = DC_RAMP_SAMPLES), restore
+        // dc_ramp to fully-ramped so the first sample sees dc_scale = 1.0.
+        // This preserves the hint-seeded v_prev: without it, dc_scale ≈ 0 on
+        // sample 0 drives known_a ≈ 0 and the NR converges to v ≈ 0 regardless
+        // of the asymmetric warm-start, erasing the init hint's effect.
+        self.dc_ramp = self.initial_dc_ramp;
         self.dc_blocker_x1 = 0.0;
         self.dc_blocker_y1 = 0.0;
         if let Some(ref mut ss) = self.state_space {

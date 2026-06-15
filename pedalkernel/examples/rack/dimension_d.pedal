@@ -1,0 +1,144 @@
+# PK:
+# Dimension D — Roland SDD-320-inspired rack "dimensional" chorus. One BBD
+# channel with companding and a slow, shallow triangle clock sweep: lush
+# widening without obvious warble.
+# Type: chorus (outboard rack gear)
+#
+# PROVENANCE — Roland SDD-320 Dimension D (1979)
+#   Sources:
+#     [S1] Roland SDD-320 Service Notes (archive.org: roland_SDD-320_SERVICE_NOTES)
+#     [S2] Juergen Haible, "Subtle Chorus" — Dimension D analysis/clone (jhaible.com)
+#     [S3] Gearspace thread: KT BBD-320 / SDD-320 delay-sweep measurements
+#     [S4] Florian Anwander, survey of Roland chorus circuits
+#   Flags: [V] = verified against the sources above, [A] = assumed/chosen here.
+#
+#   Architecture (per channel) [V, S1/S2]:
+#     input buffer -> pre-emphasis (HF boost) -> NE570/SA571-class compressor
+#     -> MN3007 1024-stage BBD clocked by an MN3101 driver -> NE570/SA571
+#     expander -> de-emphasis (HF cut) -> output mix.
+#     BBD runs between 0 and -14 V rails [V, S1]; audio path on +/-14 V
+#     bipolar rails, +4 dBm nominal I/O [V, S1].
+#   Modulation [V, S1/S2]:
+#     ONE shared triangle LFO. Channel A's MN3101 clock is swept by the
+#     normal LFO; channel B's clock by the INVERTED LFO — the two delay
+#     sweeps move in opposite directions, which is the "Dimension" effect.
+#   Modes (latching pushbuttons, combinable) [V, S3 measurements]:
+#     Mode 1: LFO 0.25 Hz, delay sweep ~8 -> 12 ms
+#     Mode 2: LFO 0.25 Hz, delay sweep ~5 -> 10 ms (deepest sweep)
+#     Mode 3: LFO 0.5 Hz,  delay sweep ~6 -> 9 ms
+#     Mode 4: LFO 0.5 Hz,  delay sweep ~6 -> 9 ms, boosted same-side wet
+#   Output mix matrix [V, S1/S2]:
+#     small same-side wet + cross-feed of each channel's wet into the
+#     OPPOSITE output, inverted, through a highpass filter, plus a slight
+#     bass boost on the dry path.
+#   Pre/de-emphasis corner values are not legible in the available service
+#   scans — ~3 kHz corners chosen here [A].
+#
+# AS MODELED HERE (channel A only — see SIMPLIFICATIONS; measured numbers
+# from tests/rack_examples.rs at 48 kHz):
+#   1. C1/R1: input coupling + series resistance (real unit: discrete
+#      op-amp buffers at +4 dBm; engine works in normalized units).
+#   2. Pre-emphasis [A]: series R8 (22k) bypassed by C5 (2.4n) into shunt
+#      R9 (22k) — HF shelf rising above f = 1/(2*pi*22k*2.4n) ~= 3.0 kHz,
+#      ~6 dB total shelf depth.
+#   3. BBD1: bbd(mn3007) — 1024 stages [V, S1]. The engine's BBD model has
+#      NE571-style companding BUILT IN (compression/expansion envelopes with
+#      tracking-error artifacts — see docs/performance.md and
+#      pedalkernel-rt/src/elements/nonlinear/bbd.rs), so no discrete NE570
+#      stages are declared. The MN3101 clock driver is implicit in the
+#      bbd() clock model.
+#   4. LFO1: lfo(triangle, 636k, 1u) -> f = 1/(2*pi*RC) ~= 0.2503 Hz, the
+#      Mode 1/2 rate [V, S3], wired DIRECTLY to BBD1.clock (engine
+#      constraint, see SIMPLIFICATIONS #3). The engine's clock sink
+#      (bias 0.15, range 0.10, log clock law: delay = 5.12ms * 10^norm)
+#      gives a MEASURED sweep of 5.85 -> 9.06 ms (center 7.34 ms) at a
+#      measured 0.21 Hz — inside Mode 2's 5 -> 10 ms / 0.25 Hz window.
+#   5. De-emphasis [A]: R3 (10k) series into C6 (5.6n) shunt after the BBD,
+#      f ~= 2.8 kHz lowpass (doubles as reconstruction/clock filtering).
+#   6. Mix: equal 10k dry (R5) / wet (R6) legs summed into C4 -> out
+#      (same-side wet only). Mode 4's boosted same-side wet: drop R6 to
+#      ~6.8k.
+#
+# SIMPLIFICATIONS vs real unit (engine-gated items marked):
+#   1. MONO BUILD — one channel (A). The stereo pair (channel B clocked by
+#      the INVERTED LFO) and the SDD-320 output matrix (each channel's wet
+#      cross-fed into the OPPOSITE output, inverted, through an HPF, plus a
+#      slight dry bass boost) are ENGINE-GATED on stereo bus support: a
+#      .pedal file compiles to a single in -> out processor, so there is no
+#      second output to cross-feed into and no LFO polarity-inversion pin.
+#   2. MODE SWITCHING — the four latching, combinable mode buttons are not
+#      expressible as a rotary over (LFO rate x sweep range) pairs: the BBD
+#      clock sink's bias/range (sweep center/width) is fixed in the engine
+#      (0.15/0.10), so only the rate axis is controllable. Modeled as
+#      Mode 2 (deepest sweep, the classic setting). The "Mode" control is
+#      the LFO rate pot: the engine maps pot value v to rate scale
+#      0.1*100^v, so v = 0.50 -> 1.0x = 0.25 Hz (Modes 1/2) and
+#      v = 0.65 -> 2.0x = 0.5 Hz (Modes 3/4).
+#   3. NO DEPTH POT / CLOCK-MOD DIVIDER — engine finding: ANY component
+#      (pot or resistor) sharing the LFO1.out -> BBD1.clock net pulls the
+#      modulation chain into the audio graph as extra serial stages and
+#      silences the through-path entirely (dry output exactly 0.0; only
+#      BBD noise remains, ~ -68 dBFS). A CE-2-style
+#      `LFO -> Depth -> R -> BBD.clock` chain is therefore not usable;
+#      the LFO must drive BBD1.clock on a dedicated direct net. Sweep
+#      depth is fixed by the engine's clock-sink range.
+#   4. +4 dBm I/O levels are represented only via the +/-14 V supply
+#      headroom; the engine works in normalized units.
+
+equipment "Dimension D" {
+  supplies {
+    V+: 14V                 # Audio path bipolar rails [V, S1]
+    V-: -14V                # (BBD itself runs 0/-14 V in the real unit)
+  }
+
+  components {
+    C1: cap(470n)           # Input coupling (+4 dBm line level)
+    R1: resistor(10k)       # Input series resistance
+
+    R8: resistor(22k)       # Pre-emphasis series leg [A]
+    C5: cap(2.4n)           # Pre-emphasis bypass: ~3.0 kHz corner [A]
+    R9: resistor(22k)       # Pre-emphasis shunt
+
+    BBD1: bbd(mn3007)       # MN3007 1024-stage BBD [V, S1]; NE571-class
+                            # companding is built into the engine model
+    LFO1: lfo(triangle, 636k, 1u)  # 0.2503 Hz shared triangle LFO [V, S1/S3]
+    Mode: pot(100k, b)      # LFO rate: 0.50 = 0.25 Hz (M1/M2), 0.65 = 0.5 Hz (M3/M4)
+
+    R3: resistor(10k)       # De-emphasis series [A]
+    C6: cap(5.6n)           # De-emphasis shunt: ~2.8 kHz corner [A]
+
+    R5: resistor(10k)       # Mix resistor (dry)
+    R6: resistor(10k)       # Mix resistor (same-side wet; ~6.8k for Mode 4)
+    C4: cap(1u)             # Output coupling
+  }
+
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+
+    # Pre-emphasis shelf into the BBD; dry path taps off before it
+    R1.b -> R8.a, C5.a, R5.a
+    R8.b -> C5.b
+    C5.b -> R9.a, BBD1.in
+    R9.b -> gnd
+
+    # LFO -> BBD clock. MUST be a dedicated direct net (engine constraint,
+    # SIMPLIFICATIONS #3). Channel B would take this inverted (engine-gated).
+    LFO1.out -> BBD1.clock
+    Mode.wiper -> LFO1.rate
+
+    # De-emphasis / reconstruction on the wet leg
+    BBD1.out -> R3.a
+    R3.b -> C6.a, R6.a
+    C6.b -> gnd
+
+    # Same-side mix (stereo cross-feed matrix is engine-gated, see header)
+    R5.b -> C4.a
+    R6.b -> C4.a
+    C4.b -> out
+  }
+
+  controls {
+    Mode.position -> "Mode" [0.0, 1.0] = 0.5
+  }
+}

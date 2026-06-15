@@ -1,0 +1,181 @@
+# PK:
+# Space Echo — Roland RE-201 tape echo section (record amp + 3-head tape
+# loop + regeneration). The spring reverb section is OMITTED (see
+# SIMPLIFICATIONS #1). One BJT record preamp drives a delay_line "tape
+# loop" with three playback-head taps, LFO wow on the tape speed, and
+# Repeat Rate / Intensity pots on delay time / regeneration.
+# Type: delay (outboard rack/tabletop gear)
+#
+# PROVENANCE — Roland RE-201 Space Echo (1974)
+#   Sources:
+#     [S1] Roland RE-101/RE-201 Service Manual (archive.org:
+#          Roland_RE-101_RE-201_Service_Manual)
+#     [S2] freestompboxes.org RE-201 thread — preamp/service-manual analysis
+#     [S3] Soundgas, "RE-201 maximum delay time" article
+#     [S4] Universal Audio RE-201 manual (control behavior)
+#   Flags: [V] = verified against the sources above, [A] = assumed/chosen here.
+#
+#   Architecture [V, S1]:
+#     input preamp -> record head -> tape loop -> 3 playback heads (evenly
+#     spaced along the tape path => delay ratios 1:2:3) -> head-select MODE
+#     switch -> wet bus (Echo Volume, Bass, Treble) -> output mix.
+#     Intensity returns the selected playback-head bus into the RECORD
+#     path (regeneration); Repeat Rate is the capstan MOTOR SPEED, so all
+#     three head delays scale together (the famous pitch-swoop when the
+#     knob moves) [V, S1/S4].
+#   Delay ranges [V, S3: ~600 ms max at head 3, slowest motor speed]:
+#     ~3:1 usable motor-speed range [A — derived]:
+#       Head 1: ~67-200 ms   (base delay, this delay_line's range)
+#       Head 2: ~133-400 ms  (2 x base)
+#       Head 3: ~200-600 ms  (3 x base)
+#   Input preamp [V, S2]: 3-transistor direct-coupled stage, closed-loop
+#     gain ~370, ~30 kHz cutoff, gentle soft clipping when driven hard.
+#   Intensity [V, S2/S4]: self-oscillation above ~2 o'clock, tamed by tape
+#     compression rather than hard clipping.
+#
+# AS MODELED HERE (measured numbers from tests/rack_examples.rs at 48 kHz):
+#   1. Record preamp: ONE common-emitter 2N3904 (stand-in for the
+#      2SC1000-class devices [A]) with divider bias, full emitter bypass
+#      (high open-loop gain, soft rail clipping when driven — the real
+#      3-transistor loop's ~370 closed-loop gain collapsed to one stage
+#      [A]), and C_hf giving the ~30 kHz collector cutoff:
+#      f = 1/(2*pi*10k*510p) ~= 31 kHz [V-target, S2].
+#   2. DL1: delay_line(67ms, 200ms, allpass, medium: tape_oxide) — the
+#      BASE delay is playback head 1; T2/T3 are heads 2 and 3 at exactly
+#      2x / 3x (evenly spaced heads [V, S1]). Head 3 at max Repeat Rate =
+#      3 x 200 ms = 600 ms [V, S3]. NOTE: docs/components.md mentions an
+#      `re201` medium preset; the DSL parser has no such keyword
+#      (dsl.rs:1363 accepts only none/tape_oxide/bbd_leakage/
+#      digital_quantize), so plain tape_oxide is declared.
+#   3. RepeatRate pot -> DL1.delay_time (motor speed; log law in the
+#      engine: 0.0 -> 67 ms, 0.5 -> ~116 ms, 1.0 -> 200 ms at head 1).
+#      BINDING ENGINE-GATED, see SIMPLIFICATIONS #7.
+#   4. Intensity pot -> DL1.feedback (regeneration into the record path;
+#      engine scales pot value x0.95 max loop gain). BINDING ENGINE-GATED,
+#      see SIMPLIFICATIONS #7.
+#   5. LFO_wow: lfo(sine, 32k, 1u) -> f = 1/(2*pi*0.032) ~= 4.97 Hz [A]
+#      -> DL1.speed_mod: +/-2% tape-speed wobble (engine speed_mod sink
+#      range 0.02) — capstan wow. Dedicated direct net (engine constraint,
+#      see dimension_d.pedal SIMPLIFICATIONS #3). BINDING ENGINE-GATED,
+#      see SIMPLIFICATIONS #8.
+#   MEASURED (DSP level, via the runtime DelayLine API — the bindings in
+#   #3/#4/#5 are compiled to no-ops today): head-1 echo 116 ms at Repeat
+#   Rate 0.5; recirculation arrivals at ratios 1.00/1.98/2.98/3.99...;
+#   Repeat Rate 0 -> 66 ms, 1 -> 199 ms (3.0x authority); Intensity
+#   0.25 -> 5 repeats, 0.75 -> 21 repeats (-60 dB threshold); Intensity
+#   1.0 tail rms decays only to 0.34x over 2.45 s (0.95 loop-gain clamp);
+#   4.97 Hz x 0.02 wow puts 88% envelope modulation on a 110 Hz tone at a
+#      detected 4.95 Hz.
+#
+# SIMPLIFICATIONS vs real unit (engine-gated items marked):
+#   1. SPRING REVERB OMITTED — the engine has no spring-reverb primitive.
+#      Known roadmap gap; when a spring() element lands, add the reverb
+#      send/return and the Reverb Volume control.
+#   2. HEADS 2/3 ENGINE-GATED — T2/T3 parse, but the compiler hard-codes
+#      a single tap at ratio 1.0 (spqr_build.rs:1928 `taps: vec![1.0]`);
+#      tap() components are never lowered into DelayLineBinding.taps.
+#      As built, only head 1 sounds; multi-head MODE-switch variants are
+#      not expressible anyway (no switch primitive over tap mixes), so the
+#      declared T2/T3 document the summed-tap default for when lowering
+#      lands.
+#   3. TAPE MEDIUM INERT — set_medium(TapeOxide) is applied but the
+#      compiler never calls configure_zones_from_taps (delay.rs:494), so
+#      the zone list is empty and process_medium() is a no-op: repeats do
+#      not darken with distance yet.
+#   4. WET BUS ENGINE-GATED — the delay line is processed after all WDF
+#      stages with a HARD-CODED 50/50 wet/dry mix (processor.rs:3808), so
+#      Echo Volume / Bass / Treble on the wet-only bus [V, S1/S4] are not
+#      expressible; they are omitted rather than mis-wired into the dry
+#      path.
+#   5. REGENERATION PATH — engine feedback recirculates INSIDE the delay
+#      line (write = input + 0.95*fb*wet). The real path re-enters the
+#      record amp and is tamed by tape compression; here loop gain is
+#      simply clamped < 1 (processor.rs:2255), so Intensity at max gives
+#      slowly-decaying near-oscillation, never runaway build-up.
+#   6. NO MOTOR INERTIA — Repeat Rate changes jump the read pointer
+#      instantly; the real capstan glides, producing the pitch swoop. The
+#      swoop survives only via the speed_mod wow path.
+#   7. PANEL CONTROLS ENGINE-GATED — pot -> DL1.delay_time / DL1.feedback
+#      is the documented DSL pattern, but the SPQR pipeline (the only
+#      pipeline; the legacy 6-pass one was removed) binds only pots that
+#      live inside compiled stages (spqr_control.rs find_pot_bindings)
+#      plus BBD targets; bind.rs's DelayTime/DelayFeedback resolution is
+#      dead code. set_control("Repeat Rate"/"Intensity") is a NO-OP: the
+#      delay sits at its construction midpoint (133.5 ms) and feedback at
+#      0. tests/control_binding.rs's four delay tests fail at HEAD for
+#      the same reason.
+#   8. WOW LFO ENGINE-GATED — the SPQR pipeline creates LfoBindings only
+#      for BBD clock targets (bbd_lowering.rs bind_bbd_runtime); bind.rs
+#      build_lfo_bindings (which resolves speed_mod/delay_time sinks) is
+#      never called, so CompiledPedal.lfos is empty and the tape runs
+#      wow-free. tests/rack_examples.rs measures the wow path through the
+#      public DelayLine::add_speed_mod API instead.
+
+equipment "Space Echo RE-201" {
+  supply 24V               # Single positive transistor rail [A]
+
+  components {
+    # === Record preamp (RE-201 input amp, collapsed to one CE stage) ===
+    C_in: cap(100n)        # Input coupling
+    R_b1: resistor(470k)   # Base bias divider, top
+    R_b2: resistor(100k)   # Base bias divider, bottom (Vb ~4.2 V)
+    Q1: npn(2n3904)        # Record amp (real: 2SC1000-class, 3-transistor)
+    R_c: resistor(10k)     # Collector load
+    C_hf: cap(510p)        # ~31 kHz collector cutoff [V-target, S2]
+    R_e: resistor(2.2k)    # Emitter bias (Ic ~1.6 mA, Vc ~mid-rail)
+    C_e: cap(47u, electrolytic)  # Full emitter bypass — soft-clips when driven
+
+    # === Tape loop: heads evenly spaced => 1x / 2x / 3x [V, S1] ===
+    DL1: delay_line(67ms, 200ms, allpass, medium: tape_oxide)  # head 1
+    T2: tap(DL1, 2.0)      # head 2 (engine-gated, SIMPLIFICATIONS #2)
+    T3: tap(DL1, 3.0)      # head 3 (engine-gated, SIMPLIFICATIONS #2)
+
+    # === Wow (capstan speed wobble) ===
+    LFO_wow: lfo(sine, 32k, 1u)  # ~4.97 Hz sine [A]
+
+    # === Panel controls ===
+    RepeatRate: pot(100k, b)     # Motor speed -> delay time
+    Intensity: pot(100k, b)      # Regeneration into record path
+
+    # === Output ===
+    C_out: cap(100n)       # Output coupling from the playback bus
+    R_out: resistor(10k)   # Output series/build-out resistor
+  }
+
+  nets {
+    # --- Record preamp ---
+    in -> C_in.a
+    C_in.b -> R_b1.a, R_b2.a, Q1.base
+    R_b1.b -> vcc
+    R_b2.b -> gnd
+    vcc -> R_c.a
+    R_c.b -> Q1.collector
+    Q1.collector -> C_hf.a
+    C_hf.b -> gnd
+    Q1.emitter -> R_e.a, C_e.a
+    R_e.b -> gnd
+    C_e.b -> gnd
+
+    # --- Record head -> tape loop ---
+    Q1.collector -> DL1.in
+
+    # --- Playback heads -> output bus (summed-tap default, see #2) ---
+    DL1.out -> C_out.a
+    C_out.b -> R_out.a
+    R_out.b -> out
+    T2.out -> out
+    T3.out -> out
+
+    # --- Controls onto the loop ---
+    RepeatRate.wiper -> DL1.delay_time
+    Intensity.wiper -> DL1.feedback
+
+    # --- Wow: dedicated direct modulation net ---
+    LFO_wow.out -> DL1.speed_mod
+  }
+
+  controls {
+    RepeatRate.position -> "Repeat Rate" [0.0, 1.0] = 0.5
+    Intensity.position -> "Intensity" [0.0, 1.0] = 0.35
+  }
+}

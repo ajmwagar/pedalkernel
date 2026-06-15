@@ -1,0 +1,138 @@
+# PK:
+# VCA Bus Comp — SSL G-series bus compressor / dbx 160-inspired VCA
+# compressor. The "glue" box: an IC VCA in the audio path with a DC control
+# port driven by a level detector.
+# Type: compressor (outboard studio gear)
+#
+# PROVENANCE
+#   SSL SL4000 G bus compressor: dbx 202C ("gold can") / later 2180-style VCA
+#   in a FEEDBACK loop — the detector taps the VCA OUTPUT. Fixed 4:1 (later
+#   2/4/10), attack 0.1/0.3/1/3/10/30 ms, release 0.1-1.2 s plus AUTO mode.
+#   The famous auto-release uses a DUAL RC network: 91k * 6.8 uF in parallel
+#   with 750k * 0.47 uF — fast recovery from transients, slow from sustained
+#   level (noted here as FUTURE WORK; v1 uses a single RC pair).
+#   dbx 160: FEED-FORWARD detector (input-tapped) with a true-RMS log-domain
+#   averager (~35 ms integration). That RMS log detector is NOT representable
+#   with this engine's envelope_follower (peak-ish RC follower) — audit note.
+#
+# AS MODELED HERE:
+#   in -> C_in -> U1 (NE5532 non-inverting buffer) -> R_v2v -> VCA1 (SSM2164)
+#      -> C_mid -> U2 (NE5532 non-inverting output stage) -> C_out
+#      -> Makeup pot -> out
+#   Sidechain: EF1 envelope follower tapped from the INPUT (feed-forward,
+#   dbx-160 style — chosen because the engine's envelope followers read the
+#   pedal input at runtime anyway; SSL's feedback detector is not currently
+#   realizable) -> VCA1.cv.
+#     EF1 = (10k, 1u, 91k, 6.8u, 20k)
+#       attack  tau = 10 kΩ × 1 µF  = 10 ms (mid SSL attack range)
+#       release tau = 91 kΩ × 6.8 µF ≈ 0.62 s (the FAST arm of the SSL auto
+#                release pair; the 750k*0.47u slow arm is future work)
+#
+# SIMPLIFICATIONS vs real unit (audit notes — read before trusting GR):
+#   1. CHANGELOG — G4 FIXED 2026-06-12 (compiler vca_lowering pass). History:
+#      the original audit found the compiler treated `vca(ssm2164)` as a
+#      virtual stub — `GraphRole::Virtual`, no MNA stamp, the compiled
+#      processor's `vcas` binding list never populated, and `cv` not a
+#      recognized envelope modulation sink — so `EF1.out -> VCA1.cv` was
+#      parsed but inert, and this file shipped with the audio path
+#      HARD-WIRED around the VCA (`U1.out -> C_mid.a`) just to pass signal,
+#      with zero gain reduction (audit measured 0.11 dB GR delta). The
+#      vca_lowering pass now lowers VCA1 into a runtime SSM2164-class
+#      dB-linear gain element (normalized cv 0..1 spans 0..-80 dB) driven by
+#      the EF1 sidechain, so the hard wire is REMOVED and the signal path
+#      runs through the VCA as drawn. Behavioral islands that fail to lower
+#      are now compile errors (reports/architecture-debt-2026-06-12.md §4).
+#   2. ENGINE LIMITATION (second audit finding): the canonical SSM2164
+#      application uses an INVERTING V-to-I input and an INVERTING I-to-V
+#      output stage (signal into the op-amp summing node, 30k feedback).
+#      In the current engine a standalone inverting op-amp stage compiles
+#      but produces SILENCE (verified against a minimal netlist mirroring
+#      the Phase 90 input stage: in->C->R->U.neg with R feedback and a
+#      divider-biased pos input — peak 0.000000), so both op-amp stages
+#      here are modeled NON-INVERTING (signal -> pos input). Polarity and
+#      virtual-ground behavior therefore differ from the real 2164 hookup.
+#      Furthermore, DC-coupling two op-amp stages through resistors also
+#      compiles to silence in the current engine, so the stages are
+#      cap-coupled via C_mid (verified: resistive cascade peak=0.000000,
+#      cap-coupled cascade passes audio).
+#   3. Feed-forward detector (dbx-style) instead of SSL's feedback loop.
+#   4. Single-RC release; real SSL AUTO release is dual RC (see provenance).
+#   5. dbx RMS log-domain detector (~35 ms averager) not representable.
+#   6. No threshold/ratio/attack/release switches; no autofade; no sidechain
+#      highpass; single supply rail (real unit runs +/-15 V).
+
+equipment "VCA Bus Comp" {
+  supply 30V               # Stands in for the real +/-15 V bipolar rails
+
+  components {
+    # === Input buffer (non-inverting — see header item 2) ===
+    C_in: cap(1u)
+    R_b1: resistor(1M)     # Bias to Vref (supply midpoint)
+    U1: opamp(ne5532)
+    R_g1: resistor(10k)    # Gain-set leg to ground
+    R_fb1: resistor(10k)   # Feedback — gain = 1 + 10k/10k = 2
+
+    # === VCA core (canonical SSM2164 application) ===
+    R_v2v: resistor(30k)   # Voltage-to-current input resistor (datasheet 30k)
+    VCA1: vca(ssm2164)     # Gain element — lowered by the compiler (G4 fixed)
+
+    # === Output stage (non-inverting, cap-coupled — see header item 2) ===
+    C_mid: cap(1u)         # ENGINE WORKAROUND: DC-coupled op-amp cascades
+                           # compile to silence; cap coupling restores audio
+    R_b2: resistor(1M)     # Bias to Vref for U2
+    U2: opamp(ne5532)
+    R_g2: resistor(30k)    # Gain-set leg to ground
+    R_fb: resistor(30k)    # Feedback (datasheet value 30k) — gain = 2
+
+    # === Output ===
+    C_out: cap(1u)
+    Makeup: pot(10k, a)    # Makeup gain / output trim
+
+    # === Sidechain ===
+    # envelope_follower(attack_r, attack_c, release_r, release_c, sens_r)
+    # Attack 10k x 1u = 10 ms; Release 91k x 6.8u ~= 0.62 s (SSL fast arm)
+    EF1: envelope_follower(10k, 1u, 91k, 6.8u, 20k)
+  }
+
+  nets {
+    # --- Input buffer (non-inverting, gain 2) ---
+    in -> C_in.a
+    C_in.b -> R_b1.a, U1.pos
+    R_b1.b -> vcc
+    U1.neg -> R_g1.a
+    R_g1.b -> gnd
+    R_fb1.a -> U1.neg
+    R_fb1.b -> U1.out
+
+    # --- VCA: V-to-I input resistor into the VCA core ---
+    # G4 fixed 2026-06-12: the hard-wire bypass (`U1.out -> C_mid.a`) that
+    # used to sit here is REMOVED — the audio path now runs through VCA1,
+    # which the compiler lowers into a runtime gain element (header item 1).
+    U1.out -> R_v2v.a
+    R_v2v.b -> VCA1.in
+    VCA1.out -> C_mid.a
+
+    # --- Output stage (non-inverting, gain 2, cap-coupled) ---
+    C_mid.b -> R_b2.a, U2.pos
+    R_b2.b -> vcc
+    U2.neg -> R_g2.a
+    R_g2.b -> gnd
+    R_fb.a -> U2.neg
+    R_fb.b -> U2.out
+
+    # --- Output level ---
+    U2.out -> C_out.a
+    C_out.b -> Makeup.a
+    Makeup.w -> out
+    Makeup.b -> gnd
+
+    # --- Sidechain: feed-forward detector drives the VCA control port ---
+    # G4 fixed 2026-06-12: `cv` is now a live modulation sink (VcaCv target).
+    EF1.in -> C_in.b
+    EF1.out -> VCA1.cv
+  }
+
+  controls {
+    Makeup.position -> "Makeup" [0.0, 1.0] = 0.7
+  }
+}

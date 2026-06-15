@@ -308,6 +308,14 @@ pub enum ControlParamKind {
     DelayTime,
     /// Delay line feedback (0–1).
     DelayFeedback,
+    /// Spring reverb dwell/drive input trim (0–1 normalized).
+    SpringDwell,
+    /// Spring reverb decay → RT60 authority (0–1 normalized).
+    SpringDecay,
+    /// Spring reverb damping LPF cutoff (0–1 normalized).
+    SpringDamping,
+    /// Spring reverb wet/dry mix (0–1 normalized).
+    SpringMix,
     /// Switch position selector.
     SwitchPosition { num_positions: usize },
     /// Fire a single-sample impulse (drum trigger).
@@ -336,8 +344,14 @@ pub enum ModulationSinkKind {
     MosfetVgs,
     OtaIabc,
     BbdClock,
+    /// VCA control-voltage port: normalized 0..1 mapped onto 0..-80 dB
+    /// (SSM2164-class dB-linear law; see the compiler's `vca_lowering` pass
+    /// and the runtime `Vca::set_cv_normalized`).
+    VcaCv,
     DelaySpeed,
     DelayTime,
+    /// Spring reverb dwell/drive CV port (normalized 0..1).
+    SpringDwell,
 }
 
 /// Context provided to `resolve_edges()` so a component can decide its role

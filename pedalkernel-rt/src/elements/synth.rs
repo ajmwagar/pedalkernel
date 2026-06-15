@@ -330,6 +330,28 @@ impl Vca {
         self.gain = crate::math::powf(10.0 as crate::Wave, db / 20.0).clamp(0.0, 10.0);
     }
 
+    /// Set gain from a NORMALIZED control voltage, SSM2164-class dB-linear law.
+    ///
+    /// Convention (SSM2164/V2164 datasheet): the control port is dB-linear at
+    /// -33 mV/dB (≈ -30 dB/V), 0 V = unity gain, attenuating as the control
+    /// voltage rises — full attenuation a little above +2.6 V (-80 dB, the
+    /// datasheet's specified gain range). Here that law is normalized to a
+    /// unitless control 0..1 spanning that same range:
+    ///
+    ///   gain_db = -80 dB × cv      (cv = 0 → 0 dB unity, cv = 1 → -80 dB)
+    ///
+    /// This is the CV port that `ModulationTarget::VcaCv` drives (compiler
+    /// `vca_lowering` pass, audit gap G4). Unlike [`set_cv`] (volts in,
+    /// device-specific dB/V), this takes the engine's normalized 0..1
+    /// modulation signal directly.
+    #[inline]
+    pub fn set_cv_normalized(&mut self, cv: crate::Wave) {
+        /// dB span of the normalized control range (SSM2164 gain range).
+        const CV_SPAN_DB: crate::Wave = 80.0;
+        let db = -CV_SPAN_DB * cv.clamp(0.0, 1.0);
+        self.gain = crate::math::powf(10.0 as crate::Wave, db / 20.0);
+    }
+
     /// Set gain directly (0.0 - 1.0+).
     pub fn set_gain(&mut self, gain: crate::Wave) {
         self.gain = gain.clamp(0.0, 10.0);

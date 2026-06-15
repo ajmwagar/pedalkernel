@@ -528,6 +528,19 @@ pub enum BbdType {
     Mn3005,
 }
 
+/// Spring-reverb tank models (Accutronics / RE-201 grounded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpringTankType {
+    /// Accutronics Type 4 — 17" tank, Fender standard, long decay.
+    Type4,
+    /// Accutronics Type 8 — 9.25" short tank, 3 springs.
+    Type8,
+    /// Accutronics Type 9 — 17", 6-spring (3 coupled pairs), densest.
+    Type9,
+    /// Roland RE-201 small dark 2-spring tank.
+    Re201Tank,
+}
+
 /// Neon bulb types for relaxation oscillators and optocouplers.
 /// Neon bulbs exhibit negative resistance behavior:
 /// - Off until striking voltage is reached (~90V for NE-2)
@@ -1351,6 +1364,27 @@ fn parse_bbd(input: &str) -> IResult<&str, BoxComp> {
     Ok((input, Box::new(Bbd { bbd_type: bt })))
 }
 
+/// Spring-tank model keyword. `type9` must precede `type8`/`type4` only by
+/// distinctness; `tag` matches a prefix so order the longer-unique first is
+/// not needed here (all four are full tokens followed by `)`).
+fn spring_type(input: &str) -> IResult<&str, SpringTankType> {
+    alt((
+        value(SpringTankType::Type4, tag("type4")),
+        value(SpringTankType::Type8, tag("type8")),
+        value(SpringTankType::Type9, tag("type9")),
+        value(SpringTankType::Re201Tank, tag("re201_tank")),
+    ))(input)
+}
+
+/// `spring(type4)` — dispersive spring-reverb tank (behavioral island).
+fn parse_spring(input: &str) -> IResult<&str, BoxComp> {
+    let (input, _) = tag("spring")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, st) = spring_type(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, Box::new(Spring { tank_type: st })))
+}
+
 /// Parse interpolation mode keyword.
 fn interpolation_mode(input: &str) -> IResult<&str, crate::elements::Interpolation> {
     alt((
@@ -2012,6 +2046,7 @@ fn component_kind(input: &str) -> IResult<&str, BoxComp> {
             parse_nmos,
             parse_pmos,
             parse_bbd,
+            parse_spring,
             parse_delay_line,
             parse_tap,
             parse_neon,

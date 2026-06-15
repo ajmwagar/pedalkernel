@@ -7,6 +7,7 @@
 //! 4. Modeling active elements (transistors, opamps) as gain stages
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
+mod bbd_lowering;
 mod bias_analysis;
 mod bind;
 mod blockwise;
@@ -18,6 +19,8 @@ mod compiled;
 pub mod component;
 pub mod components;
 mod coupling;
+mod delay_lowering;
+mod dsp_block;
 mod dyn_node;
 mod graph;
 mod helpers;
@@ -28,10 +31,13 @@ mod split;
 mod spqr;
 mod spqr_build;
 mod spqr_control;
+mod spring_lowering;
 mod stage;
 pub mod stage_test_helpers;
 pub(crate) mod subcircuit;
 pub mod validate;
+mod vca_lowering;
+mod vco_lowering;
 mod warnings;
 pub(crate) mod wdf_leaf;
 
@@ -118,6 +124,8 @@ mod biquad_table_tests;
 #[cfg(test)]
 mod blockwise_detection_tests;
 #[cfg(test)]
+mod bridged_t_bias_loading_tests;
+#[cfg(test)]
 mod coupling_tests;
 #[cfg(test)]
 mod ground_leg_tests;
@@ -133,5 +141,3 @@ mod mfb_debug_test;
 mod opamp_gain_tests;
 #[cfg(test)]
 mod tb303_decomposition_tests;
-#[cfg(test)]
-mod bridged_t_bias_loading_tests;

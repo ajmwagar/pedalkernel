@@ -4,7 +4,7 @@ use crate::compiler::component::{
     Component, ComponentEdge, ControlParam, ControlParamKind, EdgeKind, GraphRole, ModulationSink,
     ModulationSinkKind, PinConfig, StampResult,
 };
-use crate::dsl::BbdType;
+use crate::dsl::{BbdType, SpringTankType};
 use crate::elements::{Interpolation, Medium};
 use crate::tree::MnaSystem;
 
@@ -102,6 +102,125 @@ impl Component for Bbd {
     }
     fn layout_class(&self) -> &'static str {
         "bbd"
+    }
+
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("in", "out"),
+            ("input", "output"),
+            ("in", "input"),
+            ("out", "output"),
+        ]
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Spring (spring reverb tank — behavioral island)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Spring-reverb tank: a `GraphRole::Virtual` behavioral island (like `Bbd`),
+/// contributing one `Behavioral` in→out edge and `StampResult::Skip`. The
+/// electromechanical spring pair is modeled by the runtime `SpringTank`; the
+/// driver/recovery circuit stays OUTSIDE the island (real WDF stages).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spring {
+    pub tank_type: SpringTankType,
+}
+
+impl Component for Spring {
+    impl_component_dyn!();
+
+    fn type_tag(&self) -> &'static str {
+        "spring reverb"
+    }
+
+    fn is_passive(&self) -> bool {
+        false
+    }
+
+    fn pin_config(&self) -> PinConfig {
+        PinConfig {
+            valid_pins: &[
+                "in", "input", "out", "output", "dwell", "decay", "damping", "mix",
+            ],
+            aliases: &[("in", "input"), ("out", "output")],
+        }
+    }
+
+    fn modulation_pins(&self) -> &'static [&'static str] {
+        &["dwell"]
+    }
+
+    fn graph_role(&self) -> GraphRole {
+        GraphRole::Virtual
+    }
+
+    fn stamp_mna(
+        &self,
+        _comp_id: &str,
+        _n1: Option<usize>,
+        _n2: Option<usize>,
+        _mna: &mut MnaSystem,
+        _sample_rate: f64,
+    ) -> StampResult {
+        StampResult::Skip
+    }
+
+    fn edges(&self) -> Vec<ComponentEdge> {
+        vec![ComponentEdge {
+            pin_a: "input",
+            pin_b: "output",
+            kind: EdgeKind::Behavioral,
+            port_group: None,
+        }]
+    }
+
+    fn controls(&self) -> Vec<ControlParam> {
+        vec![
+            ControlParam {
+                name: "dwell",
+                kind: ControlParamKind::SpringDwell,
+            },
+            ControlParam {
+                name: "decay",
+                kind: ControlParamKind::SpringDecay,
+            },
+            ControlParam {
+                name: "damping",
+                kind: ControlParamKind::SpringDamping,
+            },
+            ControlParam {
+                name: "mix",
+                kind: ControlParamKind::SpringMix,
+            },
+        ]
+    }
+
+    fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
+        match pin {
+            "dwell" => Some(ModulationSink {
+                target_kind: ModulationSinkKind::SpringDwell,
+                bias: 0.5,
+                range: 0.5,
+            }),
+            _ => None,
+        }
+    }
+
+    fn footprint_ref(&self) -> (&'static str, &'static str) {
+        match self.tank_type {
+            SpringTankType::Type4 => ("Reverb:Accutronics_Type4", "RV"),
+            SpringTankType::Type8 => ("Reverb:Accutronics_Type8", "RV"),
+            SpringTankType::Type9 => ("Reverb:Accutronics_Type9", "RV"),
+            SpringTankType::Re201Tank => ("Reverb:RE201_Tank", "RV"),
+        }
+    }
+
+    fn symbol_name(&self) -> &'static str {
+        "spring"
+    }
+    fn layout_class(&self) -> &'static str {
+        "spring"
     }
 
     fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {

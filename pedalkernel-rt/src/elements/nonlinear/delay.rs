@@ -408,6 +408,24 @@ impl DelayLine {
         }
     }
 
+    /// Grow the ring buffer so a tap at `max_ratio` × the base delay can be
+    /// read without clamping. `DelayLine::new` sizes the buffer for the base
+    /// (head-1) `max_delay` only; a multi-head tape (RE-201 heads at 2x/3x)
+    /// reads up to `max_ratio × max_delay`, which would otherwise clamp at the
+    /// buffer end (heads 2/3 collapse onto the buffer-max position). The base
+    /// `max_delay_sec` — and thus the `set_delay_normalized` log law — is
+    /// unchanged; only the storage grows. No-op when `max_ratio <= 1.0` or the
+    /// buffer already fits.
+    pub fn ensure_tap_capacity(&mut self, max_ratio: crate::Wave) {
+        if max_ratio <= 1.0 {
+            return;
+        }
+        let max_samples = (self.max_delay_sec * self.sample_rate * max_ratio * 1.1) as usize + 8;
+        if max_samples > self.buffer.len() {
+            self.buffer.resize(max_samples, 0.0);
+        }
+    }
+
     /// Reset all state (buffer, allpass states, feedback).
     pub fn reset(&mut self) {
         self.buffer.fill(0.0);
@@ -553,9 +571,14 @@ impl DelayLine {
             Medium::TapeOxide => {
                 let buf_len = self.buffer.len();
                 for zone in &mut self.zones {
-                    // Current boundary position (relative to write head)
-                    let boundary_pos =
-                        (self.write_pos + buf_len - zone.distance_samples as usize) % buf_len;
+                    // Current boundary position (relative to write head).
+                    // Clamp the boundary distance to the buffer span: a tap
+                    // ratio > 1 can place `distance_samples` beyond the buffer
+                    // (e.g. RE-201 head 3 at 3x near max delay), which would
+                    // underflow the unsigned subtraction. `read_at_ratio`
+                    // clamps the same way (buf_len - 2).
+                    let dist = (zone.distance_samples as usize).min(buf_len - 1);
+                    let boundary_pos = (self.write_pos + buf_len - dist) % buf_len;
 
                     // How many samples have crossed this boundary since last tick
                     let samples_crossed = if boundary_pos >= zone.last_processed_pos {
@@ -583,8 +606,10 @@ impl DelayLine {
             Medium::BbdLeakage => {
                 let buf_len = self.buffer.len();
                 for zone in &mut self.zones {
-                    let boundary_pos =
-                        (self.write_pos + buf_len - zone.distance_samples as usize) % buf_len;
+                    // See TapeOxide: clamp distance to the buffer span so a
+                    // tap ratio > 1 cannot underflow the boundary subtraction.
+                    let dist = (zone.distance_samples as usize).min(buf_len - 1);
+                    let boundary_pos = (self.write_pos + buf_len - dist) % buf_len;
 
                     let samples_crossed = if boundary_pos >= zone.last_processed_pos {
                         boundary_pos - zone.last_processed_pos

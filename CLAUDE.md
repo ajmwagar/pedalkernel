@@ -163,3 +163,33 @@ ORCHESTRATOR: Update this section as the project evolves.
 Include: active work, recent decisions, known issues, architectural notes.
 Keep it concise — pointers to files are better than duplicated content.
 -->
+
+**2026-06-12 — Outboard gear audit** (`reports/outboard-gear-audit-2026-06-12.md`):
+DSL has all dynamics primitives, but the detector→gain-element wiring is broken:
+envelope followers read global input (not their tap), `-> J.vgs` envelope routing
+is inert, photocoupler LED drive acts as series gain (inverted GR), `vca()` is an
+unstamped stub. New measurement layer in `tests/audio_analysis.rs`
+(frequency_response_db, static_gain_curve, attack/release) + 4 research-grounded
+examples in `examples/outboard/`. Known: dyna_comp compiles nondeterministically
+across processes; transformer step-down ~19 dB off vs SPICE.
+
+**2026-06-13 — Pot-control-fidelity fixes** (`tests/pot_fidelity.rs`):
+Three dead/misleading plugin knobs investigated against the REAL branch circuits
+(both passive_lc_eq + opto_leveler compile to WDF PassiveRType + MultiNL, NOT the
+IIR/StateSpace stages an earlier main-tree RCA saw). #1+#2 (Pultec LF/HF Boost
+folded around 0.5, pos-0.5 == pos-0.0): root cause was the compiled pot baseline ≠
+the control's declared default — `spqr_control.rs` "apply defaults" used the
+*smoothed* `set_control`, which no-ops when default==smoother-initial, leaving the
+PassiveRType pot leaf frozen at its compile-time 0.5 stamp (spqr_build.rs:2439).
+Fix: apply defaults via `set_control_immediate` so the leaf gets the declared
+default; sweeps now monotonic full-range. Promoted 3 previously-`#[ignore]`d
+full-range tests in `tests/pultec_sweeps.rs` to green. #3 (LA-2A Gain pot frozen):
+added the circuit-accurate 1M grid-leak (`R_grid`) per real-12AX7 reality, but the
+knob stayed frozen — the 3-terminal wiper divider STRADDLES the WDF GR stage and
+the MultiNL tube-grid stage and is modeled insensitively/inverted. ENGINE TOPOLOGY
+gap, NOT circuit — left `#[ignore]`d (`opto_gain_pot_sweeps_monotonically`,
+`la2a_sweeps::gain_pot_raises_steady_gain`) pending a human topology decision (same
+family as F10 link-2). Battery unchanged vs baseline; the spqr_control fix is the
+general default-application path, so it also un-freezes compiled-in defaults for any
+PassiveRType pot. The IIR-`Generic` no-op (stage.rs:5010) and rigid-StateSpace pot
+mapping remain latent (no branch circuit reaches them; untouched).
