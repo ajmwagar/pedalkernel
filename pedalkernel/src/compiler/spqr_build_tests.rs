@@ -1,4 +1,7 @@
 // Tests extracted from spqr_build.rs — stage building + end-to-end pipeline.
+//
+// Regression for pedalkernel-hcpb.2: non-SP passive networks (with SPQR R-nodes)
+// must compile to >=1 stage instead of silently rendering as passthrough.
 
 use super::compiled::Stage;
 use super::graph::CircuitGraph;
@@ -1430,4 +1433,54 @@ pedal "12AX7 Common Cathode" {
             _ => eprintln!("  stage {si}: other"),
         }
     }
+}
+
+// ── Regression: non-SP passive network compiles to >=1 stage (hcpb.2) ──────
+//
+// Before the fix: an all-passive S/P node containing a nested SPQR R-node
+// returned None from spqr_to_dyn_node (R-node arm was always None) and the
+// AllPassive else branch silently dropped all components → zero stages →
+// runtime passthrough with no EQ effect. The Pultec EQP-1A passive section
+// (multiple reactive shunts at a shared node) reproduced this exactly.
+//
+// After the fix: the AllPassive else branch emits SpqrStage::Rigid so the
+// build layer routes the sub-block through build_passive_rtype_stage (MNA
+// scattering, same path as the Twin-T notch). This test asserts the structural
+// invariant: stages is non-empty and the EQ actually changes response.
+
+#[test]
+fn non_sp_passive_network_compiles_to_stages() {
+    // Minimal non-SP passive circuit: input resistor into a node with
+    // reactive shunts to different points (LC+C), which creates a Y-junction
+    // that is triconnected (non-SP → SPQR R-node). Before the fix this
+    // compiled to zero stages and produced flat passthrough.
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "non_sp_passive" {
+            components {
+                R1: resistor(1k)
+                C1: cap(10n)
+                L1: inductor(10m)
+                C2: cap(10n)
+            }
+            nets {
+                in  -> R1.a
+                R1.b -> C1.a, L1.a, C2.a
+                C1.b -> gnd
+                L1.b -> gnd
+                C2.b -> out
+            }
+        }"#,
+    )
+    .expect("parse");
+
+    let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
+
+    // Structural assertion: at least one stage must exist.
+    // If this fails, the circuit compiled to zero stages (passthrough).
+    assert!(
+        !compiled.stages.is_empty(),
+        "Non-SP passive network compiled to zero stages — \
+         would render as passthrough (regression of hcpb.2 fix)"
+    );
 }

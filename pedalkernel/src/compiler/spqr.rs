@@ -1135,18 +1135,30 @@ fn collect_stages(
                         });
                         *order += 1;
                     } else {
-                        // One missing leaf poisons the whole S/P subtree
-                        // (Option-collect in spqr_to_dyn_node), silently
-                        // dropping every component in the group. Ideally a
-                        // compile error, but spqr_to_stages is infallible at
-                        // its call sites, so warn loudly instead.
-                        tracing::warn!(
-                            "SPQR: all-passive stage could not be converted to \
-                             a WDF tree (a component produced no leaf); \
-                             dropping stage with components [{}] — output may \
-                             collapse to passthrough",
-                            component_ids_for_edges(graph, &node.all_edge_indices()).join(", ")
+                        // The S/P subtree contains a nested R-node (non-SP
+                        // sub-block, e.g. multiple reactive shunts at a shared
+                        // node). spqr_to_dyn_node returned None because the
+                        // R-node arm always returns None — it cannot be expressed
+                        // as a WDF series-parallel leaf. Fall back to
+                        // SpqrStage::Rigid so the build layer can route this
+                        // through build_passive_rtype_stage (MNA-derived
+                        // scattering) — the same path used by standalone R-nodes
+                        // and the Twin-T notch. boundary_nodes and pendant_trees
+                        // are unused by build_rigid_from_group_with_hints.
+                        let edge_indices = node.all_edge_indices();
+                        let (a, b) = node.endpoints();
+                        tracing::debug!(
+                            "SPQR: all-passive stage contains non-SP sub-block; \
+                             routing to MNA (PassiveRType) for components [{}]",
+                            component_ids_for_edges(graph, &edge_indices).join(", ")
                         );
+                        stages.push(SpqrStage::Rigid {
+                            edge_indices,
+                            boundary_nodes: vec![a, b],
+                            pendant_trees: Vec::new(),
+                            order: *order,
+                        });
+                        *order += 1;
                     }
                 }
                 SpClassification::SingleNl { nl_edge_idx } => {
