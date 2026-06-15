@@ -111,6 +111,8 @@ mod spqr_build_tests;
 #[cfg(test)]
 mod spqr_tests;
 #[cfg(test)]
+mod state_space_pot_tests;
+#[cfg(test)]
 mod tone_stage_tests;
 #[cfg(test)]
 mod tree_build_tests;

@@ -25,6 +25,8 @@ pub(super) use self::general::{
     build_general_mna_from_edges_with_supply, build_opamp_nl_feedback,
 };
 pub(super) use self::opamp_root::{extract_opamp_config, make_opamp_root, OpAmpConfig};
+#[cfg(test)]
+pub(super) use self::state_space::build_state_space_stage;
 
 use super::component::EdgeKind;
 use super::dyn_node::DynNode;
