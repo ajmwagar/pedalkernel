@@ -698,6 +698,7 @@ fn compare_goldens(
                     signal_results.push(pedalkernel_validate::report::SignalResult {
                         label: label.clone(),
                         passed: false,
+                        pending: false,
                         comparison: None,
                         error: Some(missing),
                     });
@@ -758,6 +759,7 @@ fn compare_goldens(
                 test_name.clone(),
                 pedalkernel_validate::report::TestResult {
                     passed: test_passed,
+                    pending: false,
                     error: None,
                     signals: signal_results,
                 },
@@ -770,6 +772,7 @@ fn compare_goldens(
                 description: suite_config.description.clone(),
                 passed: suite_passed,
                 failed: suite_failed,
+                pending: 0,
                 tests: test_results,
             },
         );
