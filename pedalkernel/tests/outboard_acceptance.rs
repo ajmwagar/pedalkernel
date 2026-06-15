@@ -60,8 +60,20 @@ fn steady_gain_db(src: &str, controls: &[(&str, f64)], amplitude: f64, freq_hz: 
 /// SPICE, so the whole chain sits at ~-58 dB and the feedback detector sees
 /// only mV-level drive (GR 0.01 dB, ratio 1.00).
 /// See reports/outboard-gear-audit-2026-06-12.md §3, §6.
+///
+/// NGSPICE REFERENCE BASELINE (bead pedalkernel-mbte.1, 2026-06-15):
+///   Golden: pedalkernel-validate/golden/compressor/fet_leveler_*/
+///   ngspice GR (0 vs -40 dBVU):  ~4.2 dB measured in SPICE at circuit level
+///   ngspice attack:               ~5.5 ms (25k × 220n RC)
+///   ngspice release:              ~1.1 s  (5M × 220n RC)
+///   WDF GR (current):             ~0.02 dB (detector starved — G5 family)
+///   Full WDF-vs-ngspice gap report: pedalkernel-validate --test compressor_dynamics_gap
+///
+/// Pass criteria (GR > 3 dB, ratio > 1.3:1) are derived from the ngspice
+/// reference and are intentionally tight.  This test stays red until the
+/// BJT makeup-gain and transformer-loss bugs (G5 family) are fixed.
 #[test]
-#[ignore = "red until makeup-gain fix (G5 family): tap+vgs routing now live, but the BJT line amp + transformer leave the chain at ~-58 dB, starving the feedback detector (GR 0.01 dB)"]
+#[ignore = "red until makeup-gain fix (G5 family): tap+vgs routing now live, but the BJT line amp + transformer leave the chain at ~-58 dB, starving the feedback detector (GR ~0.02 dB vs ngspice ~4.2 dB — see pedalkernel-validate compressor suite)"]
 fn fet_leveler_compresses() {
     let src = example_pedal_source("fet_leveler.pedal");
     let controls: &[(&str, f64)] = &[("Input", 0.7), ("Output", 0.7)];
