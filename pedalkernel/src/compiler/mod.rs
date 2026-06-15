@@ -14,6 +14,7 @@ mod blockwise;
 mod build;
 mod calibrate;
 mod classify;
+pub mod boundary_rules;
 mod compile;
 mod compiled;
 pub mod component;
@@ -49,6 +50,10 @@ pub(crate) use compiled::extract_precomputed_from_compiled;
 pub use compiled::CompiledPedal;
 pub use component::{
     Cardinality, Component, NeighborReq, NeighborRole, PinDirection,
+};
+pub use boundary_rules::{
+    classify_control_path, classify_edges, classify_ports, smoke_classify, BoundaryPolicy,
+    ClassifiedEdge, ClassifiedPort, Directive, Domain, PortClass,
 };
 pub use neighbor_roles::{
     completeness_errors, infer_neighbor_roles, InferredNeighbor,
