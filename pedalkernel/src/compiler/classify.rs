@@ -146,10 +146,10 @@ pub(super) fn classify_circuit(graph: &CircuitGraph, pedal: &PedalDef) -> Classi
 
             // Track germanium diodes
             match &kind {
-                NonlinearKind::SingleDiode(dt) | NonlinearKind::DiodePair(dt) => {
-                    if *dt == DiodeType::Germanium {
-                        has_germanium = true;
-                    }
+                NonlinearKind::SingleDiode(dt) | NonlinearKind::DiodePair(dt)
+                    if *dt == DiodeType::Germanium =>
+                {
+                    has_germanium = true;
                 }
                 _ => {}
             }

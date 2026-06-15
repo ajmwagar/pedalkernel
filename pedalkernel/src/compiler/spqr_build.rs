@@ -1950,18 +1950,18 @@ pub fn compile_via_spqr_with_options(
                             }
                         }
                     }
-                    Stage::BlackFeedback(b) if !b.bypass_serial => {
+                    Stage::BlackFeedback(b)
+                        if !b.bypass_serial && b.output_node_id == usize::MAX =>
+                    {
                         // BlackFeedback stages also need output_node_id for feedforward
-                        if b.output_node_id == usize::MAX {
-                            for pins in &graph.nullor_pins {
-                                if ff_inj_nodes.contains(&pins.out_node) {
-                                    #[cfg(debug_assertions)]
-                                    {
-                                        let comp_id = &graph.components[pins.comp_idx].id;
-                                        if b.debug_label.contains(comp_id.as_str()) {
-                                            b.output_node_id = pins.out_node;
-                                            break;
-                                        }
+                        for pins in &graph.nullor_pins {
+                            if ff_inj_nodes.contains(&pins.out_node) {
+                                #[cfg(debug_assertions)]
+                                {
+                                    let comp_id = &graph.components[pins.comp_idx].id;
+                                    if b.debug_label.contains(comp_id.as_str()) {
+                                        b.output_node_id = pins.out_node;
+                                        break;
                                     }
                                 }
                             }
