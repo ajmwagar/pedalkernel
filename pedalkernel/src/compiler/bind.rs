@@ -129,6 +129,7 @@ pub(super) fn build_controls(
         controls.push(ControlBinding {
             label: ctrl.label.clone(),
             target,
+            targets: Vec::new(),
             component_id: ctrl.component.clone(),
             max_resistance: max_r,
             taper,
