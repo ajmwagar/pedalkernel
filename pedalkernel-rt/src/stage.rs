@@ -4427,6 +4427,18 @@ pub struct MultiNlStage {
     /// Counts from 0 to DC_RAMP_SAMPLES, scaling dc_bias by ramp/N to let the
     /// NR solver track the operating point as supply voltage gradually increases.
     pub dc_ramp: u32,
+    /// Value to restore dc_ramp to on reset().
+    ///
+    /// Default is 0 (full ramp from zero on each reset). When init hints are
+    /// present for a stage (e.g. `init { Q1: saturated, Q2: cutoff }` in the
+    /// .pedal DSL), this is set to `DC_RAMP_SAMPLES` (256) so that reset()
+    /// restores dc_scale = 1.0 immediately. This preserves the hint-seeded
+    /// v_prev as a meaningful NR warm-start: with a near-zero excitation from
+    /// dc_scale ≈ 0, the NR solver converges to ≈0 regardless of the warm-start,
+    /// erasing the asymmetric seed. Skipping the ramp ensures the first sample
+    /// sees the full DC bias and the hinted Vce difference matters.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub initial_dc_ramp: u32,
     /// Physics-based initial v_prev values. Restored on reset() instead of zeroing,
     /// so the NR solver starts near the correct operating point after a DAW reset.
     pub initial_v_prev: Vec<crate::Wave>,
@@ -6072,7 +6084,12 @@ impl MultiNlStage {
         // Reset 2-sample history for extrapolation warm-start.
         // Seed from initial_v_prev so extrapolation starts near the operating point.
         self.v_prev_2.copy_from_slice(&self.initial_v_prev);
-        self.dc_ramp = 0;
+        // When init hints are present (initial_dc_ramp = DC_RAMP_SAMPLES), restore
+        // dc_ramp to fully-ramped so the first sample sees dc_scale = 1.0.
+        // This preserves the hint-seeded v_prev: without it, dc_scale ≈ 0 on
+        // sample 0 drives known_a ≈ 0 and the NR converges to v ≈ 0 regardless
+        // of the asymmetric warm-start, erasing the init hint's effect.
+        self.dc_ramp = self.initial_dc_ramp;
         self.dc_blocker_x1 = 0.0;
         self.dc_blocker_y1 = 0.0;
         if let Some(ref mut ss) = self.state_space {
