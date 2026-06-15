@@ -70,7 +70,7 @@ jobs:
   # on the flaky tail.
   # ----------------------------------------------------------------
   test:
-    name: test (${{ matrix.label }}, ${{ env.TEST_MIN_PASS_PCT }}% gate)
+    name: test (${{ matrix.label }}, gate)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

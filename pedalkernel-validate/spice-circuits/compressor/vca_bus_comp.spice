@@ -1,0 +1,59 @@
+* ============================================================================
+* VCA Bus Comp (SSL/dbx-style) — SSM2164 exponential VCA, ngspice reference
+* PedalKernel Validation Circuit (bead pedalkernel-mbte.2)
+* ============================================================================
+* Mirrors examples/outboard/compressor/vca_bus_comp.pedal:
+*   in -> C_in -> U1 (NE5532 gain 2) -> R_v2v -> VCA1 (SSM2164) -> C_mid
+*      -> U2 (NE5532 gain 2) -> C_out -> Makeup -> out
+*   Sidechain: EF1 envelope_follower(10k,1u,91k,6.8u,20k) FEED-FORWARD -> VCA1.cv
+* The SSM2164 is an IC exponential VCA; modeled behaviorally (standard approach):
+*   gain(dB) = -CV / 33mV  ->  gain = 10^(-CV/0.66).
+*
+* *** DSPBlock-vs-analog comparison (owner's interest) ***
+* The ENGINE lowers `vca(ssm2164)` to a processor binding via the compiler
+* vca_lowering pass (G4) — i.e. the engine VCA is an ALGORITHMIC/DSPBlock gain,
+* NOT a stamped circuit. This ngspice deck is the ANALOG SSM2164 reference, so
+* the WDF-vs-ngspice comparison directly tests how the DSPBlock abstraction
+* matches the real exponential VCA behavior.
+*
+* VERIFIED (orchestrator, 2026-06-15, ngspice direct, NO bootstrap):
+*   - CONVERGES (behavioral VCA + 2 opamp gain stages + feed-forward detector).
+*   - COMPRESSES: gain 4.02x@in=0.05 -> 3.51x@in=0.5 (~1.18 dB GR). Conservative
+*     sens (B_cv 0.25) — agent tunes to the real SSM2164 dB/V + envelope_follower
+*     for a musical ratio. Direction + physics correct. The detector needs a
+*     pre-rectifier sens gain (x20) or the ~0.6V diode drop swamps small signals.
+*
+* HARNESS: strip the standalone Vin SINE + .control; inject PWL at `in`, read out.
+* ----------------------------------------------------------------------------
+
+.model Ddet D(IS=1e-14)
+V_vcc vcc 0 15
+
+C_in in n1 1u
+* U1 NE5532 non-inverting gain 2 (ideal opamp behavioral)
+B_u1 nu1 0 V = 2*V(n1)
+R_v2v nu1 nvin 30k
+* SSM2164 exponential VCA: gain = 10^(-CV/0.66)
+B_vca nvout 0 V = V(nvin) * pwr(10, -V(ncv)/0.66)
+C_mid nvout nm 1u
+* U2 NE5532 gain 2
+B_u2 nu2 0 V = 2*V(nm)
+C_out nu2 no 1u
+R_mk no 0 10k
+
+* feed-forward detector: sens gain x20 -> rectify -> attack 10k/1u, release 91k/6.8u
+B_rect nrect 0 V = abs(V(n1))*20
+R_att nrect na 10k
+D_att na nenv Ddet
+C_env nenv 0 1u ic=0
+R_rel nenv 0 91k
+B_cv ncv 0 V = 0.25*V(nenv)
+
+* --- standalone inspection stimulus (harness replaces this) ---
+Vin in 0 SINE(0 0.1 1k)
+.control
+tran 20u 150m uic
+let g = maximum(abs(v(no)))/maximum(abs(v(n1)))
+print g
+.endc
+.end

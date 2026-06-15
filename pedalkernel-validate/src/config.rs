@@ -2278,6 +2278,98 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
         },
     );
 
+    // Compressor suite — FET Leveler (1176-style) ngspice gap measurement.
+    //
+    // Two stimuli characterize the feedback-compression path:
+    //   1. LevelSweep  — static gain/GR curve (9 levels, -40..0 dBVU)
+    //   2. ToneBurst   — attack/release timing (500 ms burst @ -6 dBVU)
+    //
+    // The EXPECTED outcome is an illuminating gap: ngspice shows ~4.2 dB GR
+    // and real attack/release ballistics; the WDF engine produces ~0 dB GR
+    // because the feedback compressor path is broken (audit gap G5 family,
+    // see reports/outboard-gear-audit-2026-06-12.md §6).
+    //
+    // Pass criteria are intentionally tight (time_domain only) so the gap
+    // registers as a delta, not a hidden pass.  A failing test here is correct
+    // and expected until the engine's makeup-gain/feedback-detector fixes land.
+    suites.insert(
+        "compressor".to_string(),
+        TestSuite {
+            description:
+                "FET Leveler (1176-style) — ngspice dynamics baseline vs WDF engine gap".to_string(),
+            tests: {
+                let mut tests = BTreeMap::new();
+
+                // ── 1. LEVEL SWEEP ──────────────────────────────────────────
+                // 9 input levels from -40 to 0 dBVU at 1 kHz, 0.5 s each.
+                // Measures static gain/GR curve; ngspice ~4.2 dB GR over
+                // the sweep; WDF engine currently ~0 dB GR.
+                tests.insert(
+                    "fet_leveler_level_sweep".to_string(),
+                    TestCase {
+                        circuit: "compressor/fet_leveler.pedal".to_string(),
+                        description:
+                            "FET Leveler 1176-style: static gain curve (-40..0 dBVU, 9 levels)"
+                                .to_string(),
+                        signals: vec![SignalConfig::LevelSweep {
+                            frequency: 1000.0,
+                            levels_dbvu: (-40..=0)
+                                .step_by(5)
+                                .map(|l| l as f64)
+                                .collect(),
+                            duration_per_level: 0.5,
+                            label: Some("level_sweep".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        // EXPECTED: RED — WDF gain at each level differs from ngspice
+                        // because the engine's BJT makeup-gain + transformer losses
+                        // starve the feedback detector.  Tight criteria capture the gap.
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-20.0),
+                            peak_error_db: Some(-15.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(200.0),
+                    },
+                );
+
+                // ── 2. TONE BURST ──────────────────────────────────────────
+                // 500 ms on / 2000 ms off, -6 dBVU, 1 repetition.
+                // Measures attack/release transient shape.  ngspice: attack
+                // ~5-10 ms (25k×220n=5.5 ms RC), release ~1-2 s (5M×220n=1.1 s).
+                // WDF engine: no compression means attack/release are ~0 ms.
+                tests.insert(
+                    "fet_leveler_tone_burst".to_string(),
+                    TestCase {
+                        circuit: "compressor/fet_leveler.pedal".to_string(),
+                        description:
+                            "FET Leveler 1176-style: attack/release timing via tone burst"
+                                .to_string(),
+                        signals: vec![SignalConfig::ToneBurst {
+                            frequency: 1000.0,
+                            amplitude_dbvu: Some(-6.0),
+                            amplitude: 0.5,    // fallback (unused when amplitude_dbvu set)
+                            on_ms: 500.0,
+                            off_ms: 2000.0,
+                            repetitions: 1,
+                            label: Some("tone_burst".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        // EXPECTED: RED — WDF produces no GR transient.
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-20.0),
+                            peak_error_db: Some(-15.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(100.0),
+                    },
+                );
+
+                tests
+            },
+        },
+    );
+
     suites
 }
 

@@ -624,24 +624,41 @@ pedal "Q12 To Two Rung Differential Diode Ladder" { supply 9V
 }
 "#;
 
-/// Try to load a .pedal file from the pro crate's acidattack-core directory.
+/// Try to load a file at `pro_sub_path` (relative to the pedalkernel-pro repo
+/// root, e.g. `"crates/acidattack/acidattack-core/tb303_filter.pedal"` or
+/// `"pedals/legends/screamer.pedal"`).
 ///
-/// Tries several candidate relative paths so that tests work in both the normal
-/// checkout layout and inside a git worktree (which adds `.worktrees/{name}/`
-/// prefix levels to `CARGO_MANIFEST_DIR`).
-fn load_pro_pedal(filename: &str) -> Option<String> {
+/// Tries several candidate `../` depths from `CARGO_MANIFEST_DIR` so that tests
+/// work in both normal checkout and git-worktree layouts.
+///
+/// This is the canonical shared helper for all pro-repo file loading in the
+/// engine test suite.  `pedalkernel_validate::pro_pedal::load_pro_pedal_sub`
+/// mirrors this logic for tests in the validate crate (circular dep prevents
+/// sharing a single crate).
+pub(crate) fn load_pro_pedal_sub(pro_sub_path: &str) -> Option<String> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let rel_suffix = format!("pedalkernel-pro/crates/acidattack/acidattack-core/{filename}");
     // Try 2..=6 levels of `../` to find the correct parent depending on checkout layout.
     for levels in 2..=6 {
         let prefix: String = "../".repeat(levels);
-        let candidate = format!("{manifest_dir}/{prefix}{rel_suffix}");
+        let candidate = format!("{manifest_dir}/{prefix}pedalkernel-pro/{pro_sub_path}");
         if let Ok(s) = std::fs::read_to_string(&candidate) {
-            eprintln!("  loaded {filename} ({} bytes) from {candidate}", s.len());
+            eprintln!(
+                "  loaded {} ({} bytes) from {candidate}",
+                pro_sub_path,
+                s.len()
+            );
             return Some(s);
         }
     }
     None
+}
+
+/// Convenience wrapper: loads `filename` from the acidattack-core directory.
+/// All existing TB-303 tests call this form.
+fn load_pro_pedal(filename: &str) -> Option<String> {
+    load_pro_pedal_sub(&format!(
+        "crates/acidattack/acidattack-core/{filename}"
+    ))
 }
 
 fn tb303_bkm_vs_signals(

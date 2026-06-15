@@ -1,0 +1,113 @@
+* ============================================================================
+* Ibanez Tube Screamer TS-808 — Full Signal Path
+* PedalKernel Legends Validation Circuit
+* ============================================================================
+*
+* Topology (mirrors screamer.pedal in pedalkernel-pro/pedals/legends/):
+*   1. Bias network  — 4.5 V virtual ground from 9 V supply (R_v1/R_v2/C_v)
+*   2. Input coupling — Cin (22n) + R_in (510k) shunt
+*   3. Clipping stage — U1 non-inverting opamp with Drive pot (500k, set 50%)
+*                       + R_clip (51k) + 1N914 anti-parallel pair in feedback
+*                       + R_hp/C_hp HP network in negative feedback
+*                       + C_clip (47p) HF rolloff in feedback
+*   4. Tone control   — R_t1 (1k) / Tone pot (20k, set 50%) / C_t1 (220n)
+*                       bass path + R_t2 (220) / C_t2 (100n) treble path
+*                       followed by U2 unity-gain voltage follower
+*   5. Output stage   — C_c2 (1u) coupling, Level pot (100k, set 70%),
+*                       C_out (10u), R_out_s (100) series, R_out_g (10k) shunt
+*
+* Control positions (nominal, mid-drive):
+*   Drive  = 0.5 → Rdrive_top=250k, Rdrive_bot=250k  (500k audio taper ≈ linear here)
+*   Tone   = 0.5 → split at wiper: Rtone_top=10k, Rtone_bot=10k
+*   Level  = 0.7 → split: Rlevel_top=30k, Rlevel_bot=70k (100k audio taper)
+*
+* Supply: VCC = 9 V, Vbias = 4.5 V (ideal voltage source for SPICE simplicity)
+*
+* Op-amp model: ideal VCVS (gain=100000, inverting input=v_neg, pos grounded
+*   for clarity) implemented as E-source.  Both U1 and U2 use VCC rail clamping
+*   approximated by the large-gain VCVS; for soft-clipping the diode pair
+*   limits the loop well before rail.
+*
+* Diode model: 1N914 (same as ts808_clipper.spice in this repo)
+*   Is=4.35n N=1.906 Rs=0.6 Cjo=2p
+* ============================================================================
+
+* ---- Supply and bias -------------------------------------------------------
+* 9 V supply (DC)
+VCC vcc 0 DC 9
+
+* Bias divider: R_v1 / R_v2 give 4.5 V at node vb; C_v bypasses to AC ground.
+R_v1 vcc vb 10k
+R_v2 vb  0  10k
+C_v  vb  0  47u
+
+* ---- Input coupling --------------------------------------------------------
+* Cin couples the input; R_in provides impedance to ground.
+Cin  v_in  v_in_r 22n
+R_in v_in_r 0     510k
+
+* ---- Clipping stage (U1, non-inverting) ------------------------------------
+* C_c1: coupling cap from input to U1+ and bias R_b1.
+C_c1 v_in_r v_u1pos 1u
+R_b1 v_u1pos vb    10k
+
+* Negative feedback: R_hp + C_hp define bass roll-off (f_hp ≈ 720 Hz).
+* R_hp goes from U1.neg to node v_hp; C_hp from v_hp to ground.
+R_hp v_u1neg v_hp 4.7k
+C_hp v_hp    0    47n
+
+* Drive pot (500k, position=0.5 → each half ≈ 250k audio taper).
+* Rdrive_top: U1.out → Drive wiper node v_drive_w
+* Rdrive_bot: v_drive_w → R_clip → U1.neg
+Rdrive_top v_u1out v_drive_w 250k
+Rdrive_bot v_drive_w v_rclip_in 250k
+
+* Minimum feedback resistor (series with Drive).
+R_clip v_rclip_in v_u1neg 51k
+
+* Anti-parallel 1N914 clipping diodes in feedback (soft clip).
+D1 v_u1neg v_u1out D1N914
+D2 v_u1out v_u1neg D1N914
+.model D1N914 D(Is=4.35n N=1.906 Rs=0.6 Cjo=2p)
+
+* HF rolloff cap in feedback (47p, same nodes as diodes).
+C_clip v_u1out v_u1neg 47p
+
+* U1: ideal op-amp as VCVS (non-inverting: + = v_u1pos, - = v_u1neg).
+* Eop: output = gain * (v+ - v-)
+Eu1 v_u1out 0 v_u1pos v_u1neg 100000
+
+* ---- Tone control (passive) + U2 unity buffer ------------------------------
+* R_t1 from U1 output to tone network.
+R_t1 v_u1out v_tone_in 1k
+
+* Tone pot (20k, position=0.5 → 10k each half).
+* Top half: v_tone_in → wiper v_tone_w
+* Bottom half: v_tone_w → v_tone_bot → C_t1 → gnd (bass path)
+Rtone_top v_tone_in v_tone_w   10k
+Rtone_bot v_tone_w  v_tone_bot 10k
+C_t1      v_tone_bot 0         220n
+
+* Treble path: R_t2 + C_t2 from v_tone_in to ground.
+R_t2 v_tone_in v_t2c 220
+C_t2 v_t2c     0     100n
+
+* U2: unity-gain voltage follower (out = in = v_tone_w).
+Eu2     v_u2out 0 v_tone_w v_u2out 100000
+
+* ---- Output: coupling, level, output network -------------------------------
+* C_c2: coupling cap from U2 output.
+C_c2 v_u2out v_level_in 1u
+
+* Level pot (100k, position=0.7 audio taper).
+* Audio taper at 0.7: bottom ~70% of resistance = 70k, top = 30k.
+Rlevel_top v_level_in v_level_w 30k
+Rlevel_bot v_level_w  0         70k
+
+* C_out: output coupling.
+C_out v_level_w v_cout_out 10u
+
+* Output network: R_out_s series + R_out_g shunt to ground.
+R_out_s v_cout_out v_out 100
+R_out_g v_out      0     10k
+
