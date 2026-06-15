@@ -1,0 +1,19 @@
+* BiValve "Sallen-Key LPF" — ngspice reference
+* Mirrors crates/bivalve/bivalve-core/sallen_key_lpf.pedal (PRIVATE .pedal).
+* TL072 unity-domain Sallen-Key 2-pole LP. Cutoff pots 100k @ pos 0.5 -> 52.5k
+* (range [1.0,0.05]); C=4.7n -> fc ~= 645 Hz. Gain network R_gain_top(100k)/
+* Resonance(100k @ res=0) -> gain 2, Q~1. TL072 modeled as ideal VCVS (Eop,
+* gain 1e5) per the repo extraction-deck convention.
+* HARNESS: strip the standalone AC stimulus; inject tran stimulus at v_in, read
+* v_out. Cutoff/Resonance resistor values are the calibration knobs vs .pedal.
+R1 v_in n1 52.5k
+R2 n1 npos 52.5k
+C1 n1 v_op 4.7n
+C2 npos 0 4.7n
+Rg nneg v_op 100k
+Rres nneg 0 100k
+Eop v_op 0 npos nneg 100000
+Rout v_op v_out 10k
+Vin v_in 0 AC 1
+.ac dec 20 10 100k
+.end

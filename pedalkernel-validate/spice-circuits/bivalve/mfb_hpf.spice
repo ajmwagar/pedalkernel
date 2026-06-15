@@ -1,0 +1,12 @@
+* BiValve "MFB HPF" — ngspice reference (PASSIVE first-order HP)
+* Mirrors crates/bivalve/bivalve-core/mfb_hpf.pedal (PRIVATE .pedal).
+* NOTE: despite the name this .pedal is a passive RC highpass (no opamp):
+* series C1(10n), shunt R_floor1(1k)+Cutoff(100k @ 0.5 -> 52.5k) to gnd, output
+* tapped at the cap/R junction. fc ~= 1/(2*pi*53.5k*10n) ~= 297 Hz.
+* HARNESS: replace AC stimulus with tran at v_in -> v_out.
+C1 v_in v_out 10n
+Rfloor v_out nc 1k
+Rcut nc 0 52.5k
+Vin v_in 0 AC 1
+.ac dec 20 10 100k
+.end

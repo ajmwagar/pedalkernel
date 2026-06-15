@@ -1,0 +1,16 @@
+* BiValve "Sallen-Key HPF" — ngspice reference
+* Mirrors crates/bivalve/bivalve-core/sallen_key_hpf.pedal (PRIVATE .pedal).
+* TL072 Sallen-Key 2-pole HP. Series C1,C2 (4.7n); Cutoff_R1 to gnd, Cutoff_R2
+* feedback to output (100k @ 0.5 -> 52.5k). fc ~= 645 Hz, gain 2 (Q~1).
+* TL072 = ideal VCVS. HARNESS: replace AC stimulus with tran at v_in -> v_out.
+C1 v_in n1 4.7n
+C2 n1 npos 4.7n
+R1 n1 0 52.5k
+R2 npos v_op 52.5k
+Rg nneg v_op 100k
+Rres nneg 0 100k
+Eop v_op 0 npos nneg 100000
+Rout v_op v_out 10k
+Vin v_in 0 AC 1
+.ac dec 20 10 100k
+.end

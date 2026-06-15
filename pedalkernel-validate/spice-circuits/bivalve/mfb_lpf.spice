@@ -1,0 +1,22 @@
+* BiValve "MFB LPF" — ngspice reference
+* Mirrors crates/bivalve/bivalve-core/mfb_lpf.pedal (PRIVATE .pedal).
+* TL072 multiple-feedback 2-pole LP (inverting), single-supply with vref=4.5V
+* (Rb1/Rb2 from 9V, C_vref bypass). R_in 10k, Cutoff_R1/R3 100k @ 0.5 -> 52.5k,
+* R_q_floor 10k, Resonance 100k @ res=0, C1=C2=10n. AC shape is bias-independent;
+* vref kept for topology fidelity (tran goldens). TL072 = ideal VCVS about vref.
+Vvcc vcc 0 9
+Rb1 vcc vref 100k
+Rb2 vref 0 100k
+Cvref vref 0 47u
+Rin v_in na 10k
+Rcut1 na nb 52.5k
+C1 nb 0 10n
+Rqf nb nc 10k
+Rres nc nneg 100k
+Rcut3 nneg v_op 52.5k
+C2 nneg v_op 10n
+Eop v_op 0 vref nneg 100000
+Rout v_op v_out 10k
+Vin v_in 0 AC 1
+.ac dec 20 10 100k
+.end
