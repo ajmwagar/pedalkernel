@@ -17,6 +17,59 @@ Rust WDF (Wave Digital Filter) kernel for guitar FX pedal simulation — a DSL c
 - **Testing/Benchmarks**: criterion, tempfile, rand, approx
 - **CI/CD**: GitHub Actions (rustfmt, clippy feature matrix, test feature matrix, benchmarks)
 
+## Architecture
+
+WDF compiler: `.pedal` DSL (nom, `dsl.rs`) → `CircuitGraph` → **SPQR pipeline**
+(`compiler/compile.rs::compile_via_spqr` — the legacy 6-pass pipeline has been
+removed). Two phases:
+
+1. **Signal-flow partitioning** (`compiler/signal_flow.rs::find_flow_groups`):
+   split edges into feedback/delay groups, ordered by signal-flow distance.
+2. **Per-group SPQR decomposition + stage building** (`compiler/spqr.rs`,
+   `compiler/spqr_build.rs`): each feedback-free group is SPQR-decomposed; a
+   non-series-parallel R-node routes to an MNA-derived `PassiveRType`. Stage
+   builders emit:
+   - `Iir` / `StateSpace` — linear (passive RLC → biquad / LTI MIMO)
+   - `Blockwise` — multi-NL ladders (K-method rungs + delay-free coupling)
+   - `MultiNl` — coupled NL groups (push-pull triodes/pentodes, diode bridges)
+     via grouped Newton-Raphson
+   - `Wdf` — WDF tree + a `RootKind` (NL roots solved per-sample;
+     `RootKind::Passthrough` terminates passive-only trees)
+
+Runtime (`pedalkernel-rt`, `no_std + alloc`): per-sample wave scattering. NL
+roots use **K-method tabulation** (`k_method.rs`, precomputed 1D/2D `KTable`) to
+keep Newton-Raphson out of the audio hot path → real-time-safe. `metering.rs`
+writes `UiMetrics` (levels, gain-reduction, tube/transformer state) lock-free for
+the GUI.
+
+## Tools & Locations
+
+- **SPICE validation** — `pedalkernel-validate`: CLI `run` / `quick` /
+  `generate-spice` / `bootstrap` / `import-ltspice-raw-golden` / `check-spice`.
+  Circuits in `circuits/`, ngspice decks in `spice-circuits/`, goldens in
+  `golden/`, suites in `src/config.rs`, metrics in `src/metrics.rs` (THD,
+  even/odd ratio, spectral, RMS/peak). **Goldens must be ngspice-derived, never
+  WDF-bootstrapped** (a bootstrapped golden self-validates and hides the gap).
+- **Audio analysis** (`analysis` feature, std-only): `src/analysis.rs` —
+  rms/peak/thd/spectral_centroid/spectral_distance/rms_envelope. The test
+  harness `tests/audio_analysis.rs` re-exports these and adds dynamics tools.
+- **Dynamics measurement** (`tests/audio_analysis.rs`):
+  `measure_attack_seconds` / `measure_release_seconds`, `gain_reduction_db`,
+  `compression_ratio`, `static_gain_curve`, `frequency_response_db`,
+  `detect_modulation_rate`. Dynamic stimuli: `ToneBurst` / `LevelSweep`
+  (`pedalkernel-validate/src/signals.rs`). Compressors are deterministic →
+  golden-comparable against ngspice via these.
+- **Private-`.pedal` / public-`.spice` validation** —
+  `pedalkernel_validate::pro_pedal` (`load_pro_pedal_sub` + `skip_if_missing!`):
+  runtime-loads a proprietary `.pedal` from `pedalkernel-pro`; the test SKIPS on
+  CI when it is absent. Never commit a private `.pedal` into this repo; never
+  `include_str!` one (compile-fails on public CI).
+- **Performance** — `examples/rt_bench.rs` (×realtime factor),
+  `benches/wdf_bench.rs` (FLOPS), `solver_stats_snapshot()` (NR iters/residual).
+- **Assets** — `.pedal`: `examples/`, `tests/test_pedals/`, validate `circuits/`,
+  pro `pedals/` + `equipment/`. Device models: `models/` (`.model` / `.mod`).
+  Reports: `reports/`. Design docs: `docs/`.
+
 ## Your Identity
 
 **You are an orchestrator, delegator, and constructive skeptic architect co-pilot.**

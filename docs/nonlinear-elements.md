@@ -3,7 +3,7 @@ title: "Nonlinear elements"
 description: "Catalogue of nonlinear devices — which are memoryless, which carry state, and which are K-method candidates."
 section: "Internals"
 weight: 89
-source_commit: "ba0372ed07318273d8d1a016ca9a572acc0a27df"
+source_commit: "222212fe33f0aa223f7d545d890a16654c17cca8"
 watches:
   - pedalkernel-rt/src/elements/nonlinear/
   - pedalkernel-rt/src/elements/modulation.rs
@@ -11,6 +11,7 @@ watches:
   - pedalkernel-rt/src/stage.rs
   - pedalkernel/src/compiler/k_method.rs
   - pedalkernel/src/compiler/component.rs
+  - pedalkernel/src/compiler/dsp_block.rs
 ---
 
 # Nonlinear Elements
@@ -101,14 +102,26 @@ These devices carry internal state that updates per sample, independently of the
 |---|---|---|
 | Bucket-brigade delay (BBD) | `elements/nonlinear/bbd.rs` | Per-bucket charge, NE571 companding state, clock feedthrough phase |
 | Delay line / tap | `elements/nonlinear/delay.rs` | Ring buffer of past samples |
+| Spring reverb tank | `elements/nonlinear/spring.rs` | Per-spring transit delay, M=32 allpass states, damping filter, DC blocker |
+| Jiles-Atherton transformer core | `elements/nonlinear/jiles_atherton.rs` | `(H, Hdot, M, Mdot)` magnetisation state — full B-H hysteresis |
 | LFO | `elements/modulation.rs` | Oscillator phase |
 | Envelope follower | `elements/modulation.rs` | One-pole filtered RMS with attack/release |
 | Photocoupler (Vactrol) | `elements/controlled.rs` | LED current, LDR resistance (thermal lag, ~10–100 ms) |
-| VCO / VCF / VCA | `elements/synth.rs` | Oscillator phase, filter state, gain envelope |
-| ADSR envelope | `elements/synth.rs` | Stage + per-stage timer |
+| VCO / VCF / VCA | `elements/synth.rs`, `oscillator.rs` | Oscillator phase, filter state, gain envelope |
+| ADSR / DecayEnvelope | `elements/synth.rs`, `envelope.rs` | Stage + per-stage timer |
+| Glide (portamento) | `glide.rs` | One-pole pitch tracking with gate state |
 | Slew limiter | `elements/nonlinear/slew.rs` | Previous output sample |
 
 The BBD and the photocoupler are the two cases where "stateful" matters the most: the BBD because its tone literally is its history (companding, leakage, clock feedthrough), and the photocoupler because its thermal response shapes everything an optical compressor does. Neither has a K-method shortcut available even in principle.
+
+### How stateful devices are routed
+
+Stateful devices do not become `RootKind` variants. They take one of two paths through the compiler:
+
+- **WDF leaves with state** — `Photocoupler`, `JfetVariableResistor`, `LeakyCapacitor`, `SwitchedResistor`, `UnitDelay`, **`JaMagnetizing`** all land as variants of `LeafKind` in `pedalkernel-rt::wdf_leaf`. They sit inside a WDF tree as ordinary one-ports; their `process()` method advances internal state per sample. The Jiles-Atherton core, in particular, replaces the linear `DynNode::Inductor` magnetizing branch of a transformer T-equivalent when the DSL config provides JA parameters (`ja_ms`, `ja_a`, `ja_alpha`, `ja_k`, `ja_c`).
+- **DSP blocks** — BBD, delay line / tap, VCO, VCA, spring reverb are lowered by the [DspBlock](./dsp-blocks.md) registry rather than reduced through SPQR. They get their own per-instance binding on the `CompiledPedal` and execute as a separate per-sample pass.
+
+LFOs, envelope followers, glide, and ADSR are not standalone components — they're modulation sources or runtime primitives consumed by other elements (a DspBlock's `bind_runtime` step wires them in).
 
 ## Adding a new nonlinear device
 
