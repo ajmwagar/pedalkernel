@@ -1950,18 +1950,22 @@ impl MnaSystem {
                 //
                 // DC check: b_M + b_N = 2·G[i,vn] → correct (proportional to G only).
                 // HPF check: b_M - b_N = 4fs·C[i,vn] → creates (z-1) zero for cap inputs.
-                let circuit_nodes_eliminated = alg_indices.iter().any(|&i| i < n_kept);
-                let b_scale = if circuit_nodes_eliminated { 2.0 } else { 1.0 };
-
                 // Compute b_plus = M⁻¹·b_M_red and b_minus = M⁻¹·b_N_red
+                //
+                // b_M = G[i,vn] + 2fs·C[i,vn] and b_N = G[i,vn] - 2fs·C[i,vn] are
+                // already the complete bilinear input-coupling vectors after Schur
+                // reduction; no extra scale factor is needed or physically justified.
+                // (The old `b_scale = 2.0` heuristic was a stray copy from the
+                // single-vector resistor-only path and incorrectly doubled cap-coupled
+                // high-pass inputs by +6 dB.)
                 let mut b_plus = vec![0.0; n_c];
                 let mut b_minus = vec![0.0; n_c];
                 for i in 0..n_c {
                     for k in 0..n_c {
                         let bm = b_g_red[k] + two_fs * b_c_red[k];
                         let bn = b_g_red[k] - two_fs * b_c_red[k];
-                        b_plus[i] += b_scale * m_inv[i * n_c + k] * bm;
-                        b_minus[i] += b_scale * m_inv[i * n_c + k] * bn;
+                        b_plus[i] += m_inv[i * n_c + k] * bm;
+                        b_minus[i] += m_inv[i * n_c + k] * bn;
                     }
                 }
 
@@ -2031,12 +2035,14 @@ impl MnaSystem {
                 // Two-vector input coupling (same as Schur path)
                 let mut b_plus = vec![0.0; n_c];
                 let mut b_minus = vec![0.0; n_c];
+                // Same fix as Schur path: no extra scale factor (was 2.0, incorrectly
+                // doubling cap-coupled HP inputs by +6 dB).
                 for i in 0..n_c {
                     for k in 0..n_c {
                         let bm = b_kept[k] + two_fs * b_c_kept[k];
                         let bn = b_kept[k] - two_fs * b_c_kept[k];
-                        b_plus[i] += 2.0 * m_inv[i * n_c + k] * bm;
-                        b_minus[i] += 2.0 * m_inv[i * n_c + k] * bn;
+                        b_plus[i] += m_inv[i * n_c + k] * bm;
+                        b_minus[i] += m_inv[i * n_c + k] * bn;
                     }
                 }
                 let mut b_d = b_plus.clone();
