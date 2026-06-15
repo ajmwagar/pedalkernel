@@ -798,6 +798,106 @@ fn bench_legends_block(c: &mut Criterion) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Group 8: Outboard EQ — Pultec EQP-1A passive+makeup
+// ═══════════════════════════════════════════════════════════════════
+
+/// Per-sample and xRT headroom bench for the Pultec EQP-1A passive+makeup chain.
+///
+/// The pedal compiles to 4 stages:
+///   Stage 0 — WdfStage (passive RLC EQ)
+///   Stage 1 — MultiNlStage (12AX7, grouped NR, bounded ≤ 24 iter)
+///   Stage 2 — MultiNlStage (12AU7, grouped NR, bounded ≤ 24 iter)
+///   Stage 3 — WdfStage (output coupling cap)
+///
+/// Real-time safety: grouped NR is bounded; no heap allocation on the hot path.
+/// xRT headroom = (1 / 48_000 s) / per_sample_time_s.
+fn bench_pultec_passive_makeup(c: &mut Criterion) {
+    let pedal_path = concat!(
+        env!("HOME"),
+        "/src/pedalkernel/pedalkernel/.worktrees/bd-pedalkernel-hcpb.3",
+        "/pedalkernel-validate/circuits/eq/pultec_eqp1a_passive_makeup.pedal"
+    );
+
+    if !std::path::Path::new(pedal_path).exists() {
+        eprintln!("  Skipping pultec_passive_makeup: {pedal_path} not found");
+        return;
+    }
+
+    let mut group = c.benchmark_group("outboard_eq");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    // ── per-sample criterion bench ────────────────────────────────────────────
+    {
+        let mut proc = compile_pedal_file(pedal_path);
+        group.bench_function("pultec_passive_makeup/per_sample", |b| {
+            let mut phase = 0.0_f64;
+            b.iter(|| {
+                phase += 1_000.0 / SAMPLE_RATE;
+                let input = 0.1 * (2.0 * std::f64::consts::PI * phase).sin();
+                black_box(proc.process(black_box(input)))
+            })
+        });
+    }
+
+    // ── 64-sample block criterion bench ──────────────────────────────────────
+    {
+        let block = test_block(64);
+        let mut proc = compile_pedal_file(pedal_path);
+        group.throughput(Throughput::Elements(64));
+        group.bench_function("pultec_passive_makeup/block64", |b| {
+            b.iter(|| {
+                for &s in &block {
+                    black_box(proc.process(black_box(s)));
+                }
+            })
+        });
+    }
+
+    group.finish();
+
+    // ── manual timing for xRT headroom report ─────────────────────────────────
+    {
+        let mut proc = compile_pedal_file(pedal_path);
+        let num_samples: usize = 48_000;
+        let block: Vec<f64> = (0..num_samples)
+            .map(|i| 0.1 * (2.0 * std::f64::consts::PI * 1_000.0 * i as f64 / SAMPLE_RATE).sin())
+            .collect();
+
+        // Warm up
+        for &s in &block[..1_000] {
+            black_box(proc.process(black_box(s)));
+        }
+
+        let start = Instant::now();
+        for &s in &block {
+            black_box(proc.process(black_box(s)));
+        }
+        let elapsed = start.elapsed();
+
+        let elapsed_s = elapsed.as_secs_f64();
+        let per_sample_ns = elapsed_s * 1e9 / num_samples as f64;
+        let budget_s = 1.0 / SAMPLE_RATE; // 20.833 µs at 48kHz
+        let xrt = budget_s / (elapsed_s / num_samples as f64);
+
+        eprintln!();
+        eprintln!("══════════════════════════════════════════════════════════════════");
+        eprintln!("  PULTEC EQP-1A PASSIVE+MAKEUP — REAL-TIME REPORT (48 kHz)");
+        eprintln!("══════════════════════════════════════════════════════════════════");
+        eprintln!("  Stages: WDF(passive EQ) → MultiNL(12AX7) → MultiNL(12AU7) → WDF(Cout)");
+        eprintln!("  NL solver: grouped Newton-Raphson, bounded ≤ 24 iterations/sample");
+        eprintln!("  Per-sample cost:  {per_sample_ns:.2} ns");
+        eprintln!("  48kHz budget:     {:.2} µs", budget_s * 1e6);
+        eprintln!("  xRT headroom:     {xrt:.1}× realtime");
+        eprintln!(
+            "  Status:           {}",
+            if xrt >= 1.0 { "REAL-TIME SAFE" } else { "OVER BUDGET" }
+        );
+        eprintln!("══════════════════════════════════════════════════════════════════");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 
 criterion_group!(
     existing,
@@ -830,4 +930,6 @@ criterion_group!(
     bench_legends_block
 );
 
-criterion_main!(existing, compiled, realtime, flops, legends);
+criterion_group!(outboard_eq, bench_pultec_passive_makeup);
+
+criterion_main!(existing, compiled, realtime, flops, legends, outboard_eq);
