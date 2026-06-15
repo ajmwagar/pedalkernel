@@ -18,6 +18,37 @@ use pedalkernel::PedalProcessor;
 
 const SAMPLE_RATE: f64 = 48_000.0;
 
+/// Load a file from the sibling `pedalkernel-pro` repo at runtime.
+/// `subpath` is relative to the `pedalkernel-pro/` root.
+/// Returns `None` when the pro repo is absent (public CI).
+fn load_pro_pedal_sub(subpath: &str) -> Option<String> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    for levels in 2..=6 {
+        let prefix: String = "../".repeat(levels);
+        let candidate = format!("{manifest_dir}/{prefix}pedalkernel-pro/{subpath}");
+        if let Ok(s) = std::fs::read_to_string(&candidate) {
+            eprintln!(
+                "  loaded {subpath} ({} bytes) from {candidate}",
+                s.len()
+            );
+            return Some(s);
+        }
+    }
+    None
+}
+
+macro_rules! skip_if_missing {
+    ($source:expr, $name:expr) => {
+        match $source {
+            Some(s) => s,
+            None => {
+                eprintln!("  SKIP: {} not found (pro repo not present)", $name);
+                return;
+            }
+        }
+    };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Inline pedal sources
 // ═══════════════════════════════════════════════════════════════════════════
@@ -283,8 +314,11 @@ fn bridged_t_impulse_response_shape() {
 /// the large circuit without crashing or producing NaN.
 #[test]
 fn sine_drum_full_compiles_and_produces_output() {
-    let src = include_str!("../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal");
-    let pedal = parse_pedal_file(src).expect("parse sine_drum");
+    let src = skip_if_missing!(
+        load_pro_pedal_sub("pedals/new/synth/sine_drum.pedal"),
+        "sine_drum.pedal"
+    );
+    let pedal = parse_pedal_file(&src).expect("parse sine_drum");
     let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile sine_drum");
 
     // Trigger C3
@@ -301,8 +335,11 @@ fn sine_drum_full_compiles_and_produces_output() {
 /// Diagnostic: compare spectral content of sine_drum C3 vs expected 130 Hz.
 #[test]
 fn sine_drum_spectral_analysis() {
-    let src = include_str!("../../../pedalkernel-pro/pedals/new/synth/sine_drum.pedal");
-    let pedal = parse_pedal_file(src).expect("parse sine_drum");
+    let src = skip_if_missing!(
+        load_pro_pedal_sub("pedals/new/synth/sine_drum.pedal"),
+        "sine_drum.pedal"
+    );
+    let pedal = parse_pedal_file(&src).expect("parse sine_drum");
     let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile sine_drum");
 
     proc.note_on(48, 127);

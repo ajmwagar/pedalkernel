@@ -10,6 +10,33 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 
+/// Load a `.pedal` file from the sibling `pedalkernel-pro` repo at runtime.
+///
+/// `subpath` is relative to the `pedalkernel-pro/` root, e.g.
+/// `"pedals/legends/screamer.pedal"` or
+/// `"crates/bivalve/bivalve-core/ms20_lpf.pedal"`.
+///
+/// Returns `None` when the pro repo is absent (public CI). Callers should
+/// use the `skip_if_missing!` macro to skip the test gracefully.
+pub fn load_pro_pedal_sub(subpath: &str) -> Option<String> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    // Try 2..=6 levels of `../` to cover both normal checkouts and git
+    // worktrees (which add extra prefix levels to CARGO_MANIFEST_DIR).
+    for levels in 2..=6 {
+        let prefix: String = "../".repeat(levels);
+        let candidate = format!("{manifest_dir}/{prefix}pedalkernel-pro/{subpath}");
+        if let Ok(s) = std::fs::read_to_string(&candidate) {
+            eprintln!(
+                "  loaded {subpath} ({} bytes) from {candidate}",
+                s.len()
+            );
+            return Some(s);
+        }
+    }
+    None
+}
+
+
 pub const SAMPLE_RATE: f64 = 48_000.0;
 const WARMUP: usize = 12_000;
 const MEASURE: usize = 12_000;
@@ -145,7 +172,7 @@ impl ControlCheck {
 
 pub struct CircuitRegressionSpec {
     pub name: &'static str,
-    pub source: &'static str,
+    pub source: String,
     pub checks: &'static [ControlCheck],
 }
 
@@ -204,7 +231,7 @@ pub fn run_circuit_matrix_named(
 
 pub fn assert_circuit_specs_parse_and_controls_mapped(specs: &[CircuitRegressionSpec]) {
     for spec in specs {
-        let pedal = parse_pedal_file(spec.source)
+        let pedal = parse_pedal_file(&spec.source)
             .unwrap_or_else(|e| panic!("{}: parse failed: {e}", spec.name));
         let labels: BTreeSet<&str> = pedal.controls.iter().map(|c| c.label.as_str()).collect();
         let checked: BTreeSet<&str> = spec.checks.iter().map(|check| check.label).collect();
@@ -243,7 +270,7 @@ fn run_one_circuit(
     variants: &[CompileVariant],
     report: &mut RegressionReport,
 ) {
-    let pedal = match parse_pedal_file(spec.source) {
+    let pedal = match parse_pedal_file(&spec.source) {
         Ok(p) => p,
         Err(e) => {
             report.fail(format!("{}: parse failed: {e}", spec.name));
