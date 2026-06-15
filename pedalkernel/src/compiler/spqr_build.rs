@@ -335,6 +335,16 @@ pub fn compile_via_spqr_with_options(
             terminals.push(node);
         }
     }
+    // Cross-network couplers (photocoupler LED/LDR) are galvanically isolated:
+    // each side's port nodes must be SPQR terminals so the side that does not
+    // carry the global in/out signal still gets a stage port (otherwise its
+    // dangling group probes 0). Kept as a sibling of `all_boundary_nodes` so
+    // the DspBlock registry and the coupler concern stay cleanly separated.
+    for node in coupler_boundary_nodes(&graph) {
+        if !terminals.contains(&node) {
+            terminals.push(node);
+        }
+    }
     let mut stages: Vec<Stage> = Vec::new();
     let mut stage_comp_ids: Vec<Vec<String>> = Vec::new();
     let mut bkm_consumed_comp_ids: std::collections::HashSet<String> =
@@ -2027,6 +2037,56 @@ fn build_delay_line_bindings(
     sample_rate: f64,
 ) -> Vec<pedalkernel_rt::processor::DelayLineBinding> {
     super::delay_lowering::build_delay_line_bindings(pedal, sample_rate)
+}
+
+/// SPQR terminal nodes contributed by cross-network couplers.
+///
+/// A cross-network coupler (today: `photocoupler`) declares a `Behavioral`
+/// edge between two galvanically-isolated terminals (the LED side) ALONGSIDE a
+/// conductive `graph_role` edge (the LDR side). The two sides live in different
+/// electrical networks and must never be fused (see the photocoupler component
+/// and `find_flow_groups`). For SPQR to emit a proper stage port on each side,
+/// the (isolated) LED side must be a global terminal — the same treatment
+/// `in_node`/`out_node` and DspBlock boundary pins receive.
+///
+/// Detection is generic (no component-type matching): a component qualifies
+/// when its `graph_role` is a conductive edge role (so it is a coupler with a
+/// real LDR edge, not a pure `GraphRole::Virtual` DSP island like a BBD, which
+/// is handled by `all_boundary_nodes`).
+///
+/// Only the endpoints of the **Behavioral** edge (the galvanically-isolated
+/// side that has NO conductive graph edge — the LED) are forced to terminals.
+/// The conductive side (the LDR `a`/`b`) already gets a stage port from its
+/// real graph edge, so it MUST NOT be forced: forcing it would fragment the
+/// passive WDF tree of every existing photocoupler-as-LDR circuit (e.g.
+/// `photocoupler_t4b.pedal`), which is a regression, not isolation.
+fn coupler_boundary_nodes(graph: &CircuitGraph) -> Vec<NodeId> {
+    use super::component::{EdgeKind, GraphRole};
+    let mut nodes = Vec::new();
+    for comp in &graph.components {
+        let role_is_conductive = matches!(
+            comp.kind.graph_role(),
+            GraphRole::Edge { .. }
+                | GraphRole::ActiveEdge { .. }
+                | GraphRole::CoupledEdge { .. }
+        );
+        if !role_is_conductive {
+            continue;
+        }
+        for edge in comp.kind.edges() {
+            if edge.kind != EdgeKind::Behavioral {
+                continue;
+            }
+            for pin in [edge.pin_a, edge.pin_b] {
+                if let Some(&n) = graph.node_names.get(&format!("{}.{}", comp.id, pin)) {
+                    if !nodes.contains(&n) {
+                        nodes.push(n);
+                    }
+                }
+            }
+        }
+    }
+    nodes
 }
 
 /// Check if a group is a merged pot pair (aw + wb of same component).

@@ -241,11 +241,19 @@ equipment "Teletronix LA-2A" {
     V5.cathode -> gnd
 
     # --- EL-drive node ILLUMINATES the T4B EL panel (the detector) ---
-    # NO envelope_follower: the LED is driven from the REAL sidechain node.
-    # (Engine gap G: only an envelope_follower's .out binds PhotocouplerLed;
-    #  this net is wired as the hardware intends and is expected to be inert
-    #  until gap G is fixed — that is the point. bind.rs:716-762.)
-    EL_drive.b -> PC1.led
+    # NO envelope_follower: the LED is a REAL galvanically-isolated electrical
+    # port-pair (led.a/led.b) across the 6AQ5 EL-drive winding, in the sidechain
+    # network. The LED side and the LDR side (PC1.a/PC1.b in the audio network)
+    # NEVER share a node — the optical coupling is non-electrical.
+    # PHASE 1 (cross-network-coupler de-fuse): the led edge is declared
+    #   Behavioral so it cannot fuse the sidechain net into the audio net, and
+    #   led.a/led.b/a/b are SPQR terminals. The LED is electrically present but
+    #   optically DARK (no contribute/read yet), so the LDR sits at r_dark and
+    #   the GR divider is near-bypass.
+    # GAP G (optical drive) lands in PHASE 3: contribute()/read() move the T4B
+    #   cell from the solved EL-drive node. Until then GR is ~0 dB by design.
+    EL_drive.b -> PC1.led.a
+    gnd -> PC1.led.b
   }
 
   controls {

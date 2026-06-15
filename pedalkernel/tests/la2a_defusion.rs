@@ -124,6 +124,49 @@ fn la2a_forward_path_passes_signal() {
     );
 }
 
+/// PHASE 1 (cross-network-coupler de-fuse) — LED-side isolation barrier.
+///
+/// The faithful la2a.pedal now wires the T4B LED as a real galvanically-isolated
+/// electrical port-pair: `EL_drive.b -> PC1.led.a` / `gnd -> PC1.led.b`. The LED
+/// edge is declared `EdgeKind::Behavioral`, so it is NEVER claimed into a
+/// FlowGroup and CANNOT union the sidechain (LED-side) network into the audio
+/// (LDR-side) network. This test asserts the structural barrier holds: the LDR
+/// leaf (PC1) and the LED-driving sidechain element (EL_drive, the 6AQ5 panel
+/// winding) land in SEPARATE stages — they were never electrically fused
+/// through the LED. (Phase 1 keeps the LED optically dark — no contribute/read
+/// yet — so this is purely a non-merge / boundary-port structural check.)
+#[test]
+fn la2a_photocoupler_led_does_not_fuse_sidechain_into_audio() {
+    let src = example_pedal_source(LA2A);
+    let def = parse_pedal_file(&src).expect("parse la2a");
+    let compiled = compile_pedal(&def, SAMPLE_RATE).expect("compile la2a");
+
+    let mut pc1_stage = None;
+    let mut el_drive_stage = None;
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        let label = stage_label(stage);
+        eprintln!("[Stage {i}] label={label:?}");
+        // Match the LDR leaf id exactly (`PC1`), not the EL-drive substring.
+        if label.split(',').any(|c| c == "PC1") {
+            pc1_stage = Some(i);
+        }
+        if label.split(',').any(|c| c == "EL_drive") {
+            el_drive_stage = Some(i);
+        }
+    }
+
+    let pc1_stage = pc1_stage.expect("PC1 (LDR) must compile into a stage");
+    let el_drive_stage =
+        el_drive_stage.expect("EL_drive (LED-side winding) must compile into a stage");
+    assert_ne!(
+        pc1_stage, el_drive_stage,
+        "PHASE 1: the photocoupler LDR side (PC1, stage {pc1_stage}) and the \
+         LED-driving sidechain winding (EL_drive, stage {el_drive_stage}) fused \
+         into ONE stage — the Behavioral LED edge failed to isolate the two \
+         galvanically-isolated networks"
+    );
+}
+
 /// The LA-2A FORWARD CHAIN ONLY — the SAME components as `la2a.pedal` but with
 /// the ENTIRE sidechain/detector removed. There is nothing to fuse, T_in and
 /// T_out are already in separate stages, and yet the forward gain still

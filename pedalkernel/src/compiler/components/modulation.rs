@@ -211,17 +211,28 @@ impl Component for PhotocouplerComp {
     }
 
     fn pin_config(&self) -> PinConfig {
+        // The LDR side is the electrical `a`/`b` port (the audio-network leaf).
+        // The LED side is a galvanically-ISOLATED electrical port-pair
+        // `led.a`/`led.b` (the sidechain-network drive winding). `led` is kept
+        // as a back-compat alias for `led.a` so the legacy `-> PC1.led`
+        // modulation-sink wiring still parses; faithful circuits wire both
+        // `led.a` and `led.b`. The two sides never share a node — the optical
+        // coupling is non-electrical (Phase 3).
         PinConfig {
-            valid_pins: &["a", "b", "led"],
-            aliases: &[],
+            valid_pins: &["a", "b", "led", "led.a", "led.b"],
+            aliases: &[("led", "led.a")],
         }
     }
 
     fn modulation_pins(&self) -> &'static [&'static str] {
-        &["led"]
+        &["led", "led.a", "led.b"]
     }
 
     fn graph_role(&self) -> GraphRole {
+        // Only the LDR side (`a`/`b`) becomes a conductive circuit edge. The
+        // LED edge (`led.a`/`led.b`) is declared `Behavioral` in `edges()` and
+        // is deliberately NOT created here, so it can never union the LED-side
+        // network into the LDR-side group (the non-merge isolation barrier).
         GraphRole::Edge {
             pin_a: "a",
             pin_b: "b",
@@ -257,12 +268,40 @@ impl Component for PhotocouplerComp {
     }
 
     fn edges(&self) -> Vec<ComponentEdge> {
-        vec![ComponentEdge {
-            pin_a: "a",
-            pin_b: "b",
-            kind: EdgeKind::Linear,
-            port_group: None,
-        }]
+        // The LDR edge MUST stay first: `effective_edge_kind` reads
+        // `edges().first()` for the single conductive graph edge that
+        // `GraphRole::Edge{a,b}` creates, and the LDR side is `Linear`.
+        //
+        // The LED edge is `Behavioral` (the BBD/delay/spring pattern,
+        // delay.rs:59-66). `find_flow_groups` only ever claims
+        // Linear/Reactive/Nonlinear/Vccs/Vcvs edges from the graph, and the
+        // graph builder (`GraphRole::Edge`) never instantiates this edge at
+        // all, so it cannot merge the LED-side (sidechain) network with the
+        // LDR-side (audio) network. This is the non-merge isolation barrier
+        // that mirrors the optocoupler's real galvanic isolation.
+        vec![
+            ComponentEdge {
+                pin_a: "a",
+                pin_b: "b",
+                kind: EdgeKind::Linear,
+                port_group: None,
+            },
+            ComponentEdge {
+                pin_a: "led.a",
+                pin_b: "led.b",
+                kind: EdgeKind::Behavioral,
+                port_group: None,
+            },
+        ]
+    }
+
+    fn signal_adjacencies(&self) -> Vec<(&'static str, &'static str)> {
+        // Only the LDR side carries signal. The LED side is galvanically
+        // isolated, so it must NOT appear as a conductive adjacency (that would
+        // feed `conductive_pin_pairs`/unity-follower detection and validator
+        // reachability across the isolation barrier). Override the default,
+        // which would otherwise fan `a -> led.*` out of `valid_pins`.
+        vec![("a", "b")]
     }
 
     fn modulation_sink(&self, pin: &str) -> Option<ModulationSink> {
