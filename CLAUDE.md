@@ -275,3 +275,51 @@ Note: StateSpace pot path has no `complement`/`__aw`-`__wb` split in this worktr
 (the cba8b59 StateSpace fix is NOT on 6a557a1) — irrelevant to the opto Gain (WDF+
 MultiNL), flagged for the StateSpace case. `PotHalf` Aw/Wb routing is wired but
 unused today (Whole suffices; reserved for future explicit-half StateSpace binding).
+
+**2026-06-15 — LA-2A now LEVELS + a derived boundary-classification layer** (PR #102,
+`compiler/boundary_rules.rs`, `processor.rs`, `controlled.rs`, `rigid/general.rs`):
+The faithful LA-2A went from completely inert (GAP G: detector dark → 0 dB GR) to a
+working feedback leveler — **~19 dB GR, monotonic ~50 dB GR curve** (`la2a_acceptance::
+la2a_reduces_gain_as_level_rises` + `la2a_gr_curve_matches_published_shape` promoted
+GREEN). Required peeling FIVE layered causes (each fix exposed the next): (1) multi-stage
+tube-cascade collapse — *Defect B* rail-blocked DIRECTED stage-ordering
+(`directed_signal_distances_from_in`) + main's #98 triode→MultiNlStage routing; (2)
+detector over-fusion — *Phase 2a* broker-driven `delayed_cut_edges` cuts the feedback
+tap so `T_in` stops fusing into the detector; (3) transformer-secondary forward routing
+— a mid-chain 4-terminal transformer was mis-classified StaticBias (bypassed) +
+mis-ordered because reachability/ordering ignored the primary↔secondary `coupled_nodes`;
+the broker now classifies a winding `Tight` (= traversable co-solved link) and
+`interior_reaches_signal` + the flow-distance BFS honor it (gated to secondary≠`out` so
+output-transformer amps are byte-identical); (4) the Limit/Compress fork `in→fork(LC,
+[gnd,R_ff.a])` shorted the live input — *Phase 2b* extends the cut to the feed-forward
+fork mouth; (5) the T4B cell compiled as a FIXED MNA resistor fused into the V1 MultiNl
+stage — *Phase 3* (`rigid/general.rs`) makes photocoupler/JFET edges in an MNA tube group
+**variable-resistor candidates** (`pot_children`/`variable_resistors`), and
+`MultiNlStage::set_photocoupler_led` re-derives the scattering matrix (throttled).
+
+ARCHITECTURE — *derived, no annotation* (the user's directive): components carry physics,
+the engine DERIVES boundaries. `boundary_rules.rs` is a single rules broker — `PortClass
+{Conducting,ControlInput,Transducer(Domain),Rail}` via `from_component` (reads the
+constitutive models / modulation-sinks, NOT a hand tag) and `BoundaryPolicy {Tight,
+DelayedSense,DelayedCoupling}` via `classify`. Back-edge oracle = rail-blocked
+`passive_closure_from(out)` (the directed distance dead-ends through transformer/tube
+couplings). Delayed boundaries are carried by an **internal delayed-port table**
+(`InternalPortBinding`/`CompiledPedal.internal_ports`): write a node at end-of-sample,
+inject via `node_signals` at the consumer at start-of-next (z⁻¹ = cross-sample
+persistence) — replaces the dormant `SidechainProcessor` (NOT revived); every read is
+last-sample → no intra-sample ordering. `nets{}`=tight, couplings emerge — no `couplings{}`
+/`sidechains{}` DSL block. `Phase-1` neighbor-requirements + completeness diagnostic
+(`neighbor_roles.rs`, corpus-gated) feed the broker. Detector→LED→cell is a `DelayedCoupling`
+(`DetectorLedCoupling`: rectify/normalize EL_drive → `set_led_drive`).
+
+ALSO landed this session: voltage-driven Jiles-Atherton **tape head** (saturation tracks
+Drive; `tape_saturation` 9/0); **SPQR all-passive R-node drop fix** reviving dead pots
+(tape Tone, blues_driver Tone+Level — `all_passive_drop_gate`); StateSpace 3-terminal pot
+binding; tape-head **SPICE + pending-reference** mechanism (golden later resolved by the
+user). SPICE 49/53 (extraction 3/3); non-detector goldens + opto_leveler family
+byte-identical. REMAINING (honest, `#[ignore]`d): **GAP F** output-transformer step-down
+(~19 dB) blocks `la2a_attack_near_10ms`/`compiles_and_is_healthy` on a level gate; **GAP H**
+program-dependent release (`la2a_release_slower_after_heavy_gr`). NOTE: the branch is
+SHARED — main is pushed to in parallel; fetch+build-gate before every push (two merges
+shipped compile breaks from main's SPICE `TestCase`s predating the `pending_reference`
+field).
