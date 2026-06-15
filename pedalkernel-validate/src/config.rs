@@ -2081,6 +2081,198 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
         },
     );
 
+    // Passive EQ suite — Pultec EQP-1A passive section (pedalkernel-hcpb.1 baseline)
+    //
+    // Five configs covering the key control states.  Goldens generated via ngspice
+    // (generate-spice --suite eq).  The EXPECTED outcome is RED — the current WDF
+    // engine does not render the passive RLC path correctly, and these tests quantify
+    // how far off it is.  Do NOT loosen criteria to make them green; the gap IS the
+    // deliverable.
+    //
+    // Pass criteria are intentionally tight (spectral -6dB, RMS -20dB) so any real
+    // engine improvement registers as a tightening, not a no-op.  A failing test here
+    // is correct and expected until the engine children (hcpb.2+) land.
+    suites.insert(
+        "eq".to_string(),
+        TestSuite {
+            description: "Pultec EQP-1A passive EQ section — ngspice baseline gap measurement"
+                .to_string(),
+            tests: {
+                let mut tests = BTreeMap::new();
+
+                // ── 1. FLAT ─────────────────────────────────────────────────────────
+                // All controls off (position 0.0).  Establishes insertion-loss baseline.
+                tests.insert(
+                    "pultec_passive_flat".to_string(),
+                    TestCase {
+                        circuit: "eq/pultec_eqp1a_passive_flat.pedal".to_string(),
+                        description: "Pultec EQP-1A passive, flat (all controls off)".to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 1000.0,
+                                amplitude: 0.5,
+                                duration: 0.1,
+                                label: Some("sine_1k".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 0.5,
+                                duration: 1.0,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        // EXPECTED: RED.  Passive RLC path is broken — tight criteria
+                        // capture the gap, not hide it.
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-20.0),
+                            peak_error_db: Some(-15.0),
+                            spectral_error_db: Some(6.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(50.0),
+                    },
+                );
+
+                // ── 2. LF BOOST ─────────────────────────────────────────────────────
+                // LF_Boost=1.0; measures whether L_lf shelving lift appears.
+                tests.insert(
+                    "pultec_passive_lf_boost".to_string(),
+                    TestCase {
+                        circuit: "eq/pultec_eqp1a_passive_lf_boost.pedal".to_string(),
+                        description: "Pultec EQP-1A passive, LF boost on (LF_Boost=1.0)".to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 60.0,
+                                amplitude: 0.5,
+                                duration: 0.5,
+                                label: Some("sine_60".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 0.5,
+                                duration: 1.0,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-20.0),
+                            peak_error_db: Some(-15.0),
+                            spectral_error_db: Some(6.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(100.0),
+                    },
+                );
+
+                // ── 3. LF TRICK ─────────────────────────────────────────────────────
+                // LF_Boost=1.0 + LF_Atten=1.0; the famous boost-below/dip-above shape.
+                tests.insert(
+                    "pultec_passive_lf_trick".to_string(),
+                    TestCase {
+                        circuit: "eq/pultec_eqp1a_passive_lf_trick.pedal".to_string(),
+                        description: "Pultec EQP-1A passive, LF trick (Boost+Atten=1.0)".to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 60.0,
+                                amplitude: 0.5,
+                                duration: 0.5,
+                                label: Some("sine_60".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 0.5,
+                                duration: 1.0,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-20.0),
+                            peak_error_db: Some(-15.0),
+                            spectral_error_db: Some(6.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(100.0),
+                    },
+                );
+
+                // ── 4. HF BOOST ─────────────────────────────────────────────────────
+                // HF_Boost=1.0; measures whether the L_hf||KCS tank resonant peak forms.
+                // Resonance at f0 = 1/(2π√(47m·5.6n)) ≈ 3.1 kHz.
+                tests.insert(
+                    "pultec_passive_hf_boost".to_string(),
+                    TestCase {
+                        circuit: "eq/pultec_eqp1a_passive_hf_boost.pedal".to_string(),
+                        description: "Pultec EQP-1A passive, HF boost on (HF_Boost=1.0, f0≈3.1kHz)".to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 3100.0,
+                                amplitude: 0.5,
+                                duration: 0.1,
+                                label: Some("sine_3k1".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 0.5,
+                                duration: 1.0,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-20.0),
+                            peak_error_db: Some(-15.0),
+                            spectral_error_db: Some(6.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(50.0),
+                    },
+                );
+
+                // ── 5. HF ATTEN ─────────────────────────────────────────────────────
+                // HF_Atten=1.0; measures HFA_sel cap shelf cut.
+                tests.insert(
+                    "pultec_passive_hf_atten".to_string(),
+                    TestCase {
+                        circuit: "eq/pultec_eqp1a_passive_hf_atten.pedal".to_string(),
+                        description: "Pultec EQP-1A passive, HF atten on (HF_Atten=1.0)".to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 10000.0,
+                                amplitude: 0.5,
+                                duration: 0.1,
+                                label: Some("sine_10k".to_string()),
+                            },
+                            SignalConfig::ExpSweep {
+                                f_start: 20.0,
+                                f_end: 20000.0,
+                                amplitude: 0.5,
+                                duration: 1.0,
+                                label: Some("sweep".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(-20.0),
+                            peak_error_db: Some(-15.0),
+                            spectral_error_db: Some(6.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(50.0),
+                    },
+                );
+
+                tests
+            },
+        },
+    );
+
     suites
 }
 
