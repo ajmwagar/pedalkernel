@@ -1442,6 +1442,75 @@ pub fn compile_via_spqr_with_options(
                         group_comp_ids.clone()
                     );
                     continue;
+                } else if !group_has_nonlinear
+                    && spqr_stages.is_empty()
+                    && group_has_runtime_pot
+                {
+                    // All-passive group that reduced to a rigid (non-series-
+                    // parallel) R-node AND carries a runtime pot: spqr_to_dyn_node
+                    // returns None for the R-node, so the AllPassive arm of
+                    // collect_stages warns and drops the entire stage — and its
+                    // declared pots vanish with it (symptom: dead Tone/Level
+                    // controls, unity passthrough).
+                    //
+                    // The pot guard is load-bearing: an all-passive group with NO
+                    // pot (e.g. a bare input/output coupling RC feeding an active
+                    // device's pin) is HARMLESS to drop — the serial chain carries
+                    // the signal through as a passthrough, which is correct. Only a
+                    // dropped group that owns a CONTROL needs rebuilding, and only
+                    // then is it worth the risk of mis-terminating a coupling
+                    // network as a standalone 2-port (which silences it — observed
+                    // on dyna_comp's pot-less input-coupling group).
+                    //
+                    // Rebuild it exactly the way the normal `SpqrStage::Rigid`
+                    // all-passive branch does — via `build_passive_rtype_stage`,
+                    // which lowers the group into a WDF PassiveRType stage with
+                    // terminal-derived input/output ports (compute_group_terminals)
+                    // and live pot leaves (both 2-terminal rheostats like Tone and
+                    // 3-terminal wiper dividers like Level). This preserves the
+                    // mid-chain 2-port transfer; the generic rigid MNA builder does
+                    // NOT — it models a 1-port (voltage-source-in / sample-at-`out`)
+                    // and silences any mid-chain passive group that does not contain
+                    // the global `out` (output port unbound -> zero c-vector).
+                    // Narrow: only fires when SPQR produced ZERO stages for an
+                    // all-passive group that owns a pot control.
+                    let built = if let Some(wdf) = build_passive_rtype_stage(
+                        &group_edges,
+                        &graph,
+                        sample_rate,
+                        &bias_node_voltages,
+                    ) {
+                        eprintln!(
+                            "  [compile] group {gi}: SPQR dropped all-passive stage (rigid R-node), rebuilt as PassiveRType WDF"
+                        );
+                        BuiltStage::Wdf(wdf)
+                    } else {
+                        // PassiveRType could not lower this group (e.g. degenerate
+                        // terminals); last-resort rigid MNA so the stage at least
+                        // exists rather than being silently dropped.
+                        eprintln!(
+                            "  [compile] group {gi}: SPQR dropped all-passive stage; PassiveRType lowering failed, using rigid MNA"
+                        );
+                        build_rigid_from_group_with_hints(
+                            group_edges,
+                            &graph,
+                            sample_rate,
+                            Some(group),
+                            supply_voltage,
+                            None,
+                            !options.disable_iir,
+                            &pedal.init_hints,
+                        )
+                        .map_err(|e| format!("Group {gi} (all-passive rigid fallback): {e}"))?
+                    };
+                    push_stage!(
+                        built,
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass,
+                        group_comp_ids.clone()
+                    );
+                    continue;
                 }
 
                 for stage in spqr_stages {

@@ -293,6 +293,76 @@ fn blues_driver_tone_affects_brightness() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// BD-2 revived-pot monotonicity (all-passive-drop fix, 2026-06-14)
+// ---------------------------------------------------------------------------
+//
+// The BD-2 tone stack (R10..C9 + the Tone pot) and the output network (R13/R14
+// + the Level wiper divider) form an all-passive span that reduces to a rigid
+// (non-series-parallel) R-node. SPQR previously DROPPED that span, so `Tone`
+// and `Level` were unbound/inert (a unity passthrough). The fix rebuilds the
+// span as a WDF PassiveRType stage with live pot leaves, so both controls now
+// move the output monotonically. These tests lock that behavior.
+
+/// Steady-state RMS-derived level (dBFS-ish) at one freq + control set.
+fn bd2_level_db(freq: f64, ctrl: &[(&str, f64)]) -> f64 {
+    // 1 s tone at 0.05 amplitude; analyze the second half (post-settle).
+    let input = sine_at(freq, 0.05, 1.0, SAMPLE_RATE);
+    let out = compile_example_and_process("blues_driver.pedal", &input, SAMPLE_RATE, ctrl);
+    let n = out.len();
+    lin_to_db(rms(&out[n / 2..]) * std::f64::consts::SQRT_2)
+}
+
+#[test]
+fn blues_driver_tone_sweeps_monotonically() {
+    // Tone is a tilt/cut control: at 3 kHz, CW (1.0) is darker than CCW (0.0),
+    // so the sweep is monotone NON-INCREASING. Measured ~-16.2 dB (0.0) ->
+    // ~-18.3 dB (1.0), ~2.1 dB of authority. (Was dropped/inert before the fix:
+    // every position measured the same ~-1.08 dB passthrough.)
+    let mut levels = Vec::new();
+    for &t in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+        let db = bd2_level_db(3000.0, &[("Gain", 0.5), ("Tone", t), ("Level", 0.7)]);
+        eprintln!("  [BD-2 Tone] {t:.2} -> {db:.3} dB @ 3 kHz");
+        levels.push(db);
+    }
+    for w in levels.windows(2) {
+        assert!(
+            w[1] <= w[0] + 0.05,
+            "BD-2 Tone must sweep monotonically (non-increasing) at 3 kHz, got {levels:?}"
+        );
+    }
+    let span = levels.first().unwrap() - levels.last().unwrap();
+    assert!(
+        span > 1.0,
+        "BD-2 Tone should have real authority (> 1 dB), got {span:.2} dB"
+    );
+}
+
+#[test]
+fn blues_driver_level_sweeps_monotonically() {
+    // Level is a volume wiper divider: monotone INCREASING, full-range. Measured
+    // ~-158 dB (0.0, fully closed) -> ~-6.4 dB (1.0) at 1 kHz. (Was dropped/inert
+    // before the fix: a frozen passthrough.)
+    let mut levels = Vec::new();
+    for &l in &[0.25, 0.5, 0.75, 1.0] {
+        let db = bd2_level_db(1000.0, &[("Gain", 0.5), ("Tone", 0.5), ("Level", l)]);
+        eprintln!("  [BD-2 Level] {l:.2} -> {db:.3} dB @ 1 kHz");
+        levels.push(db);
+    }
+    for w in levels.windows(2) {
+        assert!(
+            w[1] >= w[0] - 0.05,
+            "BD-2 Level must sweep monotonically (non-decreasing), got {levels:?}"
+        );
+    }
+    // Wide authority end-to-end (audio-taper volume pot).
+    let span = levels.last().unwrap() - levels.first().unwrap();
+    assert!(
+        span > 10.0,
+        "BD-2 Level should have wide authority (> 10 dB across 0.25..1.0), got {span:.2} dB"
+    );
+}
+
 // ===========================================================================
 // Cross-pedal comparison — different pedals should sound different
 // ===========================================================================
