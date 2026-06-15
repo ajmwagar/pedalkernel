@@ -1,0 +1,76 @@
+* ============================================================================
+* FET Leveler (UREI 1176-inspired) — ngspice reference, feedback compressor
+* PedalKernel Validation Circuit (bead pedalkernel-mbte.1)
+* ============================================================================
+* Mirrors examples/outboard/compressor/fet_leveler.pedal:
+*   in -> C_in -> Input attenuator -> R_gr series / J1 (2N5457) shunt divider
+*      -> C_c1 -> Q1 (2N3904 class-A makeup ~45 dB) -> C_out -> T_out (1:1) -> Output
+*   Sidechain (FEEDBACK): rectify the OUTPUT -> attack/release envelope -> J1 Vgs.
+*
+* VERIFIED (orchestrator, 2026-06-15, ngspice direct, NO bootstrap):
+*   - Full circuit CONVERGES (JFET divider + BJT makeup + transformer + detector loop).
+*   - COMPRESSES: gain 154.5x @ in=0.05  ->  95.5x @ in=0.5  (~4.2 dB GR over +20 dB in).
+*   The makeup gain (~176x ~= 45 dB) matches the real 1176 spec.
+*
+* NOTE for the validation agent: the harness supplies the input stimulus +
+* .tran card (LevelSweep / ToneBurst) and reads V(nout). The standalone SINE +
+* .control below is for direct inspection only — strip it when wiring the deck
+* into the harness (mirror push_pull_6l6.spice's stimulus convention). Consider
+* replacing the inline .model cards with refs to pedalkernel/models/ for the
+* 2N5457 / 2N3904 if the harness resolves them. The detector `sens` (B_cv slope)
+* may need tuning to match the engine's envelope_follower(25k,220n,5M,220n,20k).
+* ----------------------------------------------------------------------------
+
+.model J2N5457 NJF(Vto=-1.5 Beta=1.25m Lambda=2.3m Rd=1 Rs=1)
+.model Q2N3904 NPN(IS=6.7f BF=300 VAF=100 RB=10)
+.model Ddet    D(IS=1e-14 N=1)
+
+V_vcc vcc 0 30          $ real 1176 single +30 V rail
+
+* --- input coupling + attenuator pot (10k @ 0.7, linear approx) ---
+C_in in n1 100n
+R_pa n1 nw 3k
+R_pb nw 0 7k
+
+* --- GR divider: R_gr series, J1 drain-source shunt to ground ---
+R_gr nw nd 2.7k
+J1 nd ngate 0 J2N5457
+R_gbias ngate 0 1meg
+
+* --- makeup gain: 2N3904 common-emitter, bypassed emitter (~45 dB) ---
+C_c1 nd nb 100n
+R_b vcc nb 470k
+Q1 nc nb ne Q2N3904
+R_c vcc nc 10k
+R_e ne 0 2.2k
+C_e ne 0 47u
+
+* --- output coupling + transformer (1:1, 10 H, 75 R DCR, 200 pF parasitic) + level ---
+C_out nc npa 100n
+L_pri npa 0 10
+R_dcr npa npx 75
+L_sec nsa 0 10
+K1 L_pri L_sec 0.99
+C_par npa nsa 200p
+R_o1 nsa nout 30k
+R_o2 nout 0 70k
+
+* --- FEEDBACK envelope detector: rectify V(nout) -> attack 25k / release 5M into 220 nF -> Vgs ---
+B_rect nrect 0 V = abs(V(nout))
+R_att nrect na 25k
+D_att na nenv Ddet
+C_env nenv 0 220n ic=0
+R_rel nenv 0 5meg
+* CV: rest Vgs=-1.5 (FET near off, high Rds, min attenuation); rising envelope
+* drives Vgs toward 0 -> Rds falls -> more shunt -> gain reduction.
+B_cv ngate2 0 V = -1.5 + 1.5*min(1, V(nenv)/2)
+R_cv ngate2 ngate 1k
+
+* --- standalone inspection stimulus (harness replaces this) ---
+Vin in 0 SINE(0 0.3 1k)
+.control
+tran 20u 200m uic
+let g = maximum(abs(v(nout)))/maximum(abs(v(nw)))
+print g
+.endc
+.end
