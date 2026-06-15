@@ -52,6 +52,7 @@ fn opto_steady_gain_db(src: &str, controls: &[(&str, f64)], amplitude: f64, freq
 /// — monotonic, > 0.25 dB/step. (Was frozen flat ~+4.75 dB, slightly
 /// decreasing, before the fix.)
 #[test]
+#[ignore = "expensive opto characterization (4×8 s sims sweeping Gain positions); runs in nightly --include-ignored"]
 fn gain_pot_raises_steady_gain() {
     let src = example_pedal_source(OPTO);
     let sweep: Vec<(f64, f64)> = [0.2, 0.4, 0.6, 0.8]
@@ -87,6 +88,7 @@ fn gain_pot_raises_steady_gain() {
 /// monotonic-fall assertion covers the full range, and the effective ratio
 /// is reported over the top 15 dB.
 #[test]
+#[ignore = "expensive opto characterization (9×8 s sims sweeping 9 input levels); runs in nightly --include-ignored"]
 fn gr_curve_monotonic_with_limiter_ratio() {
     let src = example_pedal_source(OPTO);
     let controls: &[(&str, f64)] = &[("Gain", 0.6)];
@@ -154,6 +156,7 @@ fn gr_curve_monotonic_with_limiter_ratio() {
 /// simplification 3), so only sanity bounds are asserted; the comparison is
 /// printed for the report.
 #[test]
+#[ignore = "expensive opto characterization (2×8 s tone-burst sims for program-dependent release); runs in nightly --include-ignored"]
 fn program_dependent_release_measured() {
     let src = example_pedal_source(OPTO);
     let controls: &[(&str, f64)] = &[("Gain", 0.6)];

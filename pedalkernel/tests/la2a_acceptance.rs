@@ -76,6 +76,7 @@ fn la2a_compiles_and_is_healthy() {
 // the V1 makeup-tube group — darkens with program, producing real downward GR.
 // Measured: quiet(0.05) gain ~+86 dB, loud(0.5) gain ~+67 dB, GR ~19 dB.
 #[test]
+#[ignore = "expensive opto characterization (2×8 s sims at 48k×oversampling); runs in nightly --include-ignored"]
 fn la2a_reduces_gain_as_level_rises() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[("Gain", 0.6), ("Peak Reduction", 0.5)];
@@ -181,6 +182,7 @@ fn la2a_release_slower_after_heavy_gr() {
 // monotonically with level (the shunt T4B cell darkens as program rises) and
 // the total GR (-40 vs 0 dB input) is deep (~50 dB), well past the 20 dB floor.
 #[test]
+#[ignore = "expensive opto characterization (9×8 s sims sweeping 9 input levels); runs in nightly --include-ignored"]
 fn la2a_gr_curve_matches_published_shape() {
     let src = example_pedal_source(LA2A);
     let controls: &[(&str, f64)] = &[("Gain", 0.6), ("Peak Reduction", 0.5)];

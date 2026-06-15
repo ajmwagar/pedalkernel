@@ -166,6 +166,7 @@ fn opto_steady_gain_db(src: &str, controls: &[(&str, f64)], amplitude: f64, freq
 /// child, LED bound to the output-tap envelope; promoted with the T4B-aware
 /// settle above.
 #[test]
+#[ignore = "expensive opto characterization (2×8 s sims waiting for T4B CdS cell to settle); runs in nightly --include-ignored"]
 fn opto_leveler_reduces_gain_as_level_rises() {
     let src = example_pedal_source("opto_leveler.pedal");
     let controls: &[(&str, f64)] = &[("Gain", 0.6)];
