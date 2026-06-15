@@ -1,0 +1,59 @@
+# PK:
+# Pultec EQP-1A — Passive EQ, LF BOOST config
+# Type: equalizer
+#
+# Config: LF_Boost=1.0, all others at default
+# LF_Boost=1.0 → rp = 10k; others at 0.0 → rp = 10Ω; HF_BW=0.5 → 5kΩ
+#
+# Mirrors spice-circuits/eq/pultec_eqp1a_passive_lf_boost.spice
+
+pedal "Pultec EQP-1A (Passive, LF Boost)" subtitle "Passive EQ section — LF boost on" {
+  supply 0V
+  components {
+    R_in: resistor(600)
+    CPS:      cap(100n)
+    L_lf:     inductor(2H)
+    LF_Boost: pot(10k, a)
+    LF_Atten: pot(10k, a)
+    R_lf:     resistor(56k)
+    KCS:      cap(5600p)
+    L_hf:     inductor(47m)
+    HF_Boost: pot(10k, a)
+    HF_BW:    pot(10k)
+    HFA_sel:  cap(3300p)
+    HF_Atten: pot(10k, a)
+    R_hfa:    resistor(100k)
+    R_load:   resistor(100k)
+  }
+  nets {
+    in -> R_in.a
+    R_in.b -> n_lf
+    n_lf -> L_lf.a, CPS.a, R_lf.a
+    L_lf.b -> LF_Boost.a
+    LF_Boost.b -> gnd
+    CPS.b -> LF_Atten.a
+    LF_Atten.b -> gnd
+    R_lf.b -> n_hf
+    n_hf -> L_hf.a, KCS.a
+    L_hf.b -> HF_Boost.a
+    KCS.b -> HF_Boost.a
+    HF_Boost.b -> gnd
+    n_hf -> HF_BW.a
+    HF_BW.b -> gnd
+    n_hf -> n_hfa
+    n_hfa -> HFA_sel.a, R_hfa.a
+    HFA_sel.b -> HF_Atten.a
+    HF_Atten.b -> gnd
+    R_hfa.b -> n_out
+    n_out -> R_load.a
+    R_load.b -> gnd
+    n_out -> out
+  }
+  controls {
+    LF_Boost.position -> "LF Boost"     [0.0, 1.0] = 1.0
+    LF_Atten.position -> "LF Atten"     [0.0, 1.0] = 0.0
+    HF_Boost.position -> "HF Boost"     [0.0, 1.0] = 0.0
+    HF_BW.position    -> "HF Bandwidth" [0.0, 1.0] = 0.5
+    HF_Atten.position -> "HF Atten"     [0.0, 1.0] = 0.0
+  }
+}

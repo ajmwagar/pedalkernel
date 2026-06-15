@@ -1,0 +1,40 @@
+* ============================================================================
+* Pultec EQP-1A — Passive EQ section, HF ATTEN configuration
+* PedalKernel Validation Circuit (bead pedalkernel-hcpb.1)
+* ============================================================================
+*
+* HF_Atten = 1.0 → rp = 10k (high-Z, HFA_sel cap shunts more freely)
+* All other audio-taper controls at 0.0 → rp = 10Ω
+* HF_BW = 0.5 (linear) → rp = 5000Ω
+*
+* HF atten corner: f = 1/(2π·R_hfa·HFA_sel) — with R_hfa=100k and HFA_sel=3.3n
+*   → f_corner ≈ 1/(2π·100k·3.3n) ≈ 482 Hz (shelf attenuates above this)
+*   With rp=10k loading: effective corner shifts higher.
+*
+* Switched-cap values frozen at position 0:
+*   CPS = 100n (0.1u, 20 Hz), KCS = 5600p (5.6n), HFA_sel = 3300p (3.3n)
+* ============================================================================
+
+Rin   v_in   n_lf   600
+
+Llf   n_lf   n_lb   2H
+R_lfboost  n_lb  0  10
+
+Ccps  n_lf   n_la   100n
+R_lfatten  n_la  0  10
+
+Rlf   n_lf   n_hf   56k
+
+Lhf   n_hf   n_hfb  47m
+Ckcs  n_hf   n_hfb  5600p
+R_hfboost  n_hfb  0  10
+
+R_hfbw  n_hf  0  5000
+
+Chfas  n_hf   n_hfa_sw  3300p
+* HF_Atten at 1.0: rp = 10k (cap shunts more freely — stronger HF atten)
+R_hfatten  n_hfa_sw  0  10k
+
+Rhfa  n_hf   v_out   100k
+Rload  v_out  0  100k
+

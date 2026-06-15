@@ -1,0 +1,98 @@
+# PK:
+# Pultec EQP-1A — Passive EQ section only (ngspice baseline bead pedalkernel-hcpb.1)
+# Type: equalizer
+#
+# Scope: passive RLC section isolated from the full EQP-1A (no transformers, no tubes).
+# Serves as the ngspice-comparable reference for quantifying the WDF engine gap.
+#
+# Switched-cap values are FROZEN at position 0 (the value the engine picks at compile
+# time, since cap_switched freezes at values[0]):
+#   CPS     = 0.1u   (position 0 → 20 Hz LF selector)
+#   KCS     = 5.6n   (position 0 → ~3 kHz HF boost selector)
+#   HFA_sel = 3.3n   (position 0 → ~5 kHz HF atten selector)
+#
+# Source impedance R_in = 600 Ω (bridging input, no transformer).
+# Output load R_load = 100k (passive end-of-chain).
+#
+# Signal flow:
+#   in → R_in → [LF shelf: L_lf + CPS + LF_Boost/LF_Atten + R_lf]
+#              → [HF boost tank: L_hf || KCS, damped by HF_BW, lifted by HF_Boost]
+#              → [HF atten shelf: HFA_sel + HF_Atten + R_hfa]
+#              → R_load → out
+
+pedal "Pultec EQP-1A (Passive)" subtitle "Passive EQ section only — ngspice baseline" {
+  supply 0V
+
+  components {
+    # Source impedance (stands in for bridging input transformer)
+    R_in: resistor(600)
+
+    # ── LOW FREQUENCY section (shelf) ──────────────────────────────────────────
+    # Frozen at position 0: CPS = 0.1u (20 Hz corner).
+    CPS:      cap(100n)        # cap_switched frozen at position 0 = 0.1u
+    L_lf:     inductor(2H)
+    LF_Boost: pot(10k, a)
+    LF_Atten: pot(10k, a)
+    R_lf:     resistor(56k)
+
+    # ── HIGH FREQUENCY BOOST section (peaking tank) ─────────────────────────────
+    # Frozen at position 0: KCS = 5.6n → f0 = 1/(2π√(47m·5.6n)) ≈ 3.1 kHz.
+    KCS:      cap(5600p)       # cap_switched frozen at position 0 = 5.6n
+    L_hf:     inductor(47m)
+    HF_Boost: pot(10k, a)
+    HF_BW:    pot(10k)
+
+    # ── HIGH FREQUENCY ATTEN section (shelf) ────────────────────────────────────
+    # Frozen at position 0: HFA_sel = 3.3n → ~5 kHz shelf corner.
+    HFA_sel:  cap(3300p)       # cap_switched frozen at position 0 = 3.3n
+    HF_Atten: pot(10k, a)
+    R_hfa:    resistor(100k)
+
+    # Output load
+    R_load: resistor(100k)
+  }
+
+  nets {
+    in -> R_in.a
+    R_in.b -> n_lf
+
+    # LF shelf: shunt L_lf to boost pot; shunt CPS to atten pot; R_lf bridges to n_hf
+    n_lf -> L_lf.a, CPS.a, R_lf.a
+    L_lf.b -> LF_Boost.a
+    LF_Boost.b -> gnd
+    CPS.b -> LF_Atten.a
+    LF_Atten.b -> gnd
+    R_lf.b -> n_hf
+
+    # HF boost tank: L_hf || KCS shunt to boost pot; HF_BW damps from n_hf
+    n_hf -> L_hf.a, KCS.a
+    L_hf.b -> HF_Boost.a
+    KCS.b -> HF_Boost.a
+    HF_Boost.b -> gnd
+    n_hf -> HF_BW.a
+    HF_BW.b -> gnd
+
+    # n_hf passes straight into HF atten node (no DC-blocking cap in passive path)
+    n_hf -> n_hfa
+
+    # HF atten shelf: HFA_sel shunts to atten pot; R_hfa bridges to out
+    n_hfa -> HFA_sel.a, R_hfa.a
+    HFA_sel.b -> HF_Atten.a
+    HF_Atten.b -> gnd
+    R_hfa.b -> n_out
+
+    # Output load to ground
+    n_out -> R_load.a
+    R_load.b -> gnd
+
+    n_out -> out
+  }
+
+  controls {
+    LF_Boost.position -> "LF Boost"     [0.0, 1.0] = 0.0
+    LF_Atten.position -> "LF Atten"     [0.0, 1.0] = 0.0
+    HF_Boost.position -> "HF Boost"     [0.0, 1.0] = 0.0
+    HF_BW.position    -> "HF Bandwidth" [0.0, 1.0] = 0.5
+    HF_Atten.position -> "HF Atten"     [0.0, 1.0] = 0.0
+  }
+}

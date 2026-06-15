@@ -1,0 +1,40 @@
+* ============================================================================
+* Pultec EQP-1A — Passive EQ section, LF BOOST configuration
+* PedalKernel Validation Circuit (bead pedalkernel-hcpb.1)
+* ============================================================================
+*
+* LF_Boost = 1.0 → rp = (10^1-1)/9 * 10k = 10k
+* All other audio-taper controls at 0.0 → rp = 10Ω
+* HF_BW = 0.5 (linear) → rp = 5000Ω
+*
+* Switched-cap values frozen at position 0:
+*   CPS = 100n (0.1u, 20 Hz), KCS = 5600p (5.6n), HFA_sel = 3300p (3.3n)
+* ============================================================================
+
+Rin   v_in   n_lf   600
+
+Llf   n_lf   n_lb   2H
+* LF_Boost at 1.0: rp = 10k
+R_lfboost  n_lb  0  10k
+
+Ccps  n_lf   n_la   100n
+* LF_Atten at 0.0: rp = 10Ω
+R_lfatten  n_la  0  10
+
+Rlf   n_lf   n_hf   56k
+
+Lhf   n_hf   n_hfb  47m
+Ckcs  n_hf   n_hfb  5600p
+* HF_Boost at 0.0: rp = 10Ω
+R_hfboost  n_hfb  0  10
+
+* HF_BW at 0.5 (linear): rp = 5000Ω
+R_hfbw  n_hf  0  5000
+
+Chfas  n_hf   n_hfa_sw  3300p
+* HF_Atten at 0.0: rp = 10Ω
+R_hfatten  n_hfa_sw  0  10
+
+Rhfa  n_hf   v_out   100k
+Rload  v_out  0  100k
+
