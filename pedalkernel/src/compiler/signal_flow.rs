@@ -786,6 +786,79 @@ pub(in crate::compiler) fn bfs_distances_from_in_node(
     visited
 }
 
+/// Rail-blocked, signal-DIRECTED hop distance from the circuit input.
+///
+/// Unlike [`bfs_distances_from_in_node`] (rail-blocked but UNDIRECTED — it walks
+/// every edge both ways, including straight through an active device and along
+/// supply-tied bias resistors), this traversal models the *signal* path:
+///
+/// * Rail nodes (gnd / supply / ac-ground) are dead-ends — never expanded.
+/// * Passive edges conduct both directions (a passive network is reciprocal).
+/// * Active devices conduct only `input_node -> output_nodes` (forward signal),
+///   never output->input and never input->input.
+///
+/// This is the Defect-B fix base distance: plate-/collector-load resistors tie
+/// to B+, so an undirected rail-unblocked walk reaches a tube's downstream plate
+/// node in a couple of hops *through the supply rail*, giving the plate-load node
+/// a tiny distance and scrambling serial stage order. With rails dead-ended and
+/// devices crossed input->output only, a node downstream of a tube is reachable
+/// only THROUGH that tube, so it gets a correctly larger distance.
+///
+/// Adjacency mirrors [`forward_signal_nodes_to_out`] but forward (in->out)
+/// instead of reverse (out<-in), and over ALL active devices (no group exclusion
+/// — every device is a legitimate forward conductor when measuring global flow).
+pub(in crate::compiler) fn directed_signal_distances_from_in(
+    graph: &CircuitGraph,
+) -> HashMap<NodeId, usize> {
+    let rails = rail_nodes(graph);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let active_elements = find_active_elements(&all_edges, graph);
+
+    // Forward signal adjacency: node -> nodes reachable in one directed hop.
+    let mut fwd: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut add = |from: NodeId, to: NodeId| {
+        if !rails.contains(&from) && !rails.contains(&to) {
+            fwd.entry(from).or_default().push(to);
+        }
+    };
+    let active_edge_set: HashSet<usize> = active_elements.iter().map(|e| e.edge_idx).collect();
+    // Passive edges conduct both directions.
+    for (eidx, e) in graph.edges.iter().enumerate() {
+        if active_edge_set.contains(&eidx) {
+            continue;
+        }
+        let comp = &graph.components[e.comp_idx];
+        if !matches!(comp.kind.signal_terminals(), SignalTerminals::Passive) {
+            continue;
+        }
+        add(e.node_a, e.node_b);
+        add(e.node_b, e.node_a);
+    }
+    // Active devices conduct input -> each output node only.
+    for elem in &active_elements {
+        for &out in &elem.output_nodes {
+            add(elem.input_node, out);
+        }
+    }
+
+    let mut visited: HashMap<NodeId, usize> = HashMap::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    visited.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+    while let Some(node) = queue.pop_front() {
+        let dist = visited[&node];
+        if let Some(neighbors) = fwd.get(&node) {
+            for &next in neighbors {
+                if !visited.contains_key(&next) {
+                    visited.insert(next, dist + 1);
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+    visited
+}
+
 /// Set of non-rail nodes that have a directed signal path to `out` WITHOUT
 /// passing back through the active group's own output nodes.
 ///

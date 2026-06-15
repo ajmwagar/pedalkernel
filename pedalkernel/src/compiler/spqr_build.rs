@@ -1553,19 +1553,45 @@ pub fn compile_via_spqr_with_options(
         }
     }
 
-    // Sort stages by signal_flow_distance (original group index from
-    // find_flow_groups) so processing order matches the circuit's signal chain.
-    // Build order was different (non-feedback first for Ri extraction).
-    stages.sort_by_key(|s| match s {
-        Stage::Wdf(w) => w.signal_flow_distance,
-        Stage::Iir(i) => i.signal_flow_distance,
-        Stage::StateSpace(ss) => ss.signal_flow_distance,
-        Stage::MultiNl(m) => m.signal_flow_distance,
-        Stage::BlackFeedback(b) => b.signal_flow_distance,
-        Stage::Blockwise(k) => k.signal_flow_distance,
-        Stage::KMethod { .. } => usize::MAX,
-        Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
-    });
+    // Defect B tertiary tiebreak: when two stages share a signal_flow_distance,
+    // resolve their order DETERMINISTICALLY by the minimum stable component id
+    // in each stage (netlist names are stable across compiles/processes). This
+    // makes the serial chain reproducible even when `find_flow_groups` returns
+    // tied groups in a process-dependent order. `stage_comp_ids` is populated in
+    // both debug and release. A stage with no comp ids sorts last among its tie.
+    let mut stage_min_comp_id: Vec<String> = stage_comp_ids
+        .iter()
+        .map(|ids| ids.iter().min().cloned().unwrap_or_else(|| "~".to_string()))
+        .collect();
+    let stage_dist = |s: &Stage| -> usize {
+        match s {
+            Stage::Wdf(w) => w.signal_flow_distance,
+            Stage::Iir(i) => i.signal_flow_distance,
+            Stage::StateSpace(ss) => ss.signal_flow_distance,
+            Stage::MultiNl(m) => m.signal_flow_distance,
+            Stage::BlackFeedback(b) => b.signal_flow_distance,
+            Stage::Blockwise(k) => k.signal_flow_distance,
+            Stage::KMethod { .. } => usize::MAX,
+            Stage::SerialDelayedFeedback(s) => s.signal_flow_distance,
+        }
+    };
+
+    // Sort stages by (signal_flow_distance, min_comp_id). Index-permutation
+    // based so the parallel `stage_min_comp_id` table stays aligned through the
+    // sort (the second, post-feedforward re-sort below reuses it).
+    // (`stage_comp_ids` is intentionally left in its build order — the VCO
+    // generator pass below indexes it by the same pre-sort positions it always
+    // has, so we do not perturb that pre-existing behavior.)
+    {
+        let mut perm: Vec<usize> = (0..stages.len()).collect();
+        perm.sort_by(|&a, &b| {
+            stage_dist(&stages[a])
+                .cmp(&stage_dist(&stages[b]))
+                .then_with(|| stage_min_comp_id[a].cmp(&stage_min_comp_id[b]))
+        });
+        apply_permutation(&mut stages, &perm);
+        apply_permutation(&mut stage_min_comp_id, &perm);
+    }
 
     // ── Generator (VCO, N=0) source placement (spec §4) ───────────────────
     // A generator has no audio input — there is no galvanic gap to split.
@@ -1857,20 +1883,26 @@ pub fn compile_via_spqr_with_options(
     }
 
     // Re-sort: feedforward stages may have changed distance.
-    // Secondary key: feedforward stages sort AFTER non-feedforward at same distance.
-    stages.sort_by_key(|s| {
-        let (d, ff) = match s {
-            Stage::Wdf(w) => (w.signal_flow_distance, w.is_feedforward),
-            Stage::Iir(i) => (i.signal_flow_distance, false),
-            Stage::StateSpace(ss) => (ss.signal_flow_distance, false),
-            Stage::MultiNl(m) => (m.signal_flow_distance, false),
-            Stage::BlackFeedback(b) => (b.signal_flow_distance, false),
-            Stage::Blockwise(k) => (k.signal_flow_distance, false),
-            Stage::KMethod { .. } => (usize::MAX, false),
-            Stage::SerialDelayedFeedback(s) => (s.signal_flow_distance, false),
+    // Secondary key: feedforward stages sort AFTER non-feedforward at same
+    // distance. Tertiary key (Defect B): min stable component id, for
+    // deterministic ordering among otherwise-tied stages.
+    {
+        let ff_of = |s: &Stage| -> u8 {
+            match s {
+                Stage::Wdf(w) => w.is_feedforward as u8,
+                _ => 0,
+            }
         };
-        (d, ff as u8) // false=0 sorts before true=1
-    });
+        let mut perm: Vec<usize> = (0..stages.len()).collect();
+        perm.sort_by(|&a, &b| {
+            stage_dist(&stages[a])
+                .cmp(&stage_dist(&stages[b]))
+                .then_with(|| ff_of(&stages[a]).cmp(&ff_of(&stages[b])))
+                .then_with(|| stage_min_comp_id[a].cmp(&stage_min_comp_id[b]))
+        });
+        apply_permutation(&mut stages, &perm);
+        apply_permutation(&mut stage_min_comp_id, &perm);
+    }
 
     // F13b: wire parallel branches into the convergence mixer. The convergence
     // stage reads its driver voltages from `node_signals`, so each upstream
@@ -4035,6 +4067,16 @@ fn compute_bias_v_max_for_group(
     None
 }
 
+/// Reorder `v` in place so that the new element `i` is the old element
+/// `perm[i]`. `perm` must be a permutation of `0..v.len()`.
+fn apply_permutation<T>(v: &mut Vec<T>, perm: &[usize]) {
+    debug_assert_eq!(v.len(), perm.len());
+    let mut taken: Vec<Option<T>> = v.drain(..).map(Some).collect();
+    for &i in perm {
+        v.push(taken[i].take().expect("permutation index reused"));
+    }
+}
+
 /// lower distance values, giving the correct processing order regardless of
 /// the order `find_flow_groups` returned them.
 fn compute_group_flow_distances(
@@ -4123,8 +4165,18 @@ fn compute_group_flow_distances(
         false
     }
 
+    // Defect B (stage ordering): the base in->node distance is now a
+    // RAIL-BLOCKED, signal-DIRECTED traversal. The old `bfs_distances` was
+    // undirected and never blocked B+/gnd/ac-ground rails, so a plate-/
+    // collector-load resistor tied to B+ let the walk reach a tube's downstream
+    // plate node in a few hops THROUGH the supply rail — giving load nodes tiny
+    // distances and scrambling serial stage order. Crossing active devices only
+    // input->output and dead-ending rails fixes the order. The `out`-side
+    // distance keeps the old undirected walk: it only ranks active-output->output
+    // proximity for the feedback ordering special case, where reachability
+    // (not signal direction) is what matters.
     let mut node_dist: HashMap<NodeId, usize> = HashMap::new();
-    node_dist.extend(bfs_distances(graph.in_node, graph));
+    node_dist.extend(super::signal_flow::directed_signal_distances_from_in(graph));
     let out_dist = bfs_distances(graph.out_node, graph);
     let span = graph.edges.len() + graph.components.len() + groups.len() + 1;
 
