@@ -237,6 +237,7 @@ fn report_json_shape_matches_run_format() {
     tests.insert(
         "tb303_vcf".to_string(),
         TestResult {
+            profile: pedalkernel_validate::config::ValidationProfile::MeasuredMargin,
             passed: true,
             pending: false,
             error: None,

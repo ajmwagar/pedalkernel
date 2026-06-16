@@ -1214,6 +1214,140 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // ── HOT variants — drive each device into its nonlinear region ──
+                //
+                // Each _hot TestCase reuses the SAME circuit deck as the clean variant.
+                // Gates deferred to a later pass (pedalkernel-dcy4.5 follow-up); thresholds
+                // are placeholder (30.0 dB) and pending_reference=true so missing goldens
+                // are PENDING rather than FAIL.
+                //
+                // IMPORTANT — linearity caveats:
+                //   push_pull_6l6_hot : 3.0V — pushes 6L6GC grids well above class-AB
+                //     linear region; Koren ATAN pentode model has genuine nonlinearity.
+                //     Expect meaningful THD increase vs clean (amplitude=1.0).
+                //   ota_ca3080_hot    : 2.0V — WDF OTA uses tanh(Vdiff/2Vt) which saturates
+                //     hard at 2V >> 2*Vt=52mV; however the SPICE deck is a pure linear VCCS
+                //     (Gota element), so the ngspice golden itself has negligible THD.
+                //     This test documents WDF-vs-SPICE divergence at large drive, not SPICE
+                //     nonlinearity. FLAG: SPICE reference is linear.
+                //   optical_attenuator_hot : 5.0V — the circuit is a passive R divider
+                //     (R_top=10k + R_ldr=1M) with coupling caps; both SPICE and WDF are
+                //     fully linear at all amplitudes. THD will not increase vs clean.
+                //     FLAG: circuit has no nonlinear element; hot golden is structurally
+                //     identical to a scaled clean golden.
+                tests.insert(
+                    "push_pull_6l6_hot".to_string(),
+                    TestCase {
+                        circuit: "active/push_pull_6l6.pedal".to_string(),
+                        description: concat!(
+                            "Push-pull 6L6GC driven hot — 3.0V pushes grids past class-AB linear ",
+                            "region into Koren ATAN saturation / cutoff asymmetry"
+                        )
+                        .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 440.0,
+                            // 3.0V: B+=400V, cathode bias -25V → Vg1k=-25V at idle.
+                            // 3V swing brings Vg1k toward 0V (grid conduction) on the positive
+                            // half and toward -28V (deeper cutoff) on the negative half.
+                            // Koren ATAN pentode model will show clear even-harmonic reduction
+                            // (push-pull cancels even harmonics) with odd-harmonic growth.
+                            // DELMAX=57e-6 and .IC seeds in the deck ensure ngspice converges.
+                            amplitude: 3.0,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 440.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER — honest thresholds deferred to a later pass.
+                            // Distortion gates left unset; time-domain thresholds are very loose.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
+                    },
+                );
+
+                tests.insert(
+                    "ota_ca3080_hot".to_string(),
+                    TestCase {
+                        circuit: "active/ota_ca3080.pedal".to_string(),
+                        description: concat!(
+                            "CA3080 OTA driven hot — 2.0V >> 2*Vt=52mV; WDF tanh saturates hard. ",
+                            "NOTE: SPICE deck uses linear VCCS so ngspice golden has negligible THD."
+                        )
+                        .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 2.0V: linear range is Vin < 2*Vt ≈ 52mV.  At 2V the WDF tanh
+                            // is fully saturated (output ≈ ±Iabc*Rload=±5V).  The SPICE deck's
+                            // bare VCCS (Gota) is unconditionally linear — ngspice will output
+                            // a 40Vpk sine with no harmonic distortion.  This golden documents
+                            // the WDF-vs-SPICE amplitude divergence at large drive.
+                            amplitude: 2.0,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER — honest thresholds deferred to a later pass.
+                            // THD gate intentionally unset: SPICE reference is a linear VCCS so
+                            // THD comparison is not meaningful until the SPICE deck is replaced
+                            // with a nonlinear CA3080 model.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
+                    },
+                );
+
+                tests.insert(
+                    "optical_attenuator_hot".to_string(),
+                    TestCase {
+                        circuit: "active/optical_attenuator.pedal".to_string(),
+                        description: concat!(
+                            "VTL5C3 optical attenuator driven hot — 5.0V. ",
+                            "NOTE: circuit is a passive R divider (R_top=10k + R_ldr=1M); ",
+                            "both SPICE and WDF are fully linear. THD will not increase vs clean."
+                        )
+                        .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 5.0V: R_top=10k / R_ldr=1M divider; output is attenuated by
+                            // factor 1M/1.01M ≈ 0.990 (negligible ~0.09dB attenuation).
+                            // No nonlinear element exists — THD is determined by floating-point
+                            // noise floor, not circuit physics.  This golden documents that the
+                            // linear attenuation path is amplitude-invariant.
+                            amplitude: 5.0,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER — honest thresholds deferred to a later pass.
+                            // THD gate intentionally unset: circuit has no nonlinear element,
+                            // THD is indeterminate (floating-point noise floor only).
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
+                    },
+                );
+
                 tests
             },
         },
