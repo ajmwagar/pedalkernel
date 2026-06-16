@@ -83,7 +83,7 @@ fn static_gain_db(
     let window_s = 0.25;
     let amplitude = signals::dbvu_to_peak(amplitude_dbvu);
     let total_s = settle_s + window_s;
-    let n = (total_s * SAMPLE_RATE) as usize;
+    let _n = (total_s * SAMPLE_RATE) as usize;
     let settle = (settle_s * SAMPLE_RATE) as usize;
 
     let mut process = compile_pedal(circuit, controls);
@@ -131,7 +131,7 @@ fn compression_ratio_from_curve(curve: &[(f64, f64)], lo_dbvu: f64, hi_dbvu: f64
 /// Extract gain curve from ngspice golden level-sweep npy.
 /// The golden is a level sweep: 9 levels × 0.5 s at 384 kHz internal rate.
 /// Returns Vec<(in_dbvu, out_dbvu)>.
-fn gain_curve_from_golden(golden: &[f64], freq_hz: f64) -> Vec<(f64, f64)> {
+fn gain_curve_from_golden(golden: &[f64], _freq_hz: f64) -> Vec<(f64, f64)> {
     let levels_dbvu: Vec<f64> = (-40..=0).step_by(5).map(|l| l as f64).collect();
     let samples_per_level = (0.5 * INTERNAL_RATE) as usize;
     let settle_samples = (0.2 * INTERNAL_RATE) as usize;   // 200 ms warmup trim
@@ -155,7 +155,7 @@ fn envelope_settle_seconds(output: &[f64], step_sample: usize) -> f64 {
     if step_sample >= output.len() || window_samples == 0 { return 0.0; }
     let seg = &output[step_sample..];
     let env: Vec<f64> = seg.windows(window_samples)
-        .map(|w| rms(w))
+        .map(rms)
         .collect();
     if env.is_empty() { return 0.0; }
     let tail_start = env.len() - env.len() / 4;

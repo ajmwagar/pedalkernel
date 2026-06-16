@@ -13,7 +13,7 @@ Produces per-circuit PNGs:
   - annotated with dB-error metrics from the JSON report
 
 Produces summary outputs:
-  - accuracy-matrix.png    : all circuits x pass/fail + RMS-error heatmap
+  - matrix-<suite>.png     : per-suite RMS/Peak/Spectral error heatmaps
   - accuracy.json          : per-circuit pass/fail + metrics (schema documented below)
   - history.json           : append-only per-run drift log
 

@@ -1,11 +1,16 @@
 name: Accuracy Dashboard
 
-# Nightly accuracy snapshot: build validate binary, run compare-goldens,
-# generate per-circuit PNGs + accuracy.json + history, upload as CI artifact.
-# The owner pulls these artifacts into the in-repo Hugo site manually (sasf.2).
-#
-# This workflow is PYTHON-only on the analysis side — the Rust step only runs
-# the pre-existing pedalkernel-validate binary. No new Rust code is added here.
+# Nightly accuracy + dynamics dashboard refresh. Each run:
+#   1. Regenerates the WDF goldens from the CURRENT engine
+#      (bootstrap = accuracy goldens, dynamics --regen = dynamics goldens) so the
+#      published dashboard never goes stale.
+#   2. Builds the dashboards (accuracy: compare-goldens + per-circuit/per-suite
+#      PNGs; dynamics: static-curve PNGs) from those fresh goldens.
+#   3. Force-pushes the rendered data/ + static/ to the `dashboard-data` branch,
+#      which Netlify builds. Regenerated goldens are used in-CI only, NOT
+#      committed back.
+# Triggers: nightly cron + manual dispatch only (no `push:`), so the publish
+# push cannot re-trigger this workflow.
 
 on:
   schedule:
@@ -27,6 +32,8 @@ jobs:
   accuracy-dashboard:
     name: Generate accuracy dashboard
     runs-on: ubuntu-latest
+    # Guard against a hung engine run burning Actions minutes.
+    timeout-minutes: 45
 
     # Needed so the workflow can push the regenerated artifacts to the
     # publish branch (see "Publish refreshed dashboard" below).
@@ -60,23 +67,39 @@ jobs:
         run: pip install -r tools/dashboard/requirements.txt
 
       # ----------------------------------------------------------------
-      # Run pedalkernel-validate to produce the JSON report.
+      # Nightly WDF golden regeneration.
       #
-      # We run the `run` subcommand (live WDF vs committed ngspice goldens)
-      # because WDF goldens are not yet committed (bead 85by.3).  When
-      # compare-goldens is ready (both golden sets committed), swap to:
-      #   cargo run -p pedalkernel-validate -- \
-      #     --golden pedalkernel-validate/golden \
-      #     --report report.json \
-      #     compare-goldens --suite ${{ ... }}
+      # The dashboards plot the engine's WDF output from committed goldens, which
+      # would otherwise go STALE as the engine evolves. So the nightly run first
+      # regenerates them from the CURRENT engine:
+      #   - `bootstrap --suite all` rewrites the accuracy WDF goldens
+      #     (golden/<suite>/<test>/wdf/<signal>.npy).
+      #   - `dynamics --regen` rewrites the dynamics WDF goldens
+      #     (dynamics-goldens/compressor/<circuit>/level_sweep.npy) and the JSON.
+      # Everything runs off one --release build (fast); the regenerated goldens
+      # are used in-CI to build the dashboards and are NOT committed back (the
+      # published data/+static/ already reflect them).
       # ----------------------------------------------------------------
-      - name: Run validation and produce JSON report
+      - name: Build pedalkernel-validate (release)
+        run: cargo build --release -p pedalkernel-validate
+
+      - name: Regenerate accuracy WDF goldens (full)
         working-directory: pedalkernel-validate
         run: |
           SUITE="${{ github.event.inputs.suite || 'all' }}"
-          cargo run -p pedalkernel-validate -- \
+          ../target/release/pedalkernel-validate --skip-k-tables bootstrap --suite "$SUITE" \
+            2>&1 | tee bootstrap-output.txt
+
+      # `compare-goldens` reads the WDF goldens just rewritten by bootstrap and
+      # compares them to the ngspice goldens — no second engine pass (the old
+      # `run` re-derived the WDF output live, duplicating bootstrap's work).
+      - name: Compare goldens and produce JSON report
+        working-directory: pedalkernel-validate
+        run: |
+          SUITE="${{ github.event.inputs.suite || 'all' }}"
+          ../target/release/pedalkernel-validate \
             --report report.json \
-            run --suite "$SUITE" \
+            compare-goldens --suite "$SUITE" \
             2>&1 | tee validate-output.txt || true
 
           if [ ! -f report.json ]; then
@@ -119,19 +142,20 @@ jobs:
             2>&1 | tee dashboard-output.txt
 
       # ----------------------------------------------------------------
-      # Dynamics dashboard: produce data/dynamics.json from the committed
-      # dynamic-stimulus goldens (LevelSweep / ToneBurst) via the trusted
-      # pedalkernel::analysis dynamics tools, then render PNGs.
+      # Dynamics dashboard: regenerate the dynamics WDF goldens from the current
+      # engine (--regen) and produce data/dynamics.json, then render PNGs.
+      # fet_leveler keeps its golden-loop path (real ngspice overlay); the other
+      # compressors' WDF goldens are refreshed live here.
       # ----------------------------------------------------------------
-      - name: Generate dynamics.json from goldens
+      - name: Regenerate dynamics WDF goldens and produce dynamics.json
         env:
           GIT_COMMIT: ${{ github.sha }}
         run: |
           TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          cargo run -p pedalkernel-validate -- \
+          ./target/release/pedalkernel-validate \
             --golden pedalkernel-validate/golden \
             --report-dynamics data/dynamics.json \
-            dynamics --timestamp "$TIMESTAMP" \
+            dynamics --regen --timestamp "$TIMESTAMP" \
             2>&1 | tee dynamics-output.txt
 
           if [ ! -f data/dynamics.json ]; then
@@ -173,7 +197,10 @@ jobs:
           PUBLISH_BRANCH: dashboard-data
         run: |
           cp dashboard-output/accuracy.json data/accuracy.json
-          cp dashboard-output/accuracy-matrix.png static/accuracy/accuracy-matrix.png
+          # Per-suite matrices (matrix-<suite>.png) replaced the single
+          # accuracy-matrix.png — copy whatever the generator produced.
+          rm -f static/accuracy/accuracy-matrix.png static/accuracy/matrix-*.png
+          cp dashboard-output/matrix-*.png static/accuracy/
           rm -rf static/accuracy/circuits
           cp -r dashboard-output/circuits static/accuracy/circuits
           cp dashboard-history.json data/accuracy-history.json

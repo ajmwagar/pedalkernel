@@ -266,7 +266,7 @@ mod tests {
         // Should have ~10 cycles in 10ms at 1kHz
         let zero_crossings: usize = sig.windows(2).filter(|w| w[0] * w[1] < 0.0).count();
         // Each cycle has 2 zero crossings, 10 cycles = ~20 crossings
-        assert!(zero_crossings >= 18 && zero_crossings <= 22);
+        assert!((18..=22).contains(&zero_crossings));
     }
 
     #[test]
