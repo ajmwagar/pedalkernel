@@ -1,0 +1,137 @@
+* ============================================================================
+* Single-Ended EL34 Pentode Stage (pentode mode)
+* PedalKernel Validation Circuit — Single pentode nonlinear stage
+* ============================================================================
+* EL34 is the canonical European power pentode used in Marshall, Hiwatt, etc.
+* Single-ended (class A) configuration — asymmetric, H2-dominant distortion.
+*
+* Engine pentode model (screen-referenced Koren, from pedalkernel-rt/pentode.rs):
+*   E1      = KP * (1/MU + Vg1k / Vg2k)
+*   Ip_base = (Vg2k/KP * ln(1+exp(E1)))^EX / KG1
+*   Ip      = Ip_base * atan(Vpk / KVB2)
+*   (KVB unused in pentode mode — atan plate saturation replaces triode sqrt term)
+*
+* Parameters from pedalkernel/models/pentodes.model (Koren 1996):
+*   MU=11 EX=1.35 KG1=650 KG2=4200 KP=60 KVB=24 KVB2=18 VG2=470
+*
+* Operating point: B+=450V, Vg1=-33V (fixed bias, engine-derived), Vg2=470V, Vk=0V
+* Screen supply matched to VG2=470V default in pentodes.model.
+* Ip ≈ 65mA at idle (class A single-ended), Vp ≈ 225V
+* ============================================================================
+* Convergence recipe: explicit .ic on coupling caps + relaxed RELTOL
+.OPTIONS RELTOL=5e-3 METHOD=GEAR DELMAX=5u ITL4=200 ITL1=300 ABSTOL=1e-8 VNTOL=1e-4 MAXEVITER=5
+
+* B+ supply
+VB vb 0 DC 450
+
+* Screen supply (Vg2 = 470V per pentodes.model VG2 default)
+VS vscreen 0 DC 470
+
+* Fixed grid bias supply. Engine model (KP=60, MU=11, KG1=650, KVB2=18) requires
+* Vg1≈-33V to reach Ip≈65mA at B+=450V (Koren params pull more current than
+* datasheet at -11V; -33V derived from engine equation to match midpoint Vp≈225V).
+VBIAS vbias 0 DC -33
+
+* Plate load (output transformer primary modeled as resistive load for test)
+* Real OT primary ≈ 3.5kΩ for EL34 single-ended
+RP vb v_plate 3500
+
+* Screen stopper (suppresses screen parasitic oscillation)
+RG2 vscreen v_screen_r 1k
+
+* Grid stopper
+RSTO v_grid_r v_grid 100
+
+* Coupling cap (input)
+CIN v_in v_grid_r 100n
+
+* Grid leak to bias rail
+RG1 v_grid vbias 220k
+
+* AC input signal source (1kHz, 0.5V peak — moderate drive; ±0.5V at Vg1=-11V bias)
+VIN v_in 0 SIN(0 0.5 1000)
+
+* EL34 Pentode (screen-referenced Koren model)
+* Pins: anode  control_grid  cathode  screen
+X1 v_plate v_grid 0 v_screen_r PENTODE_EL34
+
+* Cathode directly to ground (fixed-bias: bias supply sets Vgk)
+* No cathode resistor — fixed bias network
+
+* Output coupling cap
+COUT v_plate v_out 100n
+
+* Output load — high-Z for validation reference (real OT primary ~3.5kΩ reflected;
+* 8Ω speaker load without OT creates a ~0.23% voltage divider, masking output)
+RLOAD v_out 0 100k
+
+* ============================================================================
+* EL34 Pentode Model — Screen-referenced Koren equations
+* Parameters from pedalkernel/models/pentodes.model
+* MU=11 EX=1.35 KG1=650 KP=60 KVB2=18 VG2_DEFAULT=470
+*
+* Engine equation (pentode.rs):
+*   E1   = KP * (1/MU + Vg1k / Vg2k)
+*   base = Vg2k/KP * ln(1+exp(E1))
+*   Ip   = (base^EX / KG1) * atan(Vpk / KVB2)
+*   (Note: atan, not the triode sqrt/ln form — engine-matched)
+* ============================================================================
+.SUBCKT PENTODE_EL34 anode grid cathode screen
+.PARAM MU=11 EX=1.35 KG1=650 KP=60 KVB2=18
+
+* Internal voltage nodes
+Bvg1k vg1k 0  V = V(grid,cathode)
+Bvg2k vg2k_n 0 V = V(screen,cathode)
+Bvak  vak   0  V = V(anode,cathode)
+
+* Screen-referenced Koren pentode current
+* E1   = KP * (1/MU + Vg1k / MAX(Vg2k,1))
+* base = MAX(Vg2k,1)/KP * ln(1+exp(E1))
+* Ip   = (base^EX / KG1) * atan(MAX(Vak,0) / KVB2)
+Bip anode cathode I = {
++ (PWR(
++   MAX(V(vg2k_n),1) / KP
++   * LOG(1 + EXP(KP * (1/MU + V(vg1k)/MAX(V(vg2k_n),1)))),
++   EX)
++ / KG1)
++ * ATAN(MAX(V(vak), 0.001) / KVB2)
++ * (1 + SGN(MAX(V(vak),0.001))) / 2
++ }
+
+* Screen grid current (simplified: proportional fraction of plate current)
+* Ig2 ≈ Ip * KG1/KG2 approximation for screen dissipation modeling
+* KG2=4200 per model — screen draws ~15% of plate current at operating point
+.PARAM KG2=4200
+Big2 screen cathode I = {
++ (PWR(
++   MAX(V(vg2k_n),1) / KP
++   * LOG(1 + EXP(KP * (1/MU + V(vg1k)/MAX(V(vg2k_n),1)))),
++   EX)
++ / KG2)
++ * (1 + SGN(MAX(V(vak),0.001))) / 2
++ }
+
+* Control grid current (diode model — grid conduction if Vg1k > 0)
+Dgc grid cathode DGRID
+.MODEL DGRID D(IS=1e-12 N=1.5 RS=1k)
+
+.ENDS PENTODE_EL34
+
+* ============================================================================
+* Analysis
+* ============================================================================
+* Transient: 10ms, timestep 2us — no UIC so ngspice computes .OP first then ramps
+.TRAN 2u 10m
+
+* Operating point
+.OP
+
+* Measure output
+.MEAS TRAN vout_rms  RMS V(v_out) FROM=4m TO=10m
+.MEAS TRAN vout_peak MAX V(v_out) FROM=4m TO=10m
+.MEAS TRAN vout_min  MIN V(v_out) FROM=4m TO=10m
+
+* Fourier analysis at 1kHz
+.FOUR 1000 9 V(v_out)
+
+.END

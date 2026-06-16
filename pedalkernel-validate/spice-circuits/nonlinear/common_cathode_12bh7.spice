@@ -1,0 +1,95 @@
+* ============================================================================
+* Common-Cathode 12BH7 Triode Stage
+* PedalKernel Validation Circuit — Single triode nonlinear stage
+* ============================================================================
+* The 12BH7 (mu≈17) is a low-mu, high-current triode used in driver stages
+* and phase inverters. Common-cathode configuration with cathode bypass cap;
+* H2-dominant asymmetric distortion due to the low mu.
+* Uses the same Koren macromodel structure as common_cathode_12ax7.spice
+* with parameters matched to pedalkernel/models/triodes.model.
+*
+* Parameters: MU=17 EX=1.3 KG1=1100 KP=60 KVB=400
+* Operating point: B+=250V, Vp≈130V, Vgk≈-7V (auto-bias via Rk), Ip≈6mA
+* Voltage gain: ~-11 (lower than 12AX7/12AT7 due to low mu)
+* ============================================================================
+* Convergence recipe: explicit .ic on coupling caps + relaxed RELTOL
+.OPTIONS RELTOL=5e-3 METHOD=TRAP DELMAX=10u ITL4=100
+
+* B+ supply
+VB vb 0 DC 250
+
+* Plate load — 12BH7 runs higher Ip, use lower Rp than 12AX7
+RP vb v_plate 22k
+
+* Coupling cap (input) — explicit IC avoids DC convergence issues
+CIN v_in v_grid 22n IC=0
+
+* Grid leak resistor
+RG v_grid 0 1MEG
+
+* AC input signal source (1kHz, 100mV peak — moderate drive; KP=60 is
+* nonlinear so 100mV gives audible H2 without gross waveform clipping)
+VIN v_in 0 SIN(0 0.1 1000)
+
+* Triode (12BH7 section A)
+X1 v_plate v_grid v_cathode TRIODE_12BH7
+
+* Cathode resistor + bypass cap — IC=0 on bypass cap
+* 1.2k × 6mA ≈ 7.2V cathode → Vgk ≈ -7.2V
+RK v_cathode 0 1200
+CK v_cathode 0 25u IC=0
+
+* Output coupling cap
+COUT v_plate v_out 22n IC=0
+
+* Output load
+RLOAD v_out 0 1MEG
+
+* ============================================================================
+* 12BH7 Triode Model — Koren equations
+* Parameters from pedalkernel/models/triodes.model (custom, estimated from datasheet)
+* MU=17 EX=1.3 KG1=1100 KP=60 KVB=400
+* ============================================================================
+.SUBCKT TRIODE_12BH7 anode grid cathode
+.PARAM MU=17 EX=1.3 KG1=1100 KP=60 KVB=400
+
+* Internal nodes for Vgk and Vak
+Bgk gk 0 V = V(grid,cathode)
+Bak ak 0 V = V(anode,cathode)
+
+* Plate current as behavioral current source (Koren equation)
+* E1 = KP * (1/MU + Vgk / sqrt(KVB + Vak^2))
+* Ip = (MAX(Vak,0)/KP * ln(1+exp(E1)))^EX / KG1, clipped for Vak<0
+Bip anode cathode I = {
++ (PWR(
++   LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2)))))
++   * MAX(V(ak), 0.001) / KP,
++   EX)
++ / KG1)
++ * (1 + SGN(LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2))))) * MAX(V(ak),0.001) / KP)) / 2
++ }
+
+* Grid current (diode model for grid conduction)
+Dgc grid cathode DGRID
+.MODEL DGRID D(IS=1e-12 N=1.5 RS=1k)
+
+.ENDS TRIODE_12BH7
+
+* ============================================================================
+* Analysis
+* ============================================================================
+* Transient: 5ms, timestep 5us
+.TRAN 5u 5m UIC
+
+* Operating point
+.OP
+
+* Measure output
+.MEAS TRAN vout_rms  RMS V(v_out) FROM=2m TO=5m
+.MEAS TRAN vout_peak MAX V(v_out) FROM=2m TO=5m
+.MEAS TRAN vout_min  MIN V(v_out) FROM=2m TO=5m
+
+* Fourier analysis at 1kHz
+.FOUR 1000 9 V(v_out)
+
+.END
