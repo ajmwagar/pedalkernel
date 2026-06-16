@@ -13,6 +13,49 @@ use super::compiled::*;
 // Compile options
 // ═��═══════════════════════════════════════════════════════��═════════════════
 
+/// Default fractional margin for [`TransformerCorePolicy::Derived`].
+///
+/// A core is treated as LINEAR while its worst-case peak field
+/// `h_peak < knee_field()·(1 − margin)` (see
+/// [`pedalkernel_rt::elements::JaCoreModel::is_linear_within`]). The Langevin
+/// curve bends well before `H = a` (the knee field), so some headroom below `a`
+/// is wanted. `0.2` is conservative on both sides:
+///
+/// - The DC-biased single-ended OT excites `h_peak ≈ 1033 A/m` against a knee
+///   `a ≈ 1100 A/m`; that ratio (≈0.94) only needs `margin ≳ 0.07` to classify
+///   NONLINEAR, so `0.2` keeps the SE OT firmly on the JA path.
+/// - Clean line/interstage transformers sit ~1000× below the knee, so the
+///   extra margin never tips them out of LINEAR — their tangent (== today's
+///   `Lm`) and goldens stay byte-identical.
+pub const DEFAULT_CORE_MARGIN: f64 = 0.2;
+
+/// How the compiler decides between the cheap linear-inductor tangent and the
+/// (expensive) Jiles-Atherton root for a transformer magnetizing branch.
+///
+/// The derived [`pedalkernel_rt::elements::JaCoreModel`] is ALWAYS built (its
+/// small-signal tangent reproduces today's linear `Lm`), so all three policies
+/// agree on a core that never leaves its linear region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TransformerCorePolicy {
+    /// Emit the linear tangent when the core is provably linear within `margin`
+    /// under worst-case (supply-limited) drive, else emit the JA root. This is
+    /// the default; see [`DEFAULT_CORE_MARGIN`].
+    Derived { margin: f64 },
+    /// Always emit the Jiles-Atherton root, regardless of the estimated drive.
+    ForceJa,
+    /// Always emit the linear inductor tangent, regardless of the estimated
+    /// drive. Reproduces the pre-derived-core behavior exactly.
+    ForceLinear,
+}
+
+impl Default for TransformerCorePolicy {
+    fn default() -> Self {
+        TransformerCorePolicy::Derived {
+            margin: DEFAULT_CORE_MARGIN,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CompileOptions {
     pub oversampling: OversamplingFactor,
@@ -51,6 +94,15 @@ pub struct CompileOptions {
     /// When false, coupled blockwise stages use table-driven fixed-point
     /// iteration without building/solving the full Jacobian.
     pub coupled_blockwise_newton: bool,
+    /// How a transformer magnetizing branch chooses between the linear-inductor
+    /// tangent and the Jiles-Atherton nonlinear core root. Defaults to
+    /// [`TransformerCorePolicy::Derived`] with [`DEFAULT_CORE_MARGIN`]: the
+    /// derived core is built unconditionally (its tangent == today's linear
+    /// `Lm`), and the compiler emits the cheap tangent for cores provably
+    /// linear under worst-case supply-limited drive, falling back to the JA
+    /// root for DC-biased / hard-driven cores. `ForceJa` / `ForceLinear`
+    /// override the per-circuit decision for testing and reference renders.
+    pub transformer_core: TransformerCorePolicy,
 }
 
 impl Default for CompileOptions {
@@ -66,6 +118,7 @@ impl Default for CompileOptions {
             force_serial_blockwise_feedback_gain: 0.0,
             disable_iir: false,
             coupled_blockwise_newton: true,
+            transformer_core: TransformerCorePolicy::default(),
         }
     }
 }

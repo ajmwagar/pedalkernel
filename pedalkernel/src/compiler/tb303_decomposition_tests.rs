@@ -656,9 +656,7 @@ pub(crate) fn load_pro_pedal_sub(pro_sub_path: &str) -> Option<String> {
 /// Convenience wrapper: loads `filename` from the acidattack-core directory.
 /// All existing TB-303 tests call this form.
 fn load_pro_pedal(filename: &str) -> Option<String> {
-    load_pro_pedal_sub(&format!(
-        "crates/acidattack/acidattack-core/{filename}"
-    ))
+    load_pro_pedal_sub(&format!("crates/acidattack/acidattack-core/{filename}"))
 }
 
 fn tb303_bkm_vs_signals(
@@ -2309,6 +2307,7 @@ fn two_rung_differential_diode_ladder_compiles_to_bkm_fixture() {
         false,
         true,
         &def.init_hints,
+        super::compile::CompileOptions::default().transformer_core,
     )
     .expect("minimal differential fixture should build through BKM directly");
     let bkm_count = built
@@ -2346,6 +2345,7 @@ fn two_rung_differential_diode_ladder_runtime_is_lowpass() {
             false,
             true,
             &def.init_hints,
+            super::compile::CompileOptions::default().transformer_core,
         )
         .expect("minimal differential fixture should build through BKM directly");
         let mut bkm = built
@@ -2419,6 +2419,7 @@ fn q12_to_two_rung_differential_diode_ladder_routes_into_bkm_boundary() {
         false,
         true,
         &def.init_hints,
+        super::compile::CompileOptions::default().transformer_core,
     )
     .expect("Q12 handoff fixture should build through direct BKM");
 
@@ -2509,6 +2510,7 @@ fn q12_to_two_rung_differential_diode_ladder_handoff_is_lowpass() {
             false,
             true,
             &def.init_hints,
+            super::compile::CompileOptions::default().transformer_core,
         )
         .expect("Q12 handoff fixture should build through direct BKM");
 
@@ -2653,6 +2655,7 @@ fn q12_handoff_fixture_runtime_boundary_probes_classify_coupling_gap() {
             false,
             true,
             &def.init_hints,
+            super::compile::CompileOptions::default().transformer_core,
         )
         .expect("Q12 handoff fixture should build through direct BKM");
 

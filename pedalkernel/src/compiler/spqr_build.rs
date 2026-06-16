@@ -8,10 +8,14 @@
 
 use super::build::create_root;
 use super::classify::NonlinearKind;
+use super::compile::TransformerCorePolicy;
 use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
-use super::operating_point::{infer_transformer_dc_bias_current, node_dc_voltage};
+use super::operating_point::{
+    infer_transformer_dc_bias_current, node_dc_voltage, transformer_core_excitation,
+    OperatingEnvelope,
+};
 use super::rigid::{
     build_general_mna_from_edges, build_general_mna_from_edges_with_hints,
     build_general_mna_from_edges_with_supply, build_rigid, build_rigid_from_group,
@@ -629,6 +633,7 @@ pub fn compile_via_spqr_with_options(
                     options.disable_iir,
                     options.coupled_blockwise_newton,
                     &pedal.init_hints,
+                    options.transformer_core,
                 ) {
                     for built in built_stages {
                         push_stage!(
@@ -1473,6 +1478,7 @@ pub fn compile_via_spqr_with_options(
                     options.disable_iir,
                     options.coupled_blockwise_newton,
                     &pedal.init_hints,
+                    options.transformer_core,
                 ) {
                     for built in built_stages {
                         push_stage!(
@@ -1583,6 +1589,8 @@ pub fn compile_via_spqr_with_options(
                         &graph,
                         sample_rate,
                         &bias_node_voltages,
+                        supply_voltage,
+                        options.transformer_core,
                     ) {
                         eprintln!(
                             "  [compile] group {gi}: SPQR dropped all-passive stage (rigid R-node), rebuilt as PassiveRType WDF"
@@ -1626,6 +1634,7 @@ pub fn compile_via_spqr_with_options(
                         &pedal.init_hints,
                         supply_voltage,
                         &bias_node_voltages,
+                        options.transformer_core,
                     )
                     .map_err(|e| format!("Group {gi}: {e}"))?;
                     push_stage!(
@@ -2804,6 +2813,7 @@ pub(super) fn build_spqr_stage(
         &[],
         supply_voltage,
         &bias_node_voltages,
+        TransformerCorePolicy::default(),
     )
 }
 
@@ -2815,14 +2825,20 @@ pub(super) fn build_spqr_stage_with_options(
     init_hints: &[crate::dsl::InitHint],
     supply_voltage: f64,
     bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    core_policy: TransformerCorePolicy,
 ) -> Result<BuiltStage, String> {
     match stage {
         SpqrStage::PassiveWdf {
             tree, edge_indices, ..
         } => {
-            if let Some(wdf) =
-                build_passive_rtype_stage(&edge_indices, graph, _sample_rate, bias_node_voltages)
-            {
+            if let Some(wdf) = build_passive_rtype_stage(
+                &edge_indices,
+                graph,
+                _sample_rate,
+                bias_node_voltages,
+                supply_voltage,
+                core_policy,
+            ) {
                 return Ok(BuiltStage::Wdf(wdf));
             }
 
@@ -3263,6 +3279,8 @@ pub(super) fn build_spqr_stage_with_options(
                     graph,
                     _sample_rate,
                     bias_node_voltages,
+                    supply_voltage,
+                    core_policy,
                 ) {
                     return Ok(BuiltStage::Wdf(wdf));
                 }
@@ -3292,6 +3310,8 @@ fn build_passive_rtype_stage(
     graph: &CircuitGraph,
     sample_rate: f64,
     bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    supply_voltage: f64,
+    core_policy: TransformerCorePolicy,
 ) -> Option<WdfStage> {
     let is_ground = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
 
@@ -3472,6 +3492,23 @@ fn build_passive_rtype_stage(
                         _ => None,
                     }
                 });
+
+                // ── Derived core-nonlinearity gate ──────────────────────────
+                //
+                // Always build the derived JA core (its small-signal tangent
+                // reproduces today's linear `Lm`), then decide per policy whether
+                // the magnetizing branch stamps the JA root or the cheap linear
+                // tangent. The decision is materialized as `Option<JaCoreModel>`:
+                // `Some` ⇒ JA root, `None` ⇒ linear inductor.
+                let core_model = decide_transformer_core_model(
+                    &resolved_cfg,
+                    primary_pos_node,
+                    primary_neg_node,
+                    bias_node_voltages,
+                    graph,
+                    supply_voltage,
+                    core_policy,
+                );
                 let dynamic = stamp_linear_transformer_skeleton(
                     &mut mna,
                     &comp.id,
@@ -3484,6 +3521,7 @@ fn build_passive_rtype_stage(
                     vsrc_p,
                     sample_rate,
                     dc_bias_current,
+                    core_model,
                 );
                 for (port, child) in dynamic {
                     add_dynamic_port(
@@ -3757,6 +3795,7 @@ fn stamp_linear_transformer_skeleton(
     vsrc_p: usize,
     sample_rate: f64,
     dc_bias_current: Option<f64>,
+    ja_core: Option<JaCoreModel>,
 ) -> Vec<(WdfPort, DynNode)> {
     const SHORT_R: f64 = 1.0e-6;
     const MIN_L: f64 = 1.0e-12;
@@ -3772,7 +3811,8 @@ fn stamp_linear_transformer_skeleton(
     let l_mag = cfg
         .magnetizing_inductance
         .unwrap_or(l_primary * k.max(1.0e-6));
-    let ja_core = transformer_ja_core_model(cfg);
+    // `ja_core` is the gate decision from `decide_transformer_core_model`:
+    // `Some` ⇒ stamp the JA root, `None` ⇒ stamp the linear inductor tangent.
     let dc_bias_current = dc_bias_current.unwrap_or(0.0);
 
     fn add_inductor_or_short(
@@ -3911,19 +3951,82 @@ fn stamp_linear_transformer_skeleton(
     dynamic
 }
 
-fn transformer_ja_core_model(cfg: &TransformerConfig) -> Option<JaCoreModel> {
-    let model = JaCoreModel {
-        ms: cfg.ja_ms? as pedalkernel_rt::Wave,
-        a: cfg.ja_a? as pedalkernel_rt::Wave,
-        alpha: cfg.ja_alpha? as pedalkernel_rt::Wave,
-        k: cfg.ja_k? as pedalkernel_rt::Wave,
-        c: cfg.ja_c? as pedalkernel_rt::Wave,
-        n_turns: cfg.core_primary_turns? as pedalkernel_rt::Wave,
-        area: cfg.core_area? as pedalkernel_rt::Wave,
-        path_len: cfg.core_path_length? as pedalkernel_rt::Wave,
-        gap: cfg.core_gap.unwrap_or(0.0) as pedalkernel_rt::Wave,
-    };
-    model.is_complete().then_some(model)
+/// Decide whether a transformer magnetizing branch stamps the Jiles-Atherton
+/// nonlinear root or the cheap linear-inductor tangent, per the compile policy.
+///
+/// The derived JA core ([`crate::model_lookup::ja_core_from_transformer_cfg`])
+/// is ALWAYS built — its small-signal tangent reproduces today's linear `Lm` —
+/// so a `None` result still corresponds to that exact tangent. Returns:
+/// - `ForceLinear` ⇒ `None` (linear tangent),
+/// - `ForceJa` ⇒ `Some(model)` (JA root),
+/// - `Derived { margin }` ⇒ estimate worst-case core excitation under a
+///   conservative supply-limited drive and return `None` iff the core is
+///   provably linear within `margin` (`h_peak < knee·(1 − margin)`), else
+///   `Some(model)`.
+///
+/// The worst-case [`OperatingEnvelope`] uses the full `supply_voltage` as the
+/// available open-circuit swing (the conservative max the rail can impose),
+/// a zero source resistance (= no divider attenuation = max swing), and the
+/// magnetizing inductance as the reactive load — so clean line transformers,
+/// sitting far below the knee, are provably linear and never fall into the
+/// unknown-drive → JA path.
+fn decide_transformer_core_model(
+    cfg: &TransformerConfig,
+    primary_pos_node: Option<NodeId>,
+    primary_neg_node: Option<NodeId>,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+    policy: TransformerCorePolicy,
+) -> Option<JaCoreModel> {
+    let model = crate::model_lookup::ja_core_from_transformer_cfg(cfg);
+
+    match policy {
+        TransformerCorePolicy::ForceLinear => None,
+        TransformerCorePolicy::ForceJa => Some(model),
+        TransformerCorePolicy::Derived { margin } => {
+            // A transformer that declares no real core physics (a bare
+            // `transformer(ratio, L)` — no core geometry, no explicit JA loop)
+            // has no grounded basis for a saturation knee. Deriving one from
+            // fallback geometry would fabricate a nonlinearity the netlist never
+            // declared (and move that circuit's WDF golden), so it stays linear:
+            // its derived tangent already equals today's `Lm`.
+            if !crate::model_lookup::transformer_has_core_physics(cfg) {
+                return None;
+            }
+            // Worst-case supply-limited drive: full-rail open-circuit swing,
+            // ideal (0 Ω) source, magnetizing inductance as the reactive load.
+            let l_mag = cfg
+                .magnetizing_inductance
+                .filter(|l| l.is_finite() && *l > 0.0)
+                .unwrap_or_else(|| {
+                    let k = cfg.coupling.clamp(0.0, 1.0).max(1.0e-6);
+                    (cfg.primary_inductance * k).max(1.0e-12)
+                });
+            let driver = OperatingEnvelope::new(
+                /* r_src */ 0.0,
+                /* swing */ supply_voltage,
+                /* r_load */ l_mag,
+            );
+            // Primary nodes are only used for the DC-bias inference; when either
+            // is absent the excitation falls back to its own bias path.
+            let (pos, neg) = match (primary_pos_node, primary_neg_node) {
+                (Some(a), Some(b)) => (a, b),
+                _ => (graph.gnd_node, graph.gnd_node),
+            };
+            let exc =
+                transformer_core_excitation(cfg, pos, neg, bias_node_voltages, graph, Some(driver));
+            let linear = model.is_linear_within(
+                exc.h_peak as pedalkernel_rt::Wave,
+                margin as pedalkernel_rt::Wave,
+            );
+            if linear {
+                None
+            } else {
+                Some(model)
+            }
+        }
+    }
 }
 
 // `infer_transformer_dc_bias_current` and `node_dc_voltage` were relocated to
@@ -5261,7 +5364,13 @@ fn compute_wdf_fet_dc_qpoint(
         let source_voltage = source_rail_voltage + ids * source_resistance;
         let vgs = gate_voltage - source_voltage;
         let vds = drain_voltage - source_voltage;
-        (vgs, vds, drain_voltage, source_voltage, model_current(vgs, vds))
+        (
+            vgs,
+            vds,
+            drain_voltage,
+            source_voltage,
+            model_current(vgs, vds),
+        )
     };
 
     let residual = |ids: f64| -> f64 {
@@ -5513,13 +5622,19 @@ fn compute_wdf_bjt_dc_qpoint(
     let vbc_active = -1.0_f64;
     let mut vbe = 0.65_f64;
     for _ in 0..60 {
-        let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
+        let (ic, ib) = model.currents(
+            vbe as pedalkernel_rt::Wave,
+            vbc_active as pedalkernel_rt::Wave,
+        );
         let (ic, ib) = (ic, ib);
         let ie = ic + ib;
         let f = v_drive - ib * rth - vbe - ie * re;
         // df/dVbe via finite difference on the device currents.
         let h = 1e-4;
-        let (ic2, ib2) = model.currents((vbe + h) as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
+        let (ic2, ib2) = model.currents(
+            (vbe + h) as pedalkernel_rt::Wave,
+            vbc_active as pedalkernel_rt::Wave,
+        );
         let (ic2, ib2) = (ic2, ib2);
         let df = -((ib2 - ib) / h) * rth - 1.0 - ((ic2 + ib2 - ie) / h) * re;
         if df.abs() < 1e-18 {
@@ -5544,7 +5659,10 @@ fn compute_wdf_bjt_dc_qpoint(
     // pre-seed `prev_v` so the WDF/NR solve cold-starts AT the Q-point instead of
     // 0 V, eliminating the bias-settling startup transient (ngspice runs a `.op`
     // before `.tran`).  Falls back to half-rail when RC is absent.
-    let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
+    let (ic, ib) = model.currents(
+        vbe as pedalkernel_rt::Wave,
+        vbc_active as pedalkernel_rt::Wave,
+    );
     let ie = ic + ib;
     let rc = find_r_to_rail(_collector_node, graph.vcc_node);
     let vcc = supply_voltage.abs();

@@ -46,7 +46,10 @@ pub(crate) mod wdf_leaf;
 
 #[cfg(feature = "build-cache")]
 pub use compile::compile_pedal_cached;
-pub use compile::{compile_cache_key, compile_pedal, compile_pedal_with_options, CompileOptions};
+pub use compile::{
+    compile_cache_key, compile_pedal, compile_pedal_with_options, CompileOptions,
+    TransformerCorePolicy, DEFAULT_CORE_MARGIN,
+};
 pub(crate) use compiled::extract_precomputed_from_compiled;
 pub use compiled::CompiledPedal;
 pub use component::{

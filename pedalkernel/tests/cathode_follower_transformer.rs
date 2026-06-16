@@ -163,3 +163,125 @@ fn cf_into_transformer_passes_signal() {
          (expected > -40 dB) — transformer swallowed into the CF's NL group"
     );
 }
+
+// ── Transformer-core policy gate (task #3) ─────────────────────────────────
+
+/// DC-biased single-ended output transformer carrying explicit JA core data
+/// (the OT-DEMO-SE model: IDC=45m, A=1100, full geometry). Under the default
+/// `Derived` policy this core is excited past its knee and runs the JA root.
+const SE_OT_PEDAL: &str = r#"
+pedal "SE OT" {
+    supply 9V
+    components {
+        T1: transformer(26:1, OT-DEMO-SE)
+        R_load: resistor(8)
+    }
+    nets {
+        in -> T1.a
+        T1.b -> gnd
+        T1.c -> out, R_load.a
+        T1.d -> gnd
+        R_load.b -> gnd
+    }
+}
+"#;
+
+/// Bare coupled-inductor transformer — no model, no core geometry, no JA loop.
+/// Declares no core physics, so the `Derived` gate keeps it LINEAR (byte-stable
+/// vs `ForceLinear`); `ForceJa` still overrides it to the JA root.
+const BARE_XFMR_PEDAL: &str = r#"
+pedal "Bare transformer" {
+    components {
+        T1: transformer(10:1, 2H)
+        R_load: resistor(1k)
+    }
+    nets {
+        in -> T1.a
+        T1.b -> gnd
+        T1.c -> out, R_load.a
+        T1.d -> gnd
+        R_load.b -> gnd
+    }
+}
+"#;
+
+fn render_policy(src: &str, policy: pedalkernel::compiler::TransformerCorePolicy) -> Vec<f64> {
+    use pedalkernel::compiler::{compile_pedal_with_options, CompileOptions};
+    let pedal = parse_pedal_file(src).expect("parse");
+    let mut opts = CompileOptions::default();
+    opts.transformer_core = policy;
+    let mut c = compile_pedal_with_options(&pedal, 48_000.0, opts).expect("compile");
+    (0..4800)
+        .map(|i| {
+            let t = i as f64 / 48_000.0;
+            c.process(0.1 * (2.0 * std::f64::consts::PI * 220.0 * t).sin())
+        })
+        .collect()
+}
+
+fn max_abs_diff(a: &[f64], b: &[f64]) -> f64 {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f64::max)
+}
+
+/// `ForceLinear` and `ForceJa` must actually override the derived decision:
+/// for a real (excited) core they produce DIFFERENT output.
+#[test]
+fn force_policies_override_derived_decision() {
+    use pedalkernel::compiler::TransformerCorePolicy::*;
+    let lin = render_policy(SE_OT_PEDAL, ForceLinear);
+    let ja = render_policy(SE_OT_PEDAL, ForceJa);
+    let diff = max_abs_diff(&lin, &ja);
+    assert!(
+        diff > 1e-3,
+        "ForceJa must differ from ForceLinear for the excited SE OT, got {diff:.3e}"
+    );
+}
+
+/// Default `Derived` runs JA for the DC-biased SE OT (explicit knee a=1100,
+/// h_peak≈1033 > a·(1-0.2)=880): Derived output matches ForceJa, not ForceLinear.
+#[test]
+fn derived_runs_ja_for_dc_biased_se_ot() {
+    use pedalkernel::compiler::TransformerCorePolicy::*;
+    let der = render_policy(
+        SE_OT_PEDAL,
+        Derived {
+            margin: pedalkernel::compiler::DEFAULT_CORE_MARGIN,
+        },
+    );
+    let lin = render_policy(SE_OT_PEDAL, ForceLinear);
+    let ja = render_policy(SE_OT_PEDAL, ForceJa);
+    assert!(
+        max_abs_diff(&der, &ja) < 1e-9,
+        "Derived should match ForceJa for the excited SE OT"
+    );
+    assert!(
+        max_abs_diff(&der, &lin) > 1e-3,
+        "Derived (JA) should differ from the linear tangent for the excited SE OT"
+    );
+}
+
+/// A bare transformer declares no core physics: `Derived` keeps it byte-identical
+/// to `ForceLinear`, but `ForceJa` can still force the JA root onto it.
+#[test]
+fn bare_transformer_stays_linear_under_derived() {
+    use pedalkernel::compiler::TransformerCorePolicy::*;
+    let der = render_policy(
+        BARE_XFMR_PEDAL,
+        Derived {
+            margin: pedalkernel::compiler::DEFAULT_CORE_MARGIN,
+        },
+    );
+    let lin = render_policy(BARE_XFMR_PEDAL, ForceLinear);
+    let ja = render_policy(BARE_XFMR_PEDAL, ForceJa);
+    assert!(
+        max_abs_diff(&der, &lin) < 1e-12,
+        "Derived must be byte-identical to ForceLinear for a no-core-physics transformer"
+    );
+    assert!(
+        max_abs_diff(&ja, &lin) > 1e-6,
+        "ForceJa must still override a bare transformer to the JA root"
+    );
+}

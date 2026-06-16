@@ -9,6 +9,7 @@
 //! 3. Assign sibling Q-leaves to blocks by which port nodes they touch
 //! 4. Validate: ≥2 blocks, each has reactive state, coupling is NL-free
 
+use super::compile::TransformerCorePolicy;
 use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrNode};
@@ -254,6 +255,7 @@ fn lower_block_stages(
     supply_voltage: f64,
     disable_iir: bool,
     init_hints: &[crate::dsl::InitHint],
+    core_policy: TransformerCorePolicy,
 ) -> Option<LoweredBlockStages> {
     let mut stages = Vec::new();
     let mut stage_plan_blocks = Vec::new();
@@ -329,6 +331,7 @@ fn lower_block_stages(
                 init_hints,
                 supply_voltage,
                 bias_node_voltages,
+                core_policy,
             )
             .ok()?;
             eprintln!("  [blockwise] block {bi} stage {si}: built");
@@ -2116,6 +2119,7 @@ pub(super) fn try_build_blockwise(
     disable_iir: bool,
     coupled_newton: bool,
     init_hints: &[crate::dsl::InitHint],
+    core_policy: TransformerCorePolicy,
 ) -> Option<Vec<BuiltStage>> {
     let mut plan = analyze_blockwise(edge_indices, graph)?;
 
@@ -2282,6 +2286,7 @@ pub(super) fn try_build_blockwise(
         supply_voltage,
         disable_iir,
         init_hints,
+        core_policy,
     )?;
 
     // ── Build coupling scattering matrix + package as BlockwiseStage ────────
