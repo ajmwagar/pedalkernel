@@ -29,7 +29,7 @@
 .model Ddet D(IS=1e-14)
 V_vcc vcc 0 15
 
-C_in in n1 1u
+C_in v_in n1 1u
 * U1 NE5532 non-inverting gain 2 (ideal opamp behavioral)
 B_u1 nu1 0 V = 2*V(n1)
 R_v2v nu1 nvin 30k
@@ -38,8 +38,8 @@ B_vca nvout 0 V = V(nvin) * pwr(10, -V(ncv)/0.66)
 C_mid nvout nm 1u
 * U2 NE5532 gain 2
 B_u2 nu2 0 V = 2*V(nm)
-C_out nu2 no 1u
-R_mk no 0 10k
+C_out nu2 v_out 1u
+R_mk v_out 0 10k
 
 * feed-forward detector: sens gain x20 -> rectify -> attack 10k/1u, release 91k/6.8u
 B_rect nrect 0 V = abs(V(n1))*20
@@ -49,11 +49,6 @@ C_env nenv 0 1u ic=0
 R_rel nenv 0 91k
 B_cv ncv 0 V = 0.25*V(nenv)
 
-* --- standalone inspection stimulus (harness replaces this) ---
-Vin in 0 SINE(0 0.1 1k)
-.control
-tran 20u 150m uic
-let g = maximum(abs(v(no)))/maximum(abs(v(n1)))
-print g
-.endc
+* --- standalone Vin + .control stripped; harness injects at v_in, reads V(v_out) ---
+.OPTIONS DELMAX=100e-6
 .end
