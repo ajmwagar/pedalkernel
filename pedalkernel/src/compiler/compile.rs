@@ -318,7 +318,6 @@ fn compile_subcircuit_equipment(
         supply_voltage: pedal.supplies.first().map_or(9.0, |s| s.config.voltage),
         lfos: Vec::new(),
         envelopes: Vec::new(),
-        slew_limiters: Vec::new(),
         bbds: Vec::new(),
         delay_lines: Vec::new(),
         springs: Vec::new(),

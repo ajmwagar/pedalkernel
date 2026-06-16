@@ -1370,7 +1370,6 @@ fn assemble_multi_nl_stage(
         subsample_counter: 0,
         iteration_budget_remaining: NR_ITERATION_BUDGET,
         prev_input: 0.0,
-        opamp_post_fx: None,
     })
 }
 

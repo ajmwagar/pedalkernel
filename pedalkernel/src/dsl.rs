@@ -1311,7 +1311,10 @@ fn opamp_type(input: &str) -> IResult<&str, OpAmpType> {
         value(OpAmpType::Rc4558, tag("rc4558")),
         value(OpAmpType::Lm308, tag("lm308")),
         value(OpAmpType::Lm741, tag("lm741")),
-        value(OpAmpType::Ne5532, tag("ne5532")),
+        value(
+            OpAmpType::Ne5532,
+            alt((tag("njm5532"), tag("ne5532"), tag("5532"))),
+        ),
         value(OpAmpType::Ca3080, tag("ca3080")),
         value(OpAmpType::Op07, tag("op07")),
     ))(input)
@@ -4135,6 +4138,21 @@ pedal "Auto Wah" {
     fn parse_opamp_lm308() {
         let (_, (c, _)) = component_def("U1: opamp(lm308)").unwrap();
         assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Lm308));
+    }
+
+    #[test]
+    fn parse_opamp_ne5532() {
+        let (_, (c, _)) = component_def("U1: opamp(ne5532)").unwrap();
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Ne5532));
+    }
+
+    #[test]
+    fn parse_opamp_njm5532_alias() {
+        // "njm5532" and bare "5532" are aliases for NE5532.
+        let (_, (c, _)) = component_def("U1: opamp(njm5532)").unwrap();
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Ne5532));
+        let (_, (c2, _)) = component_def("U2: opamp(5532)").unwrap();
+        assert_eq!(c2.kind.op_amp_type(), Some(OpAmpType::Ne5532));
     }
 
     #[test]

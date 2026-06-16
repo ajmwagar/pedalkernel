@@ -1494,9 +1494,6 @@ pub struct CompiledPedal {
     pub lfos: Vec<LfoBinding>,
     /// Envelope follower modulators.
     pub envelopes: Vec<EnvelopeBinding>,
-    /// Slew rate limiters for op-amp stages (one per op-amp in the circuit).
-    /// Applied to the signal path to model HF compression from slow op-amps.
-    pub slew_limiters: Vec<SlewRateLimiter>,
     /// BBD delay lines for delay/chorus/flanger effects.
     pub bbds: Vec<BbdDelayLine>,
     /// Generic delay lines (tape echo, digital delay, Karplus-Strong, etc.).
@@ -4271,14 +4268,6 @@ impl PedalProcessor for CompiledPedal {
             signal = (a + b) / 2.0; // Convert wave pair to voltage
         }
 
-        // Apply slew rate limiting from op-amps.
-        // Each op-amp in the circuit contributes its own slew rate limit.
-        // This is the mechanism that makes the LM308 RAT sound different
-        // from a TL072 RAT — the slow slew rate rounds off HF transients.
-        for slew in &mut self.slew_limiters {
-            signal = slew.process(signal);
-        }
-
         // Guard against NaN/Inf from NL solver divergence — prevents
         // permanent state corruption in the oversampler's IIR filters.
         if !signal.is_finite() {
@@ -4511,9 +4500,6 @@ impl PedalProcessor for CompiledPedal {
         for binding in &mut self.envelopes {
             binding.envelope.set_sample_rate(rate);
         }
-        for slew in &mut self.slew_limiters {
-            slew.set_sample_rate(rate);
-        }
         for bbd in &mut self.bbds {
             bbd.set_sample_rate(rate);
         }
@@ -4552,9 +4538,6 @@ impl PedalProcessor for CompiledPedal {
         }
         for binding in &mut self.envelopes {
             binding.envelope.reset();
-        }
-        for slew in &mut self.slew_limiters {
-            slew.reset();
         }
         for bbd in &mut self.bbds {
             bbd.reset();

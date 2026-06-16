@@ -101,7 +101,7 @@ pub fn flush_denormal(x: crate::Wave) -> crate::Wave {
 /// - `OpAmpRoot` (NL path): inside WDF scatter, before diode NR solver
 ///
 /// No heap allocations. All fields are scalars.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct NonIdealFxState {
     /// GBW lowpass coefficient: α = 2π·fc / (2π·fc + fs).
@@ -203,6 +203,54 @@ impl NonIdealFxState {
         let w = 2.0 * crate::math::PI * fc;
         self.gbw_coeff = w / (w + sample_rate);
     }
+
+    // ── Single source of truth: GBW / slew / rail primitives ──────────────
+    //
+    // These three `*_step` methods are the ONLY implementations of the
+    // op-amp single-pole GBW lowpass, the dV/dt slew clamp, and the tanh
+    // rail soft-clip in the entire crate. Every op-amp path — the post-FX
+    // path (`apply_nonideal_fx` / `process_post`), the in-loop linear gain
+    // stage (`BlackFeedbackStage`), the IIR stage, the WDF `OpAmpRoot` NL
+    // root, and the legacy `SlewRateLimiter` — routes through these.
+
+    /// Single-pole GBW lowpass step. Advances `gbw_state`.
+    #[inline]
+    pub fn gbw_step(&mut self, sample: crate::Wave) -> crate::Wave {
+        let out = self.gbw_coeff * sample + (1.0 - self.gbw_coeff) * self.gbw_state;
+        self.gbw_state = out;
+        out
+    }
+
+    /// dV/dt slew clamp toward `target` from the previous (real) output.
+    ///
+    /// This is THE dV/dt clamp. `prev_out` carries the actual limited output,
+    /// so when used in-loop the feedback senses the genuinely slew-limited
+    /// node. Advances `prev_out`.
+    #[inline]
+    pub fn slew_step(&mut self, target: crate::Wave) -> crate::Wave {
+        let dv = target - self.prev_out;
+        let out = if dv > self.max_dv {
+            self.prev_out + self.max_dv
+        } else if dv < -self.max_dv {
+            self.prev_out - self.max_dv
+        } else {
+            target
+        };
+        self.prev_out = out;
+        out
+    }
+
+    /// Asymmetric tanh rail soft-clip. Stateless. This is THE tanh rail.
+    #[inline]
+    pub fn rail_step(&self, sample: crate::Wave) -> crate::Wave {
+        if sample > 0.0 && self.v_rail_pos < crate::Wave::MAX {
+            self.v_rail_pos * crate::fast_math::fast_tanh(sample / self.v_rail_pos)
+        } else if sample < 0.0 && self.v_rail_neg < crate::Wave::MAX {
+            -self.v_rail_neg * crate::fast_math::fast_tanh(-sample / self.v_rail_neg)
+        } else {
+            sample
+        }
+    }
 }
 
 /// Apply NonIdealFx post-processing to a sample.
@@ -212,26 +260,11 @@ impl NonIdealFxState {
 /// No heap allocations, no branching on stage type.
 #[inline]
 pub fn apply_nonideal_fx(sample: crate::Wave, state: &mut NonIdealFxState) -> crate::Wave {
-    // GBW rolloff: single-pole lowpass
-    let mut out = state.gbw_coeff * sample + (1.0 - state.gbw_coeff) * state.gbw_state;
-    state.gbw_state = out;
-
-    // Slew rate limiting
-    let dv = out - state.prev_out;
-    if dv > state.max_dv {
-        out = state.prev_out + state.max_dv;
-    } else if dv < -state.max_dv {
-        out = state.prev_out - state.max_dv;
-    }
-    state.prev_out = out;
-
-    // Rail saturation: asymmetric tanh soft clip
-    if out > 0.0 && state.v_rail_pos < crate::Wave::MAX {
-        out = state.v_rail_pos * crate::fast_math::fast_tanh(out / state.v_rail_pos);
-    } else if out < 0.0 && state.v_rail_neg < crate::Wave::MAX {
-        out = -state.v_rail_neg * crate::fast_math::fast_tanh(-out / state.v_rail_neg);
-    }
-
+    // GBW rolloff → slew rate limiting → rail saturation, all via the shared
+    // single-source-of-truth primitives on NonIdealFxState.
+    let out = state.gbw_step(sample);
+    let out = state.slew_step(out);
+    let out = state.rail_step(out);
     flush_denormal(out)
 }
 
@@ -1315,28 +1348,25 @@ impl OpAmpWdfAdaptor {
         self.zf
             .set_incident_with_state(a2, &mut self.zf_runtime_state);
 
-        // Apply op-amp non-idealities: GBW rolloff + slew rate + rail clipping
+        // Apply op-amp non-idealities: GBW rolloff → hard rail clip → slew rate.
+        // GBW and the dV/dt slew use the shared NonIdealFxState primitives (no
+        // copy of that math); the supply-rail clip stays a hard clamp here (not
+        // the tanh soft-clip of the post-FX path), matching the original.
         let v_max = self.opamp.v_max();
-        let gbw_coeff = self.opamp.gbw_coeff();
+        let mut fx = NonIdealFxState {
+            gbw_coeff: self.opamp.gbw_coeff(),
+            gbw_state: self.gbw_state,
+            max_dv: self.opamp.model.slew_rate * 1e6 / self.opamp.sample_rate(),
+            prev_out: self.prev_out,
+            ..NonIdealFxState::default()
+        };
 
-        // GBW rolloff: single-pole LPF at f_cl = GBW / gain
-        let mut out = gbw_coeff * v_out + (1.0 - gbw_coeff) * self.gbw_state;
-        self.gbw_state = out;
-
-        // Hard clip at supply rails
+        let mut out = fx.gbw_step(v_out);
         out = out.clamp(-v_max, v_max);
+        out = fx.slew_step(out);
 
-        // Slew rate limiting
-        let sr = self.opamp.model.slew_rate;
-        let fs = self.opamp.sample_rate();
-        let max_dv = sr * 1e6 / fs;
-        let dv = out - self.prev_out;
-        if dv > max_dv {
-            out = self.prev_out + max_dv;
-        } else if dv < -max_dv {
-            out = self.prev_out - max_dv;
-        }
-        self.prev_out = out;
+        self.gbw_state = fx.gbw_state;
+        self.prev_out = fx.prev_out;
 
         flush_denormal(out)
     }
@@ -4471,12 +4501,6 @@ pub struct MultiNlStage {
     pub feedback_opamp: Option<OpAmpRoot>,
     /// Pot ID that controls feedback opamp gain (if any).
     pub feedback_pot_id: Option<String>,
-    /// Post-scattering non-ideality filter for op-amps absorbed via nullor
-    /// stamps. Applies supply rail clamping and slew rate limiting to the
-    /// extracted output node voltage. `None` for stages whose output is
-    /// not dominated by an op-amp, or stages where we cannot identify a
-    /// specific op-amp as the audio output source.
-    pub opamp_post_fx: Option<crate::elements::OpAmpPostFx>,
     /// Linearized OTA data for gm-based scattering recompute.
     /// When Some, the OTA's transconductance is stamped into the MNA as a linear
     /// conductance. When the envelope changes gain, we delta-update the MNA and
@@ -4709,6 +4733,50 @@ impl IirData {
         }
         y
     }
+
+    /// Process one sample with the op-amp output non-ideality folded **inside**
+    /// the feedback recurrence (Direct Form I).
+    ///
+    /// For a single-op-amp active filter (MFB / Sallen-Key) the op-amp output
+    /// node *is* the biquad output, and the reactive feedback elements charge
+    /// from that physical node. So the slew-rate clamp and the supply-rail
+    /// soft-clip act on the value that is then fed back through `a_coeffs`,
+    /// not on a separate post-filter copy. This routine:
+    ///
+    /// 1. computes the *demanded* (ideal) biquad output `y` from the recurrence,
+    /// 2. applies the op-amp output non-ideality via the shared
+    ///    [`NonIdealFxState`] (dV/dt slew clamp + tanh rail), and
+    /// 3. commits the **limited** value into `y_hist[0]` — so next sample's
+    ///    denominator feedback senses the genuinely slew/rail-limited node.
+    ///
+    /// GBW is deliberately **not** folded into the loop here (the op-amp's own
+    /// finite-bandwidth pole is left to the post path) — see `IirStage::process`
+    /// for the rationale. When the signal is small/slow (slew never engages, no
+    /// rail), the limited value equals `y` exactly, so `y_hist[0]` receives the
+    /// ideal value and the linear filter response is bit-identical to `process`.
+    #[inline]
+    pub fn process_inloop(&mut self, input: crate::Wave, fx: &mut NonIdealFxState) -> crate::Wave {
+        let order = self.x_hist.len();
+        let mut y = self.b_coeffs[0] * input;
+        for k in 0..order {
+            y += self.b_coeffs.get(k + 1).copied().unwrap_or(0.0) * self.x_hist[k];
+            y -= self.a_coeffs[k + 1] * self.y_hist[k];
+        }
+        // Op-amp output node non-ideality, in-loop: slew clamp then rail clip.
+        // `prev_out` carries the real limited node, so the dV/dt clamp tracks the
+        // physical output, and the limited value is what gets fed back.
+        let slewed = fx.slew_step(y);
+        let limited = flush_denormal(fx.rail_step(slewed));
+        for k in (1..order).rev() {
+            self.x_hist[k] = self.x_hist[k - 1];
+            self.y_hist[k] = self.y_hist[k - 1];
+        }
+        if order > 0 {
+            self.x_hist[0] = input;
+            self.y_hist[0] = limited;
+        }
+        limited
+    }
 }
 
 /// Standalone IIR biquad stage compiled from a linear rigid MNA.
@@ -4885,16 +4953,9 @@ pub struct IirStage {
     /// Sample rate (needed for GBW recomputation on gain change).
     pub sample_rate: crate::Wave,
     // ── NonIdealFx runtime state ──
-    /// GBW single-pole IIR state (for OpAmpBandwidth).
-    gbw_state: crate::Wave,
-    /// GBW lowpass coefficient: α = 2π·fc / (2π·fc + fs) where fc = GBW/gain.
-    gbw_coeff: crate::Wave,
-    /// Previous output sample (for slew rate limiting).
-    prev_out: crate::Wave,
-    /// Maximum dV per sample from slew rate (slew_rate / sample_rate).
-    max_dv_per_sample: crate::Wave,
-    /// Rail saturation voltage (from RailSaturation).
-    v_max: crate::Wave,
+    /// Shared GBW/slew/rail post-processing state — same single-source-of-truth
+    /// struct used by `BlackFeedbackStage` and the post-FX path.
+    fx_state: NonIdealFxState,
     /// Stored GBW from OpAmpBandwidth (for recomputation when gain changes).
     stored_gbw: crate::Wave,
 }
@@ -4918,11 +4979,7 @@ impl IirStage {
             output_binding: None,
             biquad_table: None,
             sample_rate,
-            gbw_state: 0.0,
-            gbw_coeff: 1.0, // passthrough (no GBW limiting)
-            prev_out: 0.0,
-            max_dv_per_sample: crate::Wave::MAX,
-            v_max: crate::Wave::MAX,
+            fx_state: NonIdealFxState::default(),
             stored_gbw: 0.0,
         }
     }
@@ -4986,12 +5043,13 @@ impl IirStage {
                     let gain = self.iir.dc_gain().abs().max(1.0);
                     let fc = gbw / gain;
                     let w = 2.0 * crate::math::PI * fc;
-                    self.gbw_coeff = w / (w + sample_rate);
+                    self.fx_state.gbw_coeff = w / (w + sample_rate);
                     // slew_rate from SPICE model is in V/µs — convert to V/s
-                    self.max_dv_per_sample = slew_rate * 1e6 / sample_rate;
+                    self.fx_state.max_dv = slew_rate * 1e6 / sample_rate;
                 }
                 NonIdealFx::RailSaturation { v_max } => {
-                    self.v_max = *v_max;
+                    self.fx_state.v_rail_pos = *v_max;
+                    self.fx_state.v_rail_neg = *v_max;
                 }
             }
         }
@@ -5000,27 +5058,24 @@ impl IirStage {
 
     #[inline]
     pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
-        let mut out = self.iir.process(input * self.compensation);
-
-        // GBW rolloff: single-pole lowpass
-        out = self.gbw_coeff * out + (1.0 - self.gbw_coeff) * self.gbw_state;
-        self.gbw_state = out;
-
-        // Slew rate limiting
-        let dv = out - self.prev_out;
-        if dv > self.max_dv_per_sample {
-            out = self.prev_out + self.max_dv_per_sample;
-        } else if dv < -self.max_dv_per_sample {
-            out = self.prev_out - self.max_dv_per_sample;
-        }
-        self.prev_out = out;
-
-        // Rail saturation: tanh soft clip
-        if self.v_max < crate::Wave::MAX {
-            out = self.v_max * crate::fast_math::fast_tanh(out / self.v_max);
-        }
-
-        flush_denormal(out)
+        // For a single-op-amp active filter (MFB / Sallen-Key) the op-amp output
+        // node IS the biquad output: the feedback caps charge from that physical
+        // node, so the slew/rail non-ideality acts INSIDE the recurrence. The
+        // slew-limited / rail-clipped value is committed to `y_hist[0]` so the
+        // denominator feedback senses the real op-amp output node next sample
+        // (out-of-loop post-FX would let the filter state evolve from the IDEAL,
+        // un-slewed output — the bug this fixes).
+        let opamp_out = self
+            .iir
+            .process_inloop(input * self.compensation, &mut self.fx_state);
+        // GBW stays OUT of the loop. The op-amp's own finite-bandwidth pole is a
+        // unity-DC single-pole LPF; folding it into the denominator would add an
+        // extra in-loop pole that shifts the designed filter's cutoff/Q and
+        // colours the passband (the biquad already carries the intended rolloff).
+        // Applied here as a post step it models the residual output-bandwidth
+        // limit without altering the linear filter response. (Slew + rails are
+        // genuine large-signal output-node effects and stay in-loop above.)
+        flush_denormal(self.fx_state.gbw_step(opamp_out))
     }
 
     /// Check if this stage contains a pot with the given component ID.
@@ -5071,7 +5126,7 @@ impl IirStage {
                 let dc_gain = self.iir.dc_gain().abs().max(1.0);
                 let fc = self.stored_gbw / dc_gain;
                 let w = 2.0 * crate::math::PI * fc;
-                self.gbw_coeff = w / (w + self.sample_rate);
+                self.fx_state.gbw_coeff = w / (w + self.sample_rate);
             }
             return;
         }
@@ -5092,7 +5147,7 @@ impl IirStage {
                 let gain_abs = self.iir.dc_gain().abs().max(1.0);
                 let fc = self.stored_gbw / gain_abs;
                 let w = 2.0 * crate::math::PI * fc;
-                self.gbw_coeff = w / (w + self.sample_rate);
+                self.fx_state.gbw_coeff = w / (w + self.sample_rate);
             }
             return;
         }
@@ -5121,7 +5176,7 @@ impl IirStage {
                 let gain_abs = new_gain.abs().max(1.0);
                 let fc = self.stored_gbw / gain_abs;
                 let w = 2.0 * crate::math::PI * fc;
-                self.gbw_coeff = w / (w + self.sample_rate);
+                self.fx_state.gbw_coeff = w / (w + self.sample_rate);
             }
             return;
         }
@@ -5141,7 +5196,7 @@ impl IirStage {
             let gain_abs = dc_gain.abs().max(1.0);
             let fc = self.stored_gbw / gain_abs;
             let w = 2.0 * crate::math::PI * fc;
-            self.gbw_coeff = w / (w + self.sample_rate);
+            self.fx_state.gbw_coeff = w / (w + self.sample_rate);
         }
     }
 }
@@ -5358,11 +5413,26 @@ impl BlackFeedbackStage {
         }
     }
 
-    /// Process one sample: gain × input → NonIdealFx → output.
+    /// Process one sample: in-loop GBW → slew → rails around the closed-form gain.
+    ///
+    /// `demand = gain * input` is the closed-form linear target — this preserves
+    /// the closed-loop DC/low-frequency gain EXACTLY: when `|demand - prev_out|`
+    /// is within the slew limit and the GBW pole is above Nyquist, the chain is
+    /// transparent and `out == demand`.
+    ///
+    /// The in-loop coupling lives in `slew_step`: it clamps the change of the
+    /// *real* (limited) output node and the same `prev_out` is the feedback the
+    /// next sample sees. During a slew event the stage runs effectively
+    /// open-loop, ramping at the slew limit regardless of input, then closed-loop
+    /// gain resumes once the output catches up. Same shared primitives as the
+    /// post-FX `IirStage` path — there is no second copy of this math.
     #[inline]
     pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
-        let gained = input * self.gain();
-        flush_denormal(apply_nonideal_fx(gained, &mut self.fx_state))
+        let demand = input * self.gain();
+        let out = self.fx_state.gbw_step(demand);
+        let out = self.fx_state.slew_step(out);
+        let out = self.fx_state.rail_step(out);
+        flush_denormal(out)
     }
 }
 
@@ -6119,16 +6189,6 @@ impl MultiNlStage {
                     b_passive[output_port - n_nl]
                 };
                 (a_out + b_out) / 2.0
-            };
-
-            // 6b. Apply op-amp post-FX (supply rail clamp + slew rate).
-            // The VCVS stamp in MNA already captured Aol and Ro; rails and
-            // slew are the non-LTI behaviours that must live outside the
-            // scattering matrix.
-            let raw_out = if let Some(ref mut post_fx) = self.opamp_post_fx {
-                post_fx.process(raw_out)
-            } else {
-                raw_out
             };
 
             // 7. DC blocker for stages with VCC supply injection.
@@ -9320,6 +9380,124 @@ impl BlockwiseStage {
             self.feedback_port_map.len(),
             max_output_coeff,
         )
+    }
+}
+
+#[cfg(test)]
+mod iir_inloop_slew_tests {
+    use super::*;
+
+    /// Build a normalized RBJ bandpass biquad (a0-normalized Direct Form I).
+    /// High Q so the `a_coeffs` feedback is significant — this is precisely
+    /// what makes the in-loop path differ from slewing the ideal output.
+    fn resonant_bandpass(fc: crate::Wave, q: crate::Wave, fs: crate::Wave) -> IirData {
+        let w0 = 2.0 * crate::math::PI * fc / fs;
+        let cos_w0 = crate::math::cos(w0);
+        let sin_w0 = crate::math::sin(w0);
+        let alpha = sin_w0 / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        // RBJ bandpass (constant-skirt, peak gain = Q): b = [alpha, 0, -alpha].
+        let b = vec![alpha / a0, 0.0, -alpha / a0];
+        let a = vec![1.0, (-2.0 * cos_w0) / a0, (1.0 - alpha) / a0];
+        IirData::new(b, a, fs)
+    }
+
+    /// Slow-slew, rail-limited op-amp: slew and rails active, GBW transparent.
+    fn slow_slew_fx() -> NonIdealFxState {
+        NonIdealFxState {
+            max_dv: 0.02,    // dV/dt clamp engages on a hard transient
+            v_rail_pos: 0.7, // supply-rail soft-clip ceiling
+            v_rail_neg: 0.7,
+            // gbw_coeff stays 1.0 (default) → GBW post-path transparent.
+            ..NonIdealFxState::default()
+        }
+    }
+
+    const FS: crate::Wave = 48_000.0;
+    const FC: crate::Wave = 1_000.0;
+    const Q: crate::Wave = 4.0;
+
+    /// Assertion 1: a hard transient drives the in-loop feedback away from the
+    /// post-FX reference. If `process_inloop` were ever reverted to feed the
+    /// *ideal* `y` back through `a_coeffs`, this divergence would collapse and
+    /// the test would fail — that is the regression being locked in.
+    #[test]
+    fn iir_inloop_slew_diverges_from_postfx_under_hard_transient() {
+        let mut sub = resonant_bandpass(FC, Q, FS);
+        let mut reference = resonant_bandpass(FC, Q, FS);
+        let mut fx_sub = slow_slew_fx();
+        let mut fx_ref = slow_slew_fx();
+
+        let mut max_div: crate::Wave = 0.0;
+        // 0.8-amplitude step held — a hard transient that exercises slew + rail.
+        for _ in 0..400 {
+            let x = 0.8;
+            let out_inloop = sub.process_inloop(x, &mut fx_sub);
+            // Post-FX reference: slew/rail the *ideal* biquad output independently.
+            let y = reference.process(x);
+            let slewed = fx_ref.slew_step(y);
+            let out_post = fx_ref.rail_step(slewed);
+            max_div = max_div.max((out_inloop - out_post).abs());
+        }
+
+        assert!(
+            max_div > 1e-3,
+            "in-loop output never diverged from post-FX reference (max |Δ| = {max_div:e}); \
+             process_inloop appears to feed the ideal output back instead of the limited node"
+        );
+    }
+
+    /// Assertion 2: under a tiny, slow signal the slew clamp never engages and
+    /// no rail clips, so the limited node equals the ideal `y` exactly and the
+    /// linear filter response is preserved bit-for-bit vs the post-FX path.
+    #[test]
+    fn iir_inloop_bit_identical_under_small_slow_signal() {
+        let mut sub = resonant_bandpass(FC, Q, FS);
+        let mut reference = resonant_bandpass(FC, Q, FS);
+        let mut fx_sub = slow_slew_fx();
+        let mut fx_ref = slow_slew_fx();
+
+        let mut max_diff: crate::Wave = 0.0;
+        // 1e-4 amplitude, slow (50 Hz) — never approaches max_dv (0.02) or rails.
+        for n in 0..2000 {
+            let phase = 2.0 * crate::math::PI * 50.0 * (n as crate::Wave) / FS;
+            let x = 1e-4 * crate::math::sin(phase);
+            let out_inloop = sub.process_inloop(x, &mut fx_sub);
+            let y = reference.process(x);
+            let slewed = fx_ref.slew_step(y);
+            let out_post = fx_ref.rail_step(slewed);
+            max_diff = max_diff.max((out_inloop - out_post).abs());
+        }
+
+        assert!(
+            max_diff < 1e-12,
+            "linear (small/slow) response not preserved in-loop: max |Δ| = {max_diff:e}"
+        );
+    }
+
+    /// Assertion 3: over the hard burst every in-loop output is finite and the
+    /// per-sample step obeys the dV/dt clamp (rail_step is a contraction, so it
+    /// cannot widen the step). Proves the slew constraint governs the fed-back
+    /// node.
+    #[test]
+    fn iir_inloop_obeys_slew_bound_and_stays_finite() {
+        let mut sub = resonant_bandpass(FC, Q, FS);
+        let mut fx_sub = slow_slew_fx();
+        let max_dv = fx_sub.max_dv;
+
+        let mut prev = 0.0;
+        for n in 0..400 {
+            // 1 kHz sine at 0.8 amplitude: a continually-demanding transient.
+            let phase = 2.0 * crate::math::PI * FC * (n as crate::Wave) / FS;
+            let out = sub.process_inloop(0.8 * crate::math::sin(phase), &mut fx_sub);
+            assert!(out.is_finite(), "in-loop output non-finite at sample {n}");
+            assert!(
+                (out - prev).abs() <= max_dv + 1e-9,
+                "dV/dt clamp violated at sample {n}: |Δ| = {} > max_dv = {max_dv}",
+                (out - prev).abs()
+            );
+            prev = out;
+        }
     }
 }
 
