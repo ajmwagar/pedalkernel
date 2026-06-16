@@ -139,6 +139,18 @@ pub struct ComparisonMetrics {
     pub normalized_rms_error_db: f64,
     pub peak_error_db: f64,
     pub thd_error_db: Option<f64>,
+    /// THD+N error (includes broadband noise/intermod). None when fundamental
+    /// frequency is not provided.  `#[serde(default)]` for forward compat.
+    #[serde(default)]
+    pub thd_plus_n_error_db: Option<f64>,
+    /// Maximum per-harmonic magnitude error in dB.  None when fundamental
+    /// frequency is not provided.  `#[serde(default)]` for forward compat.
+    #[serde(default)]
+    pub harmonic_mag_error_db: Option<f64>,
+    /// Even/odd ratio error in dB.  None when fundamental frequency is not
+    /// provided.  `#[serde(default)]` for forward compat.
+    #[serde(default)]
+    pub even_odd_ratio_error_db: Option<f64>,
     /// Audio-band spectral error (capped at the audio Nyquist) — the gating value.
     pub spectral_error_db: f64,
     /// Full-band (raw) spectral error up to the data Nyquist. Informational.
@@ -155,6 +167,9 @@ impl From<ComparisonResult> for ComparisonMetrics {
             normalized_rms_error_db: cr.normalized_rms_error_db,
             peak_error_db: cr.peak_error_db,
             thd_error_db: cr.thd_error_db,
+            thd_plus_n_error_db: cr.thd_plus_n_error_db,
+            harmonic_mag_error_db: cr.harmonic_mag_error_db,
+            even_odd_ratio_error_db: cr.even_odd_ratio_error_db,
             spectral_error_db: cr.spectral_error_db,
             spectral_error_full_db: cr.spectral_error_full_db,
             even_odd_ratio_db: cr.even_odd_ratio_db,

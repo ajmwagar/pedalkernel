@@ -272,6 +272,133 @@ pub fn dc_drift_mv(signal: &[f64], sample_rate: f64, window_ms: f64) -> f64 {
     max_dc * 1000.0 // Convert to mV
 }
 
+/// Compute THD+N (Total Harmonic Distortion plus Noise) in dB.
+///
+/// THD+N = 10 * log10((total_power - fundamental_power) / fundamental_power)
+///
+/// Unlike [`thd_db`], which sums only discrete harmonic bins, THD+N includes
+/// broadband noise and intermodulation products across ALL bins except the
+/// fundamental.  Uses Blackman window for spectral analysis.
+///
+/// The fundamental exclusion zone is ±3 bins to prevent Blackman window
+/// sidelobes from artificially inflating the noise estimate.
+pub fn thd_plus_n_db(signal: &[f64], fundamental_hz: f64, sample_rate: f64) -> f64 {
+    const FUND_EXCL_BINS: usize = 3;
+
+    let spectrum = compute_spectrum(signal);
+    let bin_hz = sample_rate / signal.len() as f64;
+
+    let fund_bin = (fundamental_hz / bin_hz).round() as usize;
+    if fund_bin >= spectrum.len() {
+        return -200.0;
+    }
+
+    // Sum power in the exclusion zone around the fundamental to get
+    // the reference fundamental power.
+    let excl_lo = fund_bin.saturating_sub(FUND_EXCL_BINS);
+    let excl_hi = (fund_bin + FUND_EXCL_BINS + 1).min(spectrum.len());
+    let fund_power: f64 = spectrum[excl_lo..excl_hi].iter().map(|&x| x.powi(2)).sum();
+
+    if fund_power < 1e-30 {
+        return -200.0;
+    }
+
+    // Total power over all bins.
+    let total_power: f64 = spectrum.iter().map(|&x| x.powi(2)).sum();
+    // Noise+harmonic power = total minus the fundamental exclusion zone.
+    let noise_power = total_power - fund_power;
+
+    if noise_power <= 0.0 {
+        return -200.0;
+    }
+
+    10.0 * (noise_power / fund_power).log10()
+}
+
+/// Compute THD+N error between WDF and reference in dB.
+///
+/// Returns the absolute difference in THD+N between the two signals.
+pub fn thd_plus_n_error_db(
+    wdf: &[f64],
+    reference: &[f64],
+    fundamental_hz: f64,
+    sample_rate: f64,
+) -> f64 {
+    let wdf_tpn = thd_plus_n_db(wdf, fundamental_hz, sample_rate);
+    let ref_tpn = thd_plus_n_db(reference, fundamental_hz, sample_rate);
+    (wdf_tpn - ref_tpn).abs()
+}
+
+/// Compute the maximum harmonic magnitude error between WDF and reference in dB.
+///
+/// For each harmonic h in 2..=n_harmonics, reads both spectra at the h-th
+/// harmonic bin and computes `|20*log10(wdf_h) - 20*log10(ref_h)|`.  Returns
+/// the MAX error over harmonics where **both** bins exceed the −100 dBFS
+/// absolute floor (same gate as [`spectral_error_db`]).
+///
+/// This is a targeted complement to [`spectral_error_db`]: it scores only
+/// the discrete harmonic bins, making it meaningful at high-drive levels and
+/// immune to broadband noise grass between harmonics.
+pub fn harmonic_mag_error_db(
+    wdf: &[f64],
+    reference: &[f64],
+    fundamental_hz: f64,
+    sample_rate: f64,
+    n_harmonics: usize,
+) -> f64 {
+    const ABS_FLOOR_DB: f64 = -100.0;
+
+    let n = wdf.len().min(reference.len());
+    if n == 0 {
+        return 0.0;
+    }
+
+    let wdf_spec = compute_spectrum(&wdf[..n]);
+    let ref_spec = compute_spectrum(&reference[..n]);
+    let bin_hz = sample_rate / n as f64;
+
+    let mut max_error = 0.0_f64;
+
+    for h in 2..=n_harmonics {
+        let harm_freq = fundamental_hz * h as f64;
+        if harm_freq > sample_rate / 2.0 {
+            break;
+        }
+        let harm_bin = (harm_freq / bin_hz).round() as usize;
+        if harm_bin >= wdf_spec.len() || harm_bin >= ref_spec.len() {
+            continue;
+        }
+
+        let wdf_db = 20.0 * (wdf_spec[harm_bin] + 1e-30).log10();
+        let ref_db = 20.0 * (ref_spec[harm_bin] + 1e-30).log10();
+
+        // Only score bins where both signals are above the noise floor.
+        if wdf_db > ABS_FLOOR_DB && ref_db > ABS_FLOOR_DB {
+            let error = (wdf_db - ref_db).abs();
+            max_error = max_error.max(error);
+        }
+    }
+
+    max_error
+}
+
+/// Compute even/odd harmonic ratio error between WDF and reference in dB.
+///
+/// Returns the absolute difference in [`even_odd_ratio_db`] between the two
+/// signals.  Near zero for two signals with the same harmonic character;
+/// large when one has asymmetric and the other symmetric distortion.
+pub fn even_odd_ratio_error_db(
+    wdf: &[f64],
+    reference: &[f64],
+    fundamental_hz: f64,
+    sample_rate: f64,
+    n_harmonics: usize,
+) -> f64 {
+    let wdf_ratio = even_odd_ratio_db(wdf, fundamental_hz, sample_rate, n_harmonics);
+    let ref_ratio = even_odd_ratio_db(reference, fundamental_hz, sample_rate, n_harmonics);
+    (wdf_ratio - ref_ratio).abs()
+}
+
 /// Compute magnitude spectrum using Blackman window.
 fn compute_spectrum(signal: &[f64]) -> Vec<f64> {
     let n = signal.len();
@@ -307,6 +434,15 @@ pub struct ComparisonResult {
     pub normalized_rms_error_db: f64,
     pub peak_error_db: f64,
     pub thd_error_db: Option<f64>,
+    /// THD+N error between WDF and reference in dB.  None when fundamental_hz
+    /// is not provided.
+    pub thd_plus_n_error_db: Option<f64>,
+    /// Maximum per-harmonic magnitude error in dB.  None when fundamental_hz
+    /// is not provided.
+    pub harmonic_mag_error_db: Option<f64>,
+    /// Even/odd ratio error between WDF and reference in dB.  None when
+    /// fundamental_hz is not provided.
+    pub even_odd_ratio_error_db: Option<f64>,
     /// Spectral error within the audio band (capped at the audio Nyquist by the
     /// production runners). This is the value checked against pass criteria.
     pub spectral_error_db: f64,
@@ -333,6 +469,24 @@ impl ComparisonResult {
                 return false;
             }
         }
+        if let (Some(v), Some(t)) = (self.thd_plus_n_error_db, criteria.thd_plus_n_error_db) {
+            if v > t {
+                return false;
+            }
+        }
+        if let (Some(v), Some(t)) = (self.harmonic_mag_error_db, criteria.harmonic_mag_error_db) {
+            if v > t {
+                return false;
+            }
+        }
+        if let (Some(v), Some(t)) = (
+            self.even_odd_ratio_error_db,
+            criteria.even_odd_ratio_error_db,
+        ) {
+            if v > t {
+                return false;
+            }
+        }
         if self.spectral_error_db > criteria.spectral_error_db.unwrap_or(f64::INFINITY) {
             return false;
         }
@@ -353,17 +507,31 @@ pub fn compare(
     fundamental_hz: Option<f64>,
 ) -> ComparisonResult {
     let thd_err = fundamental_hz.map(|f| thd_error_db(wdf, reference, f, sample_rate));
+    let tpn_err =
+        fundamental_hz.map(|f| thd_plus_n_error_db(wdf, reference, f, sample_rate));
+    let harm_mag_err =
+        fundamental_hz.map(|f| harmonic_mag_error_db(wdf, reference, f, sample_rate, 10));
+    let eo_ratio_err =
+        fundamental_hz.map(|f| even_odd_ratio_error_db(wdf, reference, f, sample_rate, 10));
     let even_odd = fundamental_hz.map(|f| even_odd_ratio_db(wdf, f, sample_rate, 10));
 
     ComparisonResult {
         normalized_rms_error_db: normalized_rms_error_db(wdf, reference),
         peak_error_db: peak_error_db(wdf, reference),
         thd_error_db: thd_err,
+        thd_plus_n_error_db: tpn_err,
+        harmonic_mag_error_db: harm_mag_err,
+        even_odd_ratio_error_db: eo_ratio_err,
         spectral_error_db: spectral_error_db(wdf, reference, sample_rate, None),
         // Full-band (raw) spectral error up to the data Nyquist. The production
         // runners overwrite `spectral_error_db` with the audio-band cap, but
         // leave this raw value intact for display.
-        spectral_error_full_db: spectral_error_db(wdf, reference, sample_rate, Some(sample_rate / 2.0)),
+        spectral_error_full_db: spectral_error_db(
+            wdf,
+            reference,
+            sample_rate,
+            Some(sample_rate / 2.0),
+        ),
         even_odd_ratio_db: even_odd,
         dc_drift_mv: Some(dc_drift_mv(wdf, sample_rate, 100.0)),
     }
@@ -451,6 +619,118 @@ mod tests {
             err < 3.0,
             "Noise-floor mismatch should produce < 3 dB spectral error, got {err:.1} dB. \
              Check that the absolute noise-floor gate in spectral_error_db is working."
+        );
+    }
+
+    /// THD+N of a hard-clipped sine must be much higher than a clean sine.
+    ///
+    /// Why this matters: THD+N includes broadband noise and intermod across all
+    /// bins, so a hard clipper that produces strong harmonics AND intermod
+    /// noise should score significantly higher than a pure sine.
+    #[test]
+    fn thd_plus_n_clipped_sine_much_higher_than_clean() {
+        let sr = 48000.0;
+        let clean: Vec<f64> = (0..48000)
+            .map(|i| (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        let clipped: Vec<f64> = clean.iter().map(|&x| x.clamp(-0.3, 0.3)).collect();
+
+        let clean_tpn = thd_plus_n_db(&clean, 1000.0, sr);
+        let clipped_tpn = thd_plus_n_db(&clipped, 1000.0, sr);
+
+        assert!(
+            clipped_tpn > clean_tpn + 10.0,
+            "Clipped sine THD+N ({clipped_tpn:.1} dB) should be >10 dB higher than clean ({clean_tpn:.1} dB)"
+        );
+    }
+
+    /// harmonic_mag_error_db ~0 when wdf == ref, large when one harmonic differs by ~20 dB.
+    ///
+    /// Why this matters: the metric must be sensitive to per-harmonic level
+    /// mismatches that matter for circuit accuracy but immune to noise in bins
+    /// where both signals are below −100 dBFS.
+    #[test]
+    fn harmonic_mag_error_zero_for_identical_large_for_mismatch() {
+        let sr = 48000.0;
+        let n = 48000_usize;
+        let f = 1000.0_f64;
+
+        // Shared base: fundamental + three harmonics at known levels.
+        let base: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr;
+                (2.0 * std::f64::consts::PI * f * t).sin()
+                    + 0.1 * (2.0 * std::f64::consts::PI * 2.0 * f * t).sin()
+                    + 0.05 * (2.0 * std::f64::consts::PI * 3.0 * f * t).sin()
+            })
+            .collect();
+
+        // Identical signals → error ~0.
+        let err_same = harmonic_mag_error_db(&base, &base, f, sr, 10);
+        assert!(
+            err_same < 1.0,
+            "Identical signals should give ~0 dB harmonic_mag_error, got {err_same:.2} dB"
+        );
+
+        // WDF with 2nd harmonic reduced by ~20 dB (0.1 → 0.01).
+        let wdf_altered: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr;
+                (2.0 * std::f64::consts::PI * f * t).sin()
+                    + 0.01 * (2.0 * std::f64::consts::PI * 2.0 * f * t).sin()
+                    + 0.05 * (2.0 * std::f64::consts::PI * 3.0 * f * t).sin()
+            })
+            .collect();
+
+        let err_altered = harmonic_mag_error_db(&wdf_altered, &base, f, sr, 10);
+        assert!(
+            err_altered >= 15.0,
+            "~20 dB h2 level change should give >=15 dB harmonic_mag_error, got {err_altered:.2} dB"
+        );
+    }
+
+    /// even_odd_ratio_error_db ~0 for identical signals, large when symmetry differs.
+    ///
+    /// Why this matters: push-pull vs single-ended topologies differ in their
+    /// even/odd balance; this metric captures that difference.
+    #[test]
+    fn even_odd_ratio_error_zero_same_large_when_symmetry_differs() {
+        let sr = 48000.0;
+        let n = 48000_usize;
+        let f = 1000.0_f64;
+
+        // Asymmetric distortion: strong even harmonics (characteristic of single-ended).
+        let asymmetric: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr;
+                (2.0 * std::f64::consts::PI * f * t).sin()
+                    + 0.3 * (2.0 * std::f64::consts::PI * 2.0 * f * t).sin()
+                    + 0.05 * (2.0 * std::f64::consts::PI * 3.0 * f * t).sin()
+            })
+            .collect();
+
+        // Symmetric distortion: strong odd harmonics only (characteristic of push-pull).
+        let symmetric: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / sr;
+                (2.0 * std::f64::consts::PI * f * t).sin()
+                    + 0.01 * (2.0 * std::f64::consts::PI * 2.0 * f * t).sin()
+                    + 0.3 * (2.0 * std::f64::consts::PI * 3.0 * f * t).sin()
+            })
+            .collect();
+
+        // Identical pair → error ~0.
+        let err_same = even_odd_ratio_error_db(&asymmetric, &asymmetric, f, sr, 10);
+        assert!(
+            err_same < 1.0,
+            "Identical signals should give ~0 dB even_odd_ratio_error, got {err_same:.2} dB"
+        );
+
+        // Asymmetric vs symmetric → error must be large.
+        let err_diff = even_odd_ratio_error_db(&symmetric, &asymmetric, f, sr, 10);
+        assert!(
+            err_diff > 10.0,
+            "Asymmetric vs symmetric should give >10 dB even_odd_ratio_error, got {err_diff:.2} dB"
         );
     }
 
