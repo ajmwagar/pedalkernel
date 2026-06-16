@@ -1,0 +1,109 @@
+* ============================================================================
+* American Tube Tape Channel — SPICE reference deck at default controls
+* ============================================================================
+* Mirrors circuits/product/american_tube_tape_channel.pedal at its default
+* operating point: a 12AX7 common-cathode tube front end, an active record
+* driver, a voltage-driven Jiles-Atherton tape-head shunt, playback tilt, and
+* output trim.
+*
+* Defaults:
+*   Drive=0.35 audio taper -> Rdrive ~= 13.8k, gain ~= -(10k+13.8k)/1k = -23.8
+*   Bias=0.55 -> +0.10 V DC offset through 1M
+*   Tone=0.60 -> 150k shunt
+*   Output=0.75 -> 0.75x output pickoff
+* ============================================================================
+
+.param DRIVE_GAIN=23.8
+.param BIAS_V=0.10
+.param TONE_R=150k
+.param OUT_GAIN=0.75
+
+* B+ supply.
+Vb bplus 0 DC 250
+
+* 12AX7 tube front end.
+C_in    v_in    n_grid 22n
+R_grid  n_grid  0      1Meg
+R_plate bplus   n_plate 100k
+X1 n_plate n_grid n_cath TRIODE_12AX7
+R_cath n_cath 0 1.5k
+C_cath n_cath 0 25u
+C_tube_out n_plate n_tube_ac 22n
+
+* Active record-driver equivalent.
+Bdrv n_drv 0 V = -DRIVE_GAIN * V(n_tube_ac)
+C_drv      n_drv   n_cdrv  47u
+R_buildout n_cdrv  n_head  470
+
+* Small panel-bias injection into the head node.
+Vbias n_bias 0 DC {BIAS_V}
+Rbias n_bias n_head 1Meg
+
+* Head load + playback tilt.
+R_head_load n_head 0    2.2k
+R_pb        n_head n_pb 3.3k
+C_loss      n_pb   0    3.3n
+R_tone      n_pb   0    {TONE_R}
+
+* Output coupling and trim.
+C_out n_pb n_cout 1u
+R_out_ref n_cout 0 1Meg
+Bout v_out 0 V = OUT_GAIN * V(n_cout)
+
+* --------------------------------------------------------------------------
+* Voltage-driven Jiles-Atherton tape head, same parameterization as
+* spice-circuits/tape/tape_head_saturation.spice.
+* --------------------------------------------------------------------------
+.param Ms=3.5e5
+.param Aja=1500
+.param Alpha=1.6e-3
+.param Kja=30
+.param Cja=0.65
+.param Kv=8000
+.param Isat=2.0e-4
+.param Gp=8.0e-5
+.param Hbias=400
+
+Bh h 0 V = Kv*V(n_head) + Hbias
+Bhdot hdot 0 V = ddt(V(h))
+
+.func Lang(x)  {abs(x) < 1e-4 ? (x/3 - x*x*x/45) : (1/tanh(x) - 1/x)}
+.func LangD(x) {abs(x) < 1e-4 ? (1.0/3 - x*x/15) : (1/(x*x) - 1/(sinh(x)*sinh(x)))}
+
+Bman   man   0 V = Ms * Lang( (V(h) + Alpha*V(m)) / Aja )
+BdmanH dmanh 0 V = Ms * LangD( (V(h) + Alpha*V(m)) / Aja ) / Aja
+Bdelta  delta  0 V = (V(hdot) >= 0 ? 1 : -1)
+Bdiff   diff   0 V = V(man) - V(m)
+BdeltaM deltaM 0 V = ((V(diff)*V(delta)) >= 0 ? 1 : 0)
+Bden    den    0 V = V(delta)*Kja*(1-Cja) - Alpha*V(diff)
+Bdeng   deng   0 V = (abs(V(den)) < 1e-9*(1+abs(V(diff))) ? (V(den) >= 0 ? 1e-9*(1+abs(V(diff))) : -1e-9*(1+abs(V(diff)))) : V(den))
+Bslope  slope  0 V = max( (1-Cja)*V(deltaM)*V(diff)/V(deng) + Cja*V(dmanh), Cja*V(dmanh) )
+
+.param M0={Ms*( abs(Hbias/Aja) < 1e-4 ? ((Hbias/Aja)/3) : (1/tanh(Hbias/Aja) - Aja/Hbias) )}
+B_mi 0 m I = V(slope)*V(hdot)
+C_m  m 0 1 ic={M0}
+R_m  m 0 1e12
+
+Bhead n_head 0 I = Gp*V(n_head) + Isat*V(m)/Ms
+
+* --------------------------------------------------------------------------
+* 12AX7 Koren subcircuit, matching existing validation decks.
+* --------------------------------------------------------------------------
+.SUBCKT TRIODE_12AX7 anode grid cathode
+.PARAM MU=100 EX=1.4 KG1=1060 KP=600 KVB=300
+Bgk gk 0 V = V(grid,cathode)
+Bak ak 0 V = V(anode,cathode)
+Bip anode cathode I = {
++ (PWR(
++   LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2)))))
++   * MAX(V(ak), 0.001) / KP,
++   EX)
++ / KG1)
++ * (1 + SGN(LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2))))) * MAX(V(ak),0.001) / KP)) / 2
++ }
+Dgc grid cathode DGRID
+.MODEL DGRID D(IS=1e-12 N=1.5 RS=1k)
+.ENDS TRIODE_12AX7
+
+.ic V(n_plate)=160 V(n_cath)=1.5 V(n_tube_ac)=0 V(n_cdrv)=0 V(n_head)=0 V(n_pb)=0 V(n_cout)=0
+.end

@@ -1,0 +1,67 @@
+global:
+  sample_rate: 96000
+  oversample: 4
+  fft_size: 65536
+  warmup_trim_ms: 20.0
+
+suites:
+  product:
+    description: "Product-candidate tape channel cores"
+    tests:
+      swiss_tape_channel:
+        circuit: "product/swiss_tape_channel.pedal"
+        description: "Swiss solid-state tape channel candidate"
+        pending_reference: true
+        signals:
+          - type: sine
+            frequency: 120.0
+            amplitude: 0.05
+            duration: 0.1
+            label: clean
+          - type: sine
+            frequency: 120.0
+            amplitude: 0.25
+            duration: 0.1
+            label: driven
+          - type: sine
+            frequency: 1000.0
+            amplitude: 0.02
+            duration: 0.1
+            label: line_1k
+        metrics:
+          - type: time_domain
+          - type: thd
+            fundamental: 120.0
+        pass_criteria:
+          normalized_rms_error_db: -6.0
+          peak_error_db: -6.0
+          thd_error_db: 6.0
+
+      american_tube_tape_channel:
+        circuit: "product/american_tube_tape_channel.pedal"
+        description: "American tube-front tape channel candidate"
+        pending_reference: true
+        signals:
+          - type: sine
+            frequency: 120.0
+            amplitude: 0.05
+            duration: 0.1
+            label: clean
+          - type: sine
+            frequency: 120.0
+            amplitude: 0.25
+            duration: 0.1
+            label: driven
+          - type: sine
+            frequency: 1000.0
+            amplitude: 0.02
+            duration: 0.1
+            label: line_1k
+        metrics:
+          - type: time_domain
+          - type: thd
+            fundamental: 120.0
+        pass_criteria:
+          normalized_rms_error_db: -6.0
+          peak_error_db: -6.0
+          thd_error_db: 6.0

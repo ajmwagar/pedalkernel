@@ -1,0 +1,101 @@
+# PK:
+# Swiss Tape Channel — product-candidate solid-state reel-to-reel color path.
+#
+# Provenance:
+#   - Revox B77 schematic set, Revox_B77_Diagr.pdf, pages "Input Amplifier"
+#     1.177.220, "Record Amplifier" 1.177.230, and "Reproduce Amplifier"
+#     1.177.250 from the public Studer/Revox manual mirror:
+#     https://www.reeltoreel.nl/studer/Public/Products/Revox/Revox_B77/
+#   - The B77 path is discrete solid-state around a +21 V rail, with input,
+#     record-head drive, reproduce-head loading/EQ, and line output buffering.
+#
+# Scope:
+#   This is not a literal B77 clone. It is an engine-safe, product-facing core:
+#   clean solid-state drive, voltage-driven Jiles-Atherton tape-head shunt,
+#   bias-offset injection, simple playback HF tilt, and output trim.
+#   It avoids transport, bias oscillator, multi-head delay, and switch matrices.
+
+pedal "Swiss Tape Channel" subtitle "Swiss solid-state tape color path" {
+  supplies {
+    V+: 15V
+    V-: -15V
+    BP: 1V
+    BN: -1V
+  }
+
+  components {
+    # Input / calibration buffer.
+    C_in: cap(1u)
+    R_ref: resistor(1M)
+    U0: opamp(ne5532)
+
+    # Solid-state record-drive equivalent. Default Drive 0.35 gives a moderate
+    # line-level gain; the hard saturation is still dominated by TH_tape.
+    R_in: resistor(10k)
+    R_fb_min: resistor(10k)
+    Drive: pot(50k, a)
+    U1: opamp(ne5532)
+    C_drv: cap(10u)
+    R_buildout: resistor(470)
+
+    # Tape/head load. This mirrors the validated shunt topology from
+    # circuits/tape/tape_head_saturation.pedal.
+    TH_tape: tape_head()
+    R_head_load: resistor(2.2k)
+
+    # Panel Bias: small DC field/offset injection into the head node. This is
+    # product-facing "calibration bias", not an RF AC-bias oscillator.
+    Bias: pot(100k)
+    R_bias: resistor(1M)
+
+    # Playback voicing: compact HF loss/tilt after the head.
+    R_pb: resistor(3.3k)
+    C_loss: cap(2.2n)
+    Tone: pot(100k)
+
+    # Output trim.
+    C_out: cap(1u)
+    Output: pot(100k)
+    R_out_ref: resistor(1M)
+  }
+
+  nets {
+    in -> C_in.a
+    C_in.b -> R_ref.a, U0.pos
+    R_ref.b -> gnd
+    U0.neg -> U0.out
+
+    U0.out -> R_in.a
+    R_in.b -> U1.neg
+    U1.pos -> gnd
+    U1.neg -> R_fb_min.a
+    R_fb_min.b -> Drive.a
+    Drive.b -> U1.out
+
+    U1.out -> C_drv.a
+    C_drv.b -> R_buildout.a
+    R_buildout.b -> TH_tape.a, R_head_load.a, R_pb.a, R_bias.a
+    TH_tape.b -> gnd
+    R_head_load.b -> gnd
+
+    BP -> Bias.a
+    BN -> Bias.b
+    Bias.w -> R_bias.b
+
+    R_pb.b -> C_loss.a, Tone.a, C_out.a
+    C_loss.b -> gnd
+    Tone.b -> gnd
+
+    C_out.b -> Output.a, R_out_ref.a
+    Output.b -> gnd
+    R_out_ref.b -> gnd
+    Output.w -> out
+  }
+
+  controls {
+    Drive.position  -> "Drive"  [0.0, 1.0] = 0.35
+    Bias.position   -> "Bias"   [0.0, 1.0] = 0.50
+    Tone.position   -> "Tone"   [0.0, 1.0] = 0.60
+    Output.position -> "Output" [0.0, 1.0] = 0.70
+  }
+}

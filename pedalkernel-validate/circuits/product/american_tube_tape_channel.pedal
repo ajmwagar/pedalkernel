@@ -1,0 +1,107 @@
+# PK:
+# American Tube Tape Channel — product-candidate tube-front tape color path.
+#
+# Provenance:
+#   - Ampex 601 public archived manual/schematic:
+#     https://web.archive.org/web/20060929035149/http://ftp.ampex.com/ampex/manuals/audio/601man/601schem.gif
+#     https://web.archive.org/web/20060929035309/http://ftp.ampex.com/ampex/manuals/audio/601man/601-man.pdf
+#   - The 601 is a portable professional 1/4-inch tube reel-to-reel recorder
+#     with tube record/playback electronics and transformer-coupled I/O.
+#
+# Scope:
+#   Engine-safe product core, not a literal 601 clone. A validated 12AX7
+#   common-cathode front end adds tube asymmetry, then a stable active
+#   record-driver pushes the validated shunt Jiles-Atherton tape head.
+#   This avoids output-transformer and full record/playback switching work.
+
+pedal "American Tube Tape Channel" subtitle "Tube front-end into tape-head color" {
+  supplies {
+    B+: 250V
+    BP: 1V
+    BN: -1V
+  }
+
+  components {
+    # Tube front end.
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+    V1: triode(12ax7)
+    R_plate: resistor(100k)
+    R_cath: resistor(1.5k)
+    C_cath: cap(25u, electrolytic)
+    C_tube_out: cap(22n)
+
+    # Active record driver. This mirrors the stable tape_saturation/swiss path
+    # while preserving tube color before the head.
+    R_drive_in: resistor(1k)
+    U_drive: opamp(ne5532)
+    R_fb_min: resistor(10k)
+    Drive: pot(100k, a)
+    C_drv: cap(47u)
+    R_buildout: resistor(470)
+
+    # Tape/head load. Shunt topology keeps it comparable to the validated
+    # behavioural ngspice J-A deck.
+    TH_tape: tape_head()
+    R_head_load: resistor(2.2k)
+
+    # Panel Bias: small DC offset/field injection into the head node.
+    Bias: pot(100k)
+    R_bias: resistor(1M)
+
+    # Playback voicing.
+    R_pb: resistor(3.3k)
+    C_loss: cap(3.3n)
+    Tone: pot(250k)
+
+    # Output trim.
+    C_out: cap(1u)
+    Output: pot(100k)
+    R_out_ref: resistor(1M)
+  }
+
+  nets {
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+
+    B+ -> R_plate.a
+    R_plate.b -> V1.plate, C_tube_out.a
+    V1.cathode -> R_cath.a, C_cath.a
+    R_cath.b -> gnd
+    C_cath.b -> gnd
+
+    C_tube_out.b -> R_drive_in.a
+    R_drive_in.b -> U_drive.neg
+    U_drive.pos -> gnd
+    U_drive.neg -> R_fb_min.a
+    R_fb_min.b -> Drive.a
+    Drive.b -> U_drive.out
+
+    U_drive.out -> C_drv.a
+    C_drv.b -> R_buildout.a
+    R_buildout.b -> TH_tape.a, R_head_load.a, R_pb.a, R_bias.a
+    TH_tape.b -> gnd
+    R_head_load.b -> gnd
+
+    BP -> Bias.a
+    BN -> Bias.b
+    Bias.w -> R_bias.b
+
+    R_pb.b -> C_loss.a, Tone.a, C_out.a
+    C_loss.b -> gnd
+    Tone.b -> gnd
+
+    C_out.b -> Output.a, R_out_ref.a
+    Output.b -> gnd
+    R_out_ref.b -> gnd
+    Output.w -> out
+  }
+
+  controls {
+    Drive.position  -> "Drive"  [0.0, 1.0] = 0.35
+    Bias.position   -> "Bias"   [0.0, 1.0] = 0.55
+    Tone.position   -> "Tone"   [0.0, 1.0] = 0.60
+    Output.position -> "Output" [0.0, 1.0] = 0.75
+  }
+}
