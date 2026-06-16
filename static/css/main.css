@@ -1035,3 +1035,16 @@ body.page.t-dynamics main {
   .dyn-circuit > h2 { font-size: 1.1rem; word-break: break-word; }
 }
 
+
+/* Drift-history pass-rate sparkline (inline SVG, accuracy page). */
+.acc-trend-fig { margin: 0 0 1rem; }
+.acc-trend {
+  width: 100%;
+  height: 90px;
+  display: block;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.acc-trend-line { stroke: var(--accent); stroke-width: 2; fill: none; vector-effect: non-scaling-stroke; }
+.acc-trend-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
