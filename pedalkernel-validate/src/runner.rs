@@ -331,8 +331,24 @@ impl ValidationRunner {
 
         // Compute comparison metrics on trimmed windows
         let fundamental_hz = signal_config.fundamental_hz();
-        let comparison =
+        let mut comparison =
             metrics::compare(output_trimmed, golden_trimmed, sample_rate, fundamental_hz);
+
+        // Cap the spectral comparison at the audio Nyquist (base_rate / 2).
+        // Circuits run oversampled and the engine anti-aliases, deliberately
+        // rolling off content above the audio band before downsampling. The raw
+        // ngspice golden, sampled at the oversampled rate, retains that
+        // ultrasonic content — so comparing above the audio Nyquist scores our
+        // anti-aliasing as error. `metrics::compare` only sees the oversampled
+        // `sample_rate`, so override its bundled spectral value here where the
+        // base rate is known.
+        let audio_nyquist_hz = self.config.sample_rate as f64 / 2.0;
+        comparison.spectral_error_db = metrics::spectral_error_db(
+            output_trimmed,
+            golden_trimmed,
+            sample_rate,
+            Some(audio_nyquist_hz),
+        );
 
         // Check pass/fail
         let passed = comparison.passes(pass_criteria);

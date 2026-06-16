@@ -724,8 +724,20 @@ fn compare_goldens(
                 };
 
                 let fundamental_hz = signal_config.fundamental_hz();
-                let comparison =
+                let mut comparison =
                     metrics::compare(wdf_trimmed, spice_trimmed, sample_rate, fundamental_hz);
+
+                // Cap the spectral comparison at the audio Nyquist (base_rate / 2):
+                // above it, the engine's anti-aliasing rolls off content the raw
+                // ngspice golden still carries, which is not an accuracy error.
+                // `sample_rate` here is oversampled, so recompute with the cap.
+                let audio_nyquist_hz = cli.sample_rate as f64 / 2.0;
+                comparison.spectral_error_db = metrics::spectral_error_db(
+                    wdf_trimmed,
+                    spice_trimmed,
+                    sample_rate,
+                    Some(audio_nyquist_hz),
+                );
                 let passed = comparison.passes(&test_case.pass_criteria);
 
                 let status = if passed { "✓".green() } else { "✗".red() };
