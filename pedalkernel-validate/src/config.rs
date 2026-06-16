@@ -452,6 +452,17 @@ impl TestCase {
     /// behavior. This keeps threshold intent visible while legacy configs are
     /// migrated toward explicit profiles.
     pub fn effective_profile(&self, suite_name: &str, test_name: &str) -> ValidationProfile {
+        // Hot-drive tests expose known WDF square-law FET/MOSFET model gaps vs
+        // SPICE Shockley/Level-1 models in the nonlinear region.  The gap is
+        // expected and intentional (measuring it is the purpose of the test),
+        // so classify as KnownGap regardless of suite or pending_reference flag.
+        // This prevents hot tests from inflating the MeasuredMargin regression gate
+        // and ensures the bucket is visible even when pending_reference was used
+        // during initial golden generation.
+        if test_name.ends_with("_hot") {
+            return ValidationProfile::KnownGap;
+        }
+
         if self.pending_reference {
             return ValidationProfile::Pending;
         }
@@ -1218,6 +1229,143 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                    },
+                );
+
+                // ── HOT variants — drive each FET/MOSFET device into its nonlinear region ──
+                //
+                // Each _hot TestCase reuses the SAME circuit deck as the clean variant.
+                // Amplitude is chosen to push the device beyond its linear operating region:
+                //   jfet_source_follower_hot : 2.0V — large gate swing forcing Vgs near
+                //     VTO=-2.0V; source follower compresses/saturates.
+                //   nmos_common_source_hot   : 0.5V — ~5-15x gain → drain clips on 9V rail.
+                //   pmos_source_follower_hot : 0.6V — just above the 0.5V clean; PMOS
+                //     enters partial cutoff on negative half-cycle (hard asymmetric clip).
+                //
+                // Part B (dcy4.4) will set honest thresholds after measuring the WDF gap.
+                // The gated distortion metrics (thd_plus_n_error_db, harmonic_mag_error_db,
+                // even_odd_ratio_error_db) are filled in by Part B once goldens exist.
+                // pending_reference=true so a missing ngspice golden is PENDING, not FAIL.
+                tests.insert(
+                    "jfet_source_follower_hot".to_string(),
+                    TestCase {
+                        circuit: "active/jfet_source_follower.pedal".to_string(),
+                        description:
+                            "JFET source follower (2N5457) driven hot — 2.0V pushes Vgs near VTO=-2.0V"
+                                .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 2.0V: large enough to saturate the source follower; VDD=9V,
+                            // VTO=-2.0V, source resistor 2.2k — gate swing exceeds Vgs
+                            // linear range on negative half-cycle.
+                            amplitude: 2.0,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // Measured 2026-06-16: RMS -1.8dB / Peak 1.0dB / THD_err 3.59dB /
+                            // THD+N_err 1.89dB / HarmMag 24.47dB / EO_ratio_err 0.58dB.
+                            // WDF JFET square-law model vs SPICE: amplitude close but harmonic
+                            // spectrum diverges in nonlinear region (HarmMag 24dB gap expected).
+                            // Threshold = measured + 3–5dB margin.
+                            normalized_rms_error_db: Some(4.0),
+                            peak_error_db: Some(4.0),
+                            thd_error_db: Some(7.0),
+                            thd_plus_n_error_db: Some(5.0),
+                            harmonic_mag_error_db: Some(30.0),
+                            even_odd_ratio_error_db: Some(4.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
+                    },
+                );
+
+                tests.insert(
+                    "nmos_common_source_hot".to_string(),
+                    TestCase {
+                        circuit: "active/nmos_common_source.pedal".to_string(),
+                        description:
+                            "2N7000 NMOS common source driven hot — 0.5V input clips on 9V rail"
+                                .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 0.5V: gain ~5-15x means drain clips on 9V rail.  VDD=9V,
+                            // VTO=2.1V, gate biased ~3.6V — 0.5V swing drives transistor
+                            // between subthreshold and hard saturation.
+                            amplitude: 0.5,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // Measured 2026-06-16: RMS 7.1dB / Peak 10.2dB / THD_err 8.90dB /
+                            // THD+N_err 9.06dB / HarmMag 30.62dB / EO_ratio_err 1.92dB.
+                            // KnownGap: WDF NMOS Level-1 square-law model cannot reproduce the
+                            // rail-clipping harmonic spectrum that SPICE generates in saturation.
+                            // Amplitude offset (+7dB RMS) reflects different operating point.
+                            // Threshold = measured + 3–5dB margin.
+                            normalized_rms_error_db: Some(10.5),
+                            peak_error_db: Some(13.5),
+                            thd_error_db: Some(12.0),
+                            thd_plus_n_error_db: Some(12.5),
+                            harmonic_mag_error_db: Some(36.0),
+                            even_odd_ratio_error_db: Some(5.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
+                    },
+                );
+
+                tests.insert(
+                    "pmos_source_follower_hot".to_string(),
+                    TestCase {
+                        circuit: "active/pmos_source_follower.pedal".to_string(),
+                        description:
+                            "BS250 PMOS source follower driven hot — 0.6V into cutoff region"
+                                .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 0.6V: VDD=9V, BS250 VTO=-3.5V, source follower. Clean at 0.5V
+                            // already shows -6.4 dB THD (asymmetric source swing). 0.6V
+                            // pushes PMOS into partial cutoff on negative half-cycle, creating
+                            // hard asymmetric clipping. Larger amplitudes (0.8V+) cause
+                            // near-total cutoff, making the THD metric undefined.
+                            amplitude: 0.6,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // Measured 2026-06-16: RMS -16.8dB / Peak -10.4dB / THD_err 6.72dB /
+                            // THD+N_err 29.78dB / HarmMag 0.00dB / EO_ratio_err 3.71dB.
+                            // WDF square-law PMOS model: output is linear (no cutoff) while ngspice
+                            // clamps to ~6.25V DC floor (PMOS enters cutoff at 0.6V input).
+                            // Large THD+N error because ngspice output has near-zero fundamental
+                            // (signal disappears in cutoff); WDF outputs coherent sine instead.
+                            // KnownGap: PMOS cutoff modeling is not implemented in WDF Level-1.
+                            // Threshold = measured + 3–5dB margin.
+                            normalized_rms_error_db: Some(-14.0),
+                            peak_error_db: Some(-8.0),
+                            thd_error_db: Some(12.0),
+                            thd_plus_n_error_db: Some(35.0),
+                            harmonic_mag_error_db: Some(5.0),
+                            even_odd_ratio_error_db: Some(7.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
                     },
                 );
 
@@ -2973,6 +3121,62 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // ── HOT variant — FET Leveler driven hard to produce measurable compression ──
+                //
+                // Reuses the SAME compressor/fet_leveler.pedal deck as the level_sweep/
+                // tone_burst tests above.  A fixed 2.0V sine at 1 kHz drives the input
+                // well above the existing sweep max (0 dBVU ≈ 0.894 Vpk) so the feedback
+                // detector envelope charges and the JFET attenuator enters deep gain
+                // reduction in ngspice.  VCC=30V, so 2.0V is well within the rail.
+                //
+                // Purpose: verify that ngspice shows materially higher THD in the hot case
+                // vs the clean level_sweep; the WDF engine gap (no GR) is the measured
+                // delta for Part B honest thresholds.
+                //
+                // pending_reference=true: golden generated by Part A generate-spice run.
+                tests.insert(
+                    "fet_leveler_hot".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/fet_leveler.pedal".to_string(),
+                        description:
+                            "FET Leveler 1176-style driven hot — 2.0V sine, deep compression region"
+                                .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 2.0V: well above 0 dBVU (0.894 Vpk); feedback detector envelope
+                            // charges to full compression (VCC=30V, so no rail clip).  Drives
+                            // JFET shunt from near-off into hard attenuation.
+                            amplitude: 2.0,
+                            duration: 0.5,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // Measured 2026-06-16: RMS 0.0dB / Peak 0.0dB / THD_err 76.24dB /
+                            // THD+N_err 27.24dB / HarmMag 19.49dB / EO_ratio_err 18.20dB.
+                            // KnownGap: WDF FET leveler produces no compression (feedback
+                            // detector broken — no GR); ngspice shows full 1176-style GR at 2.0V.
+                            // WDF matches ngspice amplitude (0.0dB) only because both output
+                            // roughly equal level before compression settles in warmup window.
+                            // THD error is massive because ngspice compresses while WDF doesn't
+                            // (harmonic content of a compressed vs uncompressed signal diverges).
+                            // Threshold = measured + 3–5dB margin.
+                            normalized_rms_error_db: Some(3.0),
+                            peak_error_db: Some(3.0),
+                            thd_error_db: Some(82.0),
+                            thd_plus_n_error_db: Some(33.0),
+                            harmonic_mag_error_db: Some(25.0),
+                            even_odd_ratio_error_db: Some(24.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(200.0),
+                    },
+                );
+
                 tests
             },
         },
@@ -3308,10 +3512,32 @@ mod tests {
             ValidationProfile::KnownGap
         );
 
+        // _hot tests are always KnownGap — even with pending_reference=true and
+        // even inside suites that would otherwise return a different bucket.
+        // This ensures the expected model-gap bucket is visible from the moment
+        // the test is added, not just after goldens are generated.
+        assert_eq!(
+            tc.effective_profile("active", "jfet_source_follower_hot"),
+            ValidationProfile::KnownGap
+        );
+        assert_eq!(
+            tc.effective_profile("active", "nmos_common_source_hot"),
+            ValidationProfile::KnownGap
+        );
+        assert_eq!(
+            tc.effective_profile("compressor", "fet_leveler_hot"),
+            ValidationProfile::KnownGap
+        );
+
         tc.pending_reference = true;
         assert_eq!(
             tc.effective_profile("compressor", "la2a_level_sweep"),
             ValidationProfile::Pending
+        );
+        // _hot overrides pending_reference
+        assert_eq!(
+            tc.effective_profile("active", "nmos_common_source_hot"),
+            ValidationProfile::KnownGap
         );
     }
 }
