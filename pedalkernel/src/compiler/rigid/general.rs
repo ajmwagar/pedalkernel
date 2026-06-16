@@ -1469,7 +1469,7 @@ fn compute_triode_dc_qpoint(
         let model = super::super::helpers::vari_mu_model(model_name);
         let mut triode = VariMuTriodeRoot::new_with_v_max(model, supply_voltage)
             .with_parallel_count(parallel_count);
-        let vgk = triode.vgk_bias() as f64;
+        let vgk = triode.vgk_bias();
         triode.set_vgk(vgk);
 
         let max_ia = (supply_voltage / r_plate.max(1.0)).max(1e-9);

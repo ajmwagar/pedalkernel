@@ -5276,14 +5276,14 @@ fn compute_wdf_fet_dc_qpoint(
                 let model = super::helpers::jfet_model(model_name, *is_n_channel);
                 let mut root = pedalkernel_rt::elements::nonlinear::JfetRoot::new(model);
                 root.set_vgs(vgs as pedalkernel_rt::Wave);
-                root.drain_current(vds as pedalkernel_rt::Wave) as f64
+                root.drain_current(vds as pedalkernel_rt::Wave)
             }
             NonlinearKind::Mosfet {
                 mosfet_type,
                 is_n_channel,
             } => {
                 let model = super::helpers::mosfet_model(*mosfet_type, *is_n_channel);
-                model.ids(vgs as pedalkernel_rt::Wave, vds as pedalkernel_rt::Wave) as f64
+                model.ids(vgs as pedalkernel_rt::Wave, vds as pedalkernel_rt::Wave)
             }
             _ => 0.0,
         }
