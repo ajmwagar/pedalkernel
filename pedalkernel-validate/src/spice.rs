@@ -180,6 +180,57 @@ impl SpiceRunner {
         Ok(resampled)
     }
 
+    /// Strip standalone-deck elements that conflict with harness injection.
+    ///
+    /// New SPICE decks are authored as self-contained files (they can be run
+    /// with `ngspice deck.spice` for standalone verification) but the harness
+    /// composes them into a fresh netlist with its own VIN source, .TRAN, and
+    /// .CONTROL block. Strip the standalone-only lines so the composition
+    /// doesn't produce duplicate element definitions.
+    ///
+    /// Stripped:
+    /// - Lines beginning with `VIN ` or `VIN\t` (the standalone AC source)
+    /// - `.TRAN` lines
+    /// - `.OP` lines
+    /// - `.MEAS` lines
+    /// - `.FOUR` lines
+    /// - `.CONTROL` … `.ENDC` blocks (including contents)
+    /// - Bare `.END` lines (not inside a subcircuit `.ENDS`)
+    fn strip_standalone_elements(body: &str) -> String {
+        let mut out = Vec::with_capacity(body.len());
+        let mut in_control = false;
+        for line in body.lines() {
+            let upper = line.trim().to_uppercase();
+            if upper == ".CONTROL" {
+                in_control = true;
+                continue;
+            }
+            if in_control {
+                if upper == ".ENDC" {
+                    in_control = false;
+                }
+                continue;
+            }
+            // Skip standalone-only directives. .OPTIONS is stripped so the
+            // harness can set its own consistent convergence knobs; per-deck
+            // convergence tweaks belong as .IC initial-condition statements
+            // instead (those survive and help UIC startup).
+            if upper.starts_with("VIN ")
+                || upper.starts_with("VIN\t")
+                || upper.starts_with(".TRAN")
+                || upper.starts_with(".OP")
+                || upper.starts_with(".MEAS")
+                || upper.starts_with(".FOUR")
+                || upper.starts_with(".OPTIONS")
+                || upper == ".END"
+            {
+                continue;
+            }
+            out.push(line);
+        }
+        out.join("\n")
+    }
+
     /// Generate complete ngspice netlist from circuit template.
     fn generate_netlist(
         &self,
@@ -189,7 +240,9 @@ impl SpiceRunner {
         output_node: &str,
         output_file: &Path,
     ) -> Result<String, SpiceError> {
-        let circuit_body = std::fs::read_to_string(circuit_path)?;
+        let raw_body = std::fs::read_to_string(circuit_path)?;
+        // Strip standalone-deck elements before embedding in the harness netlist
+        let circuit_body = Self::strip_standalone_elements(&raw_body);
         let timestep = self.config.timestep();
 
         // Generate inline PWL data (more portable than file= syntax)
@@ -209,9 +262,12 @@ impl SpiceRunner {
 VIN v_in 0 PWL({pwl_data})
 
 * Simulation control
-.OPTIONS RELTOL=1e-6 ABSTOL=1e-12 VNTOL=1e-9
+* RELTOL=5e-3 / ABSTOL=1e-9: balances accuracy vs convergence for stiff
+* nonlinear circuits (diodes, BJTs, triodes, pentodes). Tighter tolerances
+* can cause non-convergence in high-current tube stages.
+.OPTIONS RELTOL=5e-3 ABSTOL=1e-9 VNTOL=1e-6
 .OPTIONS METHOD=GEAR MAXORD=2
-.OPTIONS ITL1=500 ITL2=200 ITL4=50
+.OPTIONS ITL1=500 ITL2=200 ITL4=200 DELMAX=50u
 
 .TRAN {timestep:.12e} {duration:.12e} 0 {timestep:.12e} UIC
 

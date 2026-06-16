@@ -118,6 +118,15 @@ Dgc grid cathode DGRID
 .ENDS PENTODE_EL34
 
 * ============================================================================
+* Initial conditions for UIC startup (harness uses UIC — skips .OP)
+* B+=450V, Rp=3.5k: at idle Ip≈65mA, Vp≈225V, Vg2≈464V, Vg1=-33V
+* Cap voltages at DC steady-state:
+*   V(CIN) = V(v_in) - V(v_grid_r) = 0 - (-33) = 33V (cap blocks DC bias)
+*   V(COUT) = V(v_plate) - V(v_out) = 225 - 0 = 225V (cap blocks plate DC)
+* ============================================================================
+.IC V(v_plate)=225 V(v_screen_r)=464 V(v_grid_r)=-33 V(v_grid)=-33 V(v_in)=0 V(v_out)=0
+
+* ============================================================================
 * Analysis
 * ============================================================================
 * Transient: 10ms, timestep 2us — no UIC so ngspice computes .OP first then ramps

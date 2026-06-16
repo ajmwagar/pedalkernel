@@ -2702,17 +2702,17 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                                 fundamental: 1000.0,
                             },
                         ],
-                        // Measured 2026-06-15: pending golden generation — pending_reference=true.
-                        // Thresholds will be updated after `generate-spice --suite tubes`.
-                        // Honest gate: WDF triode one-port vs SPICE 3-terminal → expect 3-5dB gap.
+                        // Measured 2026-06-15: sine RMS=-0.0dB Peak=-0.4dB THD=0.18dB
+                        //                      driven RMS=-0.1dB Peak=-1.1dB THD=0.11dB
+                        // Honest gate: 20% headroom above measured worst-case.
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(6.0),
-                            peak_error_db: Some(6.0),
-                            thd_error_db: Some(10.0),
+                            normalized_rms_error_db: Some(1.0),
+                            peak_error_db: Some(2.0),
+                            thd_error_db: Some(1.5),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: true,
+                        pending_reference: false,
                     },
                 );
 
@@ -2744,15 +2744,16 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                                 fundamental: 1000.0,
                             },
                         ],
-                        // Measured 2026-06-15: pending golden generation — pending_reference=true.
+                        // Measured 2026-06-15: sine RMS=-0.0dB Peak=-0.7dB THD=0.34dB
+                        //                      driven RMS=-0.1dB Peak=-1.3dB THD=0.33dB
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(6.0),
-                            peak_error_db: Some(6.0),
-                            thd_error_db: Some(10.0),
+                            normalized_rms_error_db: Some(1.0),
+                            peak_error_db: Some(2.0),
+                            thd_error_db: Some(1.5),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: true,
+                        pending_reference: false,
                     },
                 );
 
@@ -2784,15 +2785,16 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                                 fundamental: 1000.0,
                             },
                         ],
-                        // Measured 2026-06-15: pending golden generation — pending_reference=true.
+                        // Measured 2026-06-15: sine RMS=-0.1dB Peak=-0.5dB THD=0.17dB
+                        //                      driven RMS=-0.1dB Peak=-0.5dB THD=0.14dB
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(6.0),
-                            peak_error_db: Some(6.0),
-                            thd_error_db: Some(10.0),
+                            normalized_rms_error_db: Some(1.0),
+                            peak_error_db: Some(2.0),
+                            thd_error_db: Some(1.5),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: true,
+                        pending_reference: false,
                     },
                 );
 
@@ -2817,15 +2819,15 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                                 fundamental: 1000.0,
                             },
                         ],
-                        // Measured 2026-06-15: pending golden generation — pending_reference=true.
+                        // Measured 2026-06-15: sine RMS=-0.3dB Peak=-1.6dB THD=1.12dB
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(6.0),
-                            peak_error_db: Some(6.0),
-                            thd_error_db: Some(10.0),
+                            normalized_rms_error_db: Some(1.0),
+                            peak_error_db: Some(3.0),
+                            thd_error_db: Some(2.0),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: true,
+                        pending_reference: false,
                     },
                 );
 
@@ -2847,16 +2849,18 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             label: Some("sine".to_string()),
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
-                        // Measured 2026-06-15: pending golden generation — pending_reference=true.
-                        // BEHAVIORAL SMOKE CHECK: auto-bias vs fixed-bias topology mismatch means
-                        // operating point differs. Loose gate surfaces the gap honestly.
+                        // Measured 2026-06-15: sine RMS=0.0dB Peak=0.0dB
+                        // NOTE: Time-domain amplitude matches because WDF engine falls back to
+                        // rigid MNA for pentode (SPQR drop). THD not gated — topology mismatch
+                        // (auto-bias Rk vs fixed-bias) means operating point and harmonic structure
+                        // differ (THD error was 30.53dB when measured). Smoke check only.
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(10.0),
-                            peak_error_db: Some(10.0),
+                            normalized_rms_error_db: Some(3.0),
+                            peak_error_db: Some(3.0),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: true,
+                        pending_reference: false,
                     },
                 );
 
@@ -2879,17 +2883,18 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             label: Some("sine".to_string()),
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
-                        // Measured 2026-06-15: pending golden generation — pending_reference=true.
-                        // ENGINE GAP NOTE: WDF vari-mu comp≈0.17 produces gain≈1.7x vs SPICE 10.8x
-                        // at Vgk=-2V. RMS error expected to be large (positive). Gate set loose
-                        // to pass for tracking purposes (gap is visible on matrix/compare-goldens).
+                        // Measured 2026-06-15: sine RMS=0.0dB Peak=-0.0dB Spectral=112.4dB
+                        // NOTE: At 10mV signal (small-signal regime, Vgk=-2V) WDF matches ngspice.
+                        // The engine comp≈0.17 gap is only visible at large signals or bias sweep;
+                        // compare-goldens matrix shows the WDF vs SPICE waveform comparison.
+                        // THD not gated (10.97dB measured — harmonic floor differs).
                         pass_criteria: PassCriteria {
-                            normalized_rms_error_db: Some(15.0),
-                            peak_error_db: Some(15.0),
+                            normalized_rms_error_db: Some(3.0),
+                            peak_error_db: Some(3.0),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: true,
+                        pending_reference: false,
                     },
                 );
 

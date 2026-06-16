@@ -140,6 +140,13 @@ Dgc  grid  cathode  DGRID_6386
 .ENDS TRIODE_GE6386
 
 * ============================================================================
+* Output coupling + load — creates v_out node expected by harness
+* Direct plate measurement via coupling cap, 1M load matches .pedal topology
+* ============================================================================
+Cout  v_plate  v_out  22n  IC=0
+Rload v_out    0      1MEG
+
+* ============================================================================
 * Initial conditions — DC operating point at Vgk=-2V
 *   Load line: Vb=300V, Rp=10k, Vak≈132V, Ia≈16.8mA
 * ============================================================================
