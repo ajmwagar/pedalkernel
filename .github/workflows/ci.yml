@@ -38,8 +38,14 @@ jobs:
   # committed .npy goldens, so ngspice is NOT required in CI (ngspice is
   # only needed to *regenerate* references). Gated at SPICE_MIN_PASS_PCT.
   # ----------------------------------------------------------------
+  # SPICE validation is gated on REGRESSIONS, not an absolute pass rate: a PR
+  # fails only if circuits that PASSED on main now FAIL (new circuits ignored, so
+  # adding tests never trips it). The baseline is main's last CI run, cached and
+  # restored — so a PR runs validation ONCE and diffs against main's cached
+  # result rather than re-running it. The cache is keyed by commit SHA with a
+  # stable prefix; restore-keys returns the most recent main run.
   spice-validation:
-    name: SPICE validation (engine vs references)
+    name: SPICE validation (regression gate)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,22 +59,44 @@ jobs:
           set -o pipefail
           cargo run -p pedalkernel-validate -- --report spice-report.json run 2>&1 \
             | tee spice-output.txt || true
+          test -f spice-report.json || { echo "::error::SPICE runner produced no report (build/run failure)"; exit 1; }
           summary=$(grep -oE '[0-9]+/[0-9]+ passed' spice-output.txt | tail -1)
-          if [ -z "$summary" ]; then
-            echo "::error::SPICE runner produced no summary (build or run failure)"
-            exit 1
+          echo "SPICE accuracy: ${summary:-unknown} (informational — the gate below is regression-based)"
+
+      # ---- main: publish this run as the baseline future PRs diff against ----
+      - name: Stage baseline (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p spice-baseline
+          cp pedalkernel-validate/spice-report.json spice-baseline/report.json
+      - name: Cache baseline (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: spice-baseline/report.json
+          key: spice-baseline-main-${{ github.sha }}
+
+      # ---- PR: restore main's latest baseline and gate on regressions ----
+      - name: Restore main baseline (PR only)
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: spice-baseline/report.json
+          key: spice-baseline-main-${{ github.sha }}
+          restore-keys: |
+            spice-baseline-main-
+      - name: Regression gate (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ -f spice-baseline/report.json ]; then
+            python3 tools/dashboard/check_spice_regressions.py \
+              --base spice-baseline/report.json \
+              --current pedalkernel-validate/spice-report.json \
+              --max-new-failures "${SPICE_MAX_NEW_FAILURES:-0}"
+          else
+            echo "::warning::No cached main baseline yet — skipping the regression gate. It activates once main's CI has run and cached a baseline (and within the cache's ~7-day retention)."
           fi
-          passed=$(echo "$summary" | cut -d/ -f1)
-          total=$(echo "$summary" | cut -d/ -f2 | grep -oE '^[0-9]+')
-          gate=${SPICE_MIN_PASS_PCT:-90}
-          rate=$(awk "BEGIN{printf \"%.1f\", 100*${passed}/${total}}")
-          echo "------------------------------------------------------------"
-          echo "SPICE accuracy: ${passed}/${total} = ${rate}% (gate: ${gate}%)"
-          awk "BEGIN{exit !(${passed}*100 >= ${gate}*${total})}" || {
-            echo "::error::SPICE pass rate ${rate}% regressed below the ${gate}% gate"
-            exit 1
-          }
-          echo "SPICE gate satisfied."
+
       - name: Upload SPICE validation report
         uses: actions/upload-artifact@v4
         if: always()
