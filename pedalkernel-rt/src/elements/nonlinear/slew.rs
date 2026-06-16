@@ -17,13 +17,18 @@
 ///
 /// This is NOT a WDF root — it sits in the signal path between stages,
 /// modeling the op-amp's output stage limitation.
+/// Thin wrapper over the shared [`crate::stage::NonIdealFxState`] dV/dt clamp.
+///
+/// Carries NO copy of the slew math: `process` delegates to
+/// `NonIdealFxState::slew_step` (the single source of truth) and only adds the
+/// finite guard. Only test code uses this type now — the live SPQR pipeline
+/// applies slew in-loop via `NonIdealFxState` directly.
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SlewRateLimiter {
-    /// Maximum voltage change per sample (V/sample).
-    max_dv: crate::Wave,
-    /// Previous output voltage (state).
-    prev_out: crate::Wave,
+    /// Shared GBW/slew/rail state. Only the slew portion (`max_dv`/`prev_out`)
+    /// is exercised here; GBW is left transparent and rails at MAX.
+    fx: crate::stage::NonIdealFxState,
     /// Slew rate in V/µs (for reference/display).
     slew_rate_v_per_us: crate::Wave,
     /// Current sample rate.
@@ -42,10 +47,12 @@ impl SlewRateLimiter {
     /// - CA3080: 50.0 V/µs (OTA, essentially transparent)
     pub fn new(slew_rate_v_per_us: crate::Wave, sample_rate: crate::Wave) -> Self {
         // Convert V/µs to V/sample: slew_rate * 1e6 / sample_rate
-        let max_dv = slew_rate_v_per_us * 1e6 / sample_rate;
+        let fx = crate::stage::NonIdealFxState {
+            max_dv: slew_rate_v_per_us * 1e6 / sample_rate,
+            ..crate::stage::NonIdealFxState::default()
+        };
         Self {
-            max_dv,
-            prev_out: 0.0,
+            fx,
             slew_rate_v_per_us,
             sample_rate,
         }
@@ -59,28 +66,24 @@ impl SlewRateLimiter {
     /// makes the LM308 RAT sound different from a TL072 RAT.
     #[inline]
     pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
-        let dv = input - self.prev_out;
-        let limited = if dv > self.max_dv {
-            self.prev_out + self.max_dv
-        } else if dv < -self.max_dv {
-            self.prev_out - self.max_dv
+        let limited = self.fx.slew_step(input);
+        if limited.is_finite() {
+            limited
         } else {
-            input
-        };
-        let limited = if limited.is_finite() { limited } else { 0.0 };
-        self.prev_out = limited;
-        limited
+            self.fx.prev_out = 0.0;
+            0.0
+        }
     }
 
     /// Update sample rate and recompute max_dv.
     pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
-        self.max_dv = self.slew_rate_v_per_us * 1e6 / sample_rate;
+        self.fx.max_dv = self.slew_rate_v_per_us * 1e6 / sample_rate;
     }
 
     /// Reset internal state.
     pub fn reset(&mut self) {
-        self.prev_out = 0.0;
+        self.fx.prev_out = 0.0;
     }
 
     /// Get the slew rate in V/µs.

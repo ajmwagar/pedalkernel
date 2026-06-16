@@ -236,63 +236,6 @@ pub enum OpAmpMode {
     NonInverting { gain: crate::Wave },
 }
 
-/// Unified op-amp root for WDF trees.
-///
-/// Post-scattering non-ideality filter for op-amps absorbed into R-type
-/// adaptors via `MnaSystem::stamp_vcvs`.
-///
-/// The VCVS stamp inside the MNA already captures the frequency-independent
-/// gain (Aol) and output impedance (Ro). The genuinely non-linear-time-
-/// invariant behaviours — supply rail clamping and slew rate limiting —
-/// cannot live in the linear scattering matrix, so they run as a tiny
-/// per-sample filter on the extracted output node voltage.
-///
-/// This replaces the `feedback_opamp: Option<OpAmpRoot>` field that diode-
-/// paired stages used in the legacy topology-detection path. With the
-/// unified nullor pipeline, any op-amp whose output is the stage's
-/// audio output gets an `OpAmpPostFx` attached.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct OpAmpPostFx {
-    /// Datasheet parameters (slew_rate, v_max).
-    pub model: OpAmpModel,
-    /// Sample rate for slew-per-sample conversion.
-    pub sample_rate: crate::Wave,
-    /// Previous output voltage for slew-rate limiting.
-    prev_out: crate::Wave,
-}
-
-impl OpAmpPostFx {
-    /// Create with model parameters and sample rate.
-    pub fn new(model: OpAmpModel, sample_rate: crate::Wave) -> Self {
-        Self {
-            model,
-            sample_rate,
-            prev_out: 0.0,
-        }
-    }
-
-    /// Apply rail clamping then slew-rate limiting in that order.
-    ///
-    /// Rail clamping first so the slew limiter is bounded by the clamped
-    /// target. This matches SPICE behaviour where the op-amp can't exceed
-    /// the supply rails regardless of input rate of change.
-    pub fn process(&mut self, v_raw: crate::Wave) -> crate::Wave {
-        let v_clip = v_raw.clamp(-self.model.v_rail_neg, self.model.v_rail_pos);
-        // slew_rate is V/µs in the datasheet. Convert to V/sample.
-        let slew_max = self.model.slew_rate * 1e6 / self.sample_rate;
-        let delta = (v_clip - self.prev_out).clamp(-slew_max, slew_max);
-        let v_out = self.prev_out + delta;
-        self.prev_out = v_out;
-        v_out
-    }
-
-    /// Reset state (typically on stage reset / sample rate change).
-    pub fn reset(&mut self) {
-        self.prev_out = 0.0;
-    }
-}
-
 /// Models op-amp behavior in two topologies:
 /// - **Inverting**: Vout = -(Rf/Ri) * Vin, input from WDF wave (virtual ground)
 /// - **Non-inverting**: Vout = (1 + Rf/Ri) * Vp, input via `set_vp()`
@@ -313,19 +256,20 @@ pub struct OpAmpRoot {
     mode: OpAmpMode,
     /// Non-inverting input voltage (for NonInverting mode).
     vp: crate::Wave,
-    /// Previous output voltage (for slew rate limiting).
-    prev_out: crate::Wave,
     /// Sample rate (needed for slew rate limiting and GBW filter).
     sample_rate: crate::Wave,
     /// Soft clipping limit from feedback diodes.
     /// If set, uses tanh-based soft clipping instead of hard clipping.
     soft_clip_v: Option<crate::Wave>,
-    /// GBW rolloff filter state (single-pole LPF on closed-loop output).
-    /// Models the dominant-pole frequency response: f_cl = GBW / closed_loop_gain.
-    gbw_state: crate::Wave,
-    /// GBW rolloff filter coefficient: g = 1 - exp(-2π·f_cl/fs).
-    /// Recomputed when gain or sample rate changes.
-    gbw_coeff: crate::Wave,
+    /// Shared GBW single-pole + dV/dt slew runtime state.
+    ///
+    /// This is the SINGLE source of truth for the GBW lowpass and the slew
+    /// clamp — `OpAmpRoot` carries no copy of that math. Its `gbw_coeff`/
+    /// `max_dv` are synced from `model`/`gbw_gain` whenever gain, sample rate
+    /// or GBW change. The rails are left at `MAX` because `OpAmpRoot` applies
+    /// a HARD clamp at the supply rails (not the tanh soft-clip of the
+    /// post-FX path), so rail handling stays inline as `f.clamp(..)`.
+    fx: crate::stage::NonIdealFxState,
     /// Actual closed-loop gain for GBW bandwidth calculation ONLY.
     ///
     /// In the 3-port adaptor path, the VCVS mode gain is set to 1.0 because
@@ -371,13 +315,27 @@ impl OpAmpRoot {
             model,
             mode: OpAmpMode::NonInverting { gain: 1.0 },
             vp: 0.0,
-            prev_out: 0.0,
             sample_rate: 48000.0,
             soft_clip_v: None,
-            gbw_state: 0.0,
-            gbw_coeff,
+            fx: Self::make_fx(gbw_coeff, model.slew_rate, 48000.0),
             gbw_gain: 1.0,
             feedback_config: None,
+        }
+    }
+
+    /// Build the shared GBW/slew state container. Rails are left at MAX:
+    /// `OpAmpRoot` hard-clamps at the supply rails inline, so the shared
+    /// struct only carries the GBW pole + dV/dt slew for this element.
+    #[inline]
+    fn make_fx(
+        gbw_coeff: crate::Wave,
+        slew_rate: crate::Wave,
+        sample_rate: crate::Wave,
+    ) -> crate::stage::NonIdealFxState {
+        crate::stage::NonIdealFxState {
+            gbw_coeff,
+            max_dv: slew_rate * 1e6 / sample_rate,
+            ..crate::stage::NonIdealFxState::default()
         }
     }
 
@@ -394,11 +352,9 @@ impl OpAmpRoot {
             model,
             mode: OpAmpMode::Inverting { gain: g },
             vp: 0.0,
-            prev_out: 0.0,
             sample_rate: 48000.0,
             soft_clip_v: None,
-            gbw_state: 0.0,
-            gbw_coeff,
+            fx: Self::make_fx(gbw_coeff, model.slew_rate, 48000.0),
             gbw_gain: g,
             feedback_config: None,
         }
@@ -412,11 +368,9 @@ impl OpAmpRoot {
             model,
             mode: OpAmpMode::NonInverting { gain: g },
             vp: 0.0,
-            prev_out: 0.0,
             sample_rate: 48000.0,
             soft_clip_v: None,
-            gbw_state: 0.0,
-            gbw_coeff,
+            fx: Self::make_fx(gbw_coeff, model.slew_rate, 48000.0),
             gbw_gain: g,
             feedback_config: None,
         }
@@ -446,7 +400,7 @@ impl OpAmpRoot {
             OpAmpMode::NonInverting { gain: gv } => *gv = g,
         }
         self.gbw_gain = g;
-        self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, g, self.sample_rate);
+        self.fx.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, g, self.sample_rate);
     }
 
     /// Set only the GBW gain used for bandwidth calculation, without changing the VCVS gain.
@@ -457,7 +411,8 @@ impl OpAmpRoot {
     #[inline]
     pub fn set_gbw_gain(&mut self, gbw_gain: crate::Wave) {
         self.gbw_gain = gbw_gain.abs().max(1.0);
-        self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gbw_gain, self.sample_rate);
+        self.fx.gbw_coeff =
+            Self::compute_gbw_coeff(self.model.gbw, self.gbw_gain, self.sample_rate);
     }
 
     /// Get the current gain.
@@ -494,7 +449,8 @@ impl OpAmpRoot {
     #[inline]
     pub fn set_sample_rate(&mut self, sample_rate: crate::Wave) {
         self.sample_rate = sample_rate;
-        self.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gbw_gain, sample_rate);
+        self.fx.gbw_coeff = Self::compute_gbw_coeff(self.model.gbw, self.gbw_gain, sample_rate);
+        self.fx.max_dv = self.model.slew_rate * 1e6 / sample_rate;
     }
 
     /// Get the current sample rate.
@@ -506,7 +462,7 @@ impl OpAmpRoot {
     /// Get the current GBW filter coefficient (for testing).
     #[inline]
     pub fn gbw_coeff(&self) -> crate::Wave {
-        self.gbw_coeff
+        self.fx.gbw_coeff
     }
 
     /// Set the maximum output voltage (supply rails).
@@ -595,20 +551,10 @@ impl OpAmpRoot {
         // Kept for API compatibility with existing code
     }
 
-    /// Apply slew rate limiting.
+    /// Apply slew rate limiting via the shared dV/dt clamp.
     #[inline]
     fn apply_slew_limit(&mut self, v: crate::Wave) -> crate::Wave {
-        let max_dv = self.model.slew_rate * 1e6 / self.sample_rate;
-        let dv = v - self.prev_out;
-        let limited = if dv > max_dv {
-            self.prev_out + max_dv
-        } else if dv < -max_dv {
-            self.prev_out - max_dv
-        } else {
-            v
-        };
-        self.prev_out = limited;
-        limited
+        self.fx.slew_step(v)
     }
 
     /// Compute the voltage source value for a DiodePair stage with opamp feedback.
@@ -629,14 +575,13 @@ impl OpAmpRoot {
         // Apply gain (magnitude only — WDF handles sign convention)
         let mut v_out = gain * input;
 
-        // GBW rolloff: single-pole LPF at f_cl = GBW / gain
-        v_out = self.gbw_coeff * v_out + (1.0 - self.gbw_coeff) * self.gbw_state;
-        self.gbw_state = v_out;
+        // GBW rolloff: single-pole LPF at f_cl = GBW / gain (shared primitive)
+        v_out = self.fx.gbw_step(v_out);
 
         // Hard clip at supply rails (asymmetric)
         v_out = v_out.clamp(-self.model.v_rail_neg, self.model.v_rail_pos);
 
-        // Slew rate limiting
+        // Slew rate limiting (shared dV/dt clamp)
         v_out = self.apply_slew_limit(v_out);
 
         v_out
@@ -644,9 +589,8 @@ impl OpAmpRoot {
 
     /// Reset internal state.
     pub fn reset(&mut self) {
-        self.prev_out = 0.0;
+        self.fx.reset();
         self.vp = 0.0;
-        self.gbw_state = 0.0;
     }
 }
 
@@ -670,9 +614,8 @@ impl WdfRoot for OpAmpRoot {
 
         // Apply GBW-limited bandwidth: single-pole LPF at f_cl = GBW / gain.
         // This models the dominant-pole rolloff that makes LM308 (1MHz) darker
-        // than TL072 (3MHz) at high gain settings.
-        v_out = self.gbw_coeff * v_out + (1.0 - self.gbw_coeff) * self.gbw_state;
-        self.gbw_state = v_out;
+        // than TL072 (3MHz) at high gain settings. (shared primitive)
+        v_out = self.fx.gbw_step(v_out);
 
         // Apply soft clipping if feedback diodes present
         if let Some(vd) = self.soft_clip_v {
