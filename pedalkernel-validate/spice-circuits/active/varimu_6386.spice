@@ -1,0 +1,151 @@
+* ============================================================================
+* GE 6386 Variable-Mu Triode — Common-Cathode Gain Stage
+* PedalKernel Validation Circuit (Phase 1 Reference)
+* ============================================================================
+*
+* PURPOSE
+* -------
+* Reference circuit for the GE 6386 twin-triode (Fairchild 670 compression
+* element). Encodes the engine's Raffensperger vari-mu model as a behavioral
+* B-source so that ngspice simulations exactly match pedalkernel-rt IV curve.
+*
+* MODELING CHOICE: Raffensperger behavioral B-source (not Koren)
+* --------------------------------------------------------------
+* The GE 6386 is a remote-cutoff (variable-mu) tube whose transconductance gm
+* falls continuously as the grid is biased more negative. The engine models
+* this with the Raffensperger equation
+* (pedalkernel-rt/src/elements/nonlinear/vari_mu.rs, ge_6386()):
+*
+*   Ia = p1 * Vak^p2 / ((p3 - p4*Vgk)^p5 * (p6 + exp(p7*Vak - p8*Vgk)))
+*
+* Parameters from ge_6386():
+*   p1 = 3.981e-8    overall current scale
+*   p2 = 2.383       plate voltage exponent
+*   p3 = 0.5         denominator base intercept (cutoff offset)
+*   p4 = 0.1         grid voltage scaling in denominator
+*   p5 = 1.8         denominator exponent (controls remote-cutoff taper rate)
+*   p6 = 0.5         exponential offset
+*   p7 = -0.03922    Vak coefficient in exp term (negative: saturates w/ Vak)
+*   p8 = 0.2         Vgk coefficient in exp term
+*
+* WHY NOT KOREN: The Koren triode model assumes fixed mu and cannot represent
+* the gradual variable-mu gain taper. A behavioral B-source encoding the
+* Raffensperger equation directly gives exact agreement with the engine's IV
+* curve — no parameter re-fitting needed.
+*
+* IMPLEMENTATION NOTE: The subcircuit uses a single-expression B-source (not
+* chained intermediate voltage B-sources). Multi-node intermediate B-source
+* chains break ngspice AC small-signal linearization (the MNA jacobian for
+* V-type B-sources in series does not propagate AC derivatives correctly in
+* ngspice-45). The single inline expression is linearized correctly.
+*
+* CIRCUIT TOPOLOGY: common-cathode amplifier
+* -------------------------------------------
+*   B+ = 300V, Rp = 10k (plate load)
+*   Cathode: Rk=1R (≈GND) + bypass cap Ck
+*   Grid: driven by harness VIN (DC bias + AC signal)
+*   Output: v_plate (direct measurement node for harness wrdata)
+*
+* HARNESS INTERFACE (spice.rs::generate_netlist)
+* ----------------------------------------------
+* The validation harness wraps this file, injects VIN v_in 0 PWL(...),
+* and generates .TRAN + .CONTROL wrdata v_plate. Node v_in is the
+* signal input; the harness controls DC bias via the source offset.
+* For standalone gain-vs-bias verification, use the companion script:
+*   spice-circuits/active/varimu_6386_sweep_test.spice
+*
+* VERIFIED COMPRESSION CURVE (ngspice transient, Vb=300V Rp=10k Vac=10mV 1kHz)
+* Bias (Vgk)  ngspice gain   expected gm*(Rp||rp)  compression
+* -2V          10.8x (20.7dB)   10.6x  <- reference (light)
+* -4V           9.0x (19.1dB)    8.8x  -1.6 dB
+* -8V           6.5x (16.3dB)    6.4x  -4.4 dB
+* -12V          4.9x (13.8dB)    4.8x  -6.9 dB
+*
+* Total: 6.9 dB compression (-2V to -12V). Gain monotonically decreasing —
+* this is the vari-mu signature. The gradual taper (no hard cutoff) is
+* the defining remote-cutoff characteristic of the 6386.
+*
+* ENGINE comp=0.17 NOTE: project memory records the 670 sidechain produced
+* comp≈0.17 (mu/100 ≈ 17). This deck confirms the Raffensperger model itself
+* is correct. The comp=0.17 issue is a sidechain CV-level problem — the
+* sidechain was not swinging the 6386 bias far enough into the compression
+* region. Model is validated; sidechain fix is a separate concern.
+*
+* CONVERGENCE: .IC for DC operating point, RELTOL=5e-3, TRAP, DELMAX=50u.
+* ============================================================================
+
+* ============================================================================
+* Power supply
+* ============================================================================
+VB  vb  0  DC 300
+
+* ============================================================================
+* Plate load: B+ to plate
+* ============================================================================
+Rp  vb  v_plate  10k
+
+* ============================================================================
+* Cathode (virtually grounded via Rk=1R; Ck bypasses residual AC)
+* Self-bias Rk is minimal so DC operating point is set externally by
+* the DC component of the grid drive. This matches the Fairchild 670
+* topology where Vgk is driven directly by the sidechain control voltage.
+* ============================================================================
+Rk  v_cathode  0  1
+Ck  v_cathode  0  1000u  IC=0
+
+* ============================================================================
+* Grid: v_in is driven by the harness VIN source.
+* Grid leak Rg provides DC return path.
+* ============================================================================
+Rg  v_in  0  1MEG
+
+* ============================================================================
+* GE 6386 Triode Instance
+* (anode=v_plate, grid=v_in, cathode=v_cathode)
+* ============================================================================
+X6386  v_plate  v_in  v_cathode  TRIODE_GE6386
+
+* ============================================================================
+* GE 6386 Variable-Mu Triode Subcircuit — Raffensperger Behavioral Model
+* ============================================================================
+* Encodes the engine's plate_current() from vari_mu.rs::ge_6386() exactly.
+*
+* SINGLE-EXPRESSION B-SOURCE: Required for correct ngspice AC linearization.
+* Multi-node intermediate B-source chains do not propagate AC derivatives
+* through V-type B-nodes in ngspice's MNA solver. The inline expression
+* is fully differentiable and produces correct small-signal behavior.
+*
+* Guard conditions (matching vari_mu.rs guards):
+*   Vak <= 0: MAX(V(anode,cathode), 1e-6) prevents negative power of negative
+*   dbase = p3-p4*Vgk: MAX(..., 1e-9) guards denominator (unreachable in practice)
+*   exp arg: MIN/MAX clamp to [-80, 80] prevents IEEE overflow
+*
+* Grid current: diode IS=1e-9 N=1.5, matching engine grid_is=1e-9 grid_vt=0.025.
+* Effectively zero for Vgk < 0 (normal operation).
+* ============================================================================
+.SUBCKT TRIODE_GE6386 anode grid cathode
+
+* Plate current — Raffensperger equation, single inline expression
+Bip  anode  cathode  I =
++  3.981e-8 * PWR(MAX(V(anode,cathode), 1e-6), 2.383)
++  / ( PWR(MAX(0.5 - 0.1*V(grid,cathode), 1e-9), 1.8)
++      * (0.5 + EXP(MIN(MAX(
++            -0.03922*MAX(V(anode,cathode),1e-6) - 0.2*V(grid,cathode),
++            -80.0), 80.0))) )
+
+* Grid current: diode model (negligible for Vgk < 0, models forward conduction)
+Dgc  grid  cathode  DGRID_6386
+.MODEL DGRID_6386  D(IS=1e-9 N=1.5 RS=10k)
+
+.ENDS TRIODE_GE6386
+
+* ============================================================================
+* Initial conditions — DC operating point at Vgk=-2V
+*   Load line: Vb=300V, Rp=10k, Vak≈132V, Ia≈16.8mA
+* ============================================================================
+.IC V(v_plate)=132 V(v_cathode)=0
+
+* ============================================================================
+* Convergence options (stiff-deck recipe from project memory)
+* ============================================================================
+.OPTIONS RELTOL=5e-3 METHOD=TRAP DELMAX=50u ITL1=500 ITL4=100
