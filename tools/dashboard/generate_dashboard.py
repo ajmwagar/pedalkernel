@@ -233,12 +233,13 @@ def plot_circuit(
     ax_f.set_ylabel("Magnitude (dB)")
     ax_f.set_title("FFT Magnitude")
 
-    # Audio-Nyquist marker. Signals are plotted at the oversampled rate, but the
-    # band that survives downsampling ends at the base-rate Nyquist. Above this
-    # line ngspice (a continuous-time solver sampled at the oversampled rate)
-    # shows real nonlinear harmonics and aliasing that the discrete WDF model
-    # does not reproduce — so spectral divergence to the RIGHT of it is expected
-    # and ultrasonic (inaudible after downsampling), not an accuracy defect.
+    # Audio-Nyquist marker. Circuits run at the oversampled rate; PedalKernel
+    # then anti-aliases, band-limiting ultrasonic content before downsampling,
+    # so WDF output rolls off above the base-rate Nyquist. The ngspice golden is
+    # a raw transient sampled at the oversampled rate and keeps the full
+    # ultrasonic harmonics and aliasing up to its own Nyquist. So spectral
+    # divergence to the RIGHT of this line is the anti-aliasing working as
+    # intended (ultrasonic, filtered out on downsampling), not an accuracy defect.
     if base_nyquist_hz is not None and base_nyquist_hz > 0:
         ax_f.axvline(
             base_nyquist_hz, color="#ffb000", linestyle="--",
