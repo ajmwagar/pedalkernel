@@ -1,0 +1,50 @@
+# Single 12AU7 triode, common cathode configuration
+# Medium-mu triode (mu≈21.5) used in driver/buffer stages
+# Operating point: Vp≈130V, Vgk≈-8V, Ip≈4mA (auto-bias via Rk)
+# Voltage gain: ~-14 (lower mu than 12AX7)
+# Matches spice-circuits/nonlinear/common_cathode_12au7.spice
+
+pedal "12AU7 Common Cathode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    # Input coupling
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+
+    # Triode
+    V1: triode(12au7)
+
+    # Plate load
+    R_plate: resistor(33k)
+
+    # Cathode bias (bypassed for gain)
+    R_cathode: resistor(820)
+    C_cathode: cap(25u)
+
+    # Output coupling
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    # Input stage
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+
+    # Triode bias and load
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+
+    # Output stage
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}

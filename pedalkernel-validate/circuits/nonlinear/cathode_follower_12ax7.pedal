@@ -1,0 +1,46 @@
+# 12AX7 triode, cathode follower configuration
+# High-mu triode (mu≈100) — non-inverting, gain < 1, low output impedance
+# Plate tied directly to B+; cathode drives the output through coupling cap
+# Operating point: Vp=B+=250V, Vk≈130V, Ip≈0.9mA
+# Voltage gain: ~0.97 (non-inverting, near-unity for high mu)
+# Matches spice-circuits/nonlinear/cathode_follower_12ax7.spice
+
+pedal "12AX7 Cathode Follower" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    # Input coupling
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+
+    # Triode
+    V1: triode(12ax7)
+
+    # Cathode load (sets operating point; no bypass — cathode is the output)
+    R_cathode: resistor(100k)
+
+    # Output coupling (from cathode)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    # Input stage
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+
+    # Plate tied directly to B+ (no plate load resistor)
+    vcc -> V1.plate
+
+    # Cathode to load
+    V1.cathode -> R_cathode.a, C_out.a
+    R_cathode.b -> gnd
+
+    # Output from cathode coupling cap
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}
