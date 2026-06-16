@@ -60,21 +60,34 @@ jobs:
         run: pip install -r tools/dashboard/requirements.txt
 
       # ----------------------------------------------------------------
-      # Run pedalkernel-validate to produce the JSON report.
+      # Nightly WDF golden regeneration.
       #
-      # We run the `run` subcommand (live WDF vs committed ngspice goldens)
-      # because WDF goldens are not yet committed (bead 85by.3).  When
-      # compare-goldens is ready (both golden sets committed), swap to:
-      #   cargo run -p pedalkernel-validate -- \
-      #     --golden pedalkernel-validate/golden \
-      #     --report report.json \
-      #     compare-goldens --suite ${{ ... }}
+      # The dashboards plot the engine's WDF output from committed goldens, which
+      # would otherwise go STALE as the engine evolves. So the nightly run first
+      # regenerates them from the CURRENT engine:
+      #   - `bootstrap --suite all` rewrites the accuracy WDF goldens
+      #     (golden/<suite>/<test>/wdf/<signal>.npy).
+      #   - `dynamics --regen` rewrites the dynamics WDF goldens
+      #     (dynamics-goldens/compressor/<circuit>/level_sweep.npy) and the JSON.
+      # Everything runs off one --release build (fast); the regenerated goldens
+      # are used in-CI to build the dashboards and are NOT committed back (the
+      # published data/+static/ already reflect them).
       # ----------------------------------------------------------------
+      - name: Build pedalkernel-validate (release)
+        run: cargo build --release -p pedalkernel-validate
+
+      - name: Regenerate accuracy WDF goldens (full)
+        working-directory: pedalkernel-validate
+        run: |
+          SUITE="${{ github.event.inputs.suite || 'all' }}"
+          ../target/release/pedalkernel-validate bootstrap --suite "$SUITE" \
+            2>&1 | tee bootstrap-output.txt
+
       - name: Run validation and produce JSON report
         working-directory: pedalkernel-validate
         run: |
           SUITE="${{ github.event.inputs.suite || 'all' }}"
-          cargo run -p pedalkernel-validate -- \
+          ../target/release/pedalkernel-validate \
             --report report.json \
             run --suite "$SUITE" \
             2>&1 | tee validate-output.txt || true
@@ -119,19 +132,20 @@ jobs:
             2>&1 | tee dashboard-output.txt
 
       # ----------------------------------------------------------------
-      # Dynamics dashboard: produce data/dynamics.json from the committed
-      # dynamic-stimulus goldens (LevelSweep / ToneBurst) via the trusted
-      # pedalkernel::analysis dynamics tools, then render PNGs.
+      # Dynamics dashboard: regenerate the dynamics WDF goldens from the current
+      # engine (--regen) and produce data/dynamics.json, then render PNGs.
+      # fet_leveler keeps its golden-loop path (real ngspice overlay); the other
+      # compressors' WDF goldens are refreshed live here.
       # ----------------------------------------------------------------
-      - name: Generate dynamics.json from goldens
+      - name: Regenerate dynamics WDF goldens and produce dynamics.json
         env:
           GIT_COMMIT: ${{ github.sha }}
         run: |
           TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          cargo run -p pedalkernel-validate -- \
+          ./target/release/pedalkernel-validate \
             --golden pedalkernel-validate/golden \
             --report-dynamics data/dynamics.json \
-            dynamics --timestamp "$TIMESTAMP" \
+            dynamics --regen --timestamp "$TIMESTAMP" \
             2>&1 | tee dynamics-output.txt
 
           if [ ! -f data/dynamics.json ]; then
