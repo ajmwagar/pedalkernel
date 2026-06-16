@@ -210,12 +210,22 @@ pub fn spectral_error_db(
 
     let threshold_db = ref_peak_db - 80.0;
 
+    // Physical noise floor relative to the reference peak. The `+1e-30`
+    // guard alone pins an empty bin at a non-physical ~-600 dB, so a WDF
+    // bin that is legitimately ~0 (anti-aliased roll-off, or simply no
+    // energy there) inflates the per-bin error to 600+ dB. A bin more than
+    // 120 dB below the reference peak is effectively silent; clamp both
+    // spectra to that floor so the worst meaningful per-bin error is
+    // bounded at 120 dB. Genuine in-band mismatches (both signals present
+    // and well above the floor) are unaffected.
+    let noise_floor_db = ref_peak_db - 120.0;
+
     let mut max_error = 0.0_f64;
 
     for i in 1..max_bin {
-        let ref_db = 20.0 * (ref_spec[i] + 1e-30).log10();
+        let ref_db = (20.0 * (ref_spec[i] + 1e-30).log10()).max(noise_floor_db);
         if ref_db > threshold_db {
-            let wdf_db = 20.0 * (wdf_spec[i] + 1e-30).log10();
+            let wdf_db = (20.0 * (wdf_spec[i] + 1e-30).log10()).max(noise_floor_db);
             let error = (wdf_db - ref_db).abs();
             max_error = max_error.max(error);
         }
