@@ -1142,13 +1142,17 @@ struct DynamicsCircuit {
 struct StaticCurve {
     input_levels_dbvu: Vec<f64>,
     wdf_output_dbvu: Vec<f64>,
-    spice_output_dbvu: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spice_output_dbvu: Option<Vec<f64>>,
     wdf_gr_db: Vec<f64>,
-    spice_gr_db: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spice_gr_db: Option<Vec<f64>>,
     wdf_ratio: f64,
-    spice_ratio: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spice_ratio: Option<f64>,
     wdf_gr_total_db: f64,
-    spice_gr_total_db: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spice_gr_total_db: Option<f64>,
 }
 
 #[derive(serde::Serialize)]
@@ -1157,11 +1161,14 @@ struct ToneBurstDyn {
     off_ms: f64,
     time_ms: Vec<f64>,
     wdf_gr_db: Vec<f64>,
-    spice_gr_db: Vec<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spice_gr_db: Option<Vec<f64>>,
     wdf_attack_ms: f64,
     wdf_release_ms: f64,
-    spice_attack_ms: f64,
-    spice_release_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spice_attack_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    spice_release_ms: Option<f64>,
 }
 
 /// Measure a static gain curve from a level-sweep golden.
@@ -1262,7 +1269,13 @@ fn tone_burst_from_golden(
     // a spurious ~200 dB "gain reduction". Restrict to [onset, end], floor the
     // envelope 60 dB below the reference, and clamp GR to a sane band.
     let win_start = onset.min(env.len());
-    let win_end = end.min(env.len()).max(win_start);
+    // Window = the known burst length (onset + on_ms). The detected falling edge
+    // (`end`) misfires on circuits whose level dips mid-burst (e.g. opto riding
+    // gain down), truncating the window to a few ms; the nominal length is the
+    // robust choice since we know the stimulus.
+    let _ = end;
+    let nominal_end = onset + ((on_ms / 1000.0) * effective_sr).round() as usize;
+    let win_end = nominal_end.min(env.len()).max(win_start + 1);
     let span = win_end.saturating_sub(win_start).max(1);
     let stride = (span / 2000).max(1);
     let floor = reference * db_to_lin(-60.0);
@@ -1278,6 +1291,284 @@ fn tone_burst_from_golden(
     }
     let _ = off_ms;
     (attack_ms, release_ms, time_ms, gr_db)
+}
+
+/// One of the live-measured compressors: a `.pedal` to compile + the control
+/// settings that put it in a COMPRESSING state. Paths are repo-relative to the
+/// `pedalkernel/` crate's `examples/` tree.
+struct LiveCircuit {
+    /// Dashboard test/circuit key stem (e.g. "la2a").
+    test: &'static str,
+    /// `.pedal` path relative to the `pedalkernel/` crate root.
+    pedal_rel: &'static str,
+    /// Control settings (label, value) — applied if the control exists.
+    controls: &'static [(&'static str, f64)],
+}
+
+/// The five compressors graphed on the dynamics dashboard. `fet_leveler` is
+/// listed for completeness but is measured from its committed goldens (it has an
+/// ngspice golden), so the live path SKIPS it to avoid clobbering that entry.
+const LIVE_CIRCUITS: &[LiveCircuit] = &[
+    LiveCircuit {
+        test: "la2a",
+        pedal_rel: "examples/outboard/compressor/la2a.pedal",
+        // Peak Reduction high = max compression; Gain mid = makeup.
+        controls: &[("Peak Reduction", 0.8), ("Gain", 0.6), ("Limit/Compress", 0.0)],
+    },
+    LiveCircuit {
+        test: "opto_leveler",
+        pedal_rel: "examples/outboard/compressor/opto_leveler.pedal",
+        // Only a Gain (makeup) knob; the photocell IS the time constant.
+        controls: &[("Gain", 0.6)],
+    },
+    LiveCircuit {
+        test: "vca_bus_comp",
+        pedal_rel: "examples/outboard/compressor/vca_bus_comp.pedal",
+        // Only a Makeup knob; compression is automatic via the sidechain.
+        controls: &[("Makeup", 0.5)],
+    },
+    LiveCircuit {
+        test: "dyna_comp",
+        pedal_rel: "examples/pedals/compressor/dyna_comp.pedal",
+        // Sensitivity high = max compression; Output mid = makeup.
+        controls: &[("Sensitivity", 0.8), ("Output", 0.5)],
+    },
+];
+
+/// Resolve a `pedalkernel/`-crate-relative example path to an absolute path,
+/// trying the build-time crate sibling first, then a few cwd-relative fallbacks.
+fn resolve_pedal_path(pedal_rel: &str) -> Option<std::path::PathBuf> {
+    let candidates = [
+        // pedalkernel-validate/../pedalkernel/<rel>
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("pedalkernel")
+            .join(pedal_rel),
+        // cwd = repo root: pedalkernel/<rel>
+        std::path::Path::new("pedalkernel").join(pedal_rel),
+        // cwd = pedalkernel crate: <rel>
+        std::path::PathBuf::from(pedal_rel),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// Build a fresh compiled processor for `src` at `sample_rate`, applying the
+/// controls that exist. Unknown control labels are skipped gracefully (the
+/// compiled pedal's `set_control_immediate` is a no-op for absent labels).
+fn build_live_processor(
+    src: &str,
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+) -> anyhow::Result<impl FnMut(f64) -> f64> {
+    let pedal_def = pedalkernel::dsl::parse_pedal_file(src)
+        .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
+    let options = pedalkernel::compiler::CompileOptions {
+        oversampling: pedalkernel::oversampling::OversamplingFactor::X1,
+        ..pedalkernel::compiler::CompileOptions::default()
+    };
+    let mut pedal =
+        pedalkernel::compiler::compile_pedal_with_options(&pedal_def, sample_rate, options)
+            .map_err(|e| anyhow::anyhow!("Compile error: {}", e))?;
+    for &(label, val) in controls {
+        // Immediate (not smoothed) so the compressing state is in effect from
+        // sample 0 — no control-smoother ramp eating into the settle window.
+        pedal.set_control_immediate(label, val);
+    }
+    use pedalkernel::PedalProcessor;
+    Ok(move |s| pedal.process(s))
+}
+
+/// LIVE static gain curve: a 1 kHz sine at each level (-40..=0 step 5 dBVU) is
+/// run through a FRESH processor (so the previous level's envelope state cannot
+/// bleed in) with a generous SETTLE before measuring the steady RMS over the
+/// last WINDOW. Returns `(input_dbvu, output_dbvu)` points.
+fn live_static_curve(
+    src: &str,
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+    freq_hz: f64,
+) -> anyhow::Result<Vec<(f64, f64)>> {
+    use pedalkernel_validate::signals::dbvu_to_peak;
+    // Slow opto/LA-2A ballistics release over 1-2 s: a short settle would
+    // measure mid-transition, so use a generous 4 s settle + 1 s window.
+    const SETTLE: f64 = 4.0;
+    const WINDOW: f64 = 1.0;
+    let total = SETTLE + WINDOW;
+    let n_total = (total * sample_rate).round() as usize;
+    let n_window = (WINDOW * sample_rate).round() as usize;
+
+    let mut curve = Vec::new();
+    let mut level = -40.0_f64;
+    while level <= 0.0 + 1e-9 {
+        let amp = dbvu_to_peak(level);
+        let mut proc = build_live_processor(src, sample_rate, controls)?;
+        let mut out = Vec::with_capacity(n_total);
+        for i in 0..n_total {
+            let t = i as f64 / sample_rate;
+            let x = amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin();
+            out.push(proc(x));
+        }
+        let meas = &out[n_total.saturating_sub(n_window)..];
+        let out_dbvu = rms_to_dbvu(pedalkernel::analysis::rms(meas));
+        curve.push((level, out_dbvu));
+        level += 5.0;
+    }
+    Ok(curve)
+}
+
+/// LIVE tone burst: a 1 kHz, -6 dBVU burst (on `on_ms`, off `off_ms`) through a
+/// fresh processor, then the SAME measurement logic as `tone_burst_from_golden`.
+fn live_tone_burst(
+    src: &str,
+    sample_rate: f64,
+    controls: &[(&str, f64)],
+    freq_hz: f64,
+    on_ms: f64,
+    off_ms: f64,
+) -> anyhow::Result<(f64, f64, Vec<f64>, Vec<f64>)> {
+    use pedalkernel_validate::signals::dbvu_to_peak;
+    let amp = dbvu_to_peak(-6.0);
+    let on_n = ((on_ms / 1000.0) * sample_rate).round() as usize;
+    let off_n = ((off_ms / 1000.0) * sample_rate).round() as usize;
+    let mut proc = build_live_processor(src, sample_rate, controls)?;
+    let mut out = Vec::with_capacity(on_n + off_n);
+    // ON segment: live tone.
+    for i in 0..on_n {
+        let t = i as f64 / sample_rate;
+        let x = amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin();
+        out.push(proc(x));
+    }
+    // OFF segment: silence (the release tail).
+    for _ in 0..off_n {
+        out.push(proc(0.0));
+    }
+    Ok(tone_burst_from_golden(&out, on_ms, off_ms, sample_rate))
+}
+
+/// Measure all `LIVE_CIRCUITS` through the engine and insert WDF-only entries.
+fn add_live_dynamics(
+    cli: &Cli,
+    circuits: &mut std::collections::BTreeMap<String, DynamicsCircuit>,
+    effective_sr: f64,
+) {
+    use pedalkernel::analysis::{compression_ratio, gain_reduction_db};
+    const FREQ_HZ: f64 = 1000.0;
+    const ON_MS: f64 = 500.0;
+    const OFF_MS: f64 = 2000.0;
+    let suite = "compressor";
+
+    for lc in LIVE_CIRCUITS {
+        let Some(path) = resolve_pedal_path(lc.pedal_rel) else {
+            println!(
+                "  {} {}/{} — pedal not found ({}), skipping live",
+                "⚠".yellow(),
+                suite,
+                lc.test,
+                lc.pedal_rel
+            );
+            continue;
+        };
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                println!(
+                    "  {} {}/{} — read error: {}, skipping",
+                    "⚠".yellow(),
+                    suite,
+                    lc.test,
+                    e
+                );
+                continue;
+            }
+        };
+
+        let circuit_key = format!("{}/{}", suite, lc.test);
+        // The circuit path for display (repo-relative under pedalkernel/).
+        let circuit_disp = format!("pedalkernel/{}", lc.pedal_rel);
+
+        // --- LIVE static gain curve ---
+        let static_curve = match live_static_curve(&src, effective_sr, lc.controls, FREQ_HZ) {
+            Ok(c) if c.len() >= 2 => Some(c),
+            Ok(_) => {
+                println!("  {} {} — static curve too short, skipping", "⚠".yellow(), circuit_key);
+                None
+            }
+            Err(e) => {
+                println!("  {} {} — static curve error: {}", "⚠".yellow(), circuit_key, e);
+                None
+            }
+        };
+
+        // --- LIVE tone burst ---
+        let tone_burst =
+            match live_tone_burst(&src, effective_sr, lc.controls, FREQ_HZ, ON_MS, OFF_MS) {
+                Ok((a, r, t, gr)) if !t.is_empty() => Some((a, r, t, gr)),
+                Ok(_) => {
+                    println!("  {} {} — tone burst empty, skipping", "⚠".yellow(), circuit_key);
+                    None
+                }
+                Err(e) => {
+                    println!("  {} {} — tone burst error: {}", "⚠".yellow(), circuit_key, e);
+                    None
+                }
+            };
+
+        let entry = circuits.entry(circuit_key.clone()).or_insert_with(|| DynamicsCircuit {
+            suite: suite.to_string(),
+            test: lc.test.to_string(),
+            circuit: circuit_disp.clone(),
+            frequency_hz: FREQ_HZ,
+            static_curve: None,
+            tone_burst: None,
+        });
+
+        if let Some(curve) = static_curve {
+            let lo = curve.first().unwrap().0;
+            let hi = curve.last().unwrap().0;
+            let wdf_ratio = compression_ratio(&curve, lo, hi);
+            let wdf_gr_total = gain_reduction_db(&curve, lo, hi);
+            entry.static_curve = Some(StaticCurve {
+                input_levels_dbvu: curve.iter().map(|p| p.0).collect(),
+                wdf_output_dbvu: curve.iter().map(|p| p.1).collect(),
+                spice_output_dbvu: None,
+                wdf_gr_db: gr_series(&curve),
+                spice_gr_db: None,
+                wdf_ratio,
+                spice_ratio: None,
+                wdf_gr_total_db: wdf_gr_total,
+                spice_gr_total_db: None,
+            });
+            println!(
+                "  {} {} [live level_sweep] WDF GR {:.2} dB / ratio {:.2}:1 (WDF-only)",
+                "✓".green(),
+                circuit_key,
+                wdf_gr_total,
+                wdf_ratio,
+            );
+        }
+
+        if let Some((a, r, t, gr)) = tone_burst {
+            entry.tone_burst = Some(ToneBurstDyn {
+                on_ms: ON_MS,
+                off_ms: OFF_MS,
+                time_ms: t,
+                wdf_gr_db: gr,
+                spice_gr_db: None,
+                wdf_attack_ms: a,
+                wdf_release_ms: r,
+                spice_attack_ms: None,
+                spice_release_ms: None,
+            });
+            println!(
+                "  {} {} [live tone_burst] WDF atk {:.1} ms / rel {:.1} ms (WDF-only)",
+                "✓".green(),
+                circuit_key,
+                a,
+                r,
+            );
+        }
+    }
+    let _ = cli;
 }
 
 fn generate_dynamics(cli: &Cli, timestamp: Option<String>) -> anyhow::Result<()> {
@@ -1404,13 +1695,13 @@ fn generate_dynamics(cli: &Cli, timestamp: Option<String>) -> anyhow::Result<()>
                         entry.static_curve = Some(StaticCurve {
                             input_levels_dbvu: wdf_curve.iter().map(|p| p.0).collect(),
                             wdf_output_dbvu: wdf_curve.iter().map(|p| p.1).collect(),
-                            spice_output_dbvu: spice_curve.iter().map(|p| p.1).collect(),
+                            spice_output_dbvu: Some(spice_curve.iter().map(|p| p.1).collect()),
                             wdf_gr_db: gr_series(&wdf_curve),
-                            spice_gr_db: gr_series(&spice_curve),
+                            spice_gr_db: Some(gr_series(&spice_curve)),
                             wdf_ratio,
-                            spice_ratio,
+                            spice_ratio: Some(spice_ratio),
                             wdf_gr_total_db: wdf_gr_total,
-                            spice_gr_total_db: spice_gr_total,
+                            spice_gr_total_db: Some(spice_gr_total),
                         });
                         println!(
                             "  {} {} [level_sweep] WDF GR {:.2} dB / ratio {:.2}:1 | ngspice GR {:.2} dB / ratio {:.2}:1",
@@ -1448,11 +1739,11 @@ fn generate_dynamics(cli: &Cli, timestamp: Option<String>) -> anyhow::Result<()>
                             off_ms: *off_ms,
                             time_ms: wdf_time[..n].to_vec(),
                             wdf_gr_db: wdf_gr[..n].to_vec(),
-                            spice_gr_db: sp_gr[..n].to_vec(),
+                            spice_gr_db: Some(sp_gr[..n].to_vec()),
                             wdf_attack_ms: wdf_a,
                             wdf_release_ms: wdf_r,
-                            spice_attack_ms: sp_a,
-                            spice_release_ms: sp_r,
+                            spice_attack_ms: Some(sp_a),
+                            spice_release_ms: Some(sp_r),
                         });
                         println!(
                             "  {} {} [tone_burst] WDF atk {:.1} ms / rel {:.1} ms | ngspice atk {:.1} ms / rel {:.1} ms",
@@ -1469,6 +1760,15 @@ fn generate_dynamics(cli: &Cli, timestamp: Option<String>) -> anyhow::Result<()>
             }
         }
     }
+
+    // Live WDF measurement for the four golden-less compressors (and any other
+    // LIVE_CIRCUITS that lack a golden entry). fet_leveler is intentionally
+    // skipped here — it is measured from its committed WDF + ngspice goldens.
+    println!(
+        "{} Measuring WDF-only compressors live through the engine...",
+        "▶".blue()
+    );
+    add_live_dynamics(cli, &mut circuits, effective_sr);
 
     let git_commit = std::env::var("GIT_COMMIT").ok().filter(|s| !s.is_empty());
     let run_timestamp = timestamp.unwrap_or_else(|| {
