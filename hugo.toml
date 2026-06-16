@@ -25,6 +25,10 @@ enableRobotsTXT = true
     url = "/book/"
     weight = 10
   [[menu.main]]
+    name = "Accuracy"
+    url = "/accuracy/"
+    weight = 15
+  [[menu.main]]
     name = "API"
     url = "/api/"
     weight = 20
