@@ -986,3 +986,52 @@ body.page.t-accuracy main {
   .acc-table th, .acc-table td { padding: 0.3rem 0.4rem; }
 }
 
+/* ---------- dynamics dashboard ---------- */
+
+/* Full-width override — mirrors the accuracy page. The layout reuses the
+   .acc-* component classes (hero, stats, table, intro, fig, footer) and adds
+   only a handful of dyn-* tweaks below, so it stays dark/light-mode safe via
+   the shared CSS variables. */
+body.page.t-dynamics main {
+  max-width: 1320px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2.2rem 1.5rem 3rem;
+}
+
+.dyn-dash { color: var(--fg); }
+
+/* Each circuit is its own bordered block so the metrics table + two figures
+   read as one card. */
+.dyn-circuit {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.4rem 1.5rem 1.6rem;
+  background: var(--card);
+}
+.dyn-circuit > h2 {
+  font-family: var(--mono);
+  font-size: 1.4rem;
+  margin: 0 0 0.4rem;
+}
+
+/* Constrain the WDF-vs-ngspice metrics table so it does not stretch full width. */
+.dyn-table { max-width: 640px; margin: 1rem 0 1.4rem; }
+
+/* Dynamics figures sit full-width within the circuit card. */
+.dyn-fig { margin: 1.2rem 0 0; }
+.dyn-fig img {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: block;
+}
+
+/* Dynamics dashboard — small screens. */
+@media (max-width: 640px) {
+  body.page.t-dynamics main { padding: 1.6rem 1rem 2.5rem; }
+  .dyn-circuit { padding: 1rem 1rem 1.2rem; }
+  .dyn-circuit > h2 { font-size: 1.1rem; word-break: break-word; }
+}
+

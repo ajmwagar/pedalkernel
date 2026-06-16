@@ -6,7 +6,7 @@ description = "SPICE validation harness for PedalKernel WDF compiler"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
-pedalkernel = { path = "../pedalkernel", version = "0.1", default-features = false, features = ["gummel-poon"] }
+pedalkernel = { path = "../pedalkernel", version = "0.1", default-features = false, features = ["gummel-poon", "analysis"] }
 
 # FFT for spectral analysis
 rustfft = "6.2"

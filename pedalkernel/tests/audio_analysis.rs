@@ -134,8 +134,9 @@ pub fn tone_burst(
 
 #[cfg(feature = "analysis")]
 pub use pedalkernel::analysis::{
-    assert_healthy, band_energy_ratio, correlation, count_subnormals, crest_factor, db_to_lin,
-    dc_offset, energy, goertzel_mag, goertzel_power, lin_to_db, peak, rms, rms_envelope,
+    assert_healthy, band_energy_ratio, compression_ratio, correlation, count_subnormals,
+    crest_factor, db_to_lin, dc_offset, energy, gain_reduction_db, goertzel_mag, goertzel_power,
+    lin_to_db, measure_attack_seconds, measure_release_seconds, peak, rms, rms_envelope,
     spectral_centroid, spectral_distance, thd,
 };
 
@@ -677,6 +678,10 @@ where
 }
 
 /// Compression ratio over a region of a static gain curve.
+///
+/// When the `analysis` feature is enabled this is re-exported from
+/// `pedalkernel::analysis`; the inline copy below is the `no-feature` fallback.
+#[cfg(not(feature = "analysis"))]
 pub fn compression_ratio(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
     let pts: Vec<(f64, f64)> = curve
         .iter()
@@ -705,6 +710,10 @@ pub fn compression_ratio(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
 }
 
 /// Gain reduction in dB between two points on a static gain curve.
+///
+/// When the `analysis` feature is enabled this is re-exported from
+/// `pedalkernel::analysis`; the inline copy below is the `no-feature` fallback.
+#[cfg(not(feature = "analysis"))]
 pub fn gain_reduction_db(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
     assert!(!curve.is_empty(), "gain_reduction_db: empty curve");
     let nearest = |target: f64| {
@@ -727,9 +736,18 @@ pub fn gain_reduction_db(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
 // Attack / release timing
 // ---------------------------------------------------------------------------
 
+// Attack/release timing primitives.
+//
+// When the `analysis` feature is enabled these are re-exported from
+// `pedalkernel::analysis` (single canonical implementation); the inline copies
+// below are the `no-feature` fallback so the test crates still compile under a
+// plain `cargo test`.
+#[cfg(not(feature = "analysis"))]
 const ENVELOPE_WINDOW_SECS: f64 = 0.002;
+#[cfg(not(feature = "analysis"))]
 const SETTLE_TOLERANCE_DB: f64 = 1.0;
 
+#[cfg(not(feature = "analysis"))]
 fn envelope_settle_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
     assert!(
         step_sample < output.len(),
@@ -755,11 +773,13 @@ fn envelope_settle_seconds(output: &[f64], step_sample: usize, sample_rate: f64)
 }
 
 /// Attack time: seconds from a level step-up at `step_sample` until settled.
+#[cfg(not(feature = "analysis"))]
 pub fn measure_attack_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
     envelope_settle_seconds(output, step_sample, sample_rate)
 }
 
 /// Release time: seconds from a level step-down at `step_sample` until settled.
+#[cfg(not(feature = "analysis"))]
 pub fn measure_release_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
     envelope_settle_seconds(output, step_sample, sample_rate)
 }
