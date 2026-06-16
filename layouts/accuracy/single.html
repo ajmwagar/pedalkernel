@@ -76,6 +76,9 @@
             <th class="num">Spec full (dB)</th>
             <th class="num">Spec audio (dB)</th>
             <th class="num">THD (dB)</th>
+            <th class="num">THD+N (dB)</th>
+            <th class="num">Harm (dB)</th>
+            <th class="num">E/O err (dB)</th>
             <th>Notes</th>
           </tr>
         </thead>
@@ -89,7 +92,13 @@
             <td class="num acc-muted">{{ if ne .spectral_error_full_db nil }}{{ printf "%.1f" .spectral_error_full_db }}{{ else }}&mdash;{{ end }}</td>
             <td class="num">{{ printf "%.1f" .spectral_error_db }}</td>
             <td class="num">{{ if ne .thd_error_db nil }}{{ printf "%.1f" .thd_error_db }}{{ else }}&mdash;{{ end }}</td>
+            <td class="num acc-muted">{{ if ne .thd_plus_n_error_db nil }}{{ printf "%.1f" .thd_plus_n_error_db }}{{ else }}&mdash;{{ end }}</td>
+            <td class="num acc-muted">{{ if ne .harmonic_mag_error_db nil }}{{ printf "%.1f" .harmonic_mag_error_db }}{{ else }}&mdash;{{ end }}</td>
+            <td class="num acc-muted">{{ if ne .even_odd_ratio_error_db nil }}{{ printf "%.1f" .even_odd_ratio_error_db }}{{ else }}&mdash;{{ end }}</td>
             {{ else }}
+            <td class="num">&mdash;</td>
+            <td class="num">&mdash;</td>
+            <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
@@ -248,6 +257,9 @@
             <span class="acc-muted"><b>Spec full</b> {{ if ne .spectral_error_full_db nil }}{{ printf "%.1f" .spectral_error_full_db }}{{ else }}&mdash;{{ end }}</span>
             <span><b>Spec audio</b> {{ printf "%.1f" .spectral_error_db }}</span>
             <span><b>THD</b> {{ if ne .thd_error_db nil }}{{ printf "%.1f" .thd_error_db }}{{ else }}&mdash;{{ end }}</span>
+            <span class="acc-muted"><b>THD+N</b> {{ if ne .thd_plus_n_error_db nil }}{{ printf "%.1f" .thd_plus_n_error_db }}{{ else }}&mdash;{{ end }}</span>
+            <span class="acc-muted"><b>Harm</b> {{ if ne .harmonic_mag_error_db nil }}{{ printf "%.1f" .harmonic_mag_error_db }}{{ else }}&mdash;{{ end }}</span>
+            <span class="acc-muted"><b>E/O err</b> {{ if ne .even_odd_ratio_error_db nil }}{{ printf "%.1f" .even_odd_ratio_error_db }}{{ else }}&mdash;{{ end }}</span>
             {{ else }}
             <span class="acc-nodata">no metrics{{ with .error }} &middot; {{ . }}{{ end }}</span>
             {{ end }}

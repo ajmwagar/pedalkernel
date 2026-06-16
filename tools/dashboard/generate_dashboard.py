@@ -46,6 +46,9 @@ accuracy.json
         "normalized_rms_error_db": <float>,
         "peak_error_db": <float>,
         "thd_error_db": <float or null>,
+        "thd_plus_n_error_db": <float or null>,   // THD+N error (harmonics + broadband noise/intermod)
+        "harmonic_mag_error_db": <float or null>, // worst per-harmonic magnitude error (−100 dBFS gated)
+        "even_odd_ratio_error_db": <float or null>, // even/odd balance error (push-pull vs single-ended)
         "spectral_error_db": <float>,        // audio-band (capped at audio Nyquist); gating value
         "spectral_error_full_db": <float>,   // full-band (raw), up to the data Nyquist; informational
         "even_odd_ratio_db": <float or null>,
