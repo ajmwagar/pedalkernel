@@ -11,6 +11,7 @@ use super::classify::NonlinearKind;
 use super::compiled::{CompiledPedal, RailSaturation, Stage, StageRef};
 use super::dyn_node::DynNode;
 use super::graph::{CircuitGraph, NodeId};
+use super::operating_point::{infer_transformer_dc_bias_current, node_dc_voltage};
 use super::rigid::{
     build_general_mna_from_edges, build_general_mna_from_edges_with_hints,
     build_general_mna_from_edges_with_supply, build_rigid, build_rigid_from_group,
@@ -3925,40 +3926,9 @@ fn transformer_ja_core_model(cfg: &TransformerConfig) -> Option<JaCoreModel> {
     model.is_complete().then_some(model)
 }
 
-fn infer_transformer_dc_bias_current(
-    cfg: &TransformerConfig,
-    primary_pos: NodeId,
-    primary_neg: NodeId,
-    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
-    graph: &CircuitGraph,
-) -> Option<f64> {
-    let r_primary = cfg.primary_dcr;
-    if !(r_primary.is_finite() && r_primary > 1.0e-9) {
-        return None;
-    }
-
-    let vp = node_dc_voltage(primary_pos, bias_node_voltages, graph)?;
-    let vn = node_dc_voltage(primary_neg, bias_node_voltages, graph)?;
-    let current = (vp - vn) / r_primary;
-    (current.is_finite() && current.abs() > 1.0e-12).then_some(current)
-}
-
-fn node_dc_voltage(
-    node: NodeId,
-    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
-    graph: &CircuitGraph,
-) -> Option<f64> {
-    if node == graph.gnd_node {
-        return Some(0.0);
-    }
-    if let Some(&v) = graph.supply_voltages.get(&node) {
-        return Some(v);
-    }
-    if graph.ac_ground_nodes.contains(&node) {
-        return Some(0.0);
-    }
-    bias_node_voltages.get(&node).copied()
-}
+// `infer_transformer_dc_bias_current` and `node_dc_voltage` were relocated to
+// `operating_point.rs` (the shared compile-time bias/excursion primitives) and
+// are imported at the top of this module.
 
 fn passive_transformer_voltage_gain(
     input_node: NodeId,
