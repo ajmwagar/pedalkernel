@@ -94,6 +94,9 @@ pub struct RunnerConfig {
     pub save_output: bool,
     /// Whether to regenerate golden references (requires SPICE).
     pub regenerate_golden: bool,
+    /// Skip K-method table generation (offline NR fallback). Saves build time
+    /// for validation runs, which are not real-time.
+    pub skip_k_tables: bool,
 }
 
 impl Default for RunnerConfig {
@@ -106,6 +109,7 @@ impl Default for RunnerConfig {
             oversample: 4,
             save_output: true,
             regenerate_golden: false,
+            skip_k_tables: false,
         }
     }
 }
@@ -376,6 +380,7 @@ impl ValidationRunner {
         // Only pedals with explicit gain controls get automatic distortion gain.
         let options = CompileOptions {
             oversampling: OversamplingFactor::X1,
+            skip_k_tables: self.config.skip_k_tables,
             ..CompileOptions::default()
         };
 

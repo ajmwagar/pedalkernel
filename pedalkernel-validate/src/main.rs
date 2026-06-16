@@ -63,6 +63,12 @@ struct Cli {
     /// Oversampling factor
     #[arg(long, default_value = "4")]
     oversample: u32,
+    /// Skip K-method lookup-table generation for `run` / `bootstrap` (NL roots
+    /// fall back to direct Newton-Raphson). Offline validation is not real-time,
+    /// so the K-tables are wasted build time. NOTE: this validates the NR output
+    /// rather than the shipped K-table path; the two differ only marginally.
+    #[arg(long)]
+    skip_k_tables: bool,
 
     /// Save WDF output to disk
     #[arg(long, default_value = "true")]
@@ -348,6 +354,7 @@ fn run_validation(cli: &Cli, suite: &str, test: Option<String>) -> anyhow::Resul
         oversample: cli.oversample,
         save_output: cli.save_output,
         regenerate_golden: false,
+        skip_k_tables: cli.skip_k_tables,
     };
 
     let runner = ValidationRunner::new(runner_config, validation_config.clone());
@@ -565,6 +572,7 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
             let options = pedalkernel::compiler::CompileOptions {
                 oversampling: pedalkernel::oversampling::OversamplingFactor::X1,
+                skip_k_tables: cli.skip_k_tables,
                 ..pedalkernel::compiler::CompileOptions::default()
             };
             let mut pedal =

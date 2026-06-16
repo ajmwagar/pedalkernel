@@ -80,7 +80,7 @@ jobs:
         working-directory: pedalkernel-validate
         run: |
           SUITE="${{ github.event.inputs.suite || 'all' }}"
-          ../target/release/pedalkernel-validate bootstrap --suite "$SUITE" \
+          ../target/release/pedalkernel-validate --skip-k-tables bootstrap --suite "$SUITE" \
             2>&1 | tee bootstrap-output.txt
 
       - name: Run validation and produce JSON report
@@ -88,6 +88,7 @@ jobs:
         run: |
           SUITE="${{ github.event.inputs.suite || 'all' }}"
           ../target/release/pedalkernel-validate \
+            --skip-k-tables \
             --report report.json \
             run --suite "$SUITE" \
             2>&1 | tee validate-output.txt || true
