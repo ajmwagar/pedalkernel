@@ -1,0 +1,67 @@
+# Single-Ended EL34 Pentode Stage (pentode mode, single-ended class A)
+# EL34 is the canonical European power pentode (Marshall, Hiwatt, etc.)
+# SPICE deck uses fixed bias (Vg1=-33V); this uses auto-bias (Rk) approximation
+# with the plate load and supply matched to spice-circuits/nonlinear/single_ended_el34.spice:
+#   B+=450V, Rp=3.5k, Vscreen≈470V (from VG2 default in pentodes.model)
+#   Rk self-bias approximation (engine does not support explicit fixed-bias supply)
+#
+# BEHAVIORAL SMOKE CHECK: fixed-bias vs auto-bias topology means operating point
+# differs from the SPICE reference. This surfaces the gap on the accuracy matrix.
+# Matches spice-circuits/nonlinear/single_ended_el34.spice
+
+pedal "EL34 Single Ended" {
+  supply 450V {
+    impedance: 80
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    # Input coupling and grid stopper
+    C_in: cap(100n)
+    R_grid: resistor(220k)
+    R_stop: resistor(100)
+
+    # Power pentode
+    V1: pentode(el34)
+
+    # Plate load (OT primary modeled as resistive, 3.5k)
+    R_plate: resistor(3500)
+
+    # Screen stopper
+    R_screen: resistor(1k)
+
+    # Cathode self-bias (approximates the fixed-bias operating point)
+    R_cathode: resistor(470)
+    C_cathode: cap(100u)
+
+    # Output coupling
+    C_out: cap(100n)
+    R_load: resistor(100k)
+  }
+  nets {
+    # Input stage
+    in -> C_in.a
+    C_in.b -> R_grid.a
+    R_grid.b -> gnd
+    C_in.b -> R_stop.a
+    R_stop.b -> V1.grid
+
+    # Plate load: B+ to plate
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+
+    # Screen supply via stopper (tied to B+ through dropper)
+    vcc -> R_screen.a
+    R_screen.b -> V1.g2
+
+    # Cathode self-bias (bypassed)
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+
+    # Output from plate
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}

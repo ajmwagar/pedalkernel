@@ -1,0 +1,55 @@
+# GE 6386 Variable-Mu Triode — Common-Cathode Gain Stage
+# Remote-cutoff triode used in the Fairchild 670 compressor
+# Topology matches spice-circuits/active/varimu_6386.spice:
+#   B+=300V, Rp=10k, Rk=1R (virtually grounded), Rg=1M
+#   Harness drives VIN (grid AC signal at DC≈-2V bias)
+#
+# ENGINE GAP NOTE: The vari-mu WDF model (comp≈0.17 issue) will show a gap
+# vs ngspice across bias points. This is desired — surfaces on accuracy matrix.
+# Raffensperger model is correct; the comp=0.17 is a sidechain CV-swing issue.
+# See spice-circuits/active/varimu_6386.spice for full gap characterization.
+
+pedal "GE 6386 Variable Mu" {
+  supply 300V {
+    impedance: 50
+    filter_cap: 1000u
+    rectifier: solid_state
+  }
+  components {
+    # Grid: harness drives through grid leak
+    R_grid: resistor(1M)
+
+    # GE 6386 remote-cutoff triode
+    V1: triode(6386)
+
+    # Plate load
+    R_plate: resistor(10k)
+
+    # Cathode (virtually grounded — Rk=1R)
+    R_cathode: resistor(1)
+    C_cathode: cap(1000u)
+
+    # Output coupling (direct plate measurement)
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    # Grid driven by input signal
+    in -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+
+    # Plate load: B+ to plate
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+
+    # Cathode virtually grounded
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+
+    # Output from plate
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}

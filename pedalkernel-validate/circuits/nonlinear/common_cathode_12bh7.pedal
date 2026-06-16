@@ -1,0 +1,50 @@
+# Single 12BH7 triode, common cathode configuration
+# Low-mu high-current triode (mu≈17) used in driver stages and phase inverters
+# Operating point: B+=250V, Vp≈130V, Vgk≈-7V, Ip≈6mA (auto-bias via Rk)
+# Voltage gain: ~-11 (lower than 12AX7/12AT7 due to low mu)
+# Matches spice-circuits/nonlinear/common_cathode_12bh7.spice
+
+pedal "12BH7 Common Cathode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    # Input coupling
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+
+    # Triode — 12BH7 runs higher plate current, use lower Rp
+    V1: triode(12bh7)
+
+    # Plate load
+    R_plate: resistor(22k)
+
+    # Cathode bias: 1.2k × 6mA ≈ 7.2V → Vgk ≈ -7.2V
+    R_cathode: resistor(1200)
+    C_cathode: cap(25u)
+
+    # Output coupling
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    # Input stage
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+
+    # Triode bias and load
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+
+    # Output stage
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}

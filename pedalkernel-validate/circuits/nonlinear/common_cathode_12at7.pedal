@@ -1,0 +1,50 @@
+# Single 12AT7 triode, common cathode configuration
+# Medium-high mu triode (mu≈60) used in phase inverter and driver stages
+# Operating point: Vp≈140V, Vgk≈-2V, Ip≈2.5mA (auto-bias via Rk)
+# Voltage gain: ~-40 (intermediate between 12AX7 and 12AU7)
+# Matches spice-circuits/nonlinear/common_cathode_12at7.spice
+
+pedal "12AT7 Common Cathode" {
+  supply 250V {
+    impedance: 50
+    filter_cap: 47u
+    rectifier: solid_state
+  }
+  components {
+    # Input coupling
+    C_in: cap(22n)
+    R_grid: resistor(1M)
+
+    # Triode
+    V1: triode(12at7)
+
+    # Plate load
+    R_plate: resistor(47k)
+
+    # Cathode bias (bypassed for gain)
+    R_cathode: resistor(1k)
+    C_cathode: cap(25u)
+
+    # Output coupling
+    C_out: cap(22n)
+    R_load: resistor(1M)
+  }
+  nets {
+    # Input stage
+    in -> C_in.a
+    C_in.b -> R_grid.a, V1.grid
+    R_grid.b -> gnd
+
+    # Triode bias and load
+    vcc -> R_plate.a
+    R_plate.b -> V1.plate
+    V1.cathode -> R_cathode.a, C_cathode.a
+    R_cathode.b -> gnd
+    C_cathode.b -> gnd
+
+    # Output stage
+    V1.plate -> C_out.a
+    C_out.b -> R_load.a, out
+    R_load.b -> gnd
+  }
+}
