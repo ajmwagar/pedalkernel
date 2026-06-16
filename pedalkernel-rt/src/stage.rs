@@ -4733,6 +4733,50 @@ impl IirData {
         }
         y
     }
+
+    /// Process one sample with the op-amp output non-ideality folded **inside**
+    /// the feedback recurrence (Direct Form I).
+    ///
+    /// For a single-op-amp active filter (MFB / Sallen-Key) the op-amp output
+    /// node *is* the biquad output, and the reactive feedback elements charge
+    /// from that physical node. So the slew-rate clamp and the supply-rail
+    /// soft-clip act on the value that is then fed back through `a_coeffs`,
+    /// not on a separate post-filter copy. This routine:
+    ///
+    /// 1. computes the *demanded* (ideal) biquad output `y` from the recurrence,
+    /// 2. applies the op-amp output non-ideality via the shared
+    ///    [`NonIdealFxState`] (dV/dt slew clamp + tanh rail), and
+    /// 3. commits the **limited** value into `y_hist[0]` — so next sample's
+    ///    denominator feedback senses the genuinely slew/rail-limited node.
+    ///
+    /// GBW is deliberately **not** folded into the loop here (the op-amp's own
+    /// finite-bandwidth pole is left to the post path) — see `IirStage::process`
+    /// for the rationale. When the signal is small/slow (slew never engages, no
+    /// rail), the limited value equals `y` exactly, so `y_hist[0]` receives the
+    /// ideal value and the linear filter response is bit-identical to `process`.
+    #[inline]
+    pub fn process_inloop(&mut self, input: crate::Wave, fx: &mut NonIdealFxState) -> crate::Wave {
+        let order = self.x_hist.len();
+        let mut y = self.b_coeffs[0] * input;
+        for k in 0..order {
+            y += self.b_coeffs.get(k + 1).copied().unwrap_or(0.0) * self.x_hist[k];
+            y -= self.a_coeffs[k + 1] * self.y_hist[k];
+        }
+        // Op-amp output node non-ideality, in-loop: slew clamp then rail clip.
+        // `prev_out` carries the real limited node, so the dV/dt clamp tracks the
+        // physical output, and the limited value is what gets fed back.
+        let slewed = fx.slew_step(y);
+        let limited = flush_denormal(fx.rail_step(slewed));
+        for k in (1..order).rev() {
+            self.x_hist[k] = self.x_hist[k - 1];
+            self.y_hist[k] = self.y_hist[k - 1];
+        }
+        if order > 0 {
+            self.x_hist[0] = input;
+            self.y_hist[0] = limited;
+        }
+        limited
+    }
 }
 
 /// Standalone IIR biquad stage compiled from a linear rigid MNA.
@@ -5014,11 +5058,24 @@ impl IirStage {
 
     #[inline]
     pub fn process(&mut self, input: crate::Wave) -> crate::Wave {
-        let biquad_out = self.iir.process(input * self.compensation);
-        // GBW rolloff → slew → tanh rails, via the shared NonIdealFx primitives.
-        // A biquad output has no distinct in-loop op-amp node, so this stays the
-        // genuinely-post path (`process_post`).
-        apply_nonideal_fx(biquad_out, &mut self.fx_state)
+        // For a single-op-amp active filter (MFB / Sallen-Key) the op-amp output
+        // node IS the biquad output: the feedback caps charge from that physical
+        // node, so the slew/rail non-ideality acts INSIDE the recurrence. The
+        // slew-limited / rail-clipped value is committed to `y_hist[0]` so the
+        // denominator feedback senses the real op-amp output node next sample
+        // (out-of-loop post-FX would let the filter state evolve from the IDEAL,
+        // un-slewed output — the bug this fixes).
+        let opamp_out = self
+            .iir
+            .process_inloop(input * self.compensation, &mut self.fx_state);
+        // GBW stays OUT of the loop. The op-amp's own finite-bandwidth pole is a
+        // unity-DC single-pole LPF; folding it into the denominator would add an
+        // extra in-loop pole that shifts the designed filter's cutoff/Q and
+        // colours the passband (the biquad already carries the intended rolloff).
+        // Applied here as a post step it models the residual output-bandwidth
+        // limit without altering the linear filter response. (Slew + rails are
+        // genuine large-signal output-node effects and stay in-loop above.)
+        flush_denormal(self.fx_state.gbw_step(opamp_out))
     }
 
     /// Check if this stage contains a pot with the given component ID.
