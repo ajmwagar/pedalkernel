@@ -33,7 +33,16 @@ accuracy.json
     "passed": <int>,
     "failed": <int>,
     "wdf_pending": <int>,
-    "pass_rate": <float 0-1>
+    "pass_rate": <float 0-1>,
+    "profiles": {            // validation-tolerance buckets, copied from the runner report
+      "<profile>": {         // strict | measured_margin | smoke | known_gap | pending
+        "total_tests": <int>,  // gated tests (excludes pending)
+        "passed": <int>,
+        "failed": <int>,
+        "pending": <int>,
+        "pass_rate": <float 0-1>
+      }
+    }
   },
   "circuits": {
     "<suite>/<test>/<signal>": {
@@ -42,6 +51,7 @@ accuracy.json
       "signal": "<string>",
       "passed": <bool>,
       "wdf_pending": <bool>,   // true = WDF golden absent; ngspice-only plot
+      "profile": "<string or null>",  // validation-tolerance bucket for this test
       "metrics": {             // null if wdf_pending=true or comparison failed
         "normalized_rms_error_db": <float>,
         "peak_error_db": <float>,
@@ -649,12 +659,18 @@ def main() -> int:
                 if wdf_pending and error_msg is None:
                     error_msg = "WDF golden not yet committed (bead 85by.3); ngspice-only plot"
 
+                # Validation tolerance profile (strict / measured_margin / smoke
+                # / known_gap / pending). Serialized as a string in the report;
+                # `None` on older reports predating the profile-bucketing work.
+                profile = test_data.get("profile")
+
                 circuit_entry: dict[str, Any] = {
                     "suite": suite_name,
                     "test": test_name,
                     "signal": signal,
                     "passed": passed,
                     "wdf_pending": wdf_pending,
+                    "profile": profile,
                     "metrics": metrics,
                     "error": error_msg,
                 }
@@ -699,12 +715,18 @@ def main() -> int:
     failed_count = sum(1 for c in circuits.values() if not c["passed"])
     pass_rate = passed_count / total if total else 0.0
 
+    # Per-profile tolerance buckets, copied straight from the report summary so
+    # the dashboard mirrors the runner's own pass/fail tallies per profile.
+    # Empty on older reports predating profile bucketing.
+    profiles = report.get("summary", {}).get("profiles", {})
+
     summary = {
         "total_circuits": total,
         "passed": passed_count,
         "failed": failed_count,
         "wdf_pending": wdf_pending_count,
         "pass_rate": round(pass_rate, 4),
+        "profiles": profiles,
     }
 
     accuracy_doc = {

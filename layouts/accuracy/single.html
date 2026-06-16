@@ -82,7 +82,7 @@
         <tbody>
           {{ range $fails }}
           <tr>
-            <td class="acc-key">{{ .key }}</td>
+            <td class="acc-key">{{ .key }}{{ with .profile }} <span class="acc-badge acc-profile acc-profile-{{ . }}">{{ . }}</span>{{ end }}</td>
             {{ with .metrics }}
             <td class="num">{{ printf "%.1f" .normalized_rms_error_db }}</td>
             <td class="num">{{ printf "%.1f" .peak_error_db }}</td>
@@ -134,6 +134,60 @@
       </tbody>
     </table>
   </section>
+
+  {{/* ---------- (e2) GENERATED per-profile tolerance buckets ---------- */}}
+  {{ with $s.profiles }}
+  <section class="acc-section">
+    <h2>By tolerance profile</h2>
+    <p>
+      Not every circuit is held to the same bar. Each test declares a
+      <strong>validation profile</strong> that sets how its ngspice gap is scored —
+      from bit-tight equivalence down to known, intentionally-visible modeling gaps.
+      A failing <em>strict</em> test is a regression; a failing <em>known&nbsp;gap</em>
+      test is an honesty marker, not a surprise.
+    </p>
+    {{ $profileDesc := dict
+        "strict" "Bit-tight equivalence — a failure here is a real regression."
+        "measured_margin" "Threshold = currently-measured SPICE/WDF gap plus margin."
+        "smoke" "Behavioral signal-path coverage, not a full harmonic accuracy claim."
+        "known_gap" "Known architectural/modeling gap, kept intentionally visible."
+        "pending" "Reference or honest threshold not ready yet; excluded from the gate."
+    }}
+    {{ $profileOrder := slice "strict" "measured_margin" "smoke" "known_gap" "pending" }}
+    <table class="acc-table">
+      <thead>
+        <tr>
+          <th>Profile</th>
+          <th class="num">Pass / total</th>
+          <th>Pass ratio</th>
+          <th class="num">Pending</th>
+          <th>What it means</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range $pname := $profileOrder }}
+        {{ $p := index $s.profiles $pname }}
+        {{ with $p }}
+        {{ $tot := .total_tests }}
+        {{ $pass := .passed }}
+        {{ $ratio := 0.0 }}{{ if gt $tot 0 }}{{ $ratio = div (mul $pass 1.0) $tot }}{{ end }}
+        <tr>
+          <td><span class="acc-badge acc-profile acc-profile-{{ $pname }}">{{ $pname }}</span></td>
+          <td class="num">{{ $pass }} / {{ $tot }}</td>
+          <td>
+            <div class="acc-bar" title="{{ printf "%.0f%%" (mul $ratio 100) }}">
+              <div class="acc-bar-fill{{ if lt $pass $tot }} acc-bar-partial{{ end }}" style="width: {{ printf "%.1f%%" (mul $ratio 100) }};"></div>
+            </div>
+          </td>
+          <td class="num acc-muted">{{ if .pending }}{{ .pending }}{{ else }}&mdash;{{ end }}</td>
+          <td class="acc-muted">{{ index $profileDesc $pname }}</td>
+        </tr>
+        {{ end }}
+        {{ end }}
+      </tbody>
+    </table>
+  </section>
+  {{ end }}
 
   {{/* ---------- (f) GENERATED drift history ---------- */}}
   <section class="acc-section">
@@ -235,6 +289,7 @@
         <div class="acc-card">
           <div class="acc-card-head">
             <span class="acc-key">{{ .key }}</span>
+            {{ with .profile }}<span class="acc-badge acc-profile acc-profile-{{ . }}">{{ . }}</span>{{ end }}
             {{ if .passed }}
             <span class="acc-badge acc-badge-pass">PASS</span>
             {{ else }}
