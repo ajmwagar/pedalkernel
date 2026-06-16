@@ -29,6 +29,10 @@ enableRobotsTXT = true
     url = "/accuracy/"
     weight = 15
   [[menu.main]]
+    name = "Dynamics"
+    url = "/dynamics/"
+    weight = 17
+  [[menu.main]]
     name = "API"
     url = "/api/"
     weight = 20
