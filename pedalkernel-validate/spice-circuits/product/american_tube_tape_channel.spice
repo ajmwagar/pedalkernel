@@ -14,7 +14,7 @@
 * ============================================================================
 
 .param DRIVE_GAIN=23.8
-.param DRIVE_START=20m
+.param DRIVE_START=2m
 .param BIAS_R=6.5k
 .param TONE_R=150k
 .param OUT_GAIN=0.75

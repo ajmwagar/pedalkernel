@@ -192,9 +192,9 @@ would generate:
 
 - `R_tube_ref` gives the tube coupling node a DC return before the behavioural
   record driver.
-- `Bdrv` is now rail-limited and has a 20 ms startup ramp. The product profile
-  trims the first 20 ms, so this avoids ngspice/J-A startup failure without
-  entering the compared window.
+- `Bdrv` is now rail-limited and has a 2 ms startup ramp. A slower 20 ms ramp
+  generated successfully but contaminated the compared window because the
+  product profile trims the first 20 ms exactly.
 
 WDF goldens were then bootstrapped:
 
@@ -226,19 +226,28 @@ Result: `1/2 passed`.
 | Core | clean | driven | line_1k | Verdict |
 | --- | --- | --- | --- | --- |
 | Swiss Tape Channel | RMS -15.1 dB, spectral 4.6 dB, THD 0.09 dB | RMS -25.8 dB, spectral 4.4 dB, THD 0.69 dB | RMS -10.0 dB, spectral 4.7 dB, THD 0.06 dB | PASS |
-| American Tube Tape Channel | RMS -0.0 dB, spectral 78.8 dB, THD 6.22 dB | RMS -0.4 dB, spectral 72.3 dB, THD 4.84 dB | RMS 0.0 dB, spectral 82.1 dB, THD 14.97 dB | FAIL |
+| American Tube Tape Channel | RMS 0.0 dB, spectral 79.5 dB, THD 6.05 dB | RMS -0.3 dB, spectral 72.7 dB, THD 4.86 dB | RMS 0.0 dB, spectral 82.6 dB, THD 14.77 dB | FAIL |
 
 Additional diagnosis:
 
 - Swiss is now a real near-product validation candidate: generated ngspice
   references, WDF references, and product-profile comparison all pass.
-- American is not validated. After trim, ngspice is 22-33 dB hotter than WDF
-  in direct waveform analysis, and correlation is poor. A temporary gain=1
-  SPICE-driver experiment still failed spectral/THD comparison, so this is not
-  only a nominal record-driver gain error.
+- American is not validated. After trim, ngspice is still 22-34 dB hotter than
+  WDF in direct waveform analysis, and correlation is poor.
+- A tube-only isolation using the existing `common_cathode_12ax7` circuit at
+  American product stimulus levels showed the mismatch starts before the tape
+  head. With the stock cold SPICE output-coupling cap, ngspice was dominated by
+  a bad startup transient. Pre-charging the tube output cap improved the
+  isolation substantially, but the tube-only stage still missed strict product
+  criteria: spectral error 11-20 dB and residual level/correlation mismatch.
+- A temporary low-drive American variant (record driver scaled like Swiss in
+  both `.pedal` and SPICE) still failed badly, with THD error 16-28 dB. The
+  nominal driver gain is not the root cause.
 - The likely root is the known current tube/topology equivalence limit: the WDF
   single-port tube path is not a tight match for a cap-coupled three-terminal
-  Koren common-cathode SPICE stage feeding another nonlinear element.
+  Koren common-cathode SPICE stage feeding another nonlinear element. The
+  existing common-cathode validation profile is intentionally loose and masks
+  this for product purposes.
 
 The product suite should remain isolated from the default validation matrix
 until the American mode is either reworked, moved behind a looser exploratory
