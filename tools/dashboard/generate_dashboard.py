@@ -46,7 +46,8 @@ accuracy.json
         "normalized_rms_error_db": <float>,
         "peak_error_db": <float>,
         "thd_error_db": <float or null>,
-        "spectral_error_db": <float>,
+        "spectral_error_db": <float>,        // audio-band (capped at audio Nyquist); gating value
+        "spectral_error_full_db": <float>,   // full-band (raw), up to the data Nyquist; informational
         "even_odd_ratio_db": <float or null>,
         "dc_drift_mv": <float or null>
       },
@@ -100,9 +101,15 @@ import numpy as np
 SCHEMA_VERSION = 1
 SAMPLE_RATE_DEFAULT = 384_000  # 96kHz x4 oversample
 
-# RMS-error colour scale: -inf to 0 dB; capped at these extremes for display.
+# RMS/Peak-error colour scale (dB difference, negative = good): capped at these
+# extremes for display. Green at VMIN (deep negative), red at VMAX (near 0).
 HEATMAP_VMIN_DB = -100.0
 HEATMAP_VMAX_DB = 0.0
+
+# Spectral error is a different quantity: a max-bin error that is always >= 0
+# (0 dB = identical spectra), so it needs its own scale and polarity — green at
+# 0, ramping to red at SPECTRAL_VMAX_DB. Tune this threshold to taste.
+SPECTRAL_VMAX_DB = 60.0
 
 # Waveform plot: trim this many seconds off the front (warmup suppression).
 PLOT_WARMUP_TRIM_S = 0.005  # 5 ms
@@ -255,17 +262,20 @@ def plot_circuit(
     if metrics:
         rms = metrics.get("normalized_rms_error_db")
         peak = metrics.get("peak_error_db")
-        spectral = metrics.get("spectral_error_db")
+        spectral = metrics.get("spectral_error_db")          # audio-band (capped)
+        spectral_full = metrics.get("spectral_error_full_db")  # full-band (raw)
         thd = metrics.get("thd_error_db")
         lines = []
         if rms is not None:
-            lines.append(f"RMS err:  {rms:.1f} dB")
+            lines.append(f"RMS err:   {rms:.1f} dB")
         if peak is not None:
-            lines.append(f"Peak err: {peak:.1f} dB")
+            lines.append(f"Peak err:  {peak:.1f} dB")
+        if spectral_full is not None:
+            lines.append(f"Spec full: {spectral_full:.1f} dB")
         if spectral is not None:
-            lines.append(f"Spectral: {spectral:.1f} dB")
+            lines.append(f"Spec audio:{spectral:.1f} dB")
         if thd is not None:
-            lines.append(f"THD err:  {thd:.2f} dB")
+            lines.append(f"THD err:   {thd:.2f} dB")
         if lines:
             annotation = "\n".join(lines)
             ax_f.text(
@@ -305,7 +315,8 @@ def plot_accuracy_matrix(
 
     labels = [r["key"] for r in records]
     metric_cols = ["normalized_rms_error_db", "peak_error_db", "spectral_error_db"]
-    col_labels = ["RMS error (dB)", "Peak error (dB)", "Spectral (dB)"]
+    col_labels = ["RMS error (dB)", "Peak error (dB)", "Spectral (audio, dB)"]
+    spectral_col = metric_cols.index("spectral_error_db")
 
     # Build matrix: NaN = no data (wdf_pending or error)
     mat = np.full((len(labels), len(metric_cols)), np.nan)
@@ -319,9 +330,6 @@ def plot_accuracy_matrix(
                 mat[i, j] = float(v)
         pass_flags.append(r.get("passed", False))
 
-    # Clip display range
-    mat_clipped = np.clip(mat, HEATMAP_VMIN_DB, HEATMAP_VMAX_DB)
-
     n_rows, n_cols = mat.shape
     cell_h = max(0.25, min(0.5, 20.0 / n_rows))
     fig_h = max(6, n_rows * cell_h + 2)
@@ -330,18 +338,32 @@ def plot_accuracy_matrix(
     fig.patch.set_facecolor("#1a1a2e")
     ax.set_facecolor("#1a1a2e")
 
-    # Reversed RdYlGn: red=bad (near 0 dB), green=good (very negative dB)
-    cmap = plt.cm.RdYlGn
-    norm = mcolors.Normalize(vmin=HEATMAP_VMIN_DB, vmax=HEATMAP_VMAX_DB)
+    cmap = plt.cm.RdYlGn_r
 
-    im = ax.imshow(mat_clipped, aspect="auto", cmap=cmap, norm=norm)
+    # Two independent scales, because the columns measure opposite-polarity
+    # quantities. RdYlGn_r maps low -> green, high -> red in both cases:
+    #   RMS / Peak — dB difference, negative = good. Scale [-100, 0]:
+    #                green at -100 (far below ngspice floor), red near 0.
+    #   Spectral   — max-bin error, always >= 0, 0 = identical spectra.
+    #                Scale [0, SPECTRAL_VMAX_DB]: green at 0, red at the cap.
+    norm_diff = mcolors.Normalize(vmin=HEATMAP_VMIN_DB, vmax=HEATMAP_VMAX_DB)
+    norm_spec = mcolors.Normalize(vmin=0.0, vmax=SPECTRAL_VMAX_DB)
 
-    # Overlay NaN cells as grey
+    # Map each column through its own norm into an RGBA image, then draw once.
+    rgba = np.zeros((n_rows, n_cols, 4))
+    for j in range(n_cols):
+        col = mat[:, j]
+        if j == spectral_col:
+            normed = norm_spec(np.clip(col, 0.0, SPECTRAL_VMAX_DB))
+        else:
+            normed = norm_diff(np.clip(col, HEATMAP_VMIN_DB, HEATMAP_VMAX_DB))
+        rgba[:, j, :] = cmap(normed)
+
+    # NaN cells (no data) -> grey.
     nan_mask = np.isnan(mat)
-    if nan_mask.any():
-        grey_data = np.where(nan_mask, 0.5, np.nan)
-        grey_cmap = mcolors.ListedColormap(["#555555"])
-        ax.imshow(grey_data, aspect="auto", cmap=grey_cmap, norm=mcolors.Normalize(0, 1))
+    rgba[nan_mask] = mcolors.to_rgba("#555555")
+
+    ax.imshow(rgba, aspect="auto")
 
     # Axes labels
     ax.set_xticks(range(n_cols))
@@ -355,10 +377,18 @@ def plot_accuracy_matrix(
 
     ax.set_title("Accuracy Matrix (RMS / Peak / Spectral error vs ngspice)", color="white", pad=10)
 
-    cbar = fig.colorbar(im, ax=ax, orientation="vertical", fraction=0.03, pad=0.01)
-    cbar.set_label("dB error (lower = better)", color="white")
-    cbar.ax.yaxis.set_tick_params(color="white")
-    plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
+    # Two colorbars, one per scale.
+    sm_diff = plt.cm.ScalarMappable(norm=norm_diff, cmap=cmap)
+    cbar1 = fig.colorbar(sm_diff, ax=ax, orientation="vertical", fraction=0.03, pad=0.02)
+    cbar1.set_label("RMS / Peak dB error (lower = better)", color="white")
+    cbar1.ax.yaxis.set_tick_params(color="white")
+    plt.setp(cbar1.ax.yaxis.get_ticklabels(), color="white")
+
+    sm_spec = plt.cm.ScalarMappable(norm=norm_spec, cmap=cmap)
+    cbar2 = fig.colorbar(sm_spec, ax=ax, orientation="vertical", fraction=0.03, pad=0.10)
+    cbar2.set_label("Spectral dB error (0 = identical)", color="white")
+    cbar2.ax.yaxis.set_tick_params(color="white")
+    plt.setp(cbar2.ax.yaxis.get_ticklabels(), color="white")
 
     plt.tight_layout()
     # 140 dpi: crisp at the large widths the full-width accuracy dashboard renders.
