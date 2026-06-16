@@ -376,6 +376,43 @@ pub enum MetricConfig {
     TransferFunction { reference: String },
 }
 
+/// Validation intent bucket for interpreting pass/fail thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationProfile {
+    /// Tight numerical equivalence gate. A pass means the engine should be
+    /// considered regression-clean against the reference.
+    Strict,
+    /// Thresholds are set from the currently measured SPICE/WDF gap plus margin.
+    MeasuredMargin,
+    /// Behavioral smoke check: useful signal path coverage, but not a full
+    /// harmonic/topology accuracy claim.
+    Smoke,
+    /// Known architectural or modeling gap intentionally kept visible.
+    KnownGap,
+    /// Reference or honest threshold is not ready yet; excluded from the gate
+    /// when `pending_reference` is active and the golden is missing.
+    Pending,
+}
+
+impl Default for ValidationProfile {
+    fn default() -> Self {
+        Self::MeasuredMargin
+    }
+}
+
+impl ValidationProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::MeasuredMargin => "measured_margin",
+            Self::Smoke => "smoke",
+            Self::KnownGap => "known_gap",
+            Self::Pending => "pending",
+        }
+    }
+}
+
 /// Pass/fail criteria for a test.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PassCriteria {
@@ -402,6 +439,49 @@ impl TestCase {
     /// per-test override when set, otherwise falling back to the global value.
     pub fn effective_warmup_trim_ms(&self, global: &GlobalConfig) -> f64 {
         self.warmup_trim_ms.unwrap_or(global.warmup_trim_ms)
+    }
+
+    /// Classify the test into a reporting bucket without changing pass/fail
+    /// behavior. This keeps threshold intent visible while legacy configs are
+    /// migrated toward explicit profiles.
+    pub fn effective_profile(&self, suite_name: &str, test_name: &str) -> ValidationProfile {
+        if self.pending_reference {
+            return ValidationProfile::Pending;
+        }
+
+        if suite_name == "compressor" {
+            return ValidationProfile::KnownGap;
+        }
+        if suite_name == "stress" {
+            return ValidationProfile::Smoke;
+        }
+        if suite_name == "tubes" && test_name == "single_ended_el34" {
+            return ValidationProfile::Smoke;
+        }
+
+        match suite_name {
+            "linear" | "opamp" | "canonical" | "eq" | "tape" | "extraction" => {
+                ValidationProfile::Strict
+            }
+            "active" | "nonlinear" | "pedals" | "reactive" | "tubes" => {
+                ValidationProfile::MeasuredMargin
+            }
+            _ => {
+                let loose_rms = self
+                    .pass_criteria
+                    .normalized_rms_error_db
+                    .is_some_and(|threshold| threshold >= 10.0);
+                let loose_peak = self
+                    .pass_criteria
+                    .peak_error_db
+                    .is_some_and(|threshold| threshold >= 10.0);
+                if loose_rms || loose_peak {
+                    ValidationProfile::KnownGap
+                } else {
+                    ValidationProfile::MeasuredMargin
+                }
+            }
+        }
     }
 }
 
@@ -3194,5 +3274,37 @@ mod tests {
             pending_reference: false,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 0.0);
+    }
+
+    #[test]
+    fn test_case_profiles_classify_gate_intent() {
+        let mut tc = TestCase {
+            circuit: String::new(),
+            description: String::new(),
+            signals: vec![],
+            metrics: vec![],
+            pass_criteria: PassCriteria::default(),
+            warmup_trim_ms: None,
+            pending_reference: false,
+        };
+
+        assert_eq!(
+            tc.effective_profile("linear", "resistor_divider"),
+            ValidationProfile::Strict
+        );
+        assert_eq!(
+            tc.effective_profile("tubes", "single_ended_el34"),
+            ValidationProfile::Smoke
+        );
+        assert_eq!(
+            tc.effective_profile("compressor", "fet_leveler_level_sweep"),
+            ValidationProfile::KnownGap
+        );
+
+        tc.pending_reference = true;
+        assert_eq!(
+            tc.effective_profile("compressor", "la2a_level_sweep"),
+            ValidationProfile::Pending
+        );
     }
 }

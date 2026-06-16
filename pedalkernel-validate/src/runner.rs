@@ -169,6 +169,7 @@ impl ValidationRunner {
                     test_results.insert(
                         test_name.clone(),
                         TestResult {
+                            profile: test_case.effective_profile(suite_name, test_name),
                             passed: false,
                             pending: false,
                             error: Some(e.to_string()),
@@ -195,6 +196,8 @@ impl ValidationRunner {
         test_name: &str,
         test_case: &TestCase,
     ) -> Result<TestResult, RunnerError> {
+        let profile = test_case.effective_profile(suite_name, test_name);
+
         // Resolve circuit path
         let circuit_path = self.config.circuits_dir.join(&test_case.circuit);
 
@@ -232,6 +235,7 @@ impl ValidationRunner {
         // failed; the suite excludes them from the gate counts.
         if any_pending {
             return Ok(TestResult {
+                profile,
                 passed: false,
                 pending: true,
                 error: Some("golden not generated".to_string()),
@@ -240,6 +244,7 @@ impl ValidationRunner {
         }
 
         Ok(TestResult {
+            profile,
             passed: all_passed,
             pending: false,
             error: None,

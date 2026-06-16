@@ -804,6 +804,7 @@ fn compare_goldens(
             test_results.insert(
                 test_name.clone(),
                 pedalkernel_validate::report::TestResult {
+                    profile: test_case.effective_profile(suite_name, test_name),
                     passed: test_passed,
                     pending: false,
                     error: None,

@@ -221,7 +221,7 @@ pub mod spice;
 // Config types
 pub use config::{
     ConfigError, GlobalConfig, MetricConfig, PassCriteria, SignalConfig, TestCase, TestSuite,
-    ValidationConfig,
+    ValidationConfig, ValidationProfile,
 };
 
 // Metrics types
@@ -269,7 +269,7 @@ pub mod prelude {
     // Config
     pub use crate::config::{
         GlobalConfig, MetricConfig, PassCriteria, SignalConfig, TestCase, TestSuite,
-        ValidationConfig,
+        ValidationConfig, ValidationProfile,
     };
 
     // NPY I/O

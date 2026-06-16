@@ -38,6 +38,7 @@
 //! - Per-suite and per-test results
 //! - Summary statistics (pass/fail counts, pass rate)
 
+use crate::config::ValidationProfile;
 use crate::metrics::ComparisonResult;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -75,6 +76,20 @@ pub struct ReportSummary {
     #[serde(default)]
     pub pending: usize,
     pub pass_rate: f64,
+    /// Gate summary split by validation profile.
+    #[serde(default)]
+    pub profiles: BTreeMap<String, ProfileSummary>,
+}
+
+/// Summary of test results for one validation profile.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileSummary {
+    pub total_tests: usize,
+    pub passed: usize,
+    pub failed: usize,
+    #[serde(default)]
+    pub pending: usize,
+    pub pass_rate: f64,
 }
 
 /// Result for a single test suite.
@@ -93,6 +108,9 @@ pub struct SuiteResult {
 /// Result for a single test case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
+    /// Validation intent/profile used to interpret pass/fail.
+    #[serde(default)]
+    pub profile: ValidationProfile,
     pub passed: bool,
     /// `true` when the test is a pending reference (golden missing + the test
     /// is flagged `pending_reference`). A pending test is neither passed nor
@@ -163,6 +181,32 @@ impl ValidationReport {
             pending += suite.pending;
         }
 
+        let mut profiles: BTreeMap<String, ProfileSummary> = BTreeMap::new();
+        for suite in suites.values() {
+            for test in suite.tests.values() {
+                let bucket = profiles
+                    .entry(test.profile.as_str().to_string())
+                    .or_default();
+                if test.pending {
+                    bucket.pending += 1;
+                } else {
+                    bucket.total_tests += 1;
+                    if test.passed {
+                        bucket.passed += 1;
+                    } else {
+                        bucket.failed += 1;
+                    }
+                }
+            }
+        }
+        for bucket in profiles.values_mut() {
+            bucket.pass_rate = if bucket.total_tests > 0 {
+                bucket.passed as f64 / bucket.total_tests as f64
+            } else {
+                0.0
+            };
+        }
+
         let pass_rate = if total > 0 {
             passed as f64 / total as f64
         } else {
@@ -182,6 +226,7 @@ impl ValidationReport {
                 skipped: 0,
                 pending,
                 pass_rate,
+                profiles,
             },
         }
     }
@@ -213,6 +258,24 @@ impl ValidationReport {
             "Config:     {}Hz × {}x oversample",
             self.sample_rate, self.oversample
         );
+        if !self.summary.profiles.is_empty() {
+            let buckets: Vec<String> = self
+                .summary
+                .profiles
+                .iter()
+                .map(|(name, summary)| {
+                    if summary.pending > 0 {
+                        format!(
+                            "{} {}/{} ({} pending)",
+                            name, summary.passed, summary.total_tests, summary.pending
+                        )
+                    } else {
+                        format!("{} {}/{}", name, summary.passed, summary.total_tests)
+                    }
+                })
+                .collect();
+            println!("Profiles:   {}", buckets.join(" | ").dimmed());
+        }
         println!();
 
         for (suite_name, suite) in &self.suites {
@@ -260,7 +323,12 @@ impl ValidationReport {
                     "✗".red()
                 };
 
-                println!("  {} {}", test_status, test_name);
+                println!(
+                    "  {} {} [{}]",
+                    test_status,
+                    test_name,
+                    test.profile.as_str().dimmed()
+                );
 
                 if let Some(ref err) = test.error {
                     println!("    {} {}", "Error:".red(), err);
@@ -323,6 +391,7 @@ impl ValidationReport {
             suite: String,
             test: String,
             signal: String,
+            profile: String,
             #[tabled(rename = "RMS (dB)")]
             rms_db: String,
             #[tabled(rename = "Peak (dB)")]
@@ -343,6 +412,7 @@ impl ValidationReport {
                         suite: suite_name.clone(),
                         test: test_name.clone(),
                         signal: "-".to_string(),
+                        profile: test.profile.as_str().to_string(),
                         rms_db: "-".to_string(),
                         peak_db: "-".to_string(),
                         thd_err: "-".to_string(),
@@ -374,6 +444,7 @@ impl ValidationReport {
                         suite: suite_name.clone(),
                         test: test_name.clone(),
                         signal: signal.label.clone(),
+                        profile: test.profile.as_str().to_string(),
                         rms_db: rms,
                         peak_db: peak,
                         thd_err: thd,
