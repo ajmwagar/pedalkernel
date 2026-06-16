@@ -190,6 +190,7 @@ fn pending_excluded_from_gate_but_missing_golden_still_fails() {
         oversample: 1,
         save_output: false,
         regenerate_golden: false,
+        skip_k_tables: false,
     };
 
     let cfg = pending_test_config();

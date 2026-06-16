@@ -4967,6 +4967,7 @@ fn compute_wdf_triode_dc_qpoint(
 ///      (`bias_node_voltages`) when the divider compiled as its own group, as
 ///      `blockwise.rs` does (`bias_node_voltages.get(base_node)`).
 ///   2. Otherwise read R1/R2 directly from the group's edge set.
+///
 /// Either way the final returned value is the load-line Vbe (NOT the raw base
 /// voltage) so the stage biases into the active region instead of saturation.
 ///
@@ -5062,13 +5063,13 @@ fn compute_wdf_bjt_dc_qpoint(
     let mut vbe = 0.65_f64;
     for _ in 0..60 {
         let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
-        let (ic, ib) = (ic as f64, ib as f64);
+        let (ic, ib) = (ic, ib);
         let ie = ic + ib;
         let f = v_drive - ib * rth - vbe - ie * re;
         // df/dVbe via finite difference on the device currents.
         let h = 1e-4;
         let (ic2, ib2) = model.currents((vbe + h) as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
-        let (ic2, ib2) = (ic2 as f64, ib2 as f64);
+        let (ic2, ib2) = (ic2, ib2);
         let df = -((ib2 - ib) / h) * rth - 1.0 - ((ic2 + ib2 - ie) / h) * re;
         if df.abs() < 1e-18 {
             break;
@@ -5093,11 +5094,11 @@ fn compute_wdf_bjt_dc_qpoint(
     // 0 V, eliminating the bias-settling startup transient (ngspice runs a `.op`
     // before `.tran`).  Falls back to half-rail when RC is absent.
     let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
-    let ie = ic as f64 + ib as f64;
+    let ie = ic + ib;
     let rc = find_r_to_rail(_collector_node, graph.vcc_node);
     let vcc = supply_voltage.abs();
     let vce = match rc {
-        Some(rc) => (vcc - ic as f64 * rc - ie * re).clamp(0.0, vcc),
+        Some(rc) => (vcc - ic * rc - ie * re).clamp(0.0, vcc),
         None => vcc * 0.5,
     };
     let vce = if is_pnp { -vce } else { vce };
