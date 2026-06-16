@@ -128,6 +128,16 @@ pub struct JfetRoot {
     pub model: JfetModel,
     /// Current gate-source voltage (external control parameter).
     vgs: crate::Wave,
+    /// DC gate-source operating point. Runtime signal control is added on top.
+    #[cfg_attr(feature = "serde", serde(default))]
+    vgs_bias: crate::Wave,
+    /// DC drain-source operating point. The WDF port solves AC deviation
+    /// around this voltage.
+    #[cfg_attr(feature = "serde", serde(default))]
+    vds_bias: crate::Wave,
+    /// Drain current at the DC operating point.
+    #[cfg_attr(feature = "serde", serde(default))]
+    ids_bias: crate::Wave,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
     /// Previous sample's drain voltage for warm-starting Newton-Raphson.
@@ -143,6 +153,9 @@ impl JfetRoot {
         Self {
             model,
             vgs: 0.0,
+            vgs_bias: 0.0,
+            vds_bias: 0.0,
+            ids_bias: 0.0,
             max_iter: super::solver::NR_MAX_ITER,
             prev_v: 0.0,
             mosfet: None,
@@ -169,7 +182,7 @@ impl JfetRoot {
         let sign = if mosfet.is_n_channel { 1.0 } else { -1.0 };
         let placeholder = JfetModel {
             vto: sign * mosfet.vth,
-            beta: mosfet.kp,
+            beta: 0.5 * mosfet.kp,
             lambda: mosfet.lambda,
             gate_is: 0.0,
             n: 1.0,
@@ -182,6 +195,9 @@ impl JfetRoot {
         Self {
             model: placeholder,
             vgs: 0.0,
+            vgs_bias: 0.0,
+            vds_bias: 0.0,
+            ids_bias: 0.0,
             max_iter: super::solver::NR_MAX_ITER,
             prev_v: 0.0,
             mosfet: Some(mosfet),
@@ -203,6 +219,34 @@ impl JfetRoot {
             return;
         }
         self.vgs = vgs;
+    }
+
+    /// Set the DC gate-source operating point and current Vgs.
+    #[inline]
+    pub fn set_bias(&mut self, vgs_bias: crate::Wave) {
+        if self.mosfet.is_some() {
+            return;
+        }
+        self.vgs_bias = vgs_bias;
+        self.vgs = vgs_bias;
+    }
+
+    /// Set the DC operating point used by the incremental WDF one-port.
+    #[inline]
+    pub fn set_operating_point(&mut self, vgs_bias: crate::Wave, vds_bias: crate::Wave) {
+        if self.mosfet.is_some() {
+            return;
+        }
+        self.vgs_bias = vgs_bias;
+        self.vgs = vgs_bias;
+        self.vds_bias = vds_bias;
+        self.ids_bias = self.drain_current(vds_bias);
+    }
+
+    /// DC gate-source operating point.
+    #[inline]
+    pub fn vgs_bias(&self) -> crate::Wave {
+        self.vgs_bias
     }
 
     /// Get current gate-source voltage.
@@ -299,6 +343,16 @@ impl JfetRoot {
             let dg = self.model.lambda * if vds_int >= 0.0 { 1.0 } else { -1.0 };
             self.model.beta * vov * vov * dg
         }
+    }
+
+    #[inline]
+    fn port_current(&self, vds_ac: crate::Wave) -> crate::Wave {
+        self.drain_current(self.vds_bias + vds_ac) - self.ids_bias
+    }
+
+    #[inline]
+    fn port_current_derivative(&self, vds_ac: crate::Wave) -> crate::Wave {
+        self.drain_current_derivative(self.vds_bias + vds_ac)
     }
 }
 
@@ -402,11 +456,11 @@ impl WdfRoot for JfetRoot {
         let sign = if self.model.is_n_channel { 1.0 } else { -1.0 };
         let vgs_int = sign * self.vgs;
         let vov = vgs_int - self.model.vto;
-        let gds_approx = if vov > 0.0 {
+        let gds_approx = self.port_current_derivative(0.0).abs().max(if vov > 0.0 {
             2.0 * self.model.beta * vov
         } else {
             LEAKAGE_CONDUCTANCE
-        };
+        });
         let cold = if gds_approx > LEAKAGE_CONDUCTANCE {
             a / (2.0 + 2.0 * rp * gds_approx)
         } else {
@@ -421,7 +475,7 @@ impl WdfRoot for JfetRoot {
             };
 
         let b = newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
-            (root.drain_current(v), root.drain_current_derivative(v))
+            (root.port_current(v), root.port_current_derivative(v))
         });
         self.prev_v = (a + b) * 0.5;
         b

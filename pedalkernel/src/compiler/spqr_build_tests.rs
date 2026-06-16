@@ -3,6 +3,7 @@
 // Regression for pedalkernel-hcpb.2: non-SP passive networks (with SPQR R-nodes)
 // must compile to >=1 stage instead of silently rendering as passthrough.
 
+use super::compile::CompileOptions;
 use super::compiled::Stage;
 use super::graph::CircuitGraph;
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
@@ -51,9 +52,14 @@ fn spqr_diode_clipper_produces_audio() {
     let spqr_stages = spqr_to_stages(&spqr, &graph, 48000.0);
 
     assert_eq!(spqr_stages.len(), 1);
-    let mut stage = build_spqr_stage(spqr_stages.into_iter().next().unwrap(), &graph, 48000.0, 9.0)
-        .expect("Should build NlWdf stage")
-        .into_wdf();
+    let mut stage = build_spqr_stage(
+        spqr_stages.into_iter().next().unwrap(),
+        &graph,
+        48000.0,
+        9.0,
+    )
+    .expect("Should build NlWdf stage")
+    .into_wdf();
 
     // DC test: 5V input should clip to ~0.6V (silicon diode forward voltage)
     let dc_out = stage.process(5.0);
@@ -194,6 +200,94 @@ fn compile_via_spqr_diode_clipper_end_to_end() {
         peak = peak.max(output.abs());
     }
     assert!(peak > 0.01, "Should produce output: {peak:.6}");
+}
+
+fn compile_debug(src: &str) -> super::compiled::CompiledPedal {
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse failed");
+    compile_via_spqr_with_options(&pedal, 48_000.0, CompileOptions::debug())
+        .expect("compile failed")
+}
+
+fn measure_sine_peak(mut compiled: super::compiled::CompiledPedal) -> f64 {
+    let mut peak = 0.0f64;
+    for i in 0..48_000 {
+        let input = 0.1 * (2.0 * std::f64::consts::PI * 1_000.0 * i as f64 / 48_000.0).sin();
+        let output = compiled.process(input);
+        if i > 2_400 {
+            peak = peak.max(output.abs());
+        }
+    }
+    peak
+}
+
+fn fet_root_port_resistances(src: &str) -> Vec<f64> {
+    compile_debug(src)
+        .stages
+        .iter()
+        .filter_map(|stage| match stage {
+            Stage::Wdf(wdf)
+                if matches!(
+                    wdf.root,
+                    pedalkernel_rt::stage::RootKind::Jfet(_)
+                        | pedalkernel_rt::stage::RootKind::Mosfet(_)
+                ) =>
+            {
+                Some(wdf.tree.port_resistance())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn fet_common_source_root_port_excludes_gate_bias_network() {
+    let rps = fet_root_port_resistances(include_str!(
+        "../../../pedalkernel-validate/circuits/active/nmos_common_source.pedal"
+    ));
+    assert!(!rps.is_empty(), "expected an NMOS WDF root stage");
+    assert!(
+        rps.iter().any(|&rp| (1_000.0..5_000.0).contains(&rp)),
+        "NMOS root rp should be dominated by drain/source load, not gate divider: {rps:?}"
+    );
+}
+
+#[test]
+fn jfet_source_follower_root_port_excludes_gate_resistor() {
+    let rps = fet_root_port_resistances(include_str!(
+        "../../../pedalkernel-validate/circuits/active/jfet_source_follower.pedal"
+    ));
+    assert!(!rps.is_empty(), "expected a JFET WDF root stage");
+    assert!(
+        rps.iter().any(|&rp| (1_000.0..5_000.0).contains(&rp)),
+        "JFET source-follower rp should be load-scale, not RG-scale: {rps:?}"
+    );
+}
+
+#[test]
+fn pmos_source_follower_root_port_excludes_gate_resistor() {
+    let rps = fet_root_port_resistances(include_str!(
+        "../../../pedalkernel-validate/circuits/active/pmos_source_follower.pedal"
+    ));
+    assert!(!rps.is_empty(), "expected a PMOS WDF root stage");
+    assert!(
+        rps.iter().any(|&rp| (1_000.0..5_000.0).contains(&rp)),
+        "PMOS source-follower rp should be load-scale, not RG-scale: {rps:?}"
+    );
+}
+
+#[test]
+fn nmos_common_source_fet_stage_is_not_null() {
+    let peak = measure_sine_peak(compile_debug(include_str!(
+        "../../../pedalkernel-validate/circuits/active/nmos_common_source.pedal"
+    )));
+    assert!(
+        peak > 1.0,
+        "NMOS common-source should amplify instead of rendering a null output, peak={peak:.6}"
+    );
+    assert!(
+        peak < 25.0,
+        "NMOS common-source output should stay finite, peak={peak:.6}"
+    );
 }
 
 #[test]
@@ -1109,7 +1203,13 @@ pedal "12AX7 Common Cathode" {
     eprintln!("Edges:");
     for (i, e) in graph.edges.iter().enumerate() {
         let comp = &graph.components[e.comp_idx];
-        eprintln!("  edge {i}: {} ({:?}) node_a={:?} node_b={:?}", comp.id, graph.effective_edge_kind(i), e.node_a, e.node_b);
+        eprintln!(
+            "  edge {i}: {} ({:?}) node_a={:?} node_b={:?}",
+            comp.id,
+            graph.effective_edge_kind(i),
+            e.node_a,
+            e.node_b
+        );
     }
     let active_set: std::collections::HashSet<usize> =
         graph.active_edge_indices.iter().copied().collect();
@@ -1119,11 +1219,20 @@ pedal "12AX7 Common Cathode" {
     let groups = super::signal_flow::find_flow_groups(&all_edges, &graph);
     eprintln!("Groups: {}", groups.len());
     for (gi, g) in groups.iter().enumerate() {
-        let edge_names: Vec<String> = g.all_edges().iter().map(|&eidx| {
-            let comp = &graph.components[graph.edges[eidx].comp_idx];
-            format!("{}({:?})", comp.id, graph.effective_edge_kind(eidx))
-        }).collect();
-        eprintln!("  group {gi}: feedback={} active={} edges={:?}", g.has_feedback(), g.active_edges.len(), edge_names);
+        let edge_names: Vec<String> = g
+            .all_edges()
+            .iter()
+            .map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                format!("{}({:?})", comp.id, graph.effective_edge_kind(eidx))
+            })
+            .collect();
+        eprintln!(
+            "  group {gi}: feedback={} active={} edges={:?}",
+            g.has_feedback(),
+            g.active_edges.len(),
+            edge_names
+        );
     }
 
     // Also check stage count in compiled output
@@ -1132,8 +1241,12 @@ pedal "12AX7 Common Cathode" {
     for (si, s) in compiled.stages.iter().enumerate() {
         match s {
             super::compiled::Stage::MultiNl(m) => {
-                eprintln!("  stage {si}: MultiNl n_nl={} n_passive={} output_port={}",
-                    m.n_nl, m.passive_one_ports.len(), m.output_port);
+                eprintln!(
+                    "  stage {si}: MultiNl n_nl={} n_passive={} output_port={}",
+                    m.n_nl,
+                    m.passive_one_ports.len(),
+                    m.output_port
+                );
                 eprintln!("    dc_bias={:.4?}", m.dc_bias);
                 eprintln!("    vcc_bias_all={:.4?}", m.vcc_bias_all);
                 eprintln!("    nl_port_resistances={:.1?}", m.nl_port_resistances);
@@ -1208,7 +1321,14 @@ pedal "12AX7 Common Cathode" {
     let amplitude = 0.1_f64;
     let samples_per_cycle = (sample_rate / freq) as usize;
 
-    for &(run_cycles, measure_cycles) in &[(0usize, 10usize), (20, 10), (50, 10), (100, 10), (200, 10), (500, 10)] {
+    for &(run_cycles, measure_cycles) in &[
+        (0usize, 10usize),
+        (20, 10),
+        (50, 10),
+        (100, 10),
+        (200, 10),
+        (500, 10),
+    ] {
         let mut proc = crate::compiler::compile_pedal(&pedal, sample_rate).expect("compile");
         let total = (run_cycles + measure_cycles) * samples_per_cycle;
         let mut max_out = f64::NEG_INFINITY;
@@ -1224,8 +1344,13 @@ pedal "12AX7 Common Cathode" {
         }
         let pp = max_out - min_out;
         let gain = pp / (2.0 * amplitude);
-        eprintln!("After {}ms: gain={:.1}x ({:.1}dB), pp={:.3}V",
-            run_cycles, gain, 20.0 * gain.log10(), pp);
+        eprintln!(
+            "After {}ms: gain={:.1}x ({:.1}dB), pp={:.3}V",
+            run_cycles,
+            gain,
+            20.0 * gain.log10(),
+            pp
+        );
     }
 }
 
@@ -1270,7 +1395,11 @@ pedal "12AX7 Common Cathode" {
     eprintln!("initial_v_prev of MultiNL stage:");
     for (si, s) in compiled.stages.iter().enumerate() {
         if let crate::compiler::compiled::Stage::MultiNl(m) = s {
-            eprintln!("  stage {si}: initial_v_prev={:.4?}, n_passive={}", m.initial_v_prev, m.passive_one_ports.len());
+            eprintln!(
+                "  stage {si}: initial_v_prev={:.4?}, n_passive={}",
+                m.initial_v_prev,
+                m.passive_one_ports.len()
+            );
             // Check passive one-port initial state (branch runtime-state API).
             for (k, one_port) in m.passive_one_ports.iter().enumerate() {
                 if matches!(
@@ -1286,7 +1415,8 @@ pedal "12AX7 Common Cathode" {
 
     // Run DC steady state (no signal) and report final v_prev and cap state
     let mut proc = compiled;
-    for _ in 0..48000 { // 1 second warmup
+    for _ in 0..48000 {
+        // 1 second warmup
         proc.process(0.0);
     }
     // Small probe signal to measure gain
@@ -1302,7 +1432,11 @@ pedal "12AX7 Common Cathode" {
         min_out = min_out.min(output);
     }
     let gain = (max_out - min_out) / (2.0 * amplitude);
-    eprintln!("After 1s DC warmup, gain at 10mV probe={:.1}x ({:.1}dB)", gain, 20.0*gain.log10());
+    eprintln!(
+        "After 1s DC warmup, gain at 10mV probe={:.1}x ({:.1}dB)",
+        gain,
+        20.0 * gain.log10()
+    );
 }
 
 /// Inspect NR solver convergence during signal: dump v_prev per stage for 5 samples.
@@ -1393,17 +1527,29 @@ pedal "12AX7 Common Cathode" {
         let t = i as f64 / sample_rate;
         let input = amplitude * (2.0 * std::f64::consts::PI * freq * t).sin();
         // Process stage 0 (C_in) only
-        let s0_out = if let Some(crate::compiler::compiled::Stage::Wdf(ref mut s0)) = proc2.stages.get_mut(0) {
+        let s0_out = if let Some(crate::compiler::compiled::Stage::Wdf(ref mut s0)) =
+            proc2.stages.get_mut(0)
+        {
             s0.process(input)
-        } else { input };
+        } else {
+            input
+        };
         // Process stage 1 (triode MultiNl)
-        let s1_out = if let Some(crate::compiler::compiled::Stage::MultiNl(ref mut s1)) = proc2.stages.get_mut(1) {
+        let s1_out = if let Some(crate::compiler::compiled::Stage::MultiNl(ref mut s1)) =
+            proc2.stages.get_mut(1)
+        {
             s1.process(s0_out)
-        } else { s0_out };
+        } else {
+            s0_out
+        };
         // Process stage 2 (R_plate, C_out, R_load)
-        let s2_out = if let Some(crate::compiler::compiled::Stage::Wdf(ref mut s2)) = proc2.stages.get_mut(2) {
+        let s2_out = if let Some(crate::compiler::compiled::Stage::Wdf(ref mut s2)) =
+            proc2.stages.get_mut(2)
+        {
             s2.process(s1_out)
-        } else { s1_out };
+        } else {
+            s1_out
+        };
         if i >= 10 * samples_per_cycle {
             max_after_s1 = max_after_s1.max(s1_out);
             min_after_s1 = min_after_s1.min(s1_out);
@@ -1413,10 +1559,18 @@ pedal "12AX7 Common Cathode" {
     }
     let gain_s1 = (max_after_s1 - min_after_s1) / (2.0 * amplitude);
     let gain_final = (max_final - min_final) / (2.0 * amplitude);
-    eprintln!("Gain after stage 1 (triode): {:.1}x ({:.1}dB), pp={:.3}V",
-        gain_s1, 20.0*gain_s1.log10(), max_after_s1-min_after_s1);
-    eprintln!("Gain after stage 2 (final): {:.1}x ({:.1}dB), pp={:.3}V",
-        gain_final, 20.0*gain_final.log10(), max_final-min_final);
+    eprintln!(
+        "Gain after stage 1 (triode): {:.1}x ({:.1}dB), pp={:.3}V",
+        gain_s1,
+        20.0 * gain_s1.log10(),
+        max_after_s1 - min_after_s1
+    );
+    eprintln!(
+        "Gain after stage 2 (final): {:.1}x ({:.1}dB), pp={:.3}V",
+        gain_final,
+        20.0 * gain_final.log10(),
+        max_final - min_final
+    );
 
     // Dump stage 2 structure
     let compiled3 = crate::compiler::compile_pedal(&pedal, sample_rate).expect("compile3");
@@ -1427,8 +1581,12 @@ pedal "12AX7 Common Cathode" {
                 eprintln!("  stage {si}: WDF (debug: {})", w.debug_label);
             }
             crate::compiler::compiled::Stage::MultiNl(m) => {
-                eprintln!("  stage {si}: MultiNl n_nl={} n_passive={} output_port={}",
-                    m.n_nl, m.passive_one_ports.len(), m.output_port);
+                eprintln!(
+                    "  stage {si}: MultiNl n_nl={} n_passive={} output_port={}",
+                    m.n_nl,
+                    m.passive_one_ports.len(),
+                    m.output_port
+                );
             }
             _ => eprintln!("  stage {si}: other"),
         }

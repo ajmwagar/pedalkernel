@@ -1050,6 +1050,12 @@ impl RootKind {
                 // The bias is set once at compile time via set_bias().
                 b.set_vbe(b.vbe_bias() + input * compensation);
             }
+            RootKind::Jfet(j) => {
+                j.set_vgs(j.vgs_bias() + input * compensation);
+            }
+            RootKind::Mosfet(m) => {
+                m.set_vgs(m.vgs_bias() + input * compensation);
+            }
             RootKind::DiffPair(dp) => {
                 // Cutoff CV modulates tail current I_tail.
                 // Input maps to I_tail range: bias * (1 + input * compensation)
@@ -1403,6 +1409,20 @@ pub struct WdfStage {
     /// Previous source voltage for source follower Vgs calculation.
     /// Vgs[n] = input[n] - Vsource[n-1]
     pub prev_source_voltage: crate::Wave,
+    /// Absolute DC voltage added to the WDF root's incremental output.
+    ///
+    /// Most WDF roots solve absolute port voltage, so this remains zero. FET
+    /// amplifier roots solve AC deviation around a DC Q-point; the following
+    /// coupling network still needs the absolute device node voltage so its
+    /// uncharged-cap startup transient matches the SPICE UIC harness.
+    pub output_bias: crate::Wave,
+    /// Source-leg component used to estimate FET source AC voltage.
+    ///
+    /// FET gate drive is externally controlled, but physical Vgs is
+    /// Vgate - Vsource. When this is set, `prev_source_voltage` is updated from
+    /// the probed source-leg leaf after the WDF down-sweep and subtracted from
+    /// the next sample's gate drive.
+    pub fet_source_probe: Option<String>,
     /// BFS distance from input of the injection node (for topological ordering).
     pub signal_flow_distance: usize,
     /// Component names in this stage (e.g. "R_in,Cin"). Debug builds only.
@@ -1674,6 +1694,8 @@ impl WdfStage {
             grid_dc_blocker: None,
             is_source_follower: false,
             prev_source_voltage: 0.0,
+            output_bias: 0.0,
+            fet_source_probe: None,
             signal_flow_distance: 0,
             #[cfg(debug_assertions)]
             debug_label: String::new(),
@@ -2020,11 +2042,13 @@ impl WdfStage {
         let k_table = &self.k_table;
         let compensation = self.compensation;
         let output_probe = &self.output_probe;
+        let source_probe = &self.fet_source_probe;
         let series_rectifier_divider = self.series_rectifier_divider;
         let feedback_opamp = &mut self.feedback_opamp;
         let vcc_injection_coeff = self.vcc_injection_coeff;
         let vcc_dc_ramp = &mut self.vcc_dc_ramp;
         let coupling_cap_id = &self.coupling_cap_id;
+        let prev_source_voltage = &mut self.prev_source_voltage;
 
         // For stages with an inter-stage coupling cap, the input signal is routed
         // through the WDF tree (VS = input) so the coupling cap naturally blocks
@@ -2076,6 +2100,18 @@ impl WdfStage {
             root.set_control_voltage(grid_input, compensation, 0.0);
         }
 
+        if source_probe.is_some() {
+            match root {
+                RootKind::Jfet(j) => {
+                    j.set_vgs(j.vgs_bias() + input - *prev_source_voltage);
+                }
+                RootKind::Mosfet(m) => {
+                    m.set_vgs(m.vgs_bias() + input - *prev_source_voltage);
+                }
+                _ => {}
+            }
+        }
+
         // For JFET source followers, compute Vgs from input (gate) and previous output (source).
         // Vgs = Vgate - Vsource, where Vgate ≈ input and Vsource is the WDF output.
         // We use the previous sample's source voltage for stability.
@@ -2083,7 +2119,7 @@ impl WdfStage {
             if let RootKind::Jfet(ref mut j) = root {
                 // Bias point: Vgs typically -0.5 to -2V for N-channel JFET
                 // The input modulates around this bias point
-                let vgs = input - self.prev_source_voltage;
+                let vgs = j.vgs_bias() + input - *prev_source_voltage;
                 j.set_vgs(vgs);
             }
         }
@@ -2195,8 +2231,8 @@ impl WdfStage {
             let solver_control = match root {
                 RootKind::Bjt(b) => b.vbe() - b.vbe_bias(),
                 RootKind::Triode(t) => t.vgk() - t.vgk_bias(),
-                RootKind::Jfet(j) => j.vgs(),   // no DC bias added
-                RootKind::Mosfet(m) => m.vgs(), // no DC bias added
+                RootKind::Jfet(j) => j.vgs() - j.vgs_bias(),
+                RootKind::Mosfet(m) => m.vgs() - m.vgs_bias(),
                 RootKind::DiffPair(dp) => {
                     // Ctrl axis = I_tail modulation relative to bias
                     (dp.i_tail / dp.i_tail_bias()) - 1.0
@@ -2402,6 +2438,11 @@ impl WdfStage {
                     return v;
                 }
             }
+            if let Some(ref probe_id) = source_probe {
+                if let Some(v) = tree.leaf_voltage_with_state(probe_id, runtime_state) {
+                    *prev_source_voltage = v;
+                }
+            }
 
             // For feedback_opamp stages (op-amp + diode clipping):
             // The VS drives gain × input into the tree. The diode root
@@ -2501,6 +2542,8 @@ impl WdfStage {
         if self.is_source_follower {
             self.prev_source_voltage = wdf_out;
         }
+
+        let wdf_out = wdf_out + self.output_bias;
 
         // Apply DC-blocking filter for triode stages.
         // This models the output coupling capacitor (C_out) which blocks DC
@@ -3539,6 +3582,12 @@ impl WdfStage {
         }
         if self.output_node_id != usize::MAX {
             s.push_str(&format!(", out={}", self.output_node_id));
+        }
+        if self.output_bias != 0.0 {
+            s.push_str(&format!(", output_bias={:.4}", self.output_bias));
+        }
+        if let Some(ref probe) = self.fet_source_probe {
+            s.push_str(&format!(", fet_source_probe={probe}"));
         }
         s.push_str(")\n");
         s.push_str(&self.tree.debug_dump(1));
@@ -4746,10 +4795,11 @@ impl BiquadTable {
                 let frac = p - i0 as crate::Wave;
                 let base0 = i0 * Self::COEFF_COUNT;
                 let base1 = (i0 + 1) * Self::COEFF_COUNT;
-                for (o, (&c0, &c1)) in out
-                    .iter_mut()
-                    .zip(self.coeffs[base0..base0 + 5].iter().zip(&self.coeffs[base1..base1 + 5]))
-                {
+                for (o, (&c0, &c1)) in out.iter_mut().zip(
+                    self.coeffs[base0..base0 + 5]
+                        .iter()
+                        .zip(&self.coeffs[base1..base1 + 5]),
+                ) {
                     *o = c0 * (1.0 - frac) + c1 * frac;
                 }
             }
@@ -5788,11 +5838,7 @@ impl MultiNlStage {
                 let n = ss.n_states;
                 // x[n] = A · x[n-1] + b · u[n]
                 work.resize(n, 0.0);
-                for (i, (w, &b_i)) in work[..n]
-                    .iter_mut()
-                    .zip(&ss.b_vector[..n])
-                    .enumerate()
-                {
+                for (i, (w, &b_i)) in work[..n].iter_mut().zip(&ss.b_vector[..n]).enumerate() {
                     let row_start = i * n;
                     let mut v = b_i * sample;
                     for (&a_ij, &x_j) in
@@ -6485,11 +6531,7 @@ impl MultiNlStage {
                 if new_r.is_finite() && new_r > 0.0 {
                     let new_g = 1.0 / new_r;
                     // Compare against the matching binding's last-applied g.
-                    match self
-                        .variable_resistors
-                        .iter()
-                        .find(|ps| ps.child_idx == ci)
-                    {
+                    match self.variable_resistors.iter().find(|ps| ps.child_idx == ci) {
                         Some(ps) => {
                             let last_g = ps.conductance;
                             (new_g - last_g).abs() > CTRL_R_RECOMPUTE_EPS * last_g.abs()

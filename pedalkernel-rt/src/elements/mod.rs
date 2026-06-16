@@ -1044,10 +1044,11 @@ mod tests {
         root.set_vgs(4.0); // well above Vth=2.1V
         let ids = root.drain_current(5.0);
         assert!(ids > 0.0, "MOSFET should conduct above Vth: ids={ids}");
-        // Expected: Kp * (Vgs-Vth)^2 * (1 + lambda*Vds) = 0.1 * 3.61 * 1.2 = 0.433 A
+        // Expected SPICE Level 1: 0.5 * Kp * (Vgs-Vth)^2 * (1 + lambda*Vds)
+        // = 0.5 * 0.1 * 3.61 * 1.2 = 0.217 A
         assert!(
-            (ids - 0.433).abs() < 0.05,
-            "saturation current ~0.43A: ids={ids}"
+            (ids - 0.217).abs() < 0.03,
+            "saturation current ~0.22A: ids={ids}"
         );
     }
 

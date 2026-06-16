@@ -11,16 +11,17 @@ use crate::elements::WdfRoot;
 
 /// Enhancement-mode MOSFET model parameters.
 ///
-/// Uses the standard square-law model for drain current:
+/// Uses the SPICE Level 1 square-law model for drain current:
 /// - Cutoff: `Ids = 0` when `|Vgs| < |Vth|`
-/// - Triode: `Ids = Kp * [2*(Vgs-Vth)*Vds - Vds^2]`
-/// - Saturation: `Ids = Kp * (Vgs-Vth)^2 * (1 + lambda*|Vds|)`
+/// - Triode: `Ids = Kp * [(Vgs-Vth)*Vds - 0.5*Vds^2]`
+/// - Saturation: `Ids = 0.5*Kp * (Vgs-Vth)^2 * (1 + lambda*|Vds|)`
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MosfetModel {
     /// Threshold voltage (V). N-channel: positive, P-channel: negative.
     pub vth: crate::Wave,
-    /// Transconductance parameter (A/V²). Kp = µn·Cox·W/(2L).
+    /// SPICE Level 1 transconductance parameter (A/V²), before the 1/2
+    /// square-law saturation factor.
     pub kp: crate::Wave,
     /// Channel-length modulation parameter (1/V). Typical: 0.01-0.1.
     pub lambda: crate::Wave,
@@ -80,8 +81,8 @@ impl MosfetModel {
     ///
     /// - Cutoff: `Ids = 0` when the channel is off (N: `Vgs <= Vth`,
     ///   P: `Vgs >= Vth`)
-    /// - Triode: `Ids = Kp * [2*Vov*|Vds| - Vds²] * sign(Vds)`
-    /// - Saturation: `Ids = Kp * Vov² * (1 + lambda*|Vds|) * sign(Vds)`
+    /// - Triode: `Ids = Kp * [Vov*|Vds| - 0.5*Vds²] * sign(Vds)`
+    /// - Saturation: `Ids = 0.5*Kp * Vov² * (1 + lambda*|Vds|) * sign(Vds)`
     ///
     /// The channel conducts symmetrically in both Vds polarities (drain and
     /// source are interchangeable in the square-law model).
@@ -97,10 +98,10 @@ impl MosfetModel {
 
         let ids_magnitude = if vds_abs < vov {
             // Triode (linear) region
-            self.kp * (2.0 * vov * vds_abs - vds_abs * vds_abs)
+            self.kp * (vov * vds_abs - 0.5 * vds_abs * vds_abs)
         } else {
             // Saturation region with channel-length modulation
-            self.kp * vov * vov * (1.0 + self.lambda * vds_abs)
+            0.5 * self.kp * vov * vov * (1.0 + self.lambda * vds_abs)
         };
 
         ids_magnitude * vds_sign
@@ -120,11 +121,11 @@ impl MosfetModel {
         let vds_abs = vds.abs();
 
         if vds_abs < vov {
-            // Triode: dIds/dVds = Kp * 2*(Vov - |Vds|)
-            self.kp * 2.0 * (vov - vds_abs)
+            // Triode: dIds/dVds = Kp * (Vov - |Vds|)
+            self.kp * (vov - vds_abs)
         } else {
-            // Saturation: dIds/dVds = Kp * Vov² * lambda
-            self.kp * vov * vov * self.lambda
+            // Saturation: dIds/dVds = 0.5 * Kp * Vov² * lambda
+            0.5 * self.kp * vov * vov * self.lambda
         }
     }
 
@@ -166,6 +167,16 @@ pub struct MosfetRoot {
     pub model: MosfetModel,
     /// Current gate-source voltage (external control parameter).
     vgs: crate::Wave,
+    /// DC gate-source operating point. Runtime signal control is added on top.
+    #[cfg_attr(feature = "serde", serde(default))]
+    vgs_bias: crate::Wave,
+    /// DC drain-source operating point. The WDF port solves AC deviation
+    /// around this voltage.
+    #[cfg_attr(feature = "serde", serde(default))]
+    vds_bias: crate::Wave,
+    /// Drain current at the DC operating point.
+    #[cfg_attr(feature = "serde", serde(default))]
+    ids_bias: crate::Wave,
     /// Maximum Newton-Raphson iterations (bounded for RT safety).
     max_iter: usize,
 }
@@ -175,6 +186,9 @@ impl MosfetRoot {
         Self {
             model,
             vgs: 0.0,
+            vgs_bias: 0.0,
+            vds_bias: 0.0,
+            ids_bias: 0.0,
             max_iter: super::solver::NR_MAX_ITER,
         }
     }
@@ -183,6 +197,28 @@ impl MosfetRoot {
     #[inline]
     pub fn set_vgs(&mut self, vgs: crate::Wave) {
         self.vgs = vgs;
+    }
+
+    /// Set the DC gate-source operating point and current Vgs.
+    #[inline]
+    pub fn set_bias(&mut self, vgs_bias: crate::Wave) {
+        self.vgs_bias = vgs_bias;
+        self.vgs = vgs_bias;
+    }
+
+    /// Set the DC operating point used by the incremental WDF one-port.
+    #[inline]
+    pub fn set_operating_point(&mut self, vgs_bias: crate::Wave, vds_bias: crate::Wave) {
+        self.vgs_bias = vgs_bias;
+        self.vgs = vgs_bias;
+        self.vds_bias = vds_bias;
+        self.ids_bias = self.drain_current(vds_bias);
+    }
+
+    /// DC gate-source operating point.
+    #[inline]
+    pub fn vgs_bias(&self) -> crate::Wave {
+        self.vgs_bias
     }
 
     /// Get current gate-source voltage.
@@ -203,6 +239,16 @@ impl MosfetRoot {
     #[inline]
     fn drain_current_derivative(&self, vds: crate::Wave) -> crate::Wave {
         self.model.ids_vds_derivative(self.vgs, vds)
+    }
+
+    #[inline]
+    fn port_current(&self, vds_ac: crate::Wave) -> crate::Wave {
+        self.drain_current(self.vds_bias + vds_ac) - self.ids_bias
+    }
+
+    #[inline]
+    fn port_current_derivative(&self, vds_ac: crate::Wave) -> crate::Wave {
+        self.drain_current_derivative(self.vds_bias + vds_ac)
     }
 }
 
@@ -232,14 +278,17 @@ impl WdfRoot for MosfetRoot {
         } else {
             (self.model.vth - self.vgs).max(0.0)
         };
-        let gds_approx = 2.0 * self.model.kp * vov;
+        let gds_approx = self
+            .port_current_derivative(0.0)
+            .abs()
+            .max(self.model.kp * vov);
         let v0 = if gds_approx > LEAKAGE_CONDUCTANCE {
             a / (2.0 + 2.0 * rp * gds_approx)
         } else {
             a * 0.5
         };
         newton_raphson_solve(a, rp, v0, self.max_iter, 1e-6, None, None, |v| {
-            (root.drain_current(v), root.drain_current_derivative(v))
+            (root.port_current(v), root.port_current_derivative(v))
         })
     }
 }

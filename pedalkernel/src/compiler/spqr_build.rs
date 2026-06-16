@@ -406,6 +406,7 @@ pub fn compile_via_spqr_with_options(
                     // Skipped when skip_k_tables is set (debug builds).
                     if wdf.k_table.is_none()
                         && !options.skip_k_tables
+                        && !wdf.is_source_follower
                         && root_supports_k_table(&wdf.root)
                     {
                         let stage_n = stages.len();
@@ -1212,7 +1213,8 @@ pub fn compile_via_spqr_with_options(
                     .iter()
                     .copied()
                     .filter(|&eidx| {
-                        if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Nonlinear {
+                        if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Nonlinear
+                        {
                             return false;
                         }
                         let e = &graph.edges[eidx];
@@ -1548,10 +1550,7 @@ pub fn compile_via_spqr_with_options(
                         group_comp_ids.clone()
                     );
                     continue;
-                } else if !group_has_nonlinear
-                    && spqr_stages.is_empty()
-                    && group_has_runtime_pot
-                {
+                } else if !group_has_nonlinear && spqr_stages.is_empty() && group_has_runtime_pot {
                     // All-passive group that reduced to a rigid (non-series-
                     // parallel) R-node AND carries a runtime pot: spqr_to_dyn_node
                     // returns None for the R-node, so the AllPassive arm of
@@ -1757,9 +1756,7 @@ pub fn compile_via_spqr_with_options(
                 let d = dist[&node];
                 if let Some(neighbors) = adj.get(&node) {
                     for &next in neighbors {
-                        if let std::collections::btree_map::Entry::Vacant(e) =
-                            dist.entry(next)
-                        {
+                        if let std::collections::btree_map::Entry::Vacant(e) = dist.entry(next) {
                             e.insert(d + 1);
                             queue.push_back(next);
                         }
@@ -2241,8 +2238,8 @@ fn populate_detector_internal_ports(
     detector_seeds: &std::collections::HashSet<super::graph::NodeId>,
     stage_comp_ids: &[Vec<String>],
 ) {
-    use pedalkernel_rt::processor::{InternalPortBinding, Stage};
     use super::component::EdgeKind;
+    use pedalkernel_rt::processor::{InternalPortBinding, Stage};
 
     // Narrow gate: only a true delayed detector with a broker tap-mouth cut.
     if detector_seeds.is_empty() || cut_edges.cuts.is_empty() {
@@ -2345,13 +2342,12 @@ fn populate_detector_internal_ports(
             // peak (see la2a_detector_el_drive_tracks_program); quiet ~0.05 V.
             // scale = 1/15 maps loud -> ~full illumination, quiet -> near dark.
             // The T4B two-rate cell (set_led_drive) provides attack/release.
-            compiled.detector_led_coupling =
-                Some(pedalkernel_rt::processor::DetectorLedCoupling {
-                    carry_idx: 0,
-                    comp_id: coupler,
-                    stage_idx,
-                    scale: 1.0 / 15.0,
-                });
+            compiled.detector_led_coupling = Some(pedalkernel_rt::processor::DetectorLedCoupling {
+                carry_idx: 0,
+                comp_id: coupler,
+                stage_idx,
+                scale: 1.0 / 15.0,
+            });
             #[cfg(test)]
             eprintln!(
                 "  [3] detector LED coupling: carry=0 comp={:?} stage={stage_idx} scale={}",
@@ -2402,9 +2398,7 @@ fn coupler_boundary_nodes(graph: &CircuitGraph) -> Vec<NodeId> {
     for comp in &graph.components {
         let role_is_conductive = matches!(
             comp.kind.graph_role(),
-            GraphRole::Edge { .. }
-                | GraphRole::ActiveEdge { .. }
-                | GraphRole::CoupledEdge { .. }
+            GraphRole::Edge { .. } | GraphRole::ActiveEdge { .. } | GraphRole::CoupledEdge { .. }
         );
         if !role_is_conductive {
             continue;
@@ -2544,6 +2538,248 @@ pub(super) fn with_voltage_source_rp(passive_tree: DynNode, rp: f64) -> DynNode 
         port_name: None,
     }));
     DynNode::Series(Box::new(vs), Box::new(passive_tree))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FetWdfTopology {
+    source_follower: bool,
+}
+
+fn build_fet_amplifier_passive_tree(
+    _edge_indices: &[usize],
+    nl_edge_idx: usize,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+) -> Option<(DynNode, FetWdfTopology)> {
+    let nl_edge = &graph.edges[nl_edge_idx];
+    let comp = &graph.components[nl_edge.comp_idx];
+    if !(comp.kind.is_jfet() || comp.kind.is_mosfet()) {
+        return None;
+    }
+
+    let drain_node = nl_edge.node_a;
+    let source_node = nl_edge.node_b;
+    let gate_node = graph.node_names.get(&format!("{}.gate", comp.id)).copied();
+
+    let source_feeds_output =
+        fet_terminal_reaches_output(source_node, drain_node, gate_node, graph);
+    let drain_feeds_output = fet_terminal_reaches_output(drain_node, source_node, gate_node, graph);
+    let source_follower = source_feeds_output && !drain_feeds_output;
+    let passive_edge_indices: Vec<usize> = (0..graph.edges.len()).collect();
+
+    let drain_leg = build_fet_ac_ground_leg(
+        drain_node,
+        &passive_edge_indices,
+        nl_edge_idx,
+        graph,
+        sample_rate,
+        &[source_node],
+        gate_node,
+    );
+    let source_leg = build_fet_ac_ground_leg(
+        source_node,
+        &passive_edge_indices,
+        nl_edge_idx,
+        graph,
+        sample_rate,
+        &[drain_node],
+        gate_node,
+    );
+
+    let tree = if source_follower {
+        // The source-follower runtime root solves Vs against the source load
+        // directly; including the AC-grounded drain load would inflate Rp.
+        source_leg.or(drain_leg)?
+    } else {
+        match (drain_leg, source_leg) {
+            (Some(drain), Some(source)) => DynNode::Series(Box::new(drain), Box::new(source)),
+            (Some(drain), None) => drain,
+            (None, Some(source)) => source,
+            (None, None) => return None,
+        }
+    };
+
+    Some((tree, FetWdfTopology { source_follower }))
+}
+
+fn build_fet_ac_ground_leg(
+    start_node: NodeId,
+    edge_indices: &[usize],
+    nl_edge_idx: usize,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    blocked_nodes: &[NodeId],
+    gate_node: Option<NodeId>,
+) -> Option<DynNode> {
+    let mut visited_edges = std::collections::HashSet::new();
+    build_fet_leg_from_node(
+        start_node,
+        edge_indices,
+        nl_edge_idx,
+        graph,
+        sample_rate,
+        blocked_nodes,
+        gate_node,
+        &mut visited_edges,
+    )
+}
+
+fn build_fet_leg_from_node(
+    node: NodeId,
+    edge_indices: &[usize],
+    nl_edge_idx: usize,
+    graph: &CircuitGraph,
+    sample_rate: f64,
+    blocked_nodes: &[NodeId],
+    gate_node: Option<NodeId>,
+    visited_edges: &mut std::collections::HashSet<usize>,
+) -> Option<DynNode> {
+    if is_fet_ac_ground(node, graph) {
+        return None;
+    }
+
+    let mut branches = Vec::new();
+    for &eidx in edge_indices {
+        if eidx == nl_edge_idx || visited_edges.contains(&eidx) {
+            continue;
+        }
+        let edge = &graph.edges[eidx];
+        let Some(next_node) = other_node(edge, node) else {
+            continue;
+        };
+        if Some(next_node) == gate_node || blocked_nodes.contains(&next_node) {
+            continue;
+        }
+        if !matches!(
+            graph.effective_edge_kind(eidx),
+            super::component::EdgeKind::Linear | super::component::EdgeKind::Reactive
+        ) {
+            continue;
+        }
+
+        let comp = &graph.components[edge.comp_idx];
+        let leaf = comp.kind.make_leaf(&comp.id, sample_rate)?;
+        let mut branch_visited = visited_edges.clone();
+        branch_visited.insert(eidx);
+
+        let branch = if is_fet_ac_ground(next_node, graph) {
+            leaf
+        } else if let Some(rest) = build_fet_leg_from_node(
+            next_node,
+            edge_indices,
+            nl_edge_idx,
+            graph,
+            sample_rate,
+            blocked_nodes,
+            gate_node,
+            &mut branch_visited,
+        ) {
+            DynNode::Series(Box::new(leaf), Box::new(rest))
+        } else {
+            continue;
+        };
+
+        branches.push(branch);
+    }
+
+    fold_dyn_nodes_parallel(branches)
+}
+
+fn fold_dyn_nodes_parallel(mut nodes: Vec<DynNode>) -> Option<DynNode> {
+    match nodes.len() {
+        0 => None,
+        1 => Some(nodes.remove(0)),
+        _ => {
+            let mut tree = nodes.pop().unwrap();
+            while let Some(left) = nodes.pop() {
+                tree = DynNode::Parallel(Box::new(left), Box::new(tree));
+            }
+            Some(tree)
+        }
+    }
+}
+
+fn other_node(edge: &super::graph::GraphEdge, node: NodeId) -> Option<NodeId> {
+    if edge.node_a == node {
+        Some(edge.node_b)
+    } else if edge.node_b == node {
+        Some(edge.node_a)
+    } else {
+        None
+    }
+}
+
+fn is_fet_ac_ground(node: NodeId, graph: &CircuitGraph) -> bool {
+    node == graph.gnd_node
+        || node == graph.vcc_node
+        || graph.supply_nodes.contains(&node)
+        || graph.ac_ground_nodes.contains(&node)
+}
+
+fn fet_terminal_reaches_output(
+    start_node: NodeId,
+    other_fet_terminal: NodeId,
+    gate_node: Option<NodeId>,
+    graph: &CircuitGraph,
+) -> bool {
+    let mut seen_nodes = std::collections::HashSet::new();
+    let mut stack = vec![start_node];
+    seen_nodes.insert(start_node);
+
+    while let Some(node) = stack.pop() {
+        if node == graph.out_node {
+            return true;
+        }
+        for (eidx, edge) in graph.edges.iter().enumerate() {
+            let Some(next) = other_node(edge, node) else {
+                continue;
+            };
+            if next == other_fet_terminal
+                || Some(next) == gate_node
+                || is_fet_ac_ground(next, graph)
+            {
+                continue;
+            }
+            if !matches!(
+                graph.effective_edge_kind(eidx),
+                super::component::EdgeKind::Linear | super::component::EdgeKind::Reactive
+            ) {
+                continue;
+            }
+            if seen_nodes.insert(next) {
+                stack.push(next);
+            }
+        }
+    }
+
+    false
+}
+
+fn find_fet_source_probe(
+    source_node: NodeId,
+    drain_node: NodeId,
+    gate_node: Option<NodeId>,
+    graph: &CircuitGraph,
+) -> Option<String> {
+    for (eidx, edge) in graph.edges.iter().enumerate() {
+        let Some(other) = other_node(edge, source_node) else {
+            continue;
+        };
+        if other == drain_node || Some(other) == gate_node || !is_fet_ac_ground(other, graph) {
+            continue;
+        }
+        if !matches!(
+            graph.effective_edge_kind(eidx),
+            super::component::EdgeKind::Linear | super::component::EdgeKind::Reactive
+        ) {
+            continue;
+        }
+        let comp = &graph.components[edge.comp_idx];
+        if comp.kind.make_leaf(&comp.id, 48_000.0).is_some() {
+            return Some(comp.id.clone());
+        }
+    }
+    None
 }
 
 /// Build a runnable `WdfStage` from an `SpqrStage`.
@@ -2694,6 +2930,10 @@ pub(super) fn build_spqr_stage_with_options(
                     &graph.node_names,
                 )
                 .ok_or_else(|| format!("NL edge {} ({}) didn't classify", nl_edge_idx, comp.id))?;
+            let (tree, fet_topology) =
+                build_fet_amplifier_passive_tree(&edge_indices, nl_edge_idx, graph, _sample_rate)
+                    .map(|(tree, topology)| (tree, Some(topology)))
+                    .unwrap_or((tree, None));
 
             // BJTs now use BjtRoot (single-port WDF root with external Vbe),
             // same as triodes use TriodeRoot. No MultiNL fallback needed.
@@ -2744,12 +2984,8 @@ pub(super) fn build_spqr_stage_with_options(
             // which is wrong for high-voltage stages (e.g. 250 V 12AX7).
             // Without (2) the cathode cap takes τ=Rk*Ck time-constants to charge;
             // SPICE runs a .op before .tran so it starts at steady state.
-            let dc_qpoint = compute_wdf_triode_dc_qpoint(
-                &nl_kind,
-                &edge_indices,
-                graph,
-                supply_voltage,
-            );
+            let dc_qpoint =
+                compute_wdf_triode_dc_qpoint(&nl_kind, &edge_indices, graph, supply_voltage);
             // (1) Seed bias
             if let Some(ref dc) = dc_qpoint {
                 if let RootKind::Triode(t) = &mut root {
@@ -2802,9 +3038,57 @@ pub(super) fn build_spqr_stage_with_options(
                 }
             }
 
-            let tree = with_voltage_source(tree);
+            // Seed FET gate-source DC operating point.  The gate is a high-Z
+            // control terminal and is intentionally excluded from the WDF tree
+            // above; this puts the nonlinear root at the same DC bias that the
+            // omitted gate/source resistor network establishes in SPICE.
+            let fet_dc = if matches!(root, RootKind::Jfet(_) | RootKind::Mosfet(_)) {
+                compute_wdf_fet_dc_qpoint(&nl_kind, &edge_indices, graph, supply_voltage)
+            } else {
+                None
+            };
+            match &mut root {
+                RootKind::Jfet(j) => {
+                    if let Some(ref dc) = fet_dc {
+                        j.set_operating_point(
+                            dc.vgs as pedalkernel_rt::Wave,
+                            dc.vds as pedalkernel_rt::Wave,
+                        );
+                    }
+                }
+                RootKind::Mosfet(m) => {
+                    if let Some(ref dc) = fet_dc {
+                        m.set_operating_point(
+                            dc.vgs as pedalkernel_rt::Wave,
+                            dc.vds as pedalkernel_rt::Wave,
+                        );
+                    }
+                }
+                _ => {}
+            }
+
+            let tree = if fet_topology.is_some() {
+                tree
+            } else {
+                with_voltage_source(tree)
+            };
             let oversampler = Oversampler::new(OversamplingFactor::X1);
             let mut wdf_stage = WdfStage::new(tree, root, oversampler);
+            if let (Some(topology), Some(dc)) = (fet_topology, fet_dc.as_ref()) {
+                wdf_stage.output_bias = if topology.source_follower {
+                    dc.source_voltage as pedalkernel_rt::Wave
+                } else {
+                    dc.drain_voltage as pedalkernel_rt::Wave
+                };
+                let gate_node = graph.node_names.get(&format!("{}.gate", comp.id)).copied();
+                wdf_stage.fet_source_probe =
+                    find_fet_source_probe(e.node_b, e.node_a, gate_node, graph);
+            }
+            if fet_topology.is_some_and(|topology| topology.source_follower)
+                && matches!(wdf_stage.root, RootKind::Jfet(_))
+            {
+                wdf_stage.is_source_follower = true;
+            }
             wdf_stage.base_diode_model = base_diode_model;
             // (2) Pre-charge cathode bypass cap
             if let Some(dc) = dc_qpoint {
@@ -4904,8 +5188,7 @@ fn compute_wdf_triode_dc_qpoint(
             return None;
         }
         let (a, b) = (e.node_a, e.node_b);
-        if (a == cathode_node && b == graph.gnd_node)
-            || (b == cathode_node && a == graph.gnd_node)
+        if (a == cathode_node && b == graph.gnd_node) || (b == cathode_node && a == graph.gnd_node)
         {
             comp.kind.resistance()
         } else {
@@ -4940,6 +5223,207 @@ fn compute_wdf_triode_dc_qpoint(
     }
 
     Some(TriodeDcQpoint { vgk, v_cathode })
+}
+
+struct FetDcQpoint {
+    vgs: f64,
+    vds: f64,
+    drain_voltage: f64,
+    source_voltage: f64,
+}
+
+fn compute_wdf_fet_dc_qpoint(
+    nl_kind: &NonlinearKind,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<FetDcQpoint> {
+    let (gate_node, drain_node, source_node) = match nl_kind {
+        NonlinearKind::Jfet { .. } | NonlinearKind::Mosfet { .. } => {
+            let nl_edge_idx = edge_indices.iter().copied().find(|&eidx| {
+                matches!(
+                    graph.effective_edge_kind(eidx),
+                    super::component::EdgeKind::Nonlinear
+                ) && {
+                    let comp = &graph.components[graph.edges[eidx].comp_idx];
+                    comp.kind.is_jfet() || comp.kind.is_mosfet()
+                }
+            })?;
+            let edge = &graph.edges[nl_edge_idx];
+            let comp = &graph.components[edge.comp_idx];
+            let gate = graph
+                .node_names
+                .get(&format!("{}.gate", comp.id))
+                .copied()?;
+            (gate, edge.node_a, edge.node_b)
+        }
+        _ => return None,
+    };
+
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let gate_voltage = dc_thevenin_voltage(gate_node, &all_edges, graph, supply_voltage)?;
+    let (drain_rail_voltage, drain_resistance) =
+        dc_single_rail_resistance(drain_node, &all_edges, graph, supply_voltage)?;
+    let (source_rail_voltage, source_resistance) =
+        dc_single_rail_resistance(source_node, &all_edges, graph, supply_voltage)?;
+
+    let model_current = |vgs: f64, vds: f64| -> f64 {
+        match nl_kind {
+            NonlinearKind::Jfet {
+                model_name,
+                is_n_channel,
+            } => {
+                let model = super::helpers::jfet_model(model_name, *is_n_channel);
+                let mut root = pedalkernel_rt::elements::nonlinear::JfetRoot::new(model);
+                root.set_vgs(vgs as pedalkernel_rt::Wave);
+                root.drain_current(vds as pedalkernel_rt::Wave) as f64
+            }
+            NonlinearKind::Mosfet {
+                mosfet_type,
+                is_n_channel,
+            } => {
+                let model = super::helpers::mosfet_model(*mosfet_type, *is_n_channel);
+                model.ids(vgs as pedalkernel_rt::Wave, vds as pedalkernel_rt::Wave) as f64
+            }
+            _ => 0.0,
+        }
+    };
+
+    let point_for_ids = |ids: f64| -> (f64, f64, f64, f64, f64) {
+        let drain_voltage = drain_rail_voltage - ids * drain_resistance;
+        let source_voltage = source_rail_voltage + ids * source_resistance;
+        let vgs = gate_voltage - source_voltage;
+        let vds = drain_voltage - source_voltage;
+        (vgs, vds, drain_voltage, source_voltage, model_current(vgs, vds))
+    };
+
+    let residual = |ids: f64| -> f64 {
+        let (_vgs, _vds, _vd, _vs, device_ids) = point_for_ids(ids);
+        device_ids - ids
+    };
+
+    let resistance_sum = (drain_resistance + source_resistance).max(1.0);
+    let search = (supply_voltage.abs().max(1.0) / resistance_sum * 4.0).max(1e-6);
+    let mut best_ids = None;
+    let mut best_abs = f64::INFINITY;
+    let mut prev_i = -search;
+    let mut prev_f = residual(prev_i);
+
+    for i in 1..=480 {
+        let ids = -search + (2.0 * search) * (i as f64 / 480.0);
+        let f = residual(ids);
+        if f.is_finite() && f.abs() < best_abs {
+            best_abs = f.abs();
+            best_ids = Some(ids);
+        }
+        if prev_f.is_finite() && f.is_finite() && prev_f.signum() != f.signum() {
+            let mut lo = prev_i;
+            let mut hi = ids;
+            let mut flo = prev_f;
+            for _ in 0..80 {
+                let mid = 0.5 * (lo + hi);
+                let fmid = residual(mid);
+                if !fmid.is_finite() {
+                    break;
+                }
+                if fmid.abs() < 1e-10 {
+                    let (vgs, vds, drain_voltage, source_voltage, _ids) = point_for_ids(mid);
+                    return Some(FetDcQpoint {
+                        vgs,
+                        vds,
+                        drain_voltage,
+                        source_voltage,
+                    });
+                }
+                if flo.signum() == fmid.signum() {
+                    lo = mid;
+                    flo = fmid;
+                } else {
+                    hi = mid;
+                }
+            }
+            let ids = 0.5 * (lo + hi);
+            let (vgs, vds, drain_voltage, source_voltage, _ids) = point_for_ids(ids);
+            return Some(FetDcQpoint {
+                vgs,
+                vds,
+                drain_voltage,
+                source_voltage,
+            });
+        }
+        prev_i = ids;
+        prev_f = f;
+    }
+
+    best_ids.filter(|_| best_abs.is_finite()).map(|ids| {
+        let (vgs, vds, drain_voltage, source_voltage, _ids) = point_for_ids(ids);
+        FetDcQpoint {
+            vgs,
+            vds,
+            drain_voltage,
+            source_voltage,
+        }
+    })
+}
+
+fn dc_thevenin_voltage(
+    node: NodeId,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<f64> {
+    let mut conductance_sum = 0.0;
+    let mut weighted_voltage_sum = 0.0;
+    for &eidx in edge_indices {
+        if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Linear {
+            continue;
+        }
+        let edge = &graph.edges[eidx];
+        let Some(other) = other_node(edge, node) else {
+            continue;
+        };
+        let Some(rail_voltage) = dc_rail_voltage(other, graph, supply_voltage) else {
+            continue;
+        };
+        let Some(r) = graph.components[edge.comp_idx].kind.resistance() else {
+            continue;
+        };
+        if r <= 0.0 || !r.is_finite() {
+            continue;
+        }
+        let g = 1.0 / r;
+        conductance_sum += g;
+        weighted_voltage_sum += rail_voltage * g;
+    }
+    (conductance_sum > 0.0).then_some(weighted_voltage_sum / conductance_sum)
+}
+
+fn dc_single_rail_resistance(
+    node: NodeId,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<(f64, f64)> {
+    edge_indices.iter().find_map(|&eidx| {
+        if graph.effective_edge_kind(eidx) != super::component::EdgeKind::Linear {
+            return None;
+        }
+        let edge = &graph.edges[eidx];
+        let other = other_node(edge, node)?;
+        let rail_voltage = dc_rail_voltage(other, graph, supply_voltage)?;
+        let r = graph.components[edge.comp_idx].kind.resistance()?;
+        (r > 0.0 && r.is_finite()).then_some((rail_voltage, r))
+    })
+}
+
+fn dc_rail_voltage(node: NodeId, graph: &CircuitGraph, supply_voltage: f64) -> Option<f64> {
+    if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
+        Some(0.0)
+    } else if node == graph.vcc_node || graph.supply_nodes.contains(&node) {
+        Some(supply_voltage)
+    } else {
+        None
+    }
 }
 
 /// Compute the forward base-emitter bias (Vbe) for a single-device common-emitter
