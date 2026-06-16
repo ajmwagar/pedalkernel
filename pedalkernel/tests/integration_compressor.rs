@@ -20,6 +20,49 @@ fn ota_ca3080_produces_output() {
 }
 
 // ===========================================================================
+// OTA validate circuit — flow group diagnostic
+// ===========================================================================
+
+#[test]
+fn ota_validate_circuit_flow_group_diagnostic() {
+    // Validates the STEP 1 requirement from bead pedalkernel-q0ss.2:
+    // Check whether the validate circuit's input (C1/Rbias at pos) and
+    // output (Rload at U1.out) land in the SAME signal-flow group.
+    // Expected: SEPARATE groups (neg→gnd topology; no neg→out feedback path).
+    const OTA_VALIDATE_SRC: &str = r#"
+pedal "OTA VCA" {
+  supply 9V
+  components {
+    C1: cap(100n)
+    Rbias: resistor(100k)
+    Rinv: resistor(100k)
+    Rload: resistor(10k)
+    C2: cap(10u)
+    RL: resistor(10k)
+    U1: opamp(ca3080)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> Rbias.a, U1.pos
+    Rbias.b -> gnd
+    Rinv.a -> U1.neg
+    Rinv.b -> gnd
+    U1.out -> Rload.a, C2.a
+    Rload.b -> gnd
+    C2.b -> RL.a, out
+    RL.b -> gnd
+  }
+}
+"#;
+    // This just needs to compile and pass signal through (even linearly).
+    // The diagnostic print from find_flow_groups shows the group count.
+    let input = sine(440.0, 0.01, SAMPLE_RATE); // small amplitude
+    let output = compile_and_process(OTA_VALIDATE_SRC, &input, SAMPLE_RATE, &[]);
+    // Should produce some output (the linear VCCS path still works)
+    assert_healthy(&output, "OTA validate (open-loop)", 50.0);
+}
+
+// ===========================================================================
 // Photocouplers (Vactrols)
 // ===========================================================================
 

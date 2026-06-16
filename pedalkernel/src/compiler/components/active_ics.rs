@@ -75,9 +75,11 @@ impl Component for OpAmp {
 
     fn signal_terminals(&self) -> SignalTerminals {
         if self.op_type.is_ota() {
+            // OTA: transconductance from differential input (pos−neg) to current
+            // output at "out". Signal flow is pos → out (not pos → neg).
             SignalTerminals::Amplifier {
                 input: "pos",
-                output: "neg",
+                output: "out",
                 control: None,
             }
         } else {
@@ -221,10 +223,13 @@ impl Component for OpAmp {
 
     fn edges(&self) -> Vec<ComponentEdge> {
         if self.op_type.is_ota() {
+            // Static (non-modulated) OTA: classify as Nonlinear so SPQR routes
+            // it to the general MNA NL path (tanh transconductance via OtaTwoPort).
+            // The modulated OTA resolves to Vccs via resolve_edges() (Dyna Comp path).
             vec![ComponentEdge {
                 pin_a: "pos",
                 pin_b: "neg",
-                kind: EdgeKind::Vccs,
+                kind: EdgeKind::Nonlinear,
                 port_group: None,
             }]
         } else {
@@ -254,15 +259,23 @@ impl Component for OpAmp {
 
     fn classify_nonlinear(
         &self,
-        _comp_id: &str,
+        comp_id: &str,
         _node_a: NodeId,
         node_b: NodeId,
         gnd_node: NodeId,
-        _node_names: &HashMap<String, NodeId>,
+        node_names: &HashMap<String, NodeId>,
     ) -> Option<(NonlinearKind, Vec<NodeId>)> {
         if self.op_type.is_ota() {
             let jn = if node_b == gnd_node { _node_a } else { node_b };
-            Some((NonlinearKind::Ota, vec![jn]))
+            // Look up the OTA's output pin node (e.g. "U1.out").
+            let out_key = format!("{}.out", comp_id);
+            let out_node = node_names.get(&out_key).copied().unwrap_or(gnd_node);
+            // Model name from op_type (only CA3080 is OTA-typed in the DSL today).
+            let model_name = match self.op_type {
+                crate::dsl::OpAmpType::Ca3080 => "CA3080".to_string(),
+                _ => "CA3080".to_string(), // fallback
+            };
+            Some((NonlinearKind::Ota { model_name, out_node }, vec![jn, out_node]))
         } else {
             None
         }

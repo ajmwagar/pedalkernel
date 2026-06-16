@@ -12,7 +12,7 @@ use crate::models::{
     SpiceTriodeModel,
 };
 use pedalkernel_rt::elements::nonlinear::{
-    GummelPoonModel, JfetModel, OpAmpModel, PentodeModel, TriodeModel,
+    GummelPoonModel, JfetModel, OpAmpModel, OtaModel, PentodeModel, TriodeModel,
 };
 
 // ── JFET ────────────────────────────────────────────────────────────────
@@ -183,6 +183,31 @@ pub fn opamp_model_from_type(ot: &crate::dsl::OpAmpType) -> OpAmpModel {
 pub fn ota_gm_from_type(ot: &crate::dsl::OpAmpType) -> Option<f64> {
     let model = opamp_by_name(opamp_type_model_name(ot))?;
     model.is_ota.then_some(model.ota_gm)
+}
+
+/// Look up an `OtaModel` by name from the embedded model registry.
+///
+/// Falls back to `OtaModel::ca3080()` defaults if the registry entry is missing.
+pub fn ota_model_by_name(name: &str) -> OtaModel {
+    if let Some(m) = opamp_by_name(name) {
+        if m.is_ota {
+            return OtaModel {
+                iabc_max: m.ota_iabc,
+                vt: m.ota_vt,
+                r_load: m.ota_r_load,
+            };
+        }
+    }
+    // Fallback: use hardcoded defaults (should never happen for known OTA types)
+    OtaModel::ca3080()
+}
+
+/// Look up an `OtaModel` by DSL `OpAmpType` from the embedded model registry.
+///
+/// Falls back to `OtaModel::ca3080()` defaults if the registry entry is missing
+/// or incomplete.
+pub fn ota_model_from_type(ot: &crate::dsl::OpAmpType) -> OtaModel {
+    ota_model_by_name(opamp_type_model_name(ot))
 }
 
 fn opamp_type_model_name(ot: &crate::dsl::OpAmpType) -> &'static str {

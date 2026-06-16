@@ -58,7 +58,12 @@ pub(super) enum NonlinearKind {
     Zener {
         voltage: f64,
     },
-    Ota,
+    Ota {
+        /// Model name (e.g. "CA3080") for registry lookup.
+        model_name: String,
+        /// The output pin node (U1.out) where the transconductance current is injected.
+        out_node: NodeId,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

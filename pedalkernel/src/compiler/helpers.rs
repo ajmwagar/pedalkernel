@@ -48,6 +48,14 @@ pub(super) fn gummel_poon_model(name: &str) -> GummelPoonModel {
     model_lookup::bjt_model_by_name(name)
 }
 
+/// Look up an OTA model by name from the embedded model registry.
+///
+/// Reads IABC, VT, RLOAD from the `.OTA` entry in opamps.model.
+/// Falls back to `OtaModel::ca3080()` for unknown names.
+pub(super) fn ota_model(name: &str) -> OtaModel {
+    model_lookup::ota_model_by_name(name)
+}
+
 pub(super) fn mosfet_model(mt: MosfetType, is_n_channel: bool) -> MosfetModel {
     match mt {
         MosfetType::N2n7000 => MosfetModel::n_2n7000(),

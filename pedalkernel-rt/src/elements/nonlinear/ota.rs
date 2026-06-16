@@ -2,7 +2,7 @@
 //!
 //! Models the CA3080 and similar OTAs with tanh transfer characteristic.
 
-use super::solver::{newton_raphson_solve, LEAKAGE_CONDUCTANCE};
+use super::solver::{newton_raphson_solve, NlDeviceGroupIv, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 
 // ---------------------------------------------------------------------------
@@ -244,5 +244,122 @@ impl super::solver::NlDeviceIv for OtaRoot {
     #[inline]
     fn v_clamp(&self) -> (f64, f64) {
         (-0.2, 0.2)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OTA Two-Port grouped solver (for multi-port NR / MultiNlStage)
+// ---------------------------------------------------------------------------
+
+/// Two-port OTA model for the grouped Newton-Raphson solver.
+///
+/// Models the OTA as a transconductance amplifier with two WDF ports:
+/// - Port 0: (pos, neg) — differential input — high impedance, near-zero input current
+/// - Port 1: (out, gnd) — current output — Iout = Iabc·tanh(V_pn / (2·Vt))
+///
+/// The 2×2 Jacobian captures the cross-transconductance:
+/// ```text
+///   ∂I₀/∂V₀ = ε  (near-zero input conductance, leakage for NR stability)
+///   ∂I₀/∂V₁ = 0
+///   ∂I₁/∂V₀ = gm·sech²(V₀ / (2·Vt))   (transconductance)
+///   ∂I₁/∂V₁ = ε  (near-zero output conductance, leakage for NR stability)
+/// ```
+/// where V₀ = V_pos − V_neg, V₁ = V_out − V_gnd.
+///
+/// The leakage conductance ε prevents a zero-diagonal Jacobian which would
+/// make the linear system singular.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct OtaTwoPort {
+    /// Underlying OTA model parameters.
+    pub model: OtaModel,
+    /// Current amplifier bias current (A). Controls gain.
+    pub iabc: crate::Wave,
+}
+
+impl OtaTwoPort {
+    /// Create an OtaTwoPort from a model, initialising iabc to iabc_max.
+    pub fn new(model: OtaModel) -> Self {
+        Self {
+            iabc: model.iabc_max,
+            model,
+        }
+    }
+
+    /// Set the amplifier bias current (external control).
+    #[inline]
+    pub fn set_iabc(&mut self, iabc: crate::Wave) {
+        self.iabc = iabc.clamp(0.0, self.model.iabc_max);
+    }
+
+    /// Compute the small-signal transconductance: gm = Iabc / (2·Vt).
+    #[inline]
+    pub fn transconductance(&self) -> crate::Wave {
+        self.iabc / (2.0 * self.model.vt)
+    }
+
+    /// OTA output current for a given differential input voltage.
+    #[inline]
+    fn iout(&self, v_diff: crate::Wave) -> crate::Wave {
+        let x = v_diff / (2.0 * self.model.vt);
+        self.iabc * crate::math::tanh(x)
+    }
+
+    /// Derivative of output current w.r.t. differential input voltage.
+    ///
+    /// `dIout/dVdiff = Iabc / (2·Vt) · sech²(Vdiff / (2·Vt))`
+    #[inline]
+    fn diout_dvdiff(&self, v_diff: crate::Wave) -> crate::Wave {
+        let x = v_diff / (2.0 * self.model.vt);
+        let sech = 1.0 / crate::math::cosh(x);
+        self.iabc / (2.0 * self.model.vt) * sech * sech
+    }
+}
+
+impl NlDeviceGroupIv for OtaTwoPort {
+    fn n_ports(&self) -> usize {
+        2
+    }
+
+    /// Evaluate OTA two-port currents and 2×2 Jacobian.
+    ///
+    /// Port layout (matches nl_terminals in classify_nl_devices):
+    /// - v[0] = V_pos − V_neg   (differential input)
+    /// - v[1] = V_out − V_gnd   (output voltage, used only for Rload effects)
+    ///
+    /// Currents:
+    /// - I[0] ≈ 0  (near-ideal high-impedance input)
+    /// - I[1] = Iabc·tanh(v[0] / (2·Vt))  (transconductance output)
+    ///
+    /// Jacobian (row-major 2×2):
+    /// ```text
+    ///   [ε,    0  ]   (∂I₀/∂V₀,  ∂I₀/∂V₁)
+    ///   [gm·s², ε ]   (∂I₁/∂V₀,  ∂I₁/∂V₁)
+    /// ```
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
+        let v_diff = v[0]; // V_pos - V_neg
+
+        // Input port: near-zero current (ideal high-Z input)
+        currents[0] = LEAKAGE_CONDUCTANCE * v_diff;
+
+        // Output port: tanh transconductance
+        currents[1] = self.iout(v_diff);
+
+        // 2×2 Jacobian (row-major: jac[row*2 + col])
+        // Row 0 (input port): ∂I₀/∂V₀ = ε, ∂I₀/∂V₁ = 0
+        jacobian[0] = LEAKAGE_CONDUCTANCE; // ∂I₀/∂V₀
+        jacobian[1] = 0.0; // ∂I₀/∂V₁
+
+        // Row 1 (output port): ∂I₁/∂V₀ = gm·sech², ∂I₁/∂V₁ = ε
+        jacobian[2] = self.diout_dvdiff(v_diff); // ∂I₁/∂V₀ (transconductance)
+        jacobian[3] = LEAKAGE_CONDUCTANCE; // ∂I₁/∂V₁
+    }
+
+    /// Voltage clamps per port.
+    fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
+        match port {
+            0 => (-0.2, 0.2), // Differential input: ±200mV
+            _ => (-15.0, 15.0), // Output: ±15V (supply rail)
+        }
     }
 }

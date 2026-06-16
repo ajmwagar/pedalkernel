@@ -4120,7 +4120,7 @@ use crate::elements::nonlinear::solver::{
     multi_port_nr_solve_grouped, multi_port_nr_solve_grouped_into, multi_port_nr_solve_into,
     NlDeviceGroupIv, NlDeviceIv,
 };
-use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
+use crate::elements::nonlinear::{OtaTwoPort, PentodeThreePort, VariMuThreePort};
 
 /// Nonlinear device kind for the multi-NL solver.
 ///
@@ -4250,6 +4250,11 @@ pub enum NlDeviceGroupKind {
     /// high-injection, leakage, and parasitic resistances for reduced per-iteration
     /// cost (~3× fewer exp() calls vs Gummel-Poon).
     EbersMollTwoPort(EbersMollTwoPort),
+    /// 2-port OTA (pos-neg input + out-gnd output) using tanh transconductance.
+    ///
+    /// Port 0: (pos, neg) — differential input — high impedance, near-zero current.
+    /// Port 1: (out, gnd) — output — Iout = Iabc·tanh(Vdiff / (2·Vt)).
+    OtaTwoPort(OtaTwoPort),
     /// Single-port NL device adapted as a 1-port device group.
     /// Used for mixed-device collapsed stages (e.g., sidechain with
     /// triodes + pentodes + diodes in one MultiNlStage).
@@ -4264,6 +4269,7 @@ impl NlDeviceGroupKind {
             NlDeviceGroupKind::PentodeThreePort(p) => p,
             NlDeviceGroupKind::BjtTwoPort(b) => b,
             NlDeviceGroupKind::EbersMollTwoPort(e) => e,
+            NlDeviceGroupKind::OtaTwoPort(o) => o,
             NlDeviceGroupKind::SinglePort(d) => d,
         }
     }
@@ -4273,6 +4279,7 @@ impl NlDeviceGroupKind {
             NlDeviceGroupKind::VariMuThreePort(_) => "VariMuThreePort",
             NlDeviceGroupKind::TriodeThreePort(_) => "TriodeThreePort",
             NlDeviceGroupKind::PentodeThreePort(_) => "PentodeThreePort",
+            NlDeviceGroupKind::OtaTwoPort(_) => "OtaTwoPort",
             NlDeviceGroupKind::BjtTwoPort(b) => {
                 if b.is_pnp {
                     "BjtPnp2P"
@@ -4298,6 +4305,7 @@ impl NlDeviceGroupKind {
             NlDeviceGroupKind::PentodeThreePort(_) => 2,
             NlDeviceGroupKind::BjtTwoPort(_) => 2,
             NlDeviceGroupKind::EbersMollTwoPort(_) => 2,
+            NlDeviceGroupKind::OtaTwoPort(_) => 2,
             NlDeviceGroupKind::SinglePort(_) => 1,
         }
     }

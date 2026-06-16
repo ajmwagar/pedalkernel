@@ -575,6 +575,23 @@ fn classify_nl_devices(
                     }
                 }
             }
+            // OTA: 2-port device — port 0 = (pos,neg) input, port 1 = (out,gnd) output.
+            // The edge spans pos↔neg; out_node is the transconductance output.
+            NonlinearKind::Ota {
+                out_node,
+                ..
+            } => {
+                let out = *out_node;
+                nl_terminals.push((e.node_a, e.node_b)); // port 0: pos-neg (input)
+                nl_terminals.push((out, graph.gnd_node)); // port 1: out-gnd (output)
+                // Ensure the output node is in the MNA node set.
+                if !node_set.contains(&out)
+                    && out != graph.gnd_node
+                    && !graph.supply_nodes.contains(&out)
+                {
+                    node_set.push(out);
+                }
+            }
             _ => {
                 nl_terminals.push((e.node_a, e.node_b));
             }
@@ -1079,6 +1096,25 @@ fn create_nl_devices(
                     let model = pentode_model(model_name);
                     groups.push(NlDeviceGroupKind::PentodeThreePort(
                         PentodeThreePort::new_gnd_referenced(model, supply_voltage),
+                    ));
+                    offset += 2;
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok((Vec::new(), Some(MultiNlDeviceGroups { groups, offsets })))
+    } else if nl_kinds.iter().all(|k| matches!(k, NonlinearKind::Ota { .. })) {
+        // OTA 2-port path: port 0 = (pos,neg) input, port 1 = (out,gnd) output.
+        let mut groups = Vec::new();
+        let mut offsets = Vec::new();
+        let mut offset = 0usize;
+        for kind in nl_kinds {
+            offsets.push(offset);
+            match kind {
+                NonlinearKind::Ota { model_name, .. } => {
+                    let model = super::super::helpers::ota_model(model_name);
+                    groups.push(NlDeviceGroupKind::OtaTwoPort(
+                        pedalkernel_rt::elements::nonlinear::OtaTwoPort::new(model),
                     ));
                     offset += 2;
                 }

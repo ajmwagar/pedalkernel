@@ -69,8 +69,8 @@ pub(super) fn create_nl_device(kind: &NonlinearKind) -> Option<NlDeviceKind> {
             let diode_model = DiodeModel::from_bjt_base_emitter(&model);
             Some(NlDeviceKind::Diode(DiodeRoot::new(diode_model)))
         }
-        NonlinearKind::Ota => {
-            let model = OtaModel::ca3080();
+        NonlinearKind::Ota { model_name, .. } => {
+            let model = ota_model(model_name);
             Some(NlDeviceKind::Ota(OtaRoot::new(model)))
         }
         NonlinearKind::Mosfet {
@@ -169,8 +169,8 @@ pub(super) fn create_root(
             let model = ZenerModel::new(*voltage);
             (RootKind::Zener(ZenerRoot::new(model)), None)
         }
-        NonlinearKind::Ota => {
-            let model = OtaModel::ca3080();
+        NonlinearKind::Ota { model_name, .. } => {
+            let model = ota_model(model_name);
             (RootKind::Ota(OtaRoot::new(model)), None)
         }
         NonlinearKind::BjtNpn {

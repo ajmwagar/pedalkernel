@@ -1320,6 +1320,83 @@ pub fn compile_via_spqr_with_options(
                 }
             }
 
+            // ── OTA context collection: single static OTA in its own group ──
+            // The OTA is a 3-terminal device (pos, neg, out) but its graph edge
+            // only spans pos↔neg. Signal-flow analysis puts the OTA and its output
+            // load (Rload etc.) in SEPARATE groups. BFS from all three OTA pins
+            // collects context edges (including the output load), then builds a
+            // unified general MNA solve with the OtaTwoPort grouped NR solver.
+            {
+                let nl_ota_edges: Vec<usize> = group_edges
+                    .iter()
+                    .copied()
+                    .filter(|&eidx| {
+                        if graph.effective_edge_kind(eidx)
+                            != super::component::EdgeKind::Nonlinear
+                        {
+                            return false;
+                        }
+                        let e = &graph.edges[eidx];
+                        let comp = &graph.components[e.comp_idx];
+                        matches!(
+                            comp.kind.classify_nonlinear(
+                                &comp.id,
+                                e.node_a,
+                                e.node_b,
+                                graph.gnd_node,
+                                &graph.node_names,
+                            ),
+                            Some((super::classify::NonlinearKind::Ota { .. }, _))
+                        )
+                    })
+                    .collect();
+
+                #[cfg(test)]
+                if group_has_nonlinear {
+                    eprintln!(
+                        "  group {gi}: nl_ota_edges.len()={} group_has_nonlinear=true group_edges.len()={}",
+                        nl_ota_edges.len(), group_edges.len()
+                    );
+                }
+                if nl_ota_edges.len() == 1 {
+                    let nl_edge_idx = nl_ota_edges[0];
+                    #[cfg(test)]
+                    eprintln!(
+                        "  group {gi}: OTA context collection ({} group edges)",
+                        group_edges.len(),
+                    );
+                    let context_edges = if group_edges.len() == 1 {
+                        collect_ota_context_edges(nl_edge_idx, &graph, &all_edges)
+                    } else {
+                        group_edges.clone()
+                    };
+                    // Mark all non-NL context edges as absorbed so their
+                    // groups are skipped later.
+                    for &eidx in &context_edges {
+                        if graph.effective_edge_kind(eidx)
+                            != super::component::EdgeKind::Nonlinear
+                        {
+                            triode_absorbed_edges.insert(eidx);
+                        }
+                    }
+                    let built = super::rigid::build_general_mna_from_edges_with_supply(
+                        &context_edges,
+                        &graph,
+                        sample_rate,
+                        supply_voltage,
+                    )
+                    .map_err(|e| format!("Group {gi} (OTA-context MNA): {e}"))?;
+                    push_stage!(
+                        BuiltStage::MultiNl(built),
+                        group_flow_distances[gi],
+                        group_label.clone(),
+                        is_bypass,
+                        group_comp_ids.clone()
+                    );
+                    continue;
+                }
+            }
+
             // MERGE NOTE: #85 added a blockwise check here, but the branch's
             // restructured flow already performs the blockwise split for both
             // feedback groups (above) and non-feedback groups (the
@@ -4261,6 +4338,88 @@ fn is_ground_clip_group(
             || graph.ac_ground_nodes.contains(&e.node_b);
         is_diode && to_gnd
     })
+}
+
+/// Collect all passive edges reachable from an OTA's three pins (pos, neg, out).
+///
+/// An OTA is a 3-terminal device whose graph edge only spans pos↔neg, but the
+/// transconductance current is injected at the "out" pin. For the general MNA
+/// to correctly model the tanh transconductance, all three pins' passive context
+/// must be in the same MNA system.
+///
+/// BFS from pos, neg, AND out through passive (non-NL) edges. Stops at global
+/// nodes (gnd, supply, circuit in/out) to avoid absorbing upstream/downstream
+/// signal networks.
+fn collect_ota_context_edges(
+    ota_nl_edge_idx: usize,
+    graph: &super::graph::CircuitGraph,
+    all_graph_edges: &[usize],
+) -> Vec<usize> {
+    use super::component::EdgeKind;
+
+    let e = &graph.edges[ota_nl_edge_idx];
+    let comp = &graph.components[e.comp_idx];
+
+    // Start from all three OTA pins (pos, neg, out).
+    let mut frontier_nodes: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for pin in ["pos", "neg", "out"] {
+        let key = format!("{}.{pin}", comp.id);
+        if let Some(&node) = graph.node_names.get(&key) {
+            frontier_nodes.insert(node);
+        }
+    }
+    // Also include the NL edge endpoints directly.
+    frontier_nodes.insert(e.node_a);
+    frontier_nodes.insert(e.node_b);
+
+    // Stop BFS at global nodes.
+    let is_global = |n: NodeId| -> bool {
+        n == graph.gnd_node
+            || graph.supply_nodes.contains(&n)
+            || n == graph.in_node
+            || n == graph.out_node
+    };
+
+    let mut collected_edges: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    collected_edges.insert(ota_nl_edge_idx);
+
+    let mut visited_nodes: std::collections::HashSet<NodeId> = frontier_nodes.clone();
+    let mut queue: std::collections::VecDeque<NodeId> = frontier_nodes.into_iter().collect();
+
+    while let Some(node) = queue.pop_front() {
+        if is_global(node) {
+            continue;
+        }
+        for &eidx in all_graph_edges {
+            if collected_edges.contains(&eidx) {
+                continue;
+            }
+            let edge = &graph.edges[eidx];
+            let kind = graph.effective_edge_kind(eidx);
+            // Only follow passive (Linear/Reactive) edges — don't cross into other NL devices.
+            if matches!(kind, EdgeKind::Nonlinear | EdgeKind::Vcvs | EdgeKind::Vccs) {
+                continue;
+            }
+            let (touches, other) = if edge.node_a == node {
+                (true, edge.node_b)
+            } else if edge.node_b == node {
+                (true, edge.node_a)
+            } else {
+                (false, node)
+            };
+            if !touches {
+                continue;
+            }
+            // Include this edge.
+            collected_edges.insert(eidx);
+            if !visited_nodes.contains(&other) {
+                visited_nodes.insert(other);
+                queue.push_back(other);
+            }
+        }
+    }
+
+    collected_edges.into_iter().collect()
 }
 
 /// Merge purely-linear passive groups (series input resistors) into adjacent

@@ -1332,9 +1332,9 @@ mod tests {
         let ota = OpAmp {
             op_type: crate::dsl::OpAmpType::Ca3080,
         };
-        // CA3080 is linearized as a VCCS in the circuit graph.
-        assert_eq!(ota.edges()[0].kind, EdgeKind::Vccs);
-        // Modulated Iabc: resolves to VCCS
+        // Static CA3080: Nonlinear (routes to OtaTwoPort NR path).
+        assert_eq!(ota.edges()[0].kind, EdgeKind::Nonlinear);
+        // Modulated Iabc: resolves to VCCS (linearised for Dyna Comp / VCA path).
         let ctx = ResolveContext {
             control_pin_is_modulated: true,
             wiper_connected: false,
