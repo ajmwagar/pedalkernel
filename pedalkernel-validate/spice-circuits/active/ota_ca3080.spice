@@ -3,11 +3,15 @@
 * PedalKernel Validation Circuit
 * ============================================================================
 * Simplified OTA as a VCA with single 9V supply.
-* Uses behavioral VCCS model for the transconductance amplifier.
+* Models CA3080 tanh transconductance: Iout = Iabc * tanh((V+)-(V-)) / (2*Vt))
 *
-* Gm = 19.2 * Iabc (typical for CA3080)
-* For Iabc ~ 100uA, Gm ~ 2mS
+* Small-signal Gm = Iabc / (2*Vt)
+* Iabc = Gm * 2 * Vt = 0.002 * 2 * 0.026 = 104uA (rounded to 100uA)
+* Saturation onset: differential ~2*Vt = 52mV; fully clipped beyond ~150mV
 * ============================================================================
+
+* Bias current (sets Gm = Iabc/(2*Vt) = 104uA/52mV = 2.000mS — exact match to old Gota)
+.param Iabc=104u
 
 * Input coupling
 C1 v_in inp 100n
@@ -19,9 +23,10 @@ Rinv inn 0 100k
 * Supply
 VCC vcc 0 DC 9
 
-* OTA modeled as voltage-controlled current source
-* Iout = Gm * (V+ - V-), Gm ~ 2mS for typical bias
-Gota out 0 inp inn 0.002
+* OTA modeled as tanh behavioral current source (CA3080 soft-clip)
+* Small-signal: Iout ≈ Iabc/(2*Vt) * Vdiff = 2.000mS * Vdiff (matches old Gota 2mS)
+* Large-signal: Iout → ±Iabc = ±104uA (saturates beyond ~±52mV differential)
+Bota out 0 I = Iabc * tanh( (V(inp) - V(inn)) / (2 * 0.026) )
 
 * Output load resistor
 Rload out 0 10k
