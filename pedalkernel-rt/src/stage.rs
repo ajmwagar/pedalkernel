@@ -9384,6 +9384,124 @@ impl BlockwiseStage {
 }
 
 #[cfg(test)]
+mod iir_inloop_slew_tests {
+    use super::*;
+
+    /// Build a normalized RBJ bandpass biquad (a0-normalized Direct Form I).
+    /// High Q so the `a_coeffs` feedback is significant — this is precisely
+    /// what makes the in-loop path differ from slewing the ideal output.
+    fn resonant_bandpass(fc: crate::Wave, q: crate::Wave, fs: crate::Wave) -> IirData {
+        let w0 = 2.0 * crate::math::PI * fc / fs;
+        let cos_w0 = crate::math::cos(w0);
+        let sin_w0 = crate::math::sin(w0);
+        let alpha = sin_w0 / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        // RBJ bandpass (constant-skirt, peak gain = Q): b = [alpha, 0, -alpha].
+        let b = vec![alpha / a0, 0.0, -alpha / a0];
+        let a = vec![1.0, (-2.0 * cos_w0) / a0, (1.0 - alpha) / a0];
+        IirData::new(b, a, fs)
+    }
+
+    /// Slow-slew, rail-limited op-amp: slew and rails active, GBW transparent.
+    fn slow_slew_fx() -> NonIdealFxState {
+        NonIdealFxState {
+            max_dv: 0.02,    // dV/dt clamp engages on a hard transient
+            v_rail_pos: 0.7, // supply-rail soft-clip ceiling
+            v_rail_neg: 0.7,
+            // gbw_coeff stays 1.0 (default) → GBW post-path transparent.
+            ..NonIdealFxState::default()
+        }
+    }
+
+    const FS: crate::Wave = 48_000.0;
+    const FC: crate::Wave = 1_000.0;
+    const Q: crate::Wave = 4.0;
+
+    /// Assertion 1: a hard transient drives the in-loop feedback away from the
+    /// post-FX reference. If `process_inloop` were ever reverted to feed the
+    /// *ideal* `y` back through `a_coeffs`, this divergence would collapse and
+    /// the test would fail — that is the regression being locked in.
+    #[test]
+    fn iir_inloop_slew_diverges_from_postfx_under_hard_transient() {
+        let mut sub = resonant_bandpass(FC, Q, FS);
+        let mut reference = resonant_bandpass(FC, Q, FS);
+        let mut fx_sub = slow_slew_fx();
+        let mut fx_ref = slow_slew_fx();
+
+        let mut max_div: crate::Wave = 0.0;
+        // 0.8-amplitude step held — a hard transient that exercises slew + rail.
+        for _ in 0..400 {
+            let x = 0.8;
+            let out_inloop = sub.process_inloop(x, &mut fx_sub);
+            // Post-FX reference: slew/rail the *ideal* biquad output independently.
+            let y = reference.process(x);
+            let slewed = fx_ref.slew_step(y);
+            let out_post = fx_ref.rail_step(slewed);
+            max_div = max_div.max((out_inloop - out_post).abs());
+        }
+
+        assert!(
+            max_div > 1e-3,
+            "in-loop output never diverged from post-FX reference (max |Δ| = {max_div:e}); \
+             process_inloop appears to feed the ideal output back instead of the limited node"
+        );
+    }
+
+    /// Assertion 2: under a tiny, slow signal the slew clamp never engages and
+    /// no rail clips, so the limited node equals the ideal `y` exactly and the
+    /// linear filter response is preserved bit-for-bit vs the post-FX path.
+    #[test]
+    fn iir_inloop_bit_identical_under_small_slow_signal() {
+        let mut sub = resonant_bandpass(FC, Q, FS);
+        let mut reference = resonant_bandpass(FC, Q, FS);
+        let mut fx_sub = slow_slew_fx();
+        let mut fx_ref = slow_slew_fx();
+
+        let mut max_diff: crate::Wave = 0.0;
+        // 1e-4 amplitude, slow (50 Hz) — never approaches max_dv (0.02) or rails.
+        for n in 0..2000 {
+            let phase = 2.0 * crate::math::PI * 50.0 * (n as crate::Wave) / FS;
+            let x = 1e-4 * crate::math::sin(phase);
+            let out_inloop = sub.process_inloop(x, &mut fx_sub);
+            let y = reference.process(x);
+            let slewed = fx_ref.slew_step(y);
+            let out_post = fx_ref.rail_step(slewed);
+            max_diff = max_diff.max((out_inloop - out_post).abs());
+        }
+
+        assert!(
+            max_diff < 1e-12,
+            "linear (small/slow) response not preserved in-loop: max |Δ| = {max_diff:e}"
+        );
+    }
+
+    /// Assertion 3: over the hard burst every in-loop output is finite and the
+    /// per-sample step obeys the dV/dt clamp (rail_step is a contraction, so it
+    /// cannot widen the step). Proves the slew constraint governs the fed-back
+    /// node.
+    #[test]
+    fn iir_inloop_obeys_slew_bound_and_stays_finite() {
+        let mut sub = resonant_bandpass(FC, Q, FS);
+        let mut fx_sub = slow_slew_fx();
+        let max_dv = fx_sub.max_dv;
+
+        let mut prev = 0.0;
+        for n in 0..400 {
+            // 1 kHz sine at 0.8 amplitude: a continually-demanding transient.
+            let phase = 2.0 * crate::math::PI * FC * (n as crate::Wave) / FS;
+            let out = sub.process_inloop(0.8 * crate::math::sin(phase), &mut fx_sub);
+            assert!(out.is_finite(), "in-loop output non-finite at sample {n}");
+            assert!(
+                (out - prev).abs() <= max_dv + 1e-9,
+                "dV/dt clamp violated at sample {n}: |Δ| = {} > max_dv = {max_dv}",
+                (out - prev).abs()
+            );
+            prev = out;
+        }
+    }
+}
+
+#[cfg(test)]
 mod blockwise_stage_tests {
     use super::*;
     use crate::boundary_math::{GraphNodeId, PortSpec};
