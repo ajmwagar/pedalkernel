@@ -3,7 +3,7 @@
 <head>
 {{ partial "head.html" . }}
 </head>
-<body class="{{ if .IsHome }}home{{ else }}page{{ end }}">
+<body class="{{ if .IsHome }}home{{ else }}page{{ end }}{{ with .Type }} t-{{ . }}{{ end }}">
 {{ partial "header.html" . }}
 <main>
 {{ block "main" . }}{{ end }}

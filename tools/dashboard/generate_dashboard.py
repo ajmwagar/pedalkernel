@@ -162,6 +162,7 @@ def plot_circuit(
     metrics: dict[str, Any] | None,
     sample_rate: float,
     out_path: Path,
+    base_nyquist_hz: float | None = None,
 ) -> None:
     """Generate a 2-panel PNG (time-domain + FFT) for one circuit/signal."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,6 +232,21 @@ def plot_circuit(
     ax_f.set_xlabel("Frequency (Hz)")
     ax_f.set_ylabel("Magnitude (dB)")
     ax_f.set_title("FFT Magnitude")
+
+    # Audio-Nyquist marker. Circuits run at the oversampled rate; PedalKernel
+    # then anti-aliases, band-limiting ultrasonic content before downsampling,
+    # so WDF output rolls off above the base-rate Nyquist. The ngspice golden is
+    # a raw transient sampled at the oversampled rate and keeps the full
+    # ultrasonic harmonics and aliasing up to its own Nyquist. So spectral
+    # divergence to the RIGHT of this line is the anti-aliasing working as
+    # intended (ultrasonic, filtered out on downsampling), not an accuracy defect.
+    if base_nyquist_hz is not None and base_nyquist_hz > 0:
+        ax_f.axvline(
+            base_nyquist_hz, color="#ffb000", linestyle="--",
+            linewidth=0.9, alpha=0.75,
+            label=f"audio Nyquist ({base_nyquist_hz / 1000:.0f} kHz)",
+        )
+
     ax_f.legend(facecolor="#0f3460", labelcolor="white", fontsize=8)
     ax_f.grid(True, which="both", color="#333", linewidth=0.4)
     ax_f.set_xlim(left=20)
@@ -263,7 +279,8 @@ def plot_circuit(
             )
 
     plt.tight_layout()
-    fig.savefig(str(out_path), dpi=100, bbox_inches="tight", facecolor=fig.get_facecolor())
+    # 140 dpi: crisp at the large widths the full-width accuracy dashboard renders.
+    fig.savefig(str(out_path), dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
@@ -344,7 +361,8 @@ def plot_accuracy_matrix(
     plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
 
     plt.tight_layout()
-    fig.savefig(str(out_path), dpi=100, bbox_inches="tight", facecolor=fig.get_facecolor())
+    # 140 dpi: crisp at the large widths the full-width accuracy dashboard renders.
+    fig.savefig(str(out_path), dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"[dashboard] accuracy-matrix -> {out_path}")
 
@@ -441,7 +459,9 @@ def main() -> int:
     with args.report_json.open() as f:
         report = json.load(f)
 
-    sample_rate = float(report.get("sample_rate", 96000)) * float(report.get("oversample", 4))
+    base_sample_rate = float(report.get("sample_rate", 96000))
+    sample_rate = base_sample_rate * float(report.get("oversample", 4))
+    base_nyquist_hz = base_sample_rate / 2.0  # audio band edge for the FFT marker
     git_commit = report.get("git_commit")
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -509,6 +529,7 @@ def main() -> int:
                     metrics=metrics,
                     sample_rate=sample_rate,
                     out_path=png_path,
+                    base_nyquist_hz=base_nyquist_hz,
                 )
                 status = "WDF pending" if wdf_pending else ("PASS" if passed else "FAIL")
                 print(f"[dashboard] {status:12s}  {key}  ->  {png_path.name}")

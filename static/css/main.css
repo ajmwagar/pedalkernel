@@ -678,3 +678,308 @@ body.page main {
   }
 }
 
+/* ---------- accuracy dashboard ---------- */
+
+/* Full-width override — higher specificity than `body.page main`. */
+body.page.t-accuracy main {
+  max-width: 1320px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2.2rem 1.5rem 3rem;
+}
+
+.acc-dash { color: var(--fg); }
+
+/* Hero / summary */
+.acc-hero {
+  margin-bottom: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.acc-hero h1 {
+  font-family: var(--mono);
+  font-size: 2.4rem;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.4rem;
+}
+.acc-hero .acc-sub {
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+  font-size: 1.05rem;
+  max-width: 60ch;
+}
+.acc-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.9rem;
+  margin: 0 0 1.2rem;
+}
+.acc-stat {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.acc-stat .num {
+  font-family: var(--mono);
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--accent);
+}
+.acc-stat .lbl {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.acc-stat.acc-fail .num { color: #ff6b6b; }
+.acc-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0;
+}
+.acc-meta code {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+/* Static intro — constrained, prose-like */
+.acc-intro {
+  max-width: var(--max);
+  margin: 1.5rem auto 2.5rem;
+  font-size: 0.98rem;
+  line-height: 1.65;
+}
+.acc-intro h2 { font-family: var(--mono); font-size: 1.3rem; margin: 1.6rem 0 0.6rem; }
+.acc-intro p { margin: 0 0 1rem; }
+.acc-intro ul { margin: 0 0 1rem; padding-left: 1.4rem; }
+.acc-intro li { margin: 0.25rem 0; }
+.acc-intro a { color: var(--accent); }
+.acc-intro code {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.85em;
+}
+.acc-intro blockquote {
+  margin: 1.2rem 0;
+  padding: 0.8rem 1.1rem;
+  background: var(--card);
+  border-left: 4px solid var(--accent);
+  border-radius: 4px;
+  color: var(--fg);
+}
+.acc-intro blockquote p { margin: 0; }
+
+/* Sections */
+.acc-section { margin: 2.5rem 0; }
+.acc-section > h2 {
+  font-family: var(--mono);
+  font-size: 1.45rem;
+  letter-spacing: -0.01em;
+  margin: 0 0 1rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+.acc-allpass { color: #3fb950; font-weight: 600; }
+.acc-note { color: var(--muted); font-size: 0.9rem; }
+
+/* Tables — dense */
+.acc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+.acc-table th, .acc-table td {
+  text-align: left;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.acc-table thead th {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+}
+.acc-table tbody tr:hover { background: var(--card-hover); }
+.acc-table .num { text-align: right; font-family: var(--mono); }
+.acc-table th.num { text-align: right; }
+.acc-table .acc-key { font-family: var(--mono); font-size: 0.85em; }
+.acc-table code {
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+  font-family: var(--mono);
+  font-size: 0.82em;
+  color: #ff6b6b;
+}
+
+/* Pass-ratio bar */
+.acc-bar {
+  height: 6px;
+  width: 100%;
+  max-width: 220px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.acc-bar-fill {
+  height: 100%;
+  background: #3fb950;
+  border-radius: 3px;
+}
+.acc-bar-fill.acc-bar-partial { background: #d29922; }
+
+/* Badges (pills) */
+.acc-badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+}
+.acc-badge-pass { color: #3fb950; border-color: rgba(63, 185, 80, 0.5); }
+.acc-badge-fail { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.5); }
+
+/* Matrix figure */
+.acc-fig { margin: 0; }
+.acc-fig img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+.acc-fig figcaption {
+  margin-top: 0.6rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Collapsible per-suite galleries */
+.acc-suite {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 0.8rem 0;
+  background: var(--card);
+  overflow: hidden;
+}
+.acc-suite > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1.1rem;
+  font-family: var(--mono);
+  background: var(--card);
+}
+.acc-suite > summary::-webkit-details-marker { display: none; }
+.acc-suite > summary:hover { background: var(--card-hover); }
+.acc-suite[open] > summary { border-bottom: 1px solid var(--border); }
+.acc-suite-name {
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+}
+.acc-suite-name::before {
+  content: "\25B8";
+  display: inline-block;
+  margin-right: 0.5rem;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+.acc-suite[open] .acc-suite-name::before { transform: rotate(90deg); }
+
+.acc-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(540px, 1fr));
+  gap: 1.1rem;
+  padding: 1.1rem;
+}
+.acc-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.acc-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+.acc-card .acc-key {
+  font-family: var(--mono);
+  font-size: 0.9rem;
+  word-break: break-all;
+}
+.acc-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.acc-metrics b { color: var(--fg); font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.acc-nodata { font-style: italic; }
+.acc-card img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+/* Footer note */
+.acc-footer {
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+.acc-footer code {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+  font-family: var(--mono);
+  font-size: 0.82em;
+}
+.acc-footer a { color: var(--accent); }
+
+/* Accuracy dashboard — small screens. Placed AFTER the main accuracy rules so
+   source order wins (media queries do not raise specificity). */
+@media (max-width: 640px) {
+  body.page.t-accuracy main { padding: 1.6rem 1rem 2.5rem; }
+  .acc-hero h1 { font-size: 1.9rem; }
+  .acc-stats { grid-template-columns: 1fr 1fr; }
+  .acc-cards { grid-template-columns: 1fr; }
+  .acc-table { font-size: 0.78rem; }
+  .acc-table th, .acc-table td { padding: 0.3rem 0.4rem; }
+}
+

@@ -28,6 +28,11 @@ jobs:
     name: Generate accuracy dashboard
     runs-on: ubuntu-latest
 
+    # Needed so the workflow can push the regenerated artifacts to the
+    # publish branch (see "Publish refreshed dashboard" below).
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -121,6 +126,42 @@ jobs:
         with:
           path: dashboard-history.json
           key: accuracy-history-${{ runner.os }}-${{ github.run_id }}
+
+      # ----------------------------------------------------------------
+      # Publish refreshed dashboard to the data branch.
+      #
+      # Netlify is configured to build the docs site from this branch, so each
+      # nightly/dispatch run lands fresh PNGs + accuracy.json on it. We copy the
+      # generated artifacts into the checked-out main tree and force-push a
+      # single commit, so the branch is always "current main + latest dashboard"
+      # and never accumulates stale history. Drift history persists via the
+      # Actions cache (restored/saved above), copied in here for the commit.
+      #
+      # No loop risk: this workflow has NO `push:` trigger (schedule +
+      # workflow_dispatch only), so this push cannot re-trigger it; Netlify's
+      # build from the branch pushes nothing back.
+      - name: Publish refreshed dashboard to the data branch
+        env:
+          PUBLISH_BRANCH: dashboard-data
+        run: |
+          cp dashboard-output/accuracy.json data/accuracy.json
+          cp dashboard-output/accuracy-matrix.png static/accuracy/accuracy-matrix.png
+          rm -rf static/accuracy/circuits
+          cp -r dashboard-output/circuits static/accuracy/circuits
+          cp dashboard-history.json data/accuracy-history.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/accuracy.json data/accuracy-history.json static/accuracy
+
+          if git diff --cached --quiet; then
+            echo "No dashboard changes to publish."
+            exit 0
+          fi
+
+          git checkout -B "$PUBLISH_BRANCH"
+          git commit -m "chore(dashboard): refresh accuracy snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push --force origin "$PUBLISH_BRANCH"
 
       # ----------------------------------------------------------------
       # Upload all artifacts
