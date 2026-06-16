@@ -43,14 +43,14 @@
 * -------------------------------------------
 *   B+ = 300V, Rp = 10k (plate load)
 *   Cathode: Rk=1R (≈GND) + bypass cap Ck
-*   Grid: driven by harness VIN (DC bias + AC signal)
+*   Grid: harness VIN is zero-mean AC; the model applies Vgk_eff=Vgk-2V
 *   Output: v_plate (direct measurement node for harness wrdata)
 *
 * HARNESS INTERFACE (spice.rs::generate_netlist)
 * ----------------------------------------------
 * The validation harness wraps this file, injects VIN v_in 0 PWL(...),
-* and generates .TRAN + .CONTROL wrdata v_plate. Node v_in is the
-* signal input; the harness controls DC bias via the source offset.
+* and generates .TRAN + .CONTROL wrdata v_out. Node v_in is the
+* zero-mean signal input; the B-source applies the 6386's fixed -2V bias.
 * For standalone gain-vs-bias verification, use the companion script:
 *   spice-circuits/active/varimu_6386_sweep_test.spice
 *
@@ -94,7 +94,9 @@ Rk  v_cathode  0  1
 Ck  v_cathode  0  1000u  IC=0
 
 * ============================================================================
-* Grid: v_in is driven by the harness VIN source.
+* Grid: v_in is driven by the zero-mean harness VIN source. The vari-mu
+* subcircuit applies the fixed -2V operating bias internally, matching the
+* engine's nonlinear-port bias seed without introducing another SPICE source.
 * Grid leak Rg provides DC return path.
 * ============================================================================
 Rg  v_in  0  1MEG
@@ -115,6 +117,9 @@ X6386  v_plate  v_in  v_cathode  TRIODE_GE6386
 * through V-type B-nodes in ngspice's MNA solver. The inline expression
 * is fully differentiable and produces correct small-signal behavior.
 *
+* The harness grid is zero-mean AC. `V(grid,cathode)-2` below mirrors the
+* engine's fixed VariMu Q-point bias before evaluating the Raffensperger IV.
+*
 * Guard conditions (matching vari_mu.rs guards):
 *   Vak <= 0: MAX(V(anode,cathode), 1e-6) prevents negative power of negative
 *   dbase = p3-p4*Vgk: MAX(..., 1e-9) guards denominator (unreachable in practice)
@@ -128,9 +133,9 @@ X6386  v_plate  v_in  v_cathode  TRIODE_GE6386
 * Plate current — Raffensperger equation, single inline expression
 Bip  anode  cathode  I =
 +  3.981e-8 * PWR(MAX(V(anode,cathode), 1e-6), 2.383)
-+  / ( PWR(MAX(0.5 - 0.1*V(grid,cathode), 1e-9), 1.8)
++  / ( PWR(MAX(0.5 - 0.1*(V(grid,cathode)-2), 1e-9), 1.8)
 +      * (0.5 + EXP(MIN(MAX(
-+            -0.03922*MAX(V(anode,cathode),1e-6) - 0.2*V(grid,cathode),
++            -0.03922*MAX(V(anode,cathode),1e-6) - 0.2*(V(grid,cathode)-2),
 +            -80.0), 80.0))) )
 
 * Grid current: diode model (negligible for Vgk < 0, models forward conduction)
@@ -143,14 +148,14 @@ Dgc  grid  cathode  DGRID_6386
 * Output coupling + load — creates v_out node expected by harness
 * Direct plate measurement via coupling cap, 1M load matches .pedal topology
 * ============================================================================
-Cout  v_plate  v_out  22n  IC=0
+Cout  v_plate  v_out  22n  IC=132
 Rload v_out    0      1MEG
 
 * ============================================================================
 * Initial conditions — DC operating point at Vgk=-2V
 *   Load line: Vb=300V, Rp=10k, Vak≈132V, Ia≈16.8mA
 * ============================================================================
-.IC V(v_plate)=132 V(v_cathode)=0
+.IC V(v_plate)=132 V(v_cathode)=0 V(v_out)=0
 
 * ============================================================================
 * Convergence options (stiff-deck recipe from project memory)

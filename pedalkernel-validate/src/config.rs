@@ -3116,21 +3116,19 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         signals: vec![SignalConfig::Sine {
                             frequency: 1000.0,
                             amplitude: 0.01,
-                            duration: 0.05,
+                            duration: 0.2,
                             label: Some("sine".to_string()),
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
-                        // Measured 2026-06-15: sine RMS=0.0dB Peak=-0.0dB Spectral=112.4dB
-                        // NOTE: At 10mV signal (small-signal regime, Vgk=-2V) WDF matches ngspice.
-                        // The engine comp≈0.17 gap is only visible at large signals or bias sweep;
-                        // compare-goldens matrix shows the WDF vs SPICE waveform comparison.
-                        // THD not gated (10.97dB measured — harmonic floor differs).
+                        // The output-coupling cap has a long visible startup transient in both
+                        // engines. Measure only the settled tail so the 1kHz tone, not the cap
+                        // discharge, drives the comparison.
                         pass_criteria: PassCriteria {
                             normalized_rms_error_db: Some(3.0),
                             peak_error_db: Some(3.0),
                             ..Default::default()
                         },
-                        warmup_trim_ms: None,
+                        warmup_trim_ms: Some(150.0),
                         pending_reference: false,
                     },
                 );
