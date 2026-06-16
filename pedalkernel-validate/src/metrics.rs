@@ -280,7 +280,13 @@ pub struct ComparisonResult {
     pub normalized_rms_error_db: f64,
     pub peak_error_db: f64,
     pub thd_error_db: Option<f64>,
+    /// Spectral error within the audio band (capped at the audio Nyquist by the
+    /// production runners). This is the value checked against pass criteria.
     pub spectral_error_db: f64,
+    /// Spectral error across the full data spectrum (up to sample_rate / 2, i.e.
+    /// the oversampled Nyquist). Informational only — shows what the audio-band
+    /// cap removes (ultrasonic content the engine anti-aliases away).
+    pub spectral_error_full_db: f64,
     pub even_odd_ratio_db: Option<f64>,
     pub dc_drift_mv: Option<f64>,
 }
@@ -327,6 +333,10 @@ pub fn compare(
         peak_error_db: peak_error_db(wdf, reference),
         thd_error_db: thd_err,
         spectral_error_db: spectral_error_db(wdf, reference, sample_rate, None),
+        // Full-band (raw) spectral error up to the data Nyquist. The production
+        // runners overwrite `spectral_error_db` with the audio-band cap, but
+        // leave this raw value intact for display.
+        spectral_error_full_db: spectral_error_db(wdf, reference, sample_rate, Some(sample_rate / 2.0)),
         even_odd_ratio_db: even_odd,
         dc_drift_mv: Some(dc_drift_mv(wdf, sample_rate, 100.0)),
     }

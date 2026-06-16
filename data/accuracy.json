@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "run_timestamp": "2026-06-16T00:57:10Z",
-  "git_commit": "bbe8581",
+  "run_timestamp": "2026-06-16T02:33:44Z",
+  "git_commit": "71aa3bb",
   "sample_rate": 96000,
   "oversample": 4,
   "summary": {
@@ -23,6 +23,7 @@
         "peak_error_db": 1.4031271154664637,
         "thd_error_db": 34.8172222353701,
         "spectral_error_db": 22.37924423319643,
+        "spectral_error_full_db": 22.37924423319643,
         "even_odd_ratio_db": 10.663450864193154,
         "dc_drift_mv": 0.0
       },
@@ -39,6 +40,7 @@
         "peak_error_db": 1.254190341911659,
         "thd_error_db": 63.71934107305311,
         "spectral_error_db": 76.69564770810611,
+        "spectral_error_full_db": 76.69564770810611,
         "even_odd_ratio_db": 11.009261683570227,
         "dc_drift_mv": 0.0
       },
@@ -55,6 +57,7 @@
         "peak_error_db": 0.00026963846730323506,
         "thd_error_db": 86.61245181446192,
         "spectral_error_db": 173.40409378358947,
+        "spectral_error_full_db": 173.40409378358947,
         "even_odd_ratio_db": 30.712632794373498,
         "dc_drift_mv": 0.0
       },
@@ -71,6 +74,7 @@
         "peak_error_db": -0.2192521994588672,
         "thd_error_db": 137.3898476207479,
         "spectral_error_db": 201.5860289511524,
+        "spectral_error_full_db": 208.30896512677583,
         "even_odd_ratio_db": 12.978862174429704,
         "dc_drift_mv": 0.0
       },
@@ -87,6 +91,7 @@
         "peak_error_db": -0.13151656794250552,
         "thd_error_db": 133.52984836913595,
         "spectral_error_db": 209.53834368525867,
+        "spectral_error_full_db": 221.21451982099478,
         "even_odd_ratio_db": 5.662149067162881,
         "dc_drift_mv": 0.0
       },
@@ -103,6 +108,7 @@
         "peak_error_db": -0.34477753153282775,
         "thd_error_db": 58.406933727112474,
         "spectral_error_db": 203.9500538702725,
+        "spectral_error_full_db": 223.47198009989955,
         "even_odd_ratio_db": 6.781128949266297,
         "dc_drift_mv": 0.0
       },
@@ -119,6 +125,7 @@
         "peak_error_db": -16.65390771946615,
         "thd_error_db": 1.203405755978963,
         "spectral_error_db": 165.68532862081247,
+        "spectral_error_full_db": 170.34307661445007,
         "even_odd_ratio_db": 13.229384246129676,
         "dc_drift_mv": 0.0
       },
@@ -135,6 +142,7 @@
         "peak_error_db": 0.0,
         "thd_error_db": 45.38454736845631,
         "spectral_error_db": 600.4029245924778,
+        "spectral_error_full_db": 600.4029245924778,
         "even_odd_ratio_db": 0.0,
         "dc_drift_mv": 0.0
       },
@@ -151,6 +159,7 @@
         "peak_error_db": 0.00011448836211010586,
         "thd_error_db": 108.19302949089072,
         "spectral_error_db": 232.47274280107015,
+        "spectral_error_full_db": 242.9195926710151,
         "even_odd_ratio_db": 10.649829474650321,
         "dc_drift_mv": 0.0
       },
@@ -167,6 +176,7 @@
         "peak_error_db": 9.814711754838569e-05,
         "thd_error_db": null,
         "spectral_error_db": 274.46296734000686,
+        "spectral_error_full_db": 306.11049736833075,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0028342017584009954
       },
@@ -183,6 +193,7 @@
         "peak_error_db": 0.7077196746276858,
         "thd_error_db": 149.2908917908124,
         "spectral_error_db": 138.3816080431728,
+        "spectral_error_full_db": 138.3816080431728,
         "even_odd_ratio_db": 13.331410818849518,
         "dc_drift_mv": 0.0
       },
@@ -199,6 +210,7 @@
         "peak_error_db": 0.05049870180253635,
         "thd_error_db": 96.23499882675708,
         "spectral_error_db": 98.0205936047127,
+        "spectral_error_full_db": 98.0205936047127,
         "even_odd_ratio_db": 13.331410811491411,
         "dc_drift_mv": 0.0
       },
@@ -215,6 +227,7 @@
         "peak_error_db": 0.4160241836643127,
         "thd_error_db": 111.93000126737569,
         "spectral_error_db": 82.466539379153,
+        "spectral_error_full_db": 82.466539379153,
         "even_odd_ratio_db": 13.33141084515283,
         "dc_drift_mv": 0.0
       },
@@ -231,6 +244,7 @@
         "peak_error_db": -0.0020592194000844002,
         "thd_error_db": 36.238180540204745,
         "spectral_error_db": 76.8397281735137,
+        "spectral_error_full_db": 76.8397281735137,
         "even_odd_ratio_db": 41.86600254040477,
         "dc_drift_mv": 0.0
       },
@@ -247,6 +261,7 @@
         "peak_error_db": -0.0003007447608098305,
         "thd_error_db": 114.18400992281586,
         "spectral_error_db": 96.64719358315504,
+        "spectral_error_full_db": 96.64719358315504,
         "even_odd_ratio_db": 11.562434157698656,
         "dc_drift_mv": 0.0
       },
@@ -263,6 +278,7 @@
         "peak_error_db": -0.003009631216999522,
         "thd_error_db": 91.52353546054945,
         "spectral_error_db": 134.2894824124399,
+        "spectral_error_full_db": 134.2894824124399,
         "even_odd_ratio_db": -48.43048290656476,
         "dc_drift_mv": 0.0
       },
@@ -279,6 +295,7 @@
         "peak_error_db": -0.08490454296562021,
         "thd_error_db": null,
         "spectral_error_db": 157.7061522006797,
+        "spectral_error_full_db": 184.8256267801898,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 4.15450599804401
       },
@@ -295,6 +312,7 @@
         "peak_error_db": 0.8053750760255886,
         "thd_error_db": 7.816517975938815,
         "spectral_error_db": 215.43119491644063,
+        "spectral_error_full_db": 215.43119491644063,
         "even_odd_ratio_db": -133.96455134075586,
         "dc_drift_mv": 0.0
       },
@@ -311,6 +329,7 @@
         "peak_error_db": 1.2093310192260778,
         "thd_error_db": 22.19823352723433,
         "spectral_error_db": 208.62284658790318,
+        "spectral_error_full_db": 208.62284658790318,
         "even_odd_ratio_db": -164.69525832679975,
         "dc_drift_mv": 0.0
       },
@@ -327,6 +346,7 @@
         "peak_error_db": 1.238680272497255,
         "thd_error_db": null,
         "spectral_error_db": 119.32847200240404,
+        "spectral_error_full_db": 119.32847200240404,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 90.81505769975112
       },
@@ -343,6 +363,7 @@
         "peak_error_db": -247.56376003707499,
         "thd_error_db": null,
         "spectral_error_db": 6.0822458181064576e-12,
+        "spectral_error_full_db": 6.0822458181064576e-12,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -359,6 +380,7 @@
         "peak_error_db": -282.5630837326983,
         "thd_error_db": 2.268359367008088e-08,
         "spectral_error_db": 1.4210854715202004e-14,
+        "spectral_error_full_db": 1.4210854715202004e-14,
         "even_odd_ratio_db": 13.134405276476933,
         "dc_drift_mv": 0.0
       },
@@ -375,6 +397,7 @@
         "peak_error_db": -228.79946226367247,
         "thd_error_db": null,
         "spectral_error_db": 1.0268763617204968e-10,
+        "spectral_error_full_db": 1.0268763617204968e-10,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 13.830827189616333
       },
@@ -391,6 +414,7 @@
         "peak_error_db": -200.0,
         "thd_error_db": null,
         "spectral_error_db": 0.0,
+        "spectral_error_full_db": 0.0,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -407,6 +431,7 @@
         "peak_error_db": -297.6465757820159,
         "thd_error_db": 1.0347227430429484e-07,
         "spectral_error_db": 7.105427357601002e-15,
+        "spectral_error_full_db": 7.105427357601002e-15,
         "even_odd_ratio_db": 12.09855839578049,
         "dc_drift_mv": 0.0
       },
@@ -423,6 +448,7 @@
         "peak_error_db": -260.69113098538725,
         "thd_error_db": null,
         "spectral_error_db": 1.5333512237702962e-11,
+        "spectral_error_full_db": 1.5333512237702962e-11,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 97.70431706348754
       },
@@ -439,6 +465,7 @@
         "peak_error_db": -206.01185915170265,
         "thd_error_db": null,
         "spectral_error_db": 5.670699465554208e-10,
+        "spectral_error_full_db": 5.670699465554208e-10,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -455,6 +482,7 @@
         "peak_error_db": -285.02597308429665,
         "thd_error_db": 2.3004446347840712e-08,
         "spectral_error_db": 3.552713678800501e-14,
+        "spectral_error_full_db": 3.552713678800501e-14,
         "even_odd_ratio_db": 13.369181559245458,
         "dc_drift_mv": 0.0
       },
@@ -471,6 +499,7 @@
         "peak_error_db": -225.93253605759114,
         "thd_error_db": null,
         "spectral_error_db": 2.9749003260803875e-10,
+        "spectral_error_full_db": 2.9749003260803875e-10,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 18.782038401048236
       },
@@ -487,6 +516,7 @@
         "peak_error_db": -26.907758400967566,
         "thd_error_db": 0.14519161329325492,
         "spectral_error_db": 217.9538467840208,
+        "spectral_error_full_db": 217.9538467840208,
         "even_odd_ratio_db": 6.751507233690781,
         "dc_drift_mv": 0.0
       },
@@ -503,6 +533,7 @@
         "peak_error_db": -40.69693534905292,
         "thd_error_db": 0.04252689568799983,
         "spectral_error_db": 160.66778415454922,
+        "spectral_error_full_db": 179.65629340918383,
         "even_odd_ratio_db": 14.341786823337925,
         "dc_drift_mv": 0.0
       },
@@ -519,6 +550,7 @@
         "peak_error_db": 0.16041462330067482,
         "thd_error_db": null,
         "spectral_error_db": 69.28595703831036,
+        "spectral_error_full_db": 85.68679425839764,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 162.28426438834467
       },
@@ -535,6 +567,7 @@
         "peak_error_db": -90.13821640995168,
         "thd_error_db": 56.09549353601105,
         "spectral_error_db": 0.0002533943766458435,
+        "spectral_error_full_db": 0.0002533943766458435,
         "even_odd_ratio_db": 13.307287172416956,
         "dc_drift_mv": 0.0
       },
@@ -551,6 +584,7 @@
         "peak_error_db": -49.81544520731041,
         "thd_error_db": null,
         "spectral_error_db": 0.05298522763592928,
+        "spectral_error_full_db": 0.05298522763592928,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 193.496192397599
       },
@@ -567,6 +601,7 @@
         "peak_error_db": -236.17468230022908,
         "thd_error_db": null,
         "spectral_error_db": 2.7114310796605423e-11,
+        "spectral_error_full_db": 2.7114310796605423e-11,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -583,6 +618,7 @@
         "peak_error_db": -236.97362501309502,
         "thd_error_db": 0.0001325766106674564,
         "spectral_error_db": 7.077005648170598e-12,
+        "spectral_error_full_db": 7.077005648170598e-12,
         "even_odd_ratio_db": 10.664603604049908,
         "dc_drift_mv": 0.0
       },
@@ -599,6 +635,7 @@
         "peak_error_db": -229.19387720502712,
         "thd_error_db": null,
         "spectral_error_db": 1.3469616533257067e-09,
+        "spectral_error_full_db": 1.3469616533257067e-09,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 97.38556234220441
       },
@@ -615,6 +652,7 @@
         "peak_error_db": 0.002487473115209805,
         "thd_error_db": 90.76316593607241,
         "spectral_error_db": 228.43305875192223,
+        "spectral_error_full_db": 320.11226164641175,
         "even_odd_ratio_db": 15.471167998514677,
         "dc_drift_mv": 0.08500952832181954
       },
@@ -631,6 +669,7 @@
         "peak_error_db": 0.1417236188694343,
         "thd_error_db": 47.4262031697472,
         "spectral_error_db": 62.85602161271106,
+        "spectral_error_full_db": 178.65155216908056,
         "even_odd_ratio_db": 15.52805513617108,
         "dc_drift_mv": 0.09737648110862641
       },
@@ -647,6 +686,7 @@
         "peak_error_db": -76.83236769150368,
         "thd_error_db": 0.054615722154977675,
         "spectral_error_db": 0.0007505073730271761,
+        "spectral_error_full_db": 0.0007505073730271761,
         "even_odd_ratio_db": 10.888670039377512,
         "dc_drift_mv": 0.0
       },
@@ -663,6 +703,7 @@
         "peak_error_db": -45.9944573023816,
         "thd_error_db": null,
         "spectral_error_db": 1.1020558153122408,
+        "spectral_error_full_db": 1.1020558153122408,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.004154712525761637
       },
@@ -679,6 +720,7 @@
         "peak_error_db": -46.415571031970266,
         "thd_error_db": 105.32097798704719,
         "spectral_error_db": 0.0044291775959806046,
+        "spectral_error_full_db": 0.0044291775959806046,
         "even_odd_ratio_db": 10.736250255594165,
         "dc_drift_mv": 0.0
       },
@@ -695,6 +737,7 @@
         "peak_error_db": -48.159405378239654,
         "thd_error_db": null,
         "spectral_error_db": 0.5467720458336487,
+        "spectral_error_full_db": 0.5467720458336487,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.004154668795718537
       },
@@ -711,6 +754,7 @@
         "peak_error_db": -67.95446627380558,
         "thd_error_db": 80.05885444592202,
         "spectral_error_db": 0.002193343781243584,
+        "spectral_error_full_db": 0.002193343781243584,
         "even_odd_ratio_db": 11.055755631753454,
         "dc_drift_mv": 0.0
       },
@@ -727,6 +771,7 @@
         "peak_error_db": -55.27483887148694,
         "thd_error_db": null,
         "spectral_error_db": 0.11630135515304119,
+        "spectral_error_full_db": 0.11630135515304119,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.6199874236300643
       },
@@ -743,6 +788,7 @@
         "peak_error_db": -102.7655978088216,
         "thd_error_db": 0.7941792574826536,
         "spectral_error_db": 2.67792213719531e-05,
+        "spectral_error_full_db": 2.67792213719531e-05,
         "even_odd_ratio_db": 10.99868050137895,
         "dc_drift_mv": 5.230322570176898e-17
       },
@@ -759,6 +805,7 @@
         "peak_error_db": -45.98927195490226,
         "thd_error_db": null,
         "spectral_error_db": 1.0728382330972863,
+        "spectral_error_full_db": 1.0728382330972863,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0040410813513368175
       },
@@ -775,6 +822,7 @@
         "peak_error_db": -101.9501408259872,
         "thd_error_db": 0.7088771257756719,
         "spectral_error_db": 2.749601426899062e-05,
+        "spectral_error_full_db": 2.749601426899062e-05,
         "even_odd_ratio_db": 10.994638492658632,
         "dc_drift_mv": 7.77269196136068e-17
       },
@@ -791,6 +839,7 @@
         "peak_error_db": -46.05545913187869,
         "thd_error_db": null,
         "spectral_error_db": 2.238114693982652,
+        "spectral_error_full_db": 2.238114693982652,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.006349812602239386
       },
@@ -807,6 +856,7 @@
         "peak_error_db": 5.543053937249756,
         "thd_error_db": 69.56523858291493,
         "spectral_error_db": 0.9472023982853273,
+        "spectral_error_full_db": 0.9472023982853273,
         "even_odd_ratio_db": 12.897505942945738,
         "dc_drift_mv": 0.0
       },
@@ -823,6 +873,7 @@
         "peak_error_db": 4.991579261971297,
         "thd_error_db": null,
         "spectral_error_db": 2.3282547717236355,
+        "spectral_error_full_db": 2.3282547717236355,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -839,6 +890,7 @@
         "peak_error_db": 0.907250984435696,
         "thd_error_db": 52.512515301852005,
         "spectral_error_db": 3.659403621033782,
+        "spectral_error_full_db": 3.659403621033782,
         "even_odd_ratio_db": -95.66468746995685,
         "dc_drift_mv": 0.0
       },
@@ -855,6 +907,7 @@
         "peak_error_db": -0.03685180616023415,
         "thd_error_db": null,
         "spectral_error_db": 40.07285448730934,
+        "spectral_error_full_db": 40.07285448730934,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -871,6 +924,7 @@
         "peak_error_db": -99.9996826654359,
         "thd_error_db": 0.005961716632924663,
         "spectral_error_db": 8.685005888509068e-05,
+        "spectral_error_full_db": 8.685005888509068e-05,
         "even_odd_ratio_db": 13.375242389184223,
         "dc_drift_mv": 0.0
       },
@@ -887,6 +941,7 @@
         "peak_error_db": -83.22374576284005,
         "thd_error_db": 0.15329056862506718,
         "spectral_error_db": 0.0005442127968251498,
+        "spectral_error_full_db": 0.0005442127968251498,
         "even_odd_ratio_db": 12.56485293339425,
         "dc_drift_mv": 0.0
       },
@@ -903,6 +958,7 @@
         "peak_error_db": -72.22408537933288,
         "thd_error_db": null,
         "spectral_error_db": 0.01874498742810715,
+        "spectral_error_full_db": 0.01874498742810715,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -919,6 +975,7 @@
         "peak_error_db": 13.207280167584067,
         "thd_error_db": 83.89588907398172,
         "spectral_error_db": 11.30319804656127,
+        "spectral_error_full_db": 11.30319804656127,
         "even_odd_ratio_db": -173.34792428779315,
         "dc_drift_mv": 0.0
       },
@@ -935,6 +992,7 @@
         "peak_error_db": 13.063684832963991,
         "thd_error_db": null,
         "spectral_error_db": 44.57671574158374,
+        "spectral_error_full_db": 44.57671574158374,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -951,6 +1009,7 @@
         "peak_error_db": 5.197958406783785,
         "thd_error_db": 84.67667864467094,
         "spectral_error_db": 1.5238330441336032,
+        "spectral_error_full_db": 1.5238330441336032,
         "even_odd_ratio_db": -144.32210379372316,
         "dc_drift_mv": 0.0
       },
@@ -967,6 +1026,7 @@
         "peak_error_db": 4.5959227552758595,
         "thd_error_db": null,
         "spectral_error_db": 2.8521415717519574,
+        "spectral_error_full_db": 2.8521415717519574,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -983,6 +1043,7 @@
         "peak_error_db": -297.399421480578,
         "thd_error_db": 5.6229367828564136e-08,
         "spectral_error_db": 3.552713678800501e-15,
+        "spectral_error_full_db": 3.552713678800501e-15,
         "even_odd_ratio_db": 13.24590250639847,
         "dc_drift_mv": 0.0
       },
@@ -999,6 +1060,7 @@
         "peak_error_db": -228.79684754775485,
         "thd_error_db": null,
         "spectral_error_db": 1.773088342815754e-10,
+        "spectral_error_full_db": 1.773088342815754e-10,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 18.791702403607978
       },
@@ -1015,6 +1077,7 @@
         "peak_error_db": -200.0,
         "thd_error_db": null,
         "spectral_error_db": 0.0,
+        "spectral_error_full_db": 0.0,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -1031,6 +1094,7 @@
         "peak_error_db": -297.6465757820159,
         "thd_error_db": 1.0347227430429484e-07,
         "spectral_error_db": 7.105427357601002e-15,
+        "spectral_error_full_db": 7.105427357601002e-15,
         "even_odd_ratio_db": 12.09855839578049,
         "dc_drift_mv": 0.0
       },
@@ -1047,6 +1111,7 @@
         "peak_error_db": -260.69113098538725,
         "thd_error_db": null,
         "spectral_error_db": 1.5333512237702962e-11,
+        "spectral_error_full_db": 1.5333512237702962e-11,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 97.70431706348754
       },
@@ -1063,6 +1128,7 @@
         "peak_error_db": -313.07119549054045,
         "thd_error_db": 3.030521611435688e-08,
         "spectral_error_db": 7.105427357601002e-15,
+        "spectral_error_full_db": 7.105427357601002e-15,
         "even_odd_ratio_db": 13.375242774410905,
         "dc_drift_mv": 0.0
       },
@@ -1079,6 +1145,7 @@
         "peak_error_db": -297.6465757820159,
         "thd_error_db": 8.187072353393887e-09,
         "spectral_error_db": 1.7763568394002505e-15,
+        "spectral_error_full_db": 1.7763568394002505e-15,
         "even_odd_ratio_db": 12.098558084325335,
         "dc_drift_mv": 0.0
       },
@@ -1095,6 +1162,7 @@
         "peak_error_db": -0.8048566795895401,
         "thd_error_db": 0.7118223961656582,
         "spectral_error_db": 37.54633992780782,
+        "spectral_error_full_db": 37.54633992780782,
         "even_odd_ratio_db": 32.989146621080614,
         "dc_drift_mv": 0.0
       },
@@ -1111,6 +1179,7 @@
         "peak_error_db": -4.1385772166087325,
         "thd_error_db": 1.644541720798351,
         "spectral_error_db": 131.46898621237295,
+        "spectral_error_full_db": 131.46898621237295,
         "even_odd_ratio_db": 13.819348383523057,
         "dc_drift_mv": 0.0
       },
@@ -1127,6 +1196,7 @@
         "peak_error_db": -21.72733818725318,
         "thd_error_db": 21.300957490090205,
         "spectral_error_db": 169.2909237089556,
+        "spectral_error_full_db": 172.39130280531043,
         "even_odd_ratio_db": -100.3651077216735,
         "dc_drift_mv": 0.0
       },
@@ -1143,6 +1213,7 @@
         "peak_error_db": 5.4389343182648435,
         "thd_error_db": 0.047138758310538265,
         "spectral_error_db": 143.79386352530352,
+        "spectral_error_full_db": 143.79386352530352,
         "even_odd_ratio_db": -138.76454331389158,
         "dc_drift_mv": 0.0
       },
@@ -1159,6 +1230,7 @@
         "peak_error_db": 7.045685072353365,
         "thd_error_db": null,
         "spectral_error_db": 39.378700520139915,
+        "spectral_error_full_db": 41.55321806164015,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 36.521209338788715
       },
@@ -1175,6 +1247,7 @@
         "peak_error_db": -20.266573332676995,
         "thd_error_db": 21.023668771246605,
         "spectral_error_db": 169.33255446656898,
+        "spectral_error_full_db": 172.23880628969022,
         "even_odd_ratio_db": -100.95551616246352,
         "dc_drift_mv": 0.0
       },
@@ -1191,6 +1264,7 @@
         "peak_error_db": -8.720044122698003,
         "thd_error_db": 0.2282880243813814,
         "spectral_error_db": 112.57823476551613,
+        "spectral_error_full_db": 112.57823476551613,
         "even_odd_ratio_db": -143.1385594393328,
         "dc_drift_mv": 0.0
       },
@@ -1207,6 +1281,7 @@
         "peak_error_db": -8.305291046169499,
         "thd_error_db": 4.042440282767068,
         "spectral_error_db": 167.14534865791768,
+        "spectral_error_full_db": 169.99386981870825,
         "even_odd_ratio_db": 4.267152746265283,
         "dc_drift_mv": 0.0
       },
@@ -1223,6 +1298,7 @@
         "peak_error_db": -17.553882505048442,
         "thd_error_db": 25.136897657439743,
         "spectral_error_db": 172.1734135562859,
+        "spectral_error_full_db": 174.81792451063222,
         "even_odd_ratio_db": -120.20176293612558,
         "dc_drift_mv": 0.0
       },
@@ -1239,6 +1315,7 @@
         "peak_error_db": 2.5491638523642344,
         "thd_error_db": 0.2141628189930227,
         "spectral_error_db": 142.18578611454024,
+        "spectral_error_full_db": 142.18578611454024,
         "even_odd_ratio_db": -124.688809291944,
         "dc_drift_mv": 0.0
       },
@@ -1255,6 +1332,7 @@
         "peak_error_db": -16.701031446518737,
         "thd_error_db": 135.4341956217932,
         "spectral_error_db": 196.31982576614138,
+        "spectral_error_full_db": 207.2407609437829,
         "even_odd_ratio_db": -136.30106599306947,
         "dc_drift_mv": 0.0
       },
@@ -1271,6 +1349,7 @@
         "peak_error_db": 2.1962655647819735,
         "thd_error_db": 83.51360912359519,
         "spectral_error_db": 176.754622552553,
+        "spectral_error_full_db": 176.754622552553,
         "even_odd_ratio_db": -155.24719610520418,
         "dc_drift_mv": 0.0
       },
@@ -1287,6 +1366,7 @@
         "peak_error_db": -16.881141651478718,
         "thd_error_db": 135.48902369516173,
         "spectral_error_db": 196.22523658045975,
+        "spectral_error_full_db": 206.80817825963953,
         "even_odd_ratio_db": -136.30041727783293,
         "dc_drift_mv": 0.0
       },
@@ -1303,6 +1383,7 @@
         "peak_error_db": -16.881129744393483,
         "thd_error_db": 135.4528170130926,
         "spectral_error_db": 196.2253235651835,
+        "spectral_error_full_db": 206.80826705876353,
         "even_odd_ratio_db": -136.30041727783293,
         "dc_drift_mv": 0.0
       },
@@ -1319,6 +1400,7 @@
         "peak_error_db": -16.701041376911736,
         "thd_error_db": 135.4882395960539,
         "spectral_error_db": 196.31973860789094,
+        "spectral_error_full_db": 207.2406746926618,
         "even_odd_ratio_db": -136.30106599306947,
         "dc_drift_mv": 0.0
       },
@@ -1335,6 +1417,7 @@
         "peak_error_db": -16.681256933781206,
         "thd_error_db": 0.6988119498562355,
         "spectral_error_db": 196.33107727760864,
+        "spectral_error_full_db": 207.29079979312482,
         "even_odd_ratio_db": 13.37524219394557,
         "dc_drift_mv": 0.0
       },
@@ -1351,6 +1434,7 @@
         "peak_error_db": 50.733017835778924,
         "thd_error_db": 94.49105717759795,
         "spectral_error_db": 113.18941924844546,
+        "spectral_error_full_db": 129.0062490378592,
         "even_odd_ratio_db": -22.191392042936144,
         "dc_drift_mv": 0.0
       },
@@ -1367,6 +1451,7 @@
         "peak_error_db": 70.65716512472419,
         "thd_error_db": 69.04845973007386,
         "spectral_error_db": 113.1801685287532,
+        "spectral_error_full_db": 128.99610943465234,
         "even_odd_ratio_db": -7.854743723274882,
         "dc_drift_mv": 0.0
       },
@@ -1383,6 +1468,7 @@
         "peak_error_db": 1.7786066246196655,
         "thd_error_db": 110.65052461897108,
         "spectral_error_db": 139.31740885775113,
+        "spectral_error_full_db": 160.63033522510466,
         "even_odd_ratio_db": 13.043724566167727,
         "dc_drift_mv": 0.0
       },
@@ -1399,6 +1485,7 @@
         "peak_error_db": 12.361101401733576,
         "thd_error_db": 58.38608256223179,
         "spectral_error_db": 138.21583772671892,
+        "spectral_error_full_db": 158.08972995010672,
         "even_odd_ratio_db": 3.6773697453326726,
         "dc_drift_mv": 0.0
       },
@@ -1415,6 +1502,7 @@
         "peak_error_db": 6.8439616188879695,
         "thd_error_db": 14.33437474551884,
         "spectral_error_db": 162.83709799095388,
+        "spectral_error_full_db": 201.48237132718828,
         "even_odd_ratio_db": -164.47860388849477,
         "dc_drift_mv": 0.0
       },
@@ -1431,6 +1519,7 @@
         "peak_error_db": 6.146383886453906,
         "thd_error_db": 2.990441242252663,
         "spectral_error_db": 149.3606744285679,
+        "spectral_error_full_db": 190.57389346730855,
         "even_odd_ratio_db": -165.17701798888675,
         "dc_drift_mv": 0.0
       },
@@ -1447,6 +1536,7 @@
         "peak_error_db": 8.66025887656217,
         "thd_error_db": 2.1245650971152283,
         "spectral_error_db": 187.87961658431036,
+        "spectral_error_full_db": 187.87961658431036,
         "even_odd_ratio_db": -159.72992705850285,
         "dc_drift_mv": 0.0
       },
@@ -1463,6 +1553,7 @@
         "peak_error_db": 8.43120122551942,
         "thd_error_db": 0.9280018919678898,
         "spectral_error_db": 150.83491375785997,
+        "spectral_error_full_db": 167.66929904197215,
         "even_odd_ratio_db": -164.90729272880264,
         "dc_drift_mv": 0.0
       },
@@ -1479,6 +1570,7 @@
         "peak_error_db": 0.0,
         "thd_error_db": null,
         "spectral_error_db": 496.32373372953003,
+        "spectral_error_full_db": 496.32373372953003,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -1495,6 +1587,7 @@
         "peak_error_db": -23.431242298071705,
         "thd_error_db": 48.148959239722984,
         "spectral_error_db": 162.1296202500934,
+        "spectral_error_full_db": 162.1296202500934,
         "even_odd_ratio_db": 17.29683259120017,
         "dc_drift_mv": 0.0
       },
@@ -1511,6 +1604,7 @@
         "peak_error_db": 5.367724432482058,
         "thd_error_db": null,
         "spectral_error_db": 195.96442689407127,
+        "spectral_error_full_db": 229.00287739368704,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 15.168650337679148
       },
@@ -1527,6 +1621,7 @@
         "peak_error_db": -97.85723746454401,
         "thd_error_db": 35.12697142797066,
         "spectral_error_db": 0.00010219605022854239,
+        "spectral_error_full_db": 0.00010219605022854239,
         "even_odd_ratio_db": 13.374959921594655,
         "dc_drift_mv": 0.0
       },
@@ -1543,6 +1638,7 @@
         "peak_error_db": -45.957608264664565,
         "thd_error_db": null,
         "spectral_error_db": 0.06837809994598842,
+        "spectral_error_full_db": 0.06837809994598842,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 9.674860369173123
       },
@@ -1559,6 +1655,7 @@
         "peak_error_db": -90.16709784295938,
         "thd_error_db": 56.09626805576295,
         "spectral_error_db": 0.00025333650916437023,
+        "spectral_error_full_db": 0.00025333650916437023,
         "even_odd_ratio_db": 13.307286986356903,
         "dc_drift_mv": 0.0
       },
@@ -1575,6 +1672,7 @@
         "peak_error_db": -200.0,
         "thd_error_db": null,
         "spectral_error_db": 0.0,
+        "spectral_error_full_db": 0.0,
         "even_odd_ratio_db": null,
         "dc_drift_mv": 0.0
       },
@@ -1591,6 +1689,7 @@
         "peak_error_db": -72.9180816020399,
         "thd_error_db": 0.009541068378510431,
         "spectral_error_db": 0.1989314705208045,
+        "spectral_error_full_db": 0.1989314705208045,
         "even_odd_ratio_db": -1.7595602868468887,
         "dc_drift_mv": 0.0
       },
@@ -1607,6 +1706,7 @@
         "peak_error_db": -69.7667969083507,
         "thd_error_db": 0.00018125454134576557,
         "spectral_error_db": 0.017818481719586998,
+        "spectral_error_full_db": 0.017818481719586998,
         "even_odd_ratio_db": -18.058733386026194,
         "dc_drift_mv": 0.0
       },

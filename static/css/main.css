@@ -793,6 +793,9 @@ body.page.t-accuracy main {
 }
 .acc-allpass { color: #3fb950; font-weight: 600; }
 .acc-note { color: var(--muted); font-size: 0.9rem; }
+/* Raw full-band spectral value is shown de-emphasized next to the gating
+   (audio-band) value. */
+.acc-muted { color: var(--muted); }
 
 /* Tables — dense */
 .acc-table {

@@ -46,7 +46,8 @@ accuracy.json
         "normalized_rms_error_db": <float>,
         "peak_error_db": <float>,
         "thd_error_db": <float or null>,
-        "spectral_error_db": <float>,
+        "spectral_error_db": <float>,        // audio-band (capped at audio Nyquist); gating value
+        "spectral_error_full_db": <float>,   // full-band (raw), up to the data Nyquist; informational
         "even_odd_ratio_db": <float or null>,
         "dc_drift_mv": <float or null>
       },
@@ -255,17 +256,20 @@ def plot_circuit(
     if metrics:
         rms = metrics.get("normalized_rms_error_db")
         peak = metrics.get("peak_error_db")
-        spectral = metrics.get("spectral_error_db")
+        spectral = metrics.get("spectral_error_db")          # audio-band (capped)
+        spectral_full = metrics.get("spectral_error_full_db")  # full-band (raw)
         thd = metrics.get("thd_error_db")
         lines = []
         if rms is not None:
-            lines.append(f"RMS err:  {rms:.1f} dB")
+            lines.append(f"RMS err:   {rms:.1f} dB")
         if peak is not None:
-            lines.append(f"Peak err: {peak:.1f} dB")
+            lines.append(f"Peak err:  {peak:.1f} dB")
+        if spectral_full is not None:
+            lines.append(f"Spec full: {spectral_full:.1f} dB")
         if spectral is not None:
-            lines.append(f"Spectral: {spectral:.1f} dB")
+            lines.append(f"Spec audio:{spectral:.1f} dB")
         if thd is not None:
-            lines.append(f"THD err:  {thd:.2f} dB")
+            lines.append(f"THD err:   {thd:.2f} dB")
         if lines:
             annotation = "\n".join(lines)
             ax_f.text(
@@ -330,8 +334,10 @@ def plot_accuracy_matrix(
     fig.patch.set_facecolor("#1a1a2e")
     ax.set_facecolor("#1a1a2e")
 
-    # Reversed RdYlGn: red=bad (near 0 dB), green=good (very negative dB)
-    cmap = plt.cm.RdYlGn
+    # RdYlGn_r over [vmin=-100, vmax=0]: green=good (very negative dB, far below
+    # ngspice error floor), red=bad (near 0 dB). RdYlGn (non-reversed) inverted
+    # this — it painted -100 dB red and 0 dB green.
+    cmap = plt.cm.RdYlGn_r
     norm = mcolors.Normalize(vmin=HEATMAP_VMIN_DB, vmax=HEATMAP_VMAX_DB)
 
     im = ax.imshow(mat_clipped, aspect="auto", cmap=cmap, norm=norm)

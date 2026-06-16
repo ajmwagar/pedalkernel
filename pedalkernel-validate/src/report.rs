@@ -121,7 +121,12 @@ pub struct ComparisonMetrics {
     pub normalized_rms_error_db: f64,
     pub peak_error_db: f64,
     pub thd_error_db: Option<f64>,
+    /// Audio-band spectral error (capped at the audio Nyquist) — the gating value.
     pub spectral_error_db: f64,
+    /// Full-band (raw) spectral error up to the data Nyquist. Informational.
+    /// `#[serde(default)]` so older reports without this field still deserialize.
+    #[serde(default)]
+    pub spectral_error_full_db: f64,
     pub even_odd_ratio_db: Option<f64>,
     pub dc_drift_mv: Option<f64>,
 }
@@ -133,6 +138,7 @@ impl From<ComparisonResult> for ComparisonMetrics {
             peak_error_db: cr.peak_error_db,
             thd_error_db: cr.thd_error_db,
             spectral_error_db: cr.spectral_error_db,
+            spectral_error_full_db: cr.spectral_error_full_db,
             even_odd_ratio_db: cr.even_odd_ratio_db,
             dc_drift_mv: cr.dc_drift_mv,
         }
