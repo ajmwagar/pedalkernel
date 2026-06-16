@@ -6,6 +6,10 @@
 {{ range $k, $c := $dyn.circuits }}{{ $all = $all | append (merge $c (dict "key" $k)) }}{{ end }}
 {{ $all = sort $all "key" }}
 
+{{/* Count circuits that have an ngspice overlay (a committed golden). */}}
+{{ $nspice := 0 }}
+{{ range $all }}{{ with .static_curve }}{{ if ne .spice_ratio nil }}{{ $nspice = add $nspice 1 }}{{ end }}{{ end }}{{ end }}
+
 <div class="dyn-dash acc-dash">
 
   {{/* ---------- hero / summary ---------- */}}
@@ -22,8 +26,8 @@
         <span class="lbl">Static curves</span>
       </div>
       <div class="acc-stat">
-        <span class="num">{{ len (where $all "tone_burst" "!=" nil) }}</span>
-        <span class="lbl">Tone bursts</span>
+        <span class="num">{{ $nspice }}</span>
+        <span class="lbl">ngspice overlays</span>
       </div>
       <div class="acc-stat">
         <span class="num">{{ $dyn.sample_rate }}&times;{{ $dyn.oversample }}</span>
@@ -56,7 +60,12 @@
         {{ with $c.frequency_hz }}&middot; {{ printf "%.0f Hz" . }} probe tone{{ end }}
       </p>
 
-      <p class="acc-note dyn-caveat">&#9888; Preliminary reference — the committed golden is rough, so the absolute numbers below are provisional. Read the panels qualitatively (see the note above).</p>
+      {{ $hasSpice := false }}{{ with $c.static_curve }}{{ if ne .spice_ratio nil }}{{ $hasSpice = true }}{{ end }}{{ end }}
+      {{ if $hasSpice }}
+      <p class="acc-note dyn-caveat">&#9888; Preliminary reference — the committed ngspice golden is rough, so the absolute numbers below are provisional. Read the panels qualitatively (see the note above).</p>
+      {{ else }}
+      <p class="acc-note dyn-caveat">&#9888; WDF self-measurement — no ngspice golden yet, so these numbers are not validated against SPICE. Absolute levels are uncalibrated; read the panels qualitatively.</p>
+      {{ end }}
 
       {{/* ----- summary metrics table (WDF vs ngspice with deltas) ----- */}}
       <table class="acc-table dyn-table">
@@ -73,14 +82,24 @@
           <tr>
             <td>Compression ratio</td>
             <td class="num">{{ printf "%.2f:1" .wdf_ratio }}</td>
+            {{ if ne .spice_ratio nil }}
             <td class="num">{{ printf "%.2f:1" .spice_ratio }}</td>
             <td class="num acc-muted">{{ printf "%.2f" (sub .wdf_ratio .spice_ratio) }}</td>
+            {{ else }}
+            <td class="num acc-muted">&mdash;</td>
+            <td class="num acc-muted">&mdash;</td>
+            {{ end }}
           </tr>
           <tr>
             <td>Total gain reduction (dB)</td>
             <td class="num">{{ printf "%.2f" .wdf_gr_total_db }}</td>
+            {{ if ne .spice_gr_total_db nil }}
             <td class="num">{{ printf "%.2f" .spice_gr_total_db }}</td>
             <td class="num acc-muted">{{ printf "%.2f" (sub .wdf_gr_total_db .spice_gr_total_db) }}</td>
+            {{ else }}
+            <td class="num acc-muted">&mdash;</td>
+            <td class="num acc-muted">&mdash;</td>
+            {{ end }}
           </tr>
           {{ end }}
           {{/* Scalar attack/release (ms) intentionally omitted: the single-burst
@@ -102,17 +121,9 @@
       </figure>
       {{ end }}
 
-      {{/* ----- tone-burst figure ----- */}}
-      {{ if $c.tone_burst }}
-      <figure class="acc-fig dyn-fig">
-        <a href="/dynamics/{{ $c.suite }}/{{ $c.test }}/tone_burst.png" target="_blank" rel="noopener">
-          <img src="/dynamics/{{ $c.suite }}/{{ $c.test }}/tone_burst.png"
-               alt="{{ $c.key }}: gain-reduction-vs-time attack/release transient, WDF vs ngspice"
-               loading="lazy">
-        </a>
-        <figcaption>Attack / release: gain reduction vs time across the tone burst. WDF orange, ngspice cyan. Click to open full resolution.</figcaption>
-      </figure>
-      {{ end }}
+      {{/* Tone-burst (attack/release) panel intentionally omitted for now: the
+           single-burst GR-vs-time measurement is not yet robust across these
+           circuits. Tracked follow-up; static curves ship now. */}}
     </section>
     {{ end }}
   {{ end }}
