@@ -1410,15 +1410,22 @@ fn compute_triode_dc_qpoint(
     if nl_kinds.len() != 1 {
         return None;
     }
-    let (model_name, plate_node, cathode_node) = match &nl_kinds[0] {
+    let (model_name, plate_node, cathode_node, parallel_count, is_vari_mu) = match &nl_kinds[0] {
         NonlinearKind::Triode {
             model_name,
             plate_node,
             cathode_node,
             grid_node: Some(_),
-            is_vari_mu: false,
+            parallel_count,
+            is_vari_mu,
             ..
-        } => (model_name.as_str(), *plate_node, *cathode_node),
+        } => (
+            model_name.as_str(),
+            *plate_node,
+            *cathode_node,
+            *parallel_count,
+            *is_vari_mu,
+        ),
         _ => return None,
     };
 
@@ -1454,9 +1461,67 @@ fn compute_triode_dc_qpoint(
         }
     })?;
 
+    if is_vari_mu {
+        // Variable-mu fixtures are fixed-bias devices: the grid control voltage
+        // establishes Vgk directly, rather than via cathode self-bias. Use the
+        // model's default bias (6386: -2 V) and solve the plate load line with
+        // the Raffensperger model, not the Koren triode model.
+        let model = super::super::helpers::vari_mu_model(model_name);
+        let mut triode = VariMuTriodeRoot::new_with_v_max(model, supply_voltage)
+            .with_parallel_count(parallel_count);
+        let vgk = triode.vgk_bias() as f64;
+        triode.set_vgk(vgk);
+
+        let max_ia = (supply_voltage / r_plate.max(1.0)).max(1e-9);
+        let mut lo = 0.0_f64;
+        let mut hi = max_ia;
+        let residual = |ia: f64, triode: &mut VariMuTriodeRoot| -> f64 {
+            let vpk = (supply_voltage - ia * r_plate).max(0.0);
+            ia - triode.plate_current(vpk)
+        };
+
+        let mut flo = residual(lo, &mut triode);
+        let fhi = residual(hi, &mut triode);
+        if !flo.is_finite() || !fhi.is_finite() || flo.signum() == fhi.signum() {
+            return None;
+        }
+        for _ in 0..80 {
+            let mid = 0.5 * (lo + hi);
+            let fmid = residual(mid, &mut triode);
+            if !fmid.is_finite() {
+                return None;
+            }
+            if fmid.abs() < 1e-10 {
+                lo = mid;
+                hi = mid;
+                break;
+            }
+            if flo.signum() == fmid.signum() {
+                lo = mid;
+                flo = fmid;
+            } else {
+                hi = mid;
+            }
+        }
+
+        let ia = 0.5 * (lo + hi);
+        let vpk = (supply_voltage - ia * r_plate).max(0.0);
+        let v_cathode = ia * r_cathode;
+        if vgk >= 0.0 || vpk <= 0.0 || !vgk.is_finite() || !vpk.is_finite() {
+            return None;
+        }
+        return Some(TriodeDcQpoint {
+            vgk,
+            vpk,
+            v_cathode,
+            ia,
+        });
+    }
+
     // Newton-Raphson on F(Ia) = Ia - plate_current(Vgk(Ia), Vpk(Ia)) = 0.
     let model = super::super::helpers::triode_model(model_name);
-    let mut triode = TriodeRoot::new_with_v_max(model, supply_voltage);
+    let mut triode = TriodeRoot::new_with_v_max(model, supply_voltage)
+        .with_parallel_count(parallel_count);
 
     let mut ia = 1e-4_f64; // initial guess: 0.1mA
     for _iter in 0..50 {
@@ -1506,6 +1571,14 @@ fn apply_triode_dc_qpoint(
     reactive_edges: &[(usize, OnePortKind)],
     graph: &CircuitGraph,
 ) {
+    let is_vari_mu = matches!(
+        nl_kinds.first(),
+        Some(NonlinearKind::Triode {
+            is_vari_mu: true,
+            ..
+        })
+    );
+
     // Set NR warm-start voltages.
     if stage.v_prev.len() >= 2 {
         stage.v_prev[0] = dc.vgk;
@@ -1518,6 +1591,19 @@ fn apply_triode_dc_qpoint(
     if stage.v_prev_2.len() >= 2 {
         stage.v_prev_2[0] = dc.vgk;
         stage.v_prev_2[1] = dc.vpk;
+    }
+    if is_vari_mu {
+        if !stage.dc_bias.is_empty() {
+            stage.dc_bias[0] = dc.vgk;
+        }
+        if !stage.vcc_bias_all.is_empty() {
+            stage.vcc_bias_all[0] = dc.vgk;
+        }
+        // The Q-point has already been solved and seeded. Starting the DC ramp
+        // at zero would pull the grid port back to cold 0 V for the first 256
+        // samples, which is exactly the invalid startup this seeding avoids.
+        stage.dc_ramp = 256;
+        stage.initial_dc_ramp = 256;
     }
 
     // Find cathode_node for the triode.

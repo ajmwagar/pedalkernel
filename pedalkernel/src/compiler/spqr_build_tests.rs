@@ -291,6 +291,51 @@ fn nmos_common_source_fet_stage_is_not_null() {
 }
 
 #[test]
+fn varimu_multinl_stage_starts_at_dc_qpoint() {
+    let compiled = compile_debug(include_str!(
+        "../../../pedalkernel-validate/circuits/active/varimu_6386.pedal"
+    ));
+    let stage = compiled
+        .stages
+        .iter()
+        .find_map(|stage| match stage {
+            Stage::MultiNl(m) => Some(m),
+            _ => None,
+        })
+        .expect("expected a grouped VariMu MultiNL stage");
+    let groups = stage
+        .device_groups
+        .as_ref()
+        .expect("expected grouped device metadata");
+    assert!(
+        matches!(
+            groups.groups.first(),
+            Some(pedalkernel_rt::stage::NlDeviceGroupKind::VariMuThreePort(_))
+        ),
+        "expected the grouped device to be VariMuThreePort"
+    );
+    assert!(
+        (stage.initial_v_prev[0] + 2.0).abs() < 0.05,
+        "VariMu Vgk Q-point should start near -2V, got {:?}",
+        stage.initial_v_prev
+    );
+    assert!(
+        (100.0..180.0).contains(&stage.initial_v_prev[1]),
+        "VariMu Vpk Q-point should be near the 6386 load-line target, got {:?}",
+        stage.initial_v_prev
+    );
+    assert!(
+        (stage.dc_bias[0] + 2.0).abs() < 0.05,
+        "VariMu grid dc_bias should keep the solver at fixed bias, got {:?}",
+        stage.dc_bias
+    );
+    assert_eq!(
+        stage.initial_dc_ramp, 256,
+        "Q-point seeded VariMu stage should not fade in from cold bias"
+    );
+}
+
+#[test]
 fn compile_via_spqr_inverting_opamp_end_to_end() {
     use crate::PedalProcessor;
 

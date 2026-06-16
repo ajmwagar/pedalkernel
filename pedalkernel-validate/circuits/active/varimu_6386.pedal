@@ -20,7 +20,7 @@ pedal "GE 6386 Variable Mu" {
     R_grid: resistor(1M)
 
     # GE 6386 remote-cutoff triode
-    V1: triode(6386)
+    V1: vari_mu(6386)
 
     # Plate load
     R_plate: resistor(10k)
