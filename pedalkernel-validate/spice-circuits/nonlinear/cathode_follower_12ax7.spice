@@ -1,0 +1,87 @@
+* ============================================================================
+* Cathode Follower 12AX7 Triode Stage
+* PedalKernel Validation Circuit — Single triode nonlinear stage
+* ============================================================================
+* High-mu triode (mu≈100) in cathode-follower configuration.
+* Contrasts the common-cathode 12AX7 deck by isolating follower behavior:
+* non-inverting, gain < 1, low output impedance, H2-dominant distortion.
+* Uses the same Koren macromodel as common_cathode_12ax7.spice with
+* identical parameters (matched to pedalkernel/models/triodes.model).
+*
+* Operating point: Vp = B+ = 250V, Vk ≈ 130V, Ip ≈ 0.9mA
+* Voltage gain: ~0.97 (non-inverting, very close to unity for high mu)
+* ============================================================================
+* Convergence recipe: explicit .ic on coupling caps + relaxed RELTOL
+.OPTIONS RELTOL=5e-3 METHOD=TRAP DELMAX=10u ITL4=100
+
+* B+ supply
+VB vb 0 DC 250
+
+* Input signal through coupling cap
+CIN v_in v_grid 22n IC=0
+
+* Grid leak resistor
+RG v_grid 0 1MEG
+
+* AC input signal source (1kHz, 1V peak)
+VIN v_in 0 SIN(0 1.0 1000)
+
+* Triode (12AX7 section A) — cathode follower: plate tied directly to B+
+X1 vb v_grid v_cathode TRIODE_12AX7
+
+* Cathode resistor sets operating point; no bypass (cathode is the output)
+RK v_cathode 0 100k
+
+* Output coupling cap (from cathode)
+COUT v_cathode v_out 22n IC=0
+
+* Output load
+RLOAD v_out 0 1MEG
+
+* ============================================================================
+* 12AX7 Triode Model — Koren equations
+* Parameters from pedalkernel/models/triodes.model (Koren 1996)
+* MU=100 EX=1.4 KG1=1060 KP=600 KVB=300
+* Identical to common_cathode_12ax7.spice subcircuit
+* ============================================================================
+.SUBCKT TRIODE_12AX7 anode grid cathode
+.PARAM MU=100 EX=1.4 KG1=1060 KP=600 KVB=300
+
+* Internal nodes for Vgk and Vak
+Bgk gk 0 V = V(grid,cathode)
+Bak ak 0 V = V(anode,cathode)
+
+* Plate current as behavioral current source (Koren equation)
+Bip anode cathode I = {
++ (PWR(
++   LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2)))))
++   * MAX(V(ak), 0.001) / KP,
++   EX)
++ / KG1)
++ * (1 + SGN(LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2))))) * MAX(V(ak),0.001) / KP)) / 2
++ }
+
+* Grid current (diode model for grid conduction)
+Dgc grid cathode DGRID
+.MODEL DGRID D(IS=1e-12 N=1.5 RS=1k)
+
+.ENDS TRIODE_12AX7
+
+* ============================================================================
+* Analysis
+* ============================================================================
+* Transient: 5ms, timestep 5us
+.TRAN 5u 5m UIC
+
+* Operating point
+.OP
+
+* Measure output (follower: gain ≈ 0.97, non-inverting)
+.MEAS TRAN vout_rms  RMS V(v_out) FROM=2m TO=5m
+.MEAS TRAN vout_peak MAX V(v_out) FROM=2m TO=5m
+.MEAS TRAN vout_min  MIN V(v_out) FROM=2m TO=5m
+
+* Fourier analysis at 1kHz
+.FOUR 1000 9 V(v_out)
+
+.END

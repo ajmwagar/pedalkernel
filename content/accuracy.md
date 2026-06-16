@@ -12,7 +12,7 @@ This page shows how closely the **PedalKernel WDF engine** reproduces its **ngsp
 
 - **RMS** — normalized RMS error (dB) across the whole signal.
 - **Peak** — peak error (dB), the worst-case sample deviation.
-- **Spectral** — spectral error (dB), how the magnitude spectra differ. Measured only within the audio band (up to the Nyquist marked below), so the engine's anti-aliasing roll-off is not counted against it.
+- **Spectral** — spectral error (dB), how the magnitude spectra differ. Two figures are shown: **Spec full** (raw, across the entire data spectrum up to the oversampled Nyquist) and **Spec audio** (capped at the audio Nyquist marked below). Only **Spec audio** gates pass/fail — the engine's anti-aliasing roll-off above the audio band is not counted against it, but **Spec full** is shown alongside so the gap is transparent.
 - **THD** — THD error (dB), difference in total harmonic distortion (absent for some stimuli, shown as `—`).
 
 For all of these, **lower is better**. Large negative numbers (e.g. **−200 dB**) mean the WDF output is numerically identical to ngspice; positive numbers are real, audible divergence. The per-circuit panels below plot **ngspice (cyan)** against **WDF (orange)** in the time domain with a difference trace, plus an FFT magnitude overlay so spectral discrepancies are visible at a glance.

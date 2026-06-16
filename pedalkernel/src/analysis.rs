@@ -272,3 +272,131 @@ pub fn assert_healthy(buf: &[f64], name: &str, max_peak: f64) {
         "{name}: output too loud (peak={p:.4}, max={max_peak})"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Dynamics: static gain curve metrics
+//
+// These are the trusted dynamics-measurement primitives used by the compressor
+// / limiter validation harness.  They were promoted here from
+// `pedalkernel/tests/audio_analysis.rs` so the validation CLI (and any other
+// library consumer) can call them without depending on the test crate.
+// ---------------------------------------------------------------------------
+
+/// Compression ratio over a region of a static gain curve.
+///
+/// `curve` is a slice of `(input_db, output_db)` points.  The slope of the
+/// least-squares regression of `output_db` vs `input_db` over the points whose
+/// input falls in `[lo_db, hi_db]` is computed; the ratio returned is
+/// `1.0 / slope`.  A near-zero slope (a perfect limiter) returns
+/// `f64::INFINITY`.
+///
+/// # Panics
+/// Panics if fewer than two curve points fall in `[lo_db, hi_db]`.
+pub fn compression_ratio(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
+    let pts: Vec<(f64, f64)> = curve
+        .iter()
+        .copied()
+        .filter(|&(x, _)| x >= lo_db && x <= hi_db)
+        .collect();
+    assert!(
+        pts.len() >= 2,
+        "compression_ratio: need >= 2 curve points in [{lo_db}, {hi_db}], got {}",
+        pts.len()
+    );
+    let n = pts.len() as f64;
+    let mx = pts.iter().map(|p| p.0).sum::<f64>() / n;
+    let my = pts.iter().map(|p| p.1).sum::<f64>() / n;
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for &(x, y) in &pts {
+        sxy += (x - mx) * (y - my);
+        sxx += (x - mx) * (x - mx);
+    }
+    let slope = sxy / sxx;
+    if slope.abs() < 1e-9 {
+        f64::INFINITY
+    } else {
+        1.0 / slope
+    }
+}
+
+/// Gain reduction in dB between two points on a static gain curve.
+///
+/// `curve` is a slice of `(input_db, output_db)` points.  The points whose
+/// input is nearest `lo_db` and nearest `hi_db` (by absolute distance) are
+/// selected, and the change in gain `(out - in)` between them is returned:
+/// `(lo.out - lo.in) - (hi.out - hi.in)`.  Positive = the circuit applies more
+/// gain reduction at the higher input.
+///
+/// # Panics
+/// Panics if `curve` is empty.
+pub fn gain_reduction_db(curve: &[(f64, f64)], lo_db: f64, hi_db: f64) -> f64 {
+    assert!(!curve.is_empty(), "gain_reduction_db: empty curve");
+    let nearest = |target: f64| {
+        curve
+            .iter()
+            .min_by(|a, b| {
+                (a.0 - target)
+                    .abs()
+                    .partial_cmp(&(b.0 - target).abs())
+                    .unwrap_or(core::cmp::Ordering::Equal)
+            })
+            .unwrap()
+    };
+    let lo = nearest(lo_db);
+    let hi = nearest(hi_db);
+    (lo.1 - lo.0) - (hi.1 - hi.0)
+}
+
+// ---------------------------------------------------------------------------
+// Dynamics: attack / release timing
+// ---------------------------------------------------------------------------
+
+/// RMS-envelope window used by the attack/release settle measurement.
+const ENVELOPE_WINDOW_SECS: f64 = 0.002;
+/// Settle tolerance band (dB) around the steady-state level.
+const SETTLE_TOLERANCE_DB: f64 = 1.0;
+
+/// Seconds from a level step at `step_sample` until the RMS envelope settles
+/// within `±SETTLE_TOLERANCE_DB` of the steady-state (tail-mean) level.
+///
+/// The steady-state target is the mean of the last quarter of the post-step
+/// segment.  If that target is ~0 (no signal) the function returns 0.  The
+/// envelope is scanned from the step to the tail; the settle index is the last
+/// sample that leaves the tolerance band, so the returned time is the duration
+/// until the envelope stays inside the band for good.
+///
+/// # Panics
+/// Panics if `step_sample >= output.len()`.
+fn envelope_settle_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    assert!(
+        step_sample < output.len(),
+        "envelope_settle_seconds: step_sample {step_sample} out of range"
+    );
+    let env = rms_envelope(output, ENVELOPE_WINDOW_SECS, sample_rate);
+    let segment = &env[step_sample..];
+    let tail_start = segment.len() - segment.len() / 4;
+    let tail = &segment[tail_start..];
+    let target = tail.iter().sum::<f64>() / tail.len().max(1) as f64;
+    if target < 1e-12 {
+        return 0.0;
+    }
+    let lo = target * db_to_lin(-SETTLE_TOLERANCE_DB);
+    let hi = target * db_to_lin(SETTLE_TOLERANCE_DB);
+    let mut settle_idx = 0;
+    for (i, &e) in segment.iter().enumerate().take(tail_start) {
+        if e < lo || e > hi {
+            settle_idx = i + 1;
+        }
+    }
+    settle_idx as f64 / sample_rate
+}
+
+/// Attack time: seconds from a level step-up at `step_sample` until settled.
+pub fn measure_attack_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    envelope_settle_seconds(output, step_sample, sample_rate)
+}
+
+/// Release time: seconds from a level step-down at `step_sample` until settled.
+pub fn measure_release_seconds(output: &[f64], step_sample: usize, sample_rate: f64) -> f64 {
+    envelope_settle_seconds(output, step_sample, sample_rate)
+}

@@ -1,0 +1,140 @@
+{{ define "main" }}
+{{ $dyn := site.Data.dynamics }}
+
+{{/* Flatten the circuits map into a sortable slice with the key merged in. */}}
+{{ $all := slice }}
+{{ range $k, $c := $dyn.circuits }}{{ $all = $all | append (merge $c (dict "key" $k)) }}{{ end }}
+{{ $all = sort $all "key" }}
+
+{{/* Count circuits that have an ngspice overlay (a committed golden). */}}
+{{ $nspice := 0 }}
+{{ range $all }}{{ with .static_curve }}{{ if ne .spice_ratio nil }}{{ $nspice = add $nspice 1 }}{{ end }}{{ end }}{{ end }}
+
+<div class="dyn-dash acc-dash">
+
+  {{/* ---------- hero / summary ---------- */}}
+  <header class="acc-hero">
+    <h1>Dynamics Dashboard</h1>
+    <p class="acc-sub">Compressor / limiter dynamics — WDF engine vs ngspice golden references, measured by the trusted dynamics tools.</p>
+    <div class="acc-stats">
+      <div class="acc-stat">
+        <span class="num">{{ len $all }}</span>
+        <span class="lbl">Circuits</span>
+      </div>
+      <div class="acc-stat">
+        <span class="num">{{ len (where $all "static_curve" "!=" nil) }}</span>
+        <span class="lbl">Static curves</span>
+      </div>
+      <div class="acc-stat">
+        <span class="num">{{ $nspice }}</span>
+        <span class="lbl">ngspice overlays</span>
+      </div>
+      <div class="acc-stat">
+        <span class="num">{{ $dyn.sample_rate }}&times;{{ $dyn.oversample }}</span>
+        <span class="lbl">Sample rate</span>
+      </div>
+    </div>
+    <p class="acc-meta">
+      Run <code>{{ $dyn.run_timestamp }}</code>
+      &middot; commit <code>{{ with $dyn.git_commit }}{{ . }}{{ else }}—{{ end }}</code>
+      &middot; {{ $dyn.sample_rate }} Hz &times;{{ $dyn.oversample }} oversampling
+    </p>
+  </header>
+
+  {{/* ---------- static intro (markdown body) ---------- */}}
+  <section class="acc-intro">
+    {{ .Content }}
+  </section>
+
+  {{/* ---------- per-circuit detail ---------- */}}
+  {{ if eq (len $all) 0 }}
+    <section class="acc-section">
+      <p class="acc-note">No dynamics goldens are committed yet. This page populates automatically once a circuit gains a <code>level_sweep</code> or <code>tone_burst</code> golden.</p>
+    </section>
+  {{ else }}
+    {{ range $c := $all }}
+    <section class="acc-section dyn-circuit">
+      <h2>{{ $c.key }}</h2>
+      <p class="acc-meta">
+        Circuit <code>{{ $c.circuit }}</code>
+        {{ with $c.frequency_hz }}&middot; {{ printf "%.0f Hz" . }} probe tone{{ end }}
+      </p>
+
+      {{ $hasSpice := false }}{{ with $c.static_curve }}{{ if ne .spice_ratio nil }}{{ $hasSpice = true }}{{ end }}{{ end }}
+      {{ if $hasSpice }}
+      <p class="acc-note dyn-caveat">&#9888; Preliminary reference — the committed ngspice golden is rough, so the absolute numbers below are provisional. Read the panels qualitatively (see the note above).</p>
+      {{ else }}
+      <p class="acc-note dyn-caveat">&#9888; WDF self-measurement — no ngspice golden yet, so these numbers are not validated against SPICE. Absolute levels are uncalibrated; read the panels qualitatively.</p>
+      {{ end }}
+
+      {{/* ----- summary metrics table (WDF vs ngspice with deltas) ----- */}}
+      <table class="acc-table dyn-table">
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th class="num">WDF</th>
+            <th class="num">ngspice</th>
+            <th class="num">&Delta;</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ with $c.static_curve }}
+          <tr>
+            <td>Compression ratio</td>
+            <td class="num">{{ printf "%.2f:1" .wdf_ratio }}</td>
+            {{ if ne .spice_ratio nil }}
+            <td class="num">{{ printf "%.2f:1" .spice_ratio }}</td>
+            <td class="num acc-muted">{{ printf "%.2f" (sub .wdf_ratio .spice_ratio) }}</td>
+            {{ else }}
+            <td class="num acc-muted">&mdash;</td>
+            <td class="num acc-muted">&mdash;</td>
+            {{ end }}
+          </tr>
+          <tr>
+            <td>Total gain reduction (dB)</td>
+            <td class="num">{{ printf "%.2f" .wdf_gr_total_db }}</td>
+            {{ if ne .spice_gr_total_db nil }}
+            <td class="num">{{ printf "%.2f" .spice_gr_total_db }}</td>
+            <td class="num acc-muted">{{ printf "%.2f" (sub .wdf_gr_total_db .spice_gr_total_db) }}</td>
+            {{ else }}
+            <td class="num acc-muted">&mdash;</td>
+            <td class="num acc-muted">&mdash;</td>
+            {{ end }}
+          </tr>
+          {{ end }}
+          {{/* Scalar attack/release (ms) intentionally omitted: the single-burst
+               envelope-settle measure reflects audio-level settling, not GR
+               ballistics, and is unreliable on the current reference. The
+               tone-burst panel below shows the GR-vs-time transient shape. */}}
+        </tbody>
+      </table>
+
+      {{/* ----- static-curve figure ----- */}}
+      {{ if $c.static_curve }}
+      <figure class="acc-fig dyn-fig">
+        <a href="/dynamics/{{ $c.suite }}/{{ $c.test }}/static_curve.png" target="_blank" rel="noopener">
+          <img src="/dynamics/{{ $c.suite }}/{{ $c.test }}/static_curve.png"
+               alt="{{ $c.key }}: static gain curve and gain reduction, WDF vs ngspice"
+               loading="lazy">
+        </a>
+        <figcaption>Static gain: input vs output (left) and gain reduction vs input (right). WDF orange, ngspice cyan; dashed grey is unity. Click to open full resolution.</figcaption>
+      </figure>
+      {{ end }}
+
+      {{/* Tone-burst (attack/release) panel intentionally omitted for now: the
+           single-burst GR-vs-time measurement is not yet robust across these
+           circuits. Tracked follow-up; static curves ship now. */}}
+    </section>
+    {{ end }}
+  {{ end }}
+
+  {{/* ---------- footer ---------- */}}
+  <footer class="acc-footer">
+    Generated by <code>tools/dashboard/generate_dynamics.py</code> from committed WDF + ngspice goldens,
+    measured with the trusted <code>pedalkernel::analysis</code> dynamics tools.
+    Machine-readable data: <code>data/dynamics.json</code>.
+    Source on <a href="https://github.com/ajmwagar/pedalkernel" target="_blank" rel="noopener">GitHub</a>.
+  </footer>
+
+</div>
+{{ end }}

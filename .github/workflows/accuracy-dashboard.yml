@@ -119,6 +119,34 @@ jobs:
             2>&1 | tee dashboard-output.txt
 
       # ----------------------------------------------------------------
+      # Dynamics dashboard: produce data/dynamics.json from the committed
+      # dynamic-stimulus goldens (LevelSweep / ToneBurst) via the trusted
+      # pedalkernel::analysis dynamics tools, then render PNGs.
+      # ----------------------------------------------------------------
+      - name: Generate dynamics.json from goldens
+        env:
+          GIT_COMMIT: ${{ github.sha }}
+        run: |
+          TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cargo run -p pedalkernel-validate -- \
+            --golden pedalkernel-validate/golden \
+            --report-dynamics data/dynamics.json \
+            dynamics --timestamp "$TIMESTAMP" \
+            2>&1 | tee dynamics-output.txt
+
+          if [ ! -f data/dynamics.json ]; then
+            echo "::error::dynamics subcommand did not produce data/dynamics.json"
+            exit 1
+          fi
+
+      - name: Render dynamics PNGs
+        run: |
+          python3 tools/dashboard/generate_dynamics.py \
+            --dynamics-json data/dynamics.json \
+            --out-dir dynamics-output \
+            2>&1 | tee dynamics-render.txt
+
+      # ----------------------------------------------------------------
       # Cache updated history for next nightly run
       # ----------------------------------------------------------------
       - name: Save updated history
@@ -150,9 +178,16 @@ jobs:
           cp -r dashboard-output/circuits static/accuracy/circuits
           cp dashboard-history.json data/accuracy-history.json
 
+          # Dynamics dashboard: data/dynamics.json is already written in place by
+          # the dynamics subcommand; refresh the rendered PNGs under static/.
+          rm -rf static/dynamics
+          mkdir -p static/dynamics
+          if [ -d dynamics-output ]; then cp -r dynamics-output/* static/dynamics/; fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/accuracy.json data/accuracy-history.json static/accuracy
+          git add data/dynamics.json static/dynamics
 
           if git diff --cached --quiet; then
             echo "No dashboard changes to publish."

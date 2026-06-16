@@ -73,7 +73,8 @@
             <th>Circuit</th>
             <th class="num">RMS (dB)</th>
             <th class="num">Peak (dB)</th>
-            <th class="num">Spectral (dB)</th>
+            <th class="num">Spec full (dB)</th>
+            <th class="num">Spec audio (dB)</th>
             <th class="num">THD (dB)</th>
             <th>Notes</th>
           </tr>
@@ -85,9 +86,11 @@
             {{ with .metrics }}
             <td class="num">{{ printf "%.1f" .normalized_rms_error_db }}</td>
             <td class="num">{{ printf "%.1f" .peak_error_db }}</td>
+            <td class="num acc-muted">{{ if ne .spectral_error_full_db nil }}{{ printf "%.1f" .spectral_error_full_db }}{{ else }}&mdash;{{ end }}</td>
             <td class="num">{{ printf "%.1f" .spectral_error_db }}</td>
             <td class="num">{{ if ne .thd_error_db nil }}{{ printf "%.1f" .thd_error_db }}{{ else }}&mdash;{{ end }}</td>
             {{ else }}
+            <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
@@ -165,17 +168,29 @@
     </table>
   </section>
 
-  {{/* ---------- (g) Accuracy matrix PNG ---------- */}}
+  {{/* ---------- (g) Per-suite accuracy matrices ---------- */}}
   <section class="acc-section">
-    <h2>Accuracy matrix</h2>
+    <h2>Accuracy matrices by suite</h2>
+    <p>
+      Each suite gets its own compact matrix: rows are circuits/signals, columns are
+      <strong>RMS</strong>, <strong>Peak</strong>, and <strong>Spectral (audio)</strong> dB error against ngspice.
+      Within every matrix the colour means the same thing — <span style="color:#3a9c52;font-weight:600">green = closer to the reference</span>,
+      <span style="color:#c0392b;font-weight:600">red = further from it</span> — so red cells are exactly where the engine is currently weakest.
+      Row labels in orange currently fail. Click any matrix to open full resolution.
+    </p>
+    {{ range $suite := $suites }}
+    {{ $rows := where $all "suite" $suite }}
+    {{ $pass := len (where $rows "passed" true) }}
+    {{ $tot := len $rows }}
     <figure class="acc-fig">
-      <a href="/accuracy/accuracy-matrix.png" target="_blank" rel="noopener">
-        <img src="/accuracy/accuracy-matrix.png"
-             alt="Accuracy matrix: all circuits by RMS/peak/spectral error vs ngspice"
+      <h3 class="acc-suite-name">{{ $suite }} <span class="acc-badge {{ if lt $pass $tot }}acc-badge-fail{{ else }}acc-badge-pass{{ end }}">{{ $pass }} / {{ $tot }} pass</span></h3>
+      <a href="/accuracy/matrix-{{ $suite }}.png" target="_blank" rel="noopener">
+        <img src="/accuracy/matrix-{{ $suite }}.png"
+             alt="{{ $suite }} suite accuracy matrix: circuits by RMS/peak/spectral error vs ngspice"
              loading="lazy">
       </a>
-      <figcaption>Every circuit by RMS / Peak / Spectral error against ngspice. Greener is closer to SPICE; rows in orange currently fail. Click to open full resolution.</figcaption>
     </figure>
+    {{ end }}
   </section>
 
   {{/* ---------- (h) Per-suite galleries (collapsible) ---------- */}}
@@ -207,7 +222,8 @@
             {{ with .metrics }}
             <span><b>RMS</b> {{ printf "%.1f" .normalized_rms_error_db }}</span>
             <span><b>Peak</b> {{ printf "%.1f" .peak_error_db }}</span>
-            <span><b>Spectral</b> {{ printf "%.1f" .spectral_error_db }}</span>
+            <span class="acc-muted"><b>Spec full</b> {{ if ne .spectral_error_full_db nil }}{{ printf "%.1f" .spectral_error_full_db }}{{ else }}&mdash;{{ end }}</span>
+            <span><b>Spec audio</b> {{ printf "%.1f" .spectral_error_db }}</span>
             <span><b>THD</b> {{ if ne .thd_error_db nil }}{{ printf "%.1f" .thd_error_db }}{{ else }}&mdash;{{ end }}</span>
             {{ else }}
             <span class="acc-nodata">no metrics{{ with .error }} &middot; {{ . }}{{ end }}</span>

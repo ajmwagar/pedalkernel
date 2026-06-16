@@ -1,0 +1,56 @@
+* ============================================================================
+* Opto Leveler (generic LA-2A-style) — T4B opto cell, ngspice reference
+* PedalKernel Validation Circuit (bead pedalkernel-mbte.5)
+* ============================================================================
+* Mirrors examples/outboard/compressor/opto_leveler.pedal — the SIMPLER opto
+* leveler (single 12AX7 gain stage), DISTINCT from the faithful la2a.spice
+* (which has 5 tubes + transformers + a sidechain amp).
+*   in -> C_in -> R_gr(100k series) -> [PC1 T4B CdS shunt + Gain pot + V1.grid]
+*      -> 12AX7 common-cathode gain -> C_out -> R_load -> out
+*   Sidechain FEED-FORWARD: EF(10k/1u attack=10ms, 470k/4.7u release=2.2s) -> PC1.led
+* T4B opto cell uses the EXACT engine PhotocouplerModel::t4b params
+* (R_dark=3M, R_light=500, gamma=0.65, log-interp R). The 12AX7 stage is a
+* behavioral net gain (the opto cell, not tube THD, governs the dynamics here).
+*
+* VERIFIED (orchestrator, 2026-06-16, ngspice direct, NO bootstrap):
+*   - CONVERGES. COMPRESSES (steady-state tail, 4 s settle for the 2.2 s release):
+*       in=0.05 -> gain 22.4x ;  in=0.5 -> gain 5.28x
+*     +20 dB input -> +7.4 dB output  ==  ~2.7:1 ratio, ~-12.6 dB GR. Realistic
+*     opto-leveler curve, consistent with the faithful la2a deck (~2.8:1).
+*   - Settling needs ~4 s (EF release tau 2.2 s); measure a steady-state tail,
+*     NOT peak-over-window (the uncompressed attack transient inflates it).
+*
+* HARNESS (phase 2): strip the standalone Vin SINE + .control; inject stimulus
+* at `in`, read V(out), allow >=4 s settle. GMK/PRG are the makeup/sidechain-sens
+* calibration knobs to tune to the engine + datasheet.
+* ----------------------------------------------------------------------------
+.param GMK=40           $ 12AX7 common-cathode net gain (behavioral)
+.param PRG=0.18         $ sidechain sensitivity (EF -> LED)
+* T4B LDR: ln(3e6)=14.9141, ln(500)=6.2146, diff=-8.6995, gamma=0.65
+.func rldr(L) = exp(14.9141 - 8.6995*pwr(min(max(L,1e-9),1),0.65))
+
+C_in in nci 100n
+R_gr nci ndiv 100k
+R_gl ndiv 0 1meg                 $ R_grid grid leak (Gain pot 1M to grid)
+B_pc ndiv 0 I = V(ndiv)/V(nrldr) $ PC1 CdS cell as voltage-controlled shunt R
+B_mk nmk 0 V = GMK*V(ndiv)       $ 12AX7 common-cathode gain stage (behavioral)
+C_out nmk out 22n
+R_load out 0 100k
+
+* FEED-FORWARD detector EF1(10k,1u,470k,4.7u,20k): attack 10ms, release 2.2s
+B_led nled 0 V = min(1, PRG*abs(V(out)))
+B_env 0 nenv I = (V(nled)-V(nenv)) / ((V(nled)>V(nenv)) ? 10m : 2200m)
+C_env nenv 0 1 ic=0
+B_rldr nrldr 0 V = rldr(V(nenv))
+
+* --- standalone inspection stimulus (harness replaces this) ---
+Vin in 0 SINE(0 0.1 1k)
+.options DELMAX=50e-6
+.control
+tran 20u 4 uic
+meas tran outpp PP v(out) from=3.6 to=4
+meas tran inpp  PP v(in)  from=3.6 to=4
+let g = outpp/inpp
+print g
+.endc
+.end

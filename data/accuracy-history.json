@@ -1424,5 +1424,718 @@
         "spectral_error_db": 0.017818481719586998
       }
     }
+  },
+  {
+    "timestamp": "2026-06-16T02:33:44Z",
+    "git_commit": "71aa3bb",
+    "summary": {
+      "total_circuits": 100,
+      "passed": 91,
+      "failed": 9,
+      "wdf_pending": 0,
+      "pass_rate": 0.91
+    },
+    "circuits": {
+      "active/fuzz_face_pnp/clean": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 1.129503275035779,
+        "peak_error_db": 1.4031271154664637,
+        "spectral_error_db": 22.37924423319643
+      },
+      "active/fuzz_face_pnp/saturated": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 1.0914929779370375,
+        "peak_error_db": 1.254190341911659,
+        "spectral_error_db": 76.69564770810611
+      },
+      "active/jfet_source_follower/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 9.466619812406337e-06,
+        "peak_error_db": 0.00026963846730323506,
+        "spectral_error_db": 173.40409378358947
+      },
+      "active/nmos_common_source/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.2787397341406696,
+        "peak_error_db": -0.2192521994588672,
+        "spectral_error_db": 201.5860289511524
+      },
+      "active/npn_common_emitter/clean": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.12158772279640782,
+        "peak_error_db": -0.13151656794250552,
+        "spectral_error_db": 209.53834368525867
+      },
+      "active/npn_common_emitter/driven": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.46433510823643226,
+        "peak_error_db": -0.34477753153282775,
+        "spectral_error_db": 203.9500538702725
+      },
+      "active/optical_attenuator/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -47.953736054821746,
+        "peak_error_db": -16.65390771946615,
+        "spectral_error_db": 165.68532862081247
+      },
+      "active/ota_ca3080/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.0,
+        "peak_error_db": 0.0,
+        "spectral_error_db": 600.4029245924778
+      },
+      "active/phase_allpass_stage/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 9.865944079781685e-05,
+        "peak_error_db": 0.00011448836211010586,
+        "spectral_error_db": 232.47274280107015
+      },
+      "active/phase_allpass_stage/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 9.729409777249147e-05,
+        "peak_error_db": 9.814711754838569e-05,
+        "spectral_error_db": 274.46296734000686
+      },
+      "active/pmos_source_follower/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.03239025977141971,
+        "peak_error_db": 0.7077196746276858,
+        "spectral_error_db": 138.3816080431728
+      },
+      "active/pnp_common_emitter/clean": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.0002716926967257324,
+        "peak_error_db": 0.05049870180253635,
+        "spectral_error_db": 98.0205936047127
+      },
+      "active/pnp_common_emitter/driven": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.009798236047502157,
+        "peak_error_db": 0.4160241836643127,
+        "spectral_error_db": 82.466539379153
+      },
+      "active/push_pull_6l6/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.00243558576850161,
+        "peak_error_db": -0.0020592194000844002,
+        "spectral_error_db": 76.8397281735137
+      },
+      "canonical/bjt_diff_pair/linear": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.0006467308262569342,
+        "peak_error_db": -0.0003007447608098305,
+        "spectral_error_db": 96.64719358315504
+      },
+      "canonical/bjt_diff_pair/soft_clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.004143142200601102,
+        "peak_error_db": -0.003009631216999522,
+        "spectral_error_db": 134.2894824124399
+      },
+      "canonical/bjt_diff_pair/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.07073270164902727,
+        "peak_error_db": -0.08490454296562021,
+        "spectral_error_db": 157.7061522006797
+      },
+      "canonical/opamp_diode_clipper/linear": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.020904454820649572,
+        "peak_error_db": 0.8053750760255886,
+        "spectral_error_db": 215.43119491644063
+      },
+      "canonical/opamp_diode_clipper/clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.08696312287478455,
+        "peak_error_db": 1.2093310192260778,
+        "spectral_error_db": 208.62284658790318
+      },
+      "canonical/opamp_diode_clipper/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.0659769289792855,
+        "peak_error_db": 1.238680272497255,
+        "spectral_error_db": 119.32847200240404
+      },
+      "canonical/rc_highpass/impulse": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -247.24512595821813,
+        "peak_error_db": -247.56376003707499,
+        "spectral_error_db": 6.0822458181064576e-12
+      },
+      "canonical/rc_highpass/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -283.4976049228855,
+        "peak_error_db": -282.5630837326983,
+        "spectral_error_db": 1.4210854715202004e-14
+      },
+      "canonical/rc_highpass/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -267.20333113102726,
+        "peak_error_db": -228.79946226367247,
+        "spectral_error_db": 1.0268763617204968e-10
+      },
+      "canonical/rc_lowpass/impulse": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -200.0,
+        "peak_error_db": -200.0,
+        "spectral_error_db": 0.0
+      },
+      "canonical/rc_lowpass/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -307.75174230416224,
+        "peak_error_db": -297.6465757820159,
+        "spectral_error_db": 7.105427357601002e-15
+      },
+      "canonical/rc_lowpass/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -286.1852667417459,
+        "peak_error_db": -260.69113098538725,
+        "spectral_error_db": 1.5333512237702962e-11
+      },
+      "canonical/series_rlc/impulse": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -205.57659092559874,
+        "peak_error_db": -206.01185915170265,
+        "spectral_error_db": 5.670699465554208e-10
+      },
+      "canonical/series_rlc/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -287.68873684801315,
+        "peak_error_db": -285.02597308429665,
+        "spectral_error_db": 3.552713678800501e-14
+      },
+      "canonical/series_rlc/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -230.71330484552803,
+        "peak_error_db": -225.93253605759114,
+        "spectral_error_db": 2.9749003260803875e-10
+      },
+      "canonical/single_diode/mild_clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -25.642926324876285,
+        "peak_error_db": -26.907758400967566,
+        "spectral_error_db": 217.9538467840208
+      },
+      "canonical/single_diode/hard_clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -40.07663016339973,
+        "peak_error_db": -40.69693534905292,
+        "spectral_error_db": 160.66778415454922
+      },
+      "canonical/single_diode/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -5.215316414757711,
+        "peak_error_db": 0.16041462330067482,
+        "spectral_error_db": 69.28595703831036
+      },
+      "canonical/transformer_load/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -90.65765074061818,
+        "peak_error_db": -90.13821640995168,
+        "spectral_error_db": 0.0002533943766458435
+      },
+      "canonical/transformer_load/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -60.31875714164744,
+        "peak_error_db": -49.81544520731041,
+        "spectral_error_db": 0.05298522763592928
+      },
+      "canonical/twin_t_notch/impulse": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -235.96629225396396,
+        "peak_error_db": -236.17468230022908,
+        "spectral_error_db": 2.7114310796605423e-11
+      },
+      "canonical/twin_t_notch/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -242.3641259611578,
+        "peak_error_db": -236.97362501309502,
+        "spectral_error_db": 7.077005648170598e-12
+      },
+      "canonical/twin_t_notch/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -264.9194092381794,
+        "peak_error_db": -229.19387720502712,
+        "spectral_error_db": 1.3469616533257067e-09
+      },
+      "compressor/fet_leveler_level_sweep/level_sweep": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.0029635335084301443,
+        "peak_error_db": 0.002487473115209805,
+        "spectral_error_db": 228.43305875192223
+      },
+      "compressor/fet_leveler_tone_burst/tone_burst": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.042597455268602244,
+        "peak_error_db": 0.1417236188694343,
+        "spectral_error_db": 62.85602161271106
+      },
+      "eq/pultec_passive_flat/sine_1k": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -76.86845037776237,
+        "peak_error_db": -76.83236769150368,
+        "spectral_error_db": 0.0007505073730271761
+      },
+      "eq/pultec_passive_flat/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -48.342175128798104,
+        "peak_error_db": -45.9944573023816,
+        "spectral_error_db": 1.1020558153122408
+      },
+      "eq/pultec_passive_hf_atten/sine_10k": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -46.460549640402355,
+        "peak_error_db": -46.415571031970266,
+        "spectral_error_db": 0.0044291775959806046
+      },
+      "eq/pultec_passive_hf_atten/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -49.92656074108098,
+        "peak_error_db": -48.159405378239654,
+        "spectral_error_db": 0.5467720458336487
+      },
+      "eq/pultec_passive_hf_boost/sine_3k1": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -68.30721856898535,
+        "peak_error_db": -67.95446627380558,
+        "spectral_error_db": 0.002193343781243584
+      },
+      "eq/pultec_passive_hf_boost/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -65.41317897535252,
+        "peak_error_db": -55.27483887148694,
+        "spectral_error_db": 0.11630135515304119
+      },
+      "eq/pultec_passive_lf_boost/sine_60": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -103.72368595027724,
+        "peak_error_db": -102.7655978088216,
+        "spectral_error_db": 2.67792213719531e-05
+      },
+      "eq/pultec_passive_lf_boost/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -48.31917696563024,
+        "peak_error_db": -45.98927195490226,
+        "spectral_error_db": 1.0728382330972863
+      },
+      "eq/pultec_passive_lf_trick/sine_60": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -103.70903661457575,
+        "peak_error_db": -101.9501408259872,
+        "spectral_error_db": 2.749601426899062e-05
+      },
+      "eq/pultec_passive_lf_trick/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -47.789707525719805,
+        "peak_error_db": -46.05545913187869,
+        "spectral_error_db": 2.238114693982652
+      },
+      "extraction/active_feedback_treble_shelf/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 5.542054841005747,
+        "peak_error_db": 5.543053937249756,
+        "spectral_error_db": 0.9472023982853273
+      },
+      "extraction/active_feedback_treble_shelf/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 5.204280431411751,
+        "peak_error_db": 4.991579261971297,
+        "spectral_error_db": 2.3282547717236355
+      },
+      "extraction/mfb_highpass_controlled/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.9067442042063655,
+        "peak_error_db": 0.907250984435696,
+        "spectral_error_db": 3.659403621033782
+      },
+      "extraction/mfb_highpass_controlled/sweep": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.022894192038132342,
+        "peak_error_db": -0.03685180616023415,
+        "spectral_error_db": 40.07285448730934
+      },
+      "extraction/output_wiper_divider/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -99.99969337126936,
+        "peak_error_db": -99.9996826654359,
+        "spectral_error_db": 8.685005888509068e-05
+      },
+      "extraction/passive_loaded_rc_lowpass/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -83.31667286646875,
+        "peak_error_db": -83.22374576284005,
+        "spectral_error_db": 0.0005442127968251498
+      },
+      "extraction/passive_loaded_rc_lowpass/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -77.23359949638551,
+        "peak_error_db": -72.22408537933288,
+        "spectral_error_db": 0.01874498742810715
+      },
+      "extraction/sallen_key_highpass/sine": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 13.396202396097133,
+        "peak_error_db": 13.207280167584067,
+        "spectral_error_db": 11.30319804656127
+      },
+      "extraction/sallen_key_highpass/sweep": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 13.417277732494723,
+        "peak_error_db": 13.063684832963991,
+        "spectral_error_db": 44.57671574158374
+      },
+      "extraction/sallen_key_lowpass/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 5.283822887819203,
+        "peak_error_db": 5.197958406783785,
+        "spectral_error_db": 1.5238330441336032
+      },
+      "extraction/sallen_key_lowpass/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 5.049040197016956,
+        "peak_error_db": 4.5959227552758595,
+        "spectral_error_db": 2.8521415717519574
+      },
+      "linear/rc_highpass/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -305.49102466662157,
+        "peak_error_db": -297.399421480578,
+        "spectral_error_db": 3.552713678800501e-15
+      },
+      "linear/rc_highpass/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -267.7418433780411,
+        "peak_error_db": -228.79684754775485,
+        "spectral_error_db": 1.773088342815754e-10
+      },
+      "linear/rc_lowpass/impulse": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -200.0,
+        "peak_error_db": -200.0,
+        "spectral_error_db": 0.0
+      },
+      "linear/rc_lowpass/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -307.75174230416224,
+        "peak_error_db": -297.6465757820159,
+        "spectral_error_db": 7.105427357601002e-15
+      },
+      "linear/rc_lowpass/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -286.1852667417459,
+        "peak_error_db": -260.69113098538725,
+        "spectral_error_db": 1.5333512237702962e-11
+      },
+      "linear/resistor_divider/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -317.308842928145,
+        "peak_error_db": -313.07119549054045,
+        "spectral_error_db": 7.105427357601002e-15
+      },
+      "linear/rl_lowpass/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -307.5382330376299,
+        "peak_error_db": -297.6465757820159,
+        "spectral_error_db": 1.7763568394002505e-15
+      },
+      "nonlinear/common_cathode_12ax7/clean": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.12238156434792041,
+        "peak_error_db": -0.8048566795895401,
+        "spectral_error_db": 37.54633992780782
+      },
+      "nonlinear/common_cathode_12ax7/driven": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -2.796052587754913,
+        "peak_error_db": -4.1385772166087325,
+        "spectral_error_db": 131.46898621237295
+      },
+      "nonlinear/diode_clipper/low_level": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -21.666575794527105,
+        "peak_error_db": -21.72733818725318,
+        "spectral_error_db": 169.2909237089556
+      },
+      "nonlinear/diode_clipper/clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -2.6162355894399485,
+        "peak_error_db": 5.4389343182648435,
+        "spectral_error_db": 143.79386352530352
+      },
+      "nonlinear/diode_clipper/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -0.9181877420186917,
+        "peak_error_db": 7.045685072353365,
+        "spectral_error_db": 39.378700520139915
+      },
+      "nonlinear/diode_no_cap/low_level": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -23.471095204738738,
+        "peak_error_db": -20.266573332676995,
+        "spectral_error_db": 169.33255446656898
+      },
+      "nonlinear/diode_no_cap/clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -11.876869841666826,
+        "peak_error_db": -8.720044122698003,
+        "spectral_error_db": 112.57823476551613
+      },
+      "nonlinear/single_diode/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -10.439146875158261,
+        "peak_error_db": -8.305291046169499,
+        "spectral_error_db": 167.14534865791768
+      },
+      "nonlinear/zener_clipper/low_level": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -19.807625606461123,
+        "peak_error_db": -17.553882505048442,
+        "spectral_error_db": 172.1734135562859
+      },
+      "nonlinear/zener_clipper/clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -7.660045418732833,
+        "peak_error_db": 2.5491638523642344,
+        "spectral_error_db": 142.18578611454024
+      },
+      "opamp/difference_amp/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -31.618723578071076,
+        "peak_error_db": -16.701031446518737,
+        "spectral_error_db": 196.31982576614138
+      },
+      "opamp/integrator/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 1.911672384336324,
+        "peak_error_db": 2.1962655647819735,
+        "spectral_error_db": 176.754622552553
+      },
+      "opamp/inverting_gain10/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -31.571562511186837,
+        "peak_error_db": -16.881141651478718,
+        "spectral_error_db": 196.22523658045975
+      },
+      "opamp/noninverting_gain10/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -31.568585328863072,
+        "peak_error_db": -16.881129744393483,
+        "spectral_error_db": 196.2253235651835
+      },
+      "opamp/summing_inverting/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -31.62174228691914,
+        "peak_error_db": -16.701041376911736,
+        "spectral_error_db": 196.31973860789094
+      },
+      "opamp/unity_buffer/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -49.82290025393028,
+        "peak_error_db": -16.681256933781206,
+        "spectral_error_db": 196.33107727760864
+      },
+      "pedals/bigmuff_stage/clean": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 70.22509950007385,
+        "peak_error_db": 50.733017835778924,
+        "spectral_error_db": 113.18941924844546
+      },
+      "pedals/bigmuff_stage/clipping": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 90.20298811453335,
+        "peak_error_db": 70.65716512472419,
+        "spectral_error_db": 113.1801685287532
+      },
+      "pedals/fuzz_core/clean": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 7.68656021238633,
+        "peak_error_db": 1.7786066246196655,
+        "spectral_error_db": 139.31740885775113
+      },
+      "pedals/fuzz_core/saturated": {
+        "passed": false,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 26.801107739488458,
+        "peak_error_db": 12.361101401733576,
+        "spectral_error_db": 138.21583772671892
+      },
+      "pedals/rat_clipper/clean": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 5.299040039216294,
+        "peak_error_db": 6.8439616188879695,
+        "spectral_error_db": 162.83709799095388
+      },
+      "pedals/rat_clipper/clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 3.354671893280895,
+        "peak_error_db": 6.146383886453906,
+        "spectral_error_db": 149.3606744285679
+      },
+      "pedals/ts808_clipper/clean": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 8.11040246322005,
+        "peak_error_db": 8.66025887656217,
+        "spectral_error_db": 187.87961658431036
+      },
+      "pedals/ts808_clipper/clipping": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 7.582037237630925,
+        "peak_error_db": 8.43120122551942,
+        "spectral_error_db": 150.83491375785997
+      },
+      "reactive/delay_simple/impulse": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": 0.0,
+        "peak_error_db": 0.0,
+        "spectral_error_db": 496.32373372953003
+      },
+      "reactive/lc_resonant/resonant": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -44.851381829397766,
+        "peak_error_db": -23.431242298071705,
+        "spectral_error_db": 162.1296202500934
+      },
+      "reactive/lc_resonant/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -5.322001348324758,
+        "peak_error_db": 5.367724432482058,
+        "spectral_error_db": 195.96442689407127
+      },
+      "reactive/transformer_stepdown/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -98.58533023428859,
+        "peak_error_db": -97.85723746454401,
+        "spectral_error_db": 0.00010219605022854239
+      },
+      "reactive/transformer_stepdown/sweep": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -59.09539669642737,
+        "peak_error_db": -45.957608264664565,
+        "spectral_error_db": 0.06837809994598842
+      },
+      "reactive/transformer_stepup/sine": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -90.65537720432707,
+        "peak_error_db": -90.16709784295938,
+        "spectral_error_db": 0.00025333650916437023
+      },
+      "stress/dc_stability/silence": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -200.0,
+        "peak_error_db": -200.0,
+        "spectral_error_db": 0.0
+      },
+      "tape/tape_head_saturation/clean": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -72.24152418112905,
+        "peak_error_db": -72.9180816020399,
+        "spectral_error_db": 0.1989314705208045
+      },
+      "tape/tape_head_saturation/saturated": {
+        "passed": true,
+        "wdf_pending": false,
+        "normalized_rms_error_db": -69.62030860317263,
+        "peak_error_db": -69.7667969083507,
+        "spectral_error_db": 0.017818481719586998
+      }
+    }
   }
 ]

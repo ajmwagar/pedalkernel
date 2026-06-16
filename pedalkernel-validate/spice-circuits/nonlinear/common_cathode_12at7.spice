@@ -1,0 +1,90 @@
+* ============================================================================
+* Common Cathode 12AT7 Triode Amplifier
+* PedalKernel Validation Circuit — Single triode nonlinear stage
+* ============================================================================
+* Medium-high mu triode (mu≈60) used in phase inverter and driver stages.
+* Uses the same Koren macromodel structure as common_cathode_12ax7.spice
+* with parameters matched to pedalkernel/models/triodes.model.
+*
+* Operating point: Vp ≈ 140V, Vg ≈ -2V, Ip ≈ 2.5mA (auto-bias via Rk)
+* Voltage gain: ~-40 (inverting, intermediate between 12AX7 and 12AU7)
+* ============================================================================
+* Convergence recipe: explicit .ic on coupling caps + relaxed RELTOL
+.OPTIONS RELTOL=5e-3 METHOD=TRAP DELMAX=10u ITL4=100
+
+* B+ supply
+VB vb 0 DC 250
+
+* Plate load
+RP vb v_plate 47k
+
+* Coupling cap (input) — explicit IC avoids DC convergence issues
+CIN v_in v_grid 22n IC=0
+
+* Grid leak resistor
+RG v_grid 0 1MEG
+
+* AC input signal source (1kHz, 200mV peak — modest drive for medium-mu stage)
+VIN v_in 0 SIN(0 0.2 1000)
+
+* Triode (12AT7 section A)
+X1 v_plate v_grid v_cathode TRIODE_12AT7
+
+* Cathode resistor + bypass cap — IC=0 on bypass cap
+RK v_cathode 0 1k
+CK v_cathode 0 25u IC=0
+
+* Output coupling cap
+COUT v_plate v_out 22n IC=0
+
+* Output load
+RLOAD v_out 0 1MEG
+
+* ============================================================================
+* 12AT7 Triode Model — Koren equations
+* Parameters from pedalkernel/models/triodes.model (Koren 1996)
+* MU=60 EX=1.35 KG1=460 KP=300 KVB=300
+* ============================================================================
+.SUBCKT TRIODE_12AT7 anode grid cathode
+.PARAM MU=60 EX=1.35 KG1=460 KP=300 KVB=300
+
+* Internal nodes for Vgk and Vak
+Bgk gk 0 V = V(grid,cathode)
+Bak ak 0 V = V(anode,cathode)
+
+* Plate current as behavioral current source (Koren equation)
+* E1 = KP * (1/MU + Vgk / sqrt(KVB + Vak^2))
+* Ip = (MAX(Vak,0)/KP * ln(1+exp(E1)))^EX / KG1, clipped for Vak<0
+Bip anode cathode I = {
++ (PWR(
++   LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2)))))
++   * MAX(V(ak), 0.001) / KP,
++   EX)
++ / KG1)
++ * (1 + SGN(LOG(1 + EXP(KP * (1/MU + V(gk)/SQRT(KVB + PWR(V(ak),2))))) * MAX(V(ak),0.001) / KP)) / 2
++ }
+
+* Grid current (diode model for grid conduction)
+Dgc grid cathode DGRID
+.MODEL DGRID D(IS=1e-12 N=1.5 RS=1k)
+
+.ENDS TRIODE_12AT7
+
+* ============================================================================
+* Analysis
+* ============================================================================
+* Transient: 5ms, timestep 5us
+.TRAN 5u 5m UIC
+
+* Operating point
+.OP
+
+* Measure output voltage envelope
+.MEAS TRAN vout_rms  RMS V(v_out) FROM=2m TO=5m
+.MEAS TRAN vout_peak MAX V(v_out) FROM=2m TO=5m
+.MEAS TRAN vout_min  MIN V(v_out) FROM=2m TO=5m
+
+* Fourier analysis at 1kHz for harmonic content
+.FOUR 1000 9 V(v_out)
+
+.END
