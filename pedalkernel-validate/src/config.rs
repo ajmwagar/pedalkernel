@@ -2476,6 +2476,243 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // ── 3. DYNA COMP (MXR CA3080 OTA) ──────────────────────────
+                // pending_reference: true until goldens land from generate-spice.
+                // Pass criteria are PLACEHOLDERS — reconcile with kyem.1 honest
+                // values once that bead lands and the engine dyna_comp is wired.
+                // KNOWN CONFLICT: this entry will need a rebase when kyem.1 lands.
+                tests.insert(
+                    "dyna_comp_level_sweep".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/dyna_comp.pedal".to_string(),
+                        description:
+                            "Dyna Comp (CA3080 OTA): static gain curve (-40..0 dBVU, 9 levels)"
+                                .to_string(),
+                        signals: vec![SignalConfig::LevelSweep {
+                            frequency: 1000.0,
+                            levels_dbvu: (-40..=0)
+                                .step_by(5)
+                                .map(|l| l as f64)
+                                .collect(),
+                            duration_per_level: 0.5,
+                            label: Some("level_sweep".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER: tighten when kyem.1 lands with honest thresholds.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(200.0),
+                    },
+                );
+
+                tests.insert(
+                    "dyna_comp_tone_burst".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/dyna_comp.pedal".to_string(),
+                        description:
+                            "Dyna Comp (CA3080 OTA): attack/release timing via tone burst"
+                                .to_string(),
+                        signals: vec![SignalConfig::ToneBurst {
+                            frequency: 1000.0,
+                            amplitude_dbvu: Some(-6.0),
+                            amplitude: 0.5,
+                            on_ms: 500.0,
+                            off_ms: 2000.0,
+                            repetitions: 1,
+                            label: Some("tone_burst".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER: tighten when kyem.1 lands with honest thresholds.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(100.0),
+                    },
+                );
+
+                // ── 4. VCA BUS COMP (SSL/dbx-style SSM2164) ────────────────
+                tests.insert(
+                    "vca_bus_comp_level_sweep".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/vca_bus_comp.pedal".to_string(),
+                        description:
+                            "VCA Bus Comp (SSM2164): static gain curve (-40..0 dBVU, 9 levels)"
+                                .to_string(),
+                        signals: vec![SignalConfig::LevelSweep {
+                            frequency: 1000.0,
+                            levels_dbvu: (-40..=0)
+                                .step_by(5)
+                                .map(|l| l as f64)
+                                .collect(),
+                            duration_per_level: 0.5,
+                            label: Some("level_sweep".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER: tighten when kyem.1 lands with honest thresholds.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(200.0),
+                    },
+                );
+
+                tests.insert(
+                    "vca_bus_comp_tone_burst".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/vca_bus_comp.pedal".to_string(),
+                        description:
+                            "VCA Bus Comp (SSM2164): attack/release timing via tone burst"
+                                .to_string(),
+                        signals: vec![SignalConfig::ToneBurst {
+                            frequency: 1000.0,
+                            amplitude_dbvu: Some(-6.0),
+                            amplitude: 0.5,
+                            on_ms: 500.0,
+                            off_ms: 2000.0,
+                            repetitions: 1,
+                            label: Some("tone_burst".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER: tighten when kyem.1 lands with honest thresholds.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(100.0),
+                    },
+                );
+
+                // ── 5. LA-2A (T4B two-rate opto, 3 makeup triodes + 2 sidechain tubes) ──
+                // NOTE: LA-2A has slow T4B opto tau (500ms fast / slow up to 500ms).
+                // The LevelSweep uses 0.5s/level — the last few levels will be settling.
+                // A ToneBurst with 2.5s settle is provided for attack/release timing.
+                tests.insert(
+                    "la2a_level_sweep".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/la2a.pedal".to_string(),
+                        description:
+                            "LA-2A T4B opto leveler: static gain curve (-40..0 dBVU, 9 levels)"
+                                .to_string(),
+                        signals: vec![SignalConfig::LevelSweep {
+                            frequency: 1000.0,
+                            levels_dbvu: (-40..=0)
+                                .step_by(5)
+                                .map(|l| l as f64)
+                                .collect(),
+                            duration_per_level: 0.5,
+                            label: Some("level_sweep".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER: tighten when kyem.1 lands with honest thresholds.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(200.0),
+                    },
+                );
+
+                tests.insert(
+                    "la2a_tone_burst".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/la2a.pedal".to_string(),
+                        description:
+                            "LA-2A T4B opto leveler: attack/release timing via tone burst"
+                                .to_string(),
+                        signals: vec![SignalConfig::ToneBurst {
+                            frequency: 1000.0,
+                            amplitude_dbvu: Some(-6.0),
+                            amplitude: 0.5,
+                            on_ms: 500.0,
+                            off_ms: 2500.0,
+                            repetitions: 1,
+                            label: Some("tone_burst".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER: tighten when kyem.1 lands with honest thresholds.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(100.0),
+                    },
+                );
+
+                // ── 6. OPTO LEVELER (single 12AX7, T4B opto, feed-forward) ──
+                // NOTE: opto_leveler has EF release tau 2.2s — slow settling.
+                // ToneBurst uses 3000ms off to allow the EF to mostly settle.
+                tests.insert(
+                    "opto_leveler_level_sweep".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/opto_leveler.pedal".to_string(),
+                        description:
+                            "Opto Leveler (T4B, single 12AX7): static gain curve (-40..0 dBVU, 9 levels)"
+                                .to_string(),
+                        signals: vec![SignalConfig::LevelSweep {
+                            frequency: 1000.0,
+                            levels_dbvu: (-40..=0)
+                                .step_by(5)
+                                .map(|l| l as f64)
+                                .collect(),
+                            duration_per_level: 0.5,
+                            label: Some("level_sweep".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER: tighten when kyem.1 lands with honest thresholds.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(200.0),
+                    },
+                );
+
+                tests.insert(
+                    "opto_leveler_tone_burst".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/opto_leveler.pedal".to_string(),
+                        description:
+                            "Opto Leveler (T4B, single 12AX7): attack/release timing via tone burst"
+                                .to_string(),
+                        signals: vec![SignalConfig::ToneBurst {
+                            frequency: 1000.0,
+                            amplitude_dbvu: Some(-6.0),
+                            amplitude: 0.5,
+                            on_ms: 500.0,
+                            off_ms: 3000.0,
+                            repetitions: 1,
+                            label: Some("tone_burst".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER: tighten when kyem.1 lands with honest thresholds.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(100.0),
+                    },
+                );
+
                 tests
             },
         },

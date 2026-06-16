@@ -43,18 +43,18 @@
 .func rldr(L) = exp(14.9141 - 8.6995*pwr(min(max(L,1e-9),1),0.65))
 
 * --- audio path: C_in -> R_gr(100k) series ; PC1(T4B) + R_g1(1M) shunt at grid ---
-C_in in nci 100n
+C_in v_in nci 100n
 R_gr nci ndiv 100k
 R_gl ndiv 0 1meg                 $ R_g1 grid leak
 B_pc ndiv 0 I = V(ndiv)/V(nrldr) $ PC1 CdS cell as voltage-controlled shunt R
 * makeup (V1 12AX7 -> Gain pot -> V2 12AX7 -> V3 12BH7 CF -> T_out 4:1), behavioral
 B_mk nmk 0 V = GMK*V(ndiv)
-C_out nmk out 10u                $ C_c3 CF output coupling
-R_load out 0 600                 $ 600R line termination
+C_out nmk v_out 10u              $ C_c3 CF output coupling
+R_load v_out 0 600               $ 600R line termination
 
 * --- T4B opto cell: EL-panel drive -> two-rate asymmetric envelope -> CdS R ---
 * LED drive (FEEDBACK): rectified output * sidechain/Peak-Reduction sens, clamp 0..1
-B_led nled 0 V = min(1, PRG*abs(V(out)))
+B_led nled 0 V = min(1, PRG*abs(V(v_out)))
 * fast component: rise 10ms / fall 40ms  (C=1F integrator, dV/dt=(target-V)/tau)
 B_fast 0 nfast I = (V(nled)-V(nfast)) / ((V(nled)>V(nfast)) ? 10m : 40m)
 C_fast nfast 0 1 ic=0
@@ -65,14 +65,9 @@ C_slow nslow 0 1 ic=0
 B_light nlight 0 V = 0.5*V(nfast) + 0.5*V(nslow)
 B_rldr nrldr 0 V = rldr(V(nlight))
 
-* --- standalone inspection stimulus (harness replaces this) ---
-Vin in 0 SINE(0 0.1 1k)
+* --- standalone Vin + .control stripped; harness injects at v_in, reads V(v_out) ---
+* NOTE: la2a has slow T4B opto tau (500ms) — needs >=1s settle before steady-state.
+* The harness LevelSweep + ToneBurst stimuli are sufficiently long; WDF comparison
+* is pending until the engine LA-2A opto cell is wired (kyem.1).
 .options DELMAX=50e-6
-.control
-tran 20u 1 uic
-meas tran outpp PP v(out) from=0.9 to=1
-meas tran inpp  PP v(in)  from=0.9 to=1
-let g = outpp/inpp
-print g
-.endc
 .end
