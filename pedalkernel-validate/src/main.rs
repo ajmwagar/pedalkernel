@@ -1364,6 +1364,12 @@ fn build_live_processor(
         .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
     let options = pedalkernel::compiler::CompileOptions {
         oversampling: pedalkernel::oversampling::OversamplingFactor::X1,
+        // Offline one-shot measurement: skip the (expensive) K-method table
+        // generation and solve NL roots with direct Newton-Raphson at runtime.
+        // We are not real-time here, so the per-sample NR cost is fine and we
+        // avoid rebuilding K-tables for every compile (this loop recompiles per
+        // level), which dominated the dynamics run time.
+        skip_k_tables: true,
         ..pedalkernel::compiler::CompileOptions::default()
     };
     let mut pedal =
@@ -1455,6 +1461,13 @@ fn add_live_dynamics(
     const FREQ_HZ: f64 = 1000.0;
     const ON_MS: f64 = 500.0;
     const OFF_MS: f64 = 2000.0;
+    // Live dynamics are measured at a low base rate, NOT the oversampled
+    // accuracy rate: a 1 kHz tone's envelope / steady-state gain is sample-rate
+    // independent, so 48 kHz gives the same curves at ~8x less work than the
+    // 384 kHz `effective_sr`. (The fet_leveler GOLDEN path still uses its own
+    // committed rate.)
+    const LIVE_SR: f64 = 48_000.0;
+    let _ = effective_sr;
     let suite = "compressor";
 
     for lc in LIVE_CIRCUITS {
@@ -1487,7 +1500,7 @@ fn add_live_dynamics(
         let circuit_disp = format!("pedalkernel/{}", lc.pedal_rel);
 
         // --- LIVE static gain curve ---
-        let static_curve = match live_static_curve(&src, effective_sr, lc.controls, FREQ_HZ) {
+        let static_curve = match live_static_curve(&src, LIVE_SR, lc.controls, FREQ_HZ) {
             Ok(c) if c.len() >= 2 => Some(c),
             Ok(_) => {
                 println!("  {} {} — static curve too short, skipping", "⚠".yellow(), circuit_key);
@@ -1501,7 +1514,7 @@ fn add_live_dynamics(
 
         // --- LIVE tone burst ---
         let tone_burst =
-            match live_tone_burst(&src, effective_sr, lc.controls, FREQ_HZ, ON_MS, OFF_MS) {
+            match live_tone_burst(&src, LIVE_SR, lc.controls, FREQ_HZ, ON_MS, OFF_MS) {
                 Ok((a, r, t, gr)) if !t.is_empty() => Some((a, r, t, gr)),
                 Ok(_) => {
                     println!("  {} {} — tone burst empty, skipping", "⚠".yellow(), circuit_key);
