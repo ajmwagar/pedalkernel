@@ -173,10 +173,8 @@ Wrapper/UI gaps:
 
 ## Next Validation Step
 
-Ngspice was not available in this environment, so the SPICE decks have not yet
-produced committed `.npy` goldens.
-
-Once ngspice is installed, use the isolated product-candidate config:
+Ngspice is now available in this environment and product goldens have been
+generated from the SPICE decks:
 
 ```sh
 cargo run -p pedalkernel-validate -- \
@@ -187,10 +185,64 @@ cargo run -p pedalkernel-validate -- \
   generate-spice --suite product --spice-dir pedalkernel-validate/spice-circuits
 ```
 
-The product suite is intentionally in a separate config for now. Adding it to
-the default validation matrix before goldens exist would add missing-reference
-noise. The next clean step is to generate ngspice and WDF goldens from this
-config, then promote the suite/profile into the main matrix.
+Result: `Generated: 6 | Skipped: 0 | Failed: 0`.
+
+The American SPICE deck required two SPICE-reference hygiene fixes before it
+would generate:
+
+- `R_tube_ref` gives the tube coupling node a DC return before the behavioural
+  record driver.
+- `Bdrv` is now rail-limited and has a 20 ms startup ramp. The product profile
+  trims the first 20 ms, so this avoids ngspice/J-A startup failure without
+  entering the compared window.
+
+WDF goldens were then bootstrapped:
+
+```sh
+cargo run -p pedalkernel-validate -- \
+  --config pedalkernel-validate/config/product_tape_candidates.yaml \
+  --skip-k-tables \
+  --circuits pedalkernel-validate/circuits \
+  --golden pedalkernel-validate/golden \
+  bootstrap --suite product
+```
+
+Result: six WDF goldens written under
+`pedalkernel-validate/golden/product/*/wdf/`.
+
+Golden-to-golden comparison:
+
+```sh
+cargo run -p pedalkernel-validate -- \
+  --config pedalkernel-validate/config/product_tape_candidates.yaml \
+  --skip-k-tables \
+  --circuits pedalkernel-validate/circuits \
+  --golden pedalkernel-validate/golden \
+  compare-goldens --suite product
+```
+
+Result: `1/2 passed`.
+
+| Core | clean | driven | line_1k | Verdict |
+| --- | --- | --- | --- | --- |
+| Swiss Tape Channel | RMS -15.1 dB, spectral 4.6 dB, THD 0.09 dB | RMS -25.8 dB, spectral 4.4 dB, THD 0.69 dB | RMS -10.0 dB, spectral 4.7 dB, THD 0.06 dB | PASS |
+| American Tube Tape Channel | RMS -0.0 dB, spectral 78.8 dB, THD 6.22 dB | RMS -0.4 dB, spectral 72.3 dB, THD 4.84 dB | RMS 0.0 dB, spectral 82.1 dB, THD 14.97 dB | FAIL |
+
+Additional diagnosis:
+
+- Swiss is now a real near-product validation candidate: generated ngspice
+  references, WDF references, and product-profile comparison all pass.
+- American is not validated. After trim, ngspice is 22-33 dB hotter than WDF
+  in direct waveform analysis, and correlation is poor. A temporary gain=1
+  SPICE-driver experiment still failed spectral/THD comparison, so this is not
+  only a nominal record-driver gain error.
+- The likely root is the known current tube/topology equivalence limit: the WDF
+  single-port tube path is not a tight match for a cap-coupled three-terminal
+  Koren common-cathode SPICE stage feeding another nonlinear element.
+
+The product suite should remain isolated from the default validation matrix
+until the American mode is either reworked, moved behind a looser exploratory
+profile, or replaced by a more engine-native second mode.
 
 ## Deferred Audio-Path Detail Pass
 

@@ -14,6 +14,7 @@
 * ============================================================================
 
 .param DRIVE_GAIN=23.8
+.param DRIVE_START=20m
 .param BIAS_R=6.5k
 .param TONE_R=150k
 .param OUT_GAIN=0.75
@@ -29,9 +30,10 @@ X1 n_plate n_grid n_cath TRIODE_12AX7
 R_cath n_cath 0 1.5k
 C_cath n_cath 0 25u
 C_tube_out n_plate n_tube_ac 22n
+R_tube_ref n_tube_ac 0 1Meg
 
 * Active record-driver equivalent.
-Bdrv n_drv 0 V = -DRIVE_GAIN * V(n_tube_ac)
+Bdrv n_drv 0 V = 15 * tanh((-DRIVE_GAIN * V(n_tube_ac)) / 15) * (1 - exp(-time/DRIVE_START))
 C_drv      n_drv   n_cdrv  47u
 R_buildout n_cdrv  n_head  470
 
