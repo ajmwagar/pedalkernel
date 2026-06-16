@@ -1495,6 +1495,13 @@ fn add_cached_dynamics(
     let suite = "compressor";
 
     for lc in LIVE_CIRCUITS {
+        // If the golden-loop already built this circuit (i.e. both its ngspice
+        // AND WDF goldens are committed), keep that entry — it has the WDF-vs-
+        // ngspice overlay. The WDF-only cache is only a fallback for circuits
+        // whose committed WDF golden is still missing.
+        if circuits.contains_key(&format!("{}/{}", suite, lc.test)) {
+            continue;
+        }
         let golden = dir.join(lc.test).join("level_sweep.npy");
         if !golden.exists() {
             println!(
