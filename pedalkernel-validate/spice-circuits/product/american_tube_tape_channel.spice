@@ -8,13 +8,13 @@
 *
 * Defaults:
 *   Drive=0.35 audio taper -> Rdrive ~= 13.8k, gain ~= -(10k+13.8k)/1k = -23.8
-*   Bias=0.55 -> +0.10 V DC offset through 1M
+*   Bias=0.55 -> 6.5k head-loading trim including 1k floor
 *   Tone=0.60 -> 150k shunt
 *   Output=0.75 -> 0.75x output pickoff
 * ============================================================================
 
 .param DRIVE_GAIN=23.8
-.param BIAS_V=0.10
+.param BIAS_R=6.5k
 .param TONE_R=150k
 .param OUT_GAIN=0.75
 
@@ -35,9 +35,9 @@ Bdrv n_drv 0 V = -DRIVE_GAIN * V(n_tube_ac)
 C_drv      n_drv   n_cdrv  47u
 R_buildout n_cdrv  n_head  470
 
-* Small panel-bias injection into the head node.
-Vbias n_bias 0 DC {BIAS_V}
-Rbias n_bias n_head 1Meg
+* Engine-native panel-bias proxy: variable head-loading trim.
+Rbias      n_head n_bias_load {BIAS_R}
+Rbiasfloor n_bias_load 0      1k
 
 * Head load + playback tilt.
 R_head_load n_head 0    2.2k

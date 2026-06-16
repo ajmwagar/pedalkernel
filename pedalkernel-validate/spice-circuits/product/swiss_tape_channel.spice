@@ -4,17 +4,17 @@
 * Mirrors circuits/product/swiss_tape_channel.pedal at its default operating
 * point. The op-amp stages are reduced to their closed-loop transfer so this
 * deck focuses on the validated voltage-driven Jiles-Atherton tape-head shunt,
-* bias injection, playback tilt, and output trim.
+* engine-native bias/loading trim, playback tilt, and output trim.
 *
 * Defaults:
 *   Drive=0.35 audio taper -> Rdrive ~= 6.88k, gain ~= -(10k+6.88k)/10k = -1.69
-*   Bias=0.50 -> 0 V DC offset through 1M
+*   Bias=0.50 -> 6k head-loading trim including 1k floor
 *   Tone=0.60 -> 60k shunt
 *   Output=0.70 -> 0.70x output pickoff
 * ============================================================================
 
 .param DRIVE_GAIN=1.688
-.param BIAS_V=0.0
+.param BIAS_R=6k
 .param TONE_R=60k
 .param OUT_GAIN=0.70
 
@@ -27,9 +27,9 @@ Bdrv   n_drv  0      V = -DRIVE_GAIN * V(n_in)
 C_drv      n_drv   n_cdrv  10u
 R_buildout n_cdrv  n_head  470
 
-* Small panel-bias injection into the head node.
-Vbias n_bias 0 DC {BIAS_V}
-Rbias n_bias n_head 1Meg
+* Engine-native panel-bias proxy: variable head-loading trim.
+Rbias      n_head n_bias_load {BIAS_R}
+Rbiasfloor n_bias_load 0      1k
 
 * Head load + playback tilt.
 R_head_load n_head 0    2.2k

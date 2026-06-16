@@ -12,15 +12,13 @@
 # Scope:
 #   This is not a literal B77 clone. It is an engine-safe, product-facing core:
 #   clean solid-state drive, voltage-driven Jiles-Atherton tape-head shunt,
-#   bias-offset injection, simple playback HF tilt, and output trim.
+#   engine-native bias/loading trim, simple playback HF tilt, and output trim.
 #   It avoids transport, bias oscillator, multi-head delay, and switch matrices.
 
 pedal "Swiss Tape Channel" subtitle "Swiss solid-state tape color path" {
   supplies {
     V+: 15V
     V-: -15V
-    BP: 1V
-    BN: -1V
   }
 
   components {
@@ -43,10 +41,10 @@ pedal "Swiss Tape Channel" subtitle "Swiss solid-state tape color path" {
     TH_tape: tape_head()
     R_head_load: resistor(2.2k)
 
-    # Panel Bias: small DC field/offset injection into the head node. This is
-    # product-facing "calibration bias", not an RF AC-bias oscillator.
-    Bias: pot(100k)
-    R_bias: resistor(1M)
+    # Panel Bias: engine-native record-bias proxy. This is a calibrated
+    # head-loading trim, not an RF AC-bias oscillator or true DC field source.
+    Bias: pot(10k)
+    R_bias_floor: resistor(1k)
 
     # Playback voicing: compact HF loss/tilt after the head.
     R_pb: resistor(3.3k)
@@ -74,13 +72,12 @@ pedal "Swiss Tape Channel" subtitle "Swiss solid-state tape color path" {
 
     U1.out -> C_drv.a
     C_drv.b -> R_buildout.a
-    R_buildout.b -> TH_tape.a, R_head_load.a, R_pb.a, R_bias.a
+    R_buildout.b -> TH_tape.a, R_head_load.a, R_pb.a, Bias.a
     TH_tape.b -> gnd
     R_head_load.b -> gnd
 
-    BP -> Bias.a
-    BN -> Bias.b
-    Bias.w -> R_bias.b
+    Bias.b -> R_bias_floor.a
+    R_bias_floor.b -> gnd
 
     R_pb.b -> C_loss.a, Tone.a, C_out.a
     C_loss.b -> gnd
