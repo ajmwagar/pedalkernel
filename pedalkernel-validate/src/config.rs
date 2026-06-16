@@ -385,10 +385,17 @@ pub struct PassCriteria {
     pub peak_error_db: Option<f64>,
     /// Maximum THD difference in dB (e.g., 1.0)
     pub thd_error_db: Option<f64>,
+    /// Maximum THD+N difference in dB (includes broadband noise/intermod)
+    #[serde(default)]
+    pub thd_plus_n_error_db: Option<f64>,
+    /// Maximum per-harmonic magnitude error in dB (gated at −100 dBFS)
+    #[serde(default)]
+    pub harmonic_mag_error_db: Option<f64>,
+    /// Maximum even/odd ratio error in dB
+    #[serde(default)]
+    pub even_odd_ratio_error_db: Option<f64>,
     /// Maximum spectral error in dB (e.g., 3.0)
     pub spectral_error_db: Option<f64>,
-    /// Even harmonic suppression threshold in dB (e.g., 40.0 means even < -40dB relative to odd)
-    pub even_harmonic_suppression_db: Option<f64>,
     /// Maximum DC drift in mV
     pub max_dc_drift_mv: Option<f64>,
     /// Maximum magnitude error for transfer function in dB
