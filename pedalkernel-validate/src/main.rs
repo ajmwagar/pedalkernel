@@ -170,6 +170,10 @@ enum Commands {
         /// ISO-8601 timestamp string written into the JSON (e.g. from CI).
         #[arg(long)]
         timestamp: Option<String>,
+        /// Re-run the engine and rewrite the cached WDF dynamics goldens before
+        /// building the JSON. Costly; omit to just segment the committed goldens.
+        #[arg(long)]
+        regen: bool,
     },
 
     /// Import an externally exported LTspice/CSV trace as a golden .npy file
@@ -272,8 +276,8 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::CheckSpice) => {
             check_spice()?;
         }
-        Some(Commands::Dynamics { timestamp }) => {
-            generate_dynamics(&cli, timestamp.clone())?;
+        Some(Commands::Dynamics { timestamp, regen }) => {
+            generate_dynamics(&cli, timestamp.clone(), *regen)?;
         }
         Some(Commands::ImportCsvGolden {
             csv,
@@ -1388,206 +1392,179 @@ fn build_live_processor(
 /// run through a FRESH processor (so the previous level's envelope state cannot
 /// bleed in) with a generous SETTLE before measuring the steady RMS over the
 /// last WINDOW. Returns `(input_dbvu, output_dbvu)` points.
-fn live_static_curve(
-    src: &str,
-    sample_rate: f64,
-    controls: &[(&str, f64)],
-    freq_hz: f64,
-) -> anyhow::Result<Vec<(f64, f64)>> {
-    use pedalkernel_validate::signals::dbvu_to_peak;
-    // Slow opto/LA-2A ballistics release over 1-2 s: a short settle would
-    // measure mid-transition, so use a generous 4 s settle + 1 s window.
-    const SETTLE: f64 = 4.0;
-    const WINDOW: f64 = 1.0;
-    let total = SETTLE + WINDOW;
-    let n_total = (total * sample_rate).round() as usize;
-    let n_window = (WINDOW * sample_rate).round() as usize;
+// Shared dynamics-measurement parameters. The cached WDF golden is the per-level
+// settled MEASUREMENT WINDOW concatenated (settle is discarded), so segmentation
+// is just an even split + RMS — no settle region stored.
+const DYN_FREQ_HZ: f64 = 1000.0;
+// Slow opto/LA-2A ballistics release over 1-2 s, so settle generously per level.
+const DYN_SETTLE_S: f64 = 4.0;
+const DYN_WINDOW_S: f64 = 1.0;
+// Dynamics are measured at a low base rate, NOT the oversampled accuracy rate: a
+// 1 kHz tone's steady-state gain is sample-rate independent, so 48 kHz gives the
+// same curves at ~8x less work (and ~8x smaller cached goldens).
+const LIVE_SR: f64 = 48_000.0;
 
-    let mut curve = Vec::new();
-    let mut level = -40.0_f64;
-    while level <= 0.0 + 1e-9 {
-        let amp = dbvu_to_peak(level);
-        let mut proc = build_live_processor(src, sample_rate, controls)?;
-        let mut out = Vec::with_capacity(n_total);
-        for i in 0..n_total {
-            let t = i as f64 / sample_rate;
-            let x = amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin();
-            out.push(proc(x));
-        }
-        let meas = &out[n_total.saturating_sub(n_window)..];
-        let out_dbvu = rms_to_dbvu(pedalkernel::analysis::rms(meas));
-        curve.push((level, out_dbvu));
-        level += 5.0;
-    }
-    Ok(curve)
+/// Input levels for the static sweep: -40..=0 dBVU in 5 dB steps.
+fn dyn_levels() -> Vec<f64> {
+    (-40..=0).step_by(5).map(|l| l as f64).collect()
 }
 
-/// LIVE tone burst: a 1 kHz, -6 dBVU burst (on `on_ms`, off `off_ms`) through a
-/// fresh processor, then the SAME measurement logic as `tone_burst_from_golden`.
-fn live_tone_burst(
-    src: &str,
-    sample_rate: f64,
-    controls: &[(&str, f64)],
-    freq_hz: f64,
-    on_ms: f64,
-    off_ms: f64,
-) -> anyhow::Result<(f64, f64, Vec<f64>, Vec<f64>)> {
-    use pedalkernel_validate::signals::dbvu_to_peak;
-    let amp = dbvu_to_peak(-6.0);
-    let on_n = ((on_ms / 1000.0) * sample_rate).round() as usize;
-    let off_n = ((off_ms / 1000.0) * sample_rate).round() as usize;
-    let mut proc = build_live_processor(src, sample_rate, controls)?;
-    let mut out = Vec::with_capacity(on_n + off_n);
-    // ON segment: live tone.
-    for i in 0..on_n {
-        let t = i as f64 / sample_rate;
-        let x = amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin();
-        out.push(proc(x));
+/// Directory for cached WDF dynamics goldens (engine snapshots; refresh with
+/// `dynamics --regen`). Kept SEPARATE from the ngspice accuracy goldens so the
+/// WDF-bootstrapped display snapshots are never confused with validation goldens.
+fn dynamics_wdf_dir(cli: &Cli) -> std::path::PathBuf {
+    cli.golden
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("dynamics-goldens")
+        .join("compressor")
+}
+
+/// (Costly) regenerate the cached WDF level-sweep goldens for the live
+/// compressors. Runs the engine once per circuit at the low dynamics rate and
+/// persists the per-level settled measurement windows, concatenated, as one
+/// `.npy`. Default `dynamics` then just segments these — no compile/run.
+fn regen_dynamics_goldens(cli: &Cli) -> anyhow::Result<()> {
+    use pedalkernel_validate::{npy, signals::dbvu_to_peak};
+    let dir = dynamics_wdf_dir(cli);
+    let levels = dyn_levels();
+    let n_settle = (DYN_SETTLE_S * LIVE_SR).round() as usize;
+    let n_window = (DYN_WINDOW_S * LIVE_SR).round() as usize;
+    println!(
+        "{} Regenerating WDF dynamics goldens (live engine run, {} Hz)...",
+        "▶".blue(),
+        LIVE_SR as u32
+    );
+    for lc in LIVE_CIRCUITS {
+        let Some(path) = resolve_pedal_path(lc.pedal_rel) else {
+            println!("  {} {} — pedal not found, skipping", "⚠".yellow(), lc.test);
+            continue;
+        };
+        let src = std::fs::read_to_string(&path)?;
+        let mut sweep = Vec::with_capacity(levels.len() * n_window);
+        for &level in &levels {
+            let amp = dbvu_to_peak(level);
+            let mut proc = build_live_processor(&src, LIVE_SR, lc.controls)?;
+            // Settle (discard), then capture the measurement window.
+            for i in 0..n_settle {
+                let t = i as f64 / LIVE_SR;
+                proc(amp * (2.0 * std::f64::consts::PI * DYN_FREQ_HZ * t).sin());
+            }
+            for i in 0..n_window {
+                let t = (n_settle + i) as f64 / LIVE_SR;
+                sweep.push(proc(amp * (2.0 * std::f64::consts::PI * DYN_FREQ_HZ * t).sin()));
+            }
+        }
+        let out = dir.join(lc.test).join("level_sweep.npy");
+        if let Some(p) = out.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        npy::write_f64(&out, &sweep)?;
+        println!(
+            "  {} {} → {} ({} samples)",
+            "✓".green(),
+            lc.test,
+            out.display(),
+            sweep.len()
+        );
     }
-    // OFF segment: silence (the release tail).
-    for _ in 0..off_n {
-        out.push(proc(0.0));
-    }
-    Ok(tone_burst_from_golden(&out, on_ms, off_ms, sample_rate))
+    Ok(())
 }
 
 /// Measure all `LIVE_CIRCUITS` through the engine and insert WDF-only entries.
-fn add_live_dynamics(
+/// Build dynamics entries for the live compressors by SEGMENTING their cached
+/// WDF goldens (written by `dynamics --regen`). No engine run — cheap. Tone-burst
+/// is currently deferred, so only the static curve is produced here.
+fn add_cached_dynamics(
     cli: &Cli,
     circuits: &mut std::collections::BTreeMap<String, DynamicsCircuit>,
-    effective_sr: f64,
 ) {
-    use pedalkernel::analysis::{compression_ratio, gain_reduction_db};
-    const FREQ_HZ: f64 = 1000.0;
-    const ON_MS: f64 = 500.0;
-    const OFF_MS: f64 = 2000.0;
-    // Live dynamics are measured at a low base rate, NOT the oversampled
-    // accuracy rate: a 1 kHz tone's envelope / steady-state gain is sample-rate
-    // independent, so 48 kHz gives the same curves at ~8x less work than the
-    // 384 kHz `effective_sr`. (The fet_leveler GOLDEN path still uses its own
-    // committed rate.)
-    const LIVE_SR: f64 = 48_000.0;
-    let _ = effective_sr;
+    use pedalkernel::analysis::{compression_ratio, gain_reduction_db, rms};
+    use pedalkernel_validate::npy;
+    let dir = dynamics_wdf_dir(cli);
+    let levels = dyn_levels();
+    let n = levels.len();
     let suite = "compressor";
 
     for lc in LIVE_CIRCUITS {
-        let Some(path) = resolve_pedal_path(lc.pedal_rel) else {
+        let golden = dir.join(lc.test).join("level_sweep.npy");
+        if !golden.exists() {
             println!(
-                "  {} {}/{} — pedal not found ({}), skipping live",
+                "  {} {}/{} — cached WDF golden missing ({}); run `dynamics --regen`",
                 "⚠".yellow(),
                 suite,
                 lc.test,
-                lc.pedal_rel
+                golden.display()
             );
             continue;
-        };
-        let src = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
+        }
+        let wdf = match npy::read_f64(&golden) {
+            Ok(v) => v,
             Err(e) => {
-                println!(
-                    "  {} {}/{} — read error: {}, skipping",
-                    "⚠".yellow(),
-                    suite,
-                    lc.test,
-                    e
-                );
+                println!("  {} {}/{} — read error: {}", "⚠".yellow(), suite, lc.test, e);
                 continue;
             }
         };
+        if wdf.len() < n {
+            println!("  {} {}/{} — cached golden too short", "⚠".yellow(), suite, lc.test);
+            continue;
+        }
 
-        let circuit_key = format!("{}/{}", suite, lc.test);
-        // The circuit path for display (repo-relative under pedalkernel/).
+        // The golden is n per-level settled windows, concatenated → split evenly.
+        let seg = wdf.len() / n;
+        let mut curve = Vec::with_capacity(n);
+        for (k, &level) in levels.iter().enumerate() {
+            let s = &wdf[k * seg..((k + 1) * seg).min(wdf.len())];
+            curve.push((level, rms_to_dbvu(rms(s))));
+        }
+
+        let lo = curve.first().unwrap().0;
+        let hi = curve.last().unwrap().0;
+        let wdf_ratio = compression_ratio(&curve, lo, hi);
+        let wdf_gr_total = gain_reduction_db(&curve, lo, hi);
         let circuit_disp = format!("pedalkernel/{}", lc.pedal_rel);
-
-        // --- LIVE static gain curve ---
-        let static_curve = match live_static_curve(&src, LIVE_SR, lc.controls, FREQ_HZ) {
-            Ok(c) if c.len() >= 2 => Some(c),
-            Ok(_) => {
-                println!("  {} {} — static curve too short, skipping", "⚠".yellow(), circuit_key);
-                None
-            }
-            Err(e) => {
-                println!("  {} {} — static curve error: {}", "⚠".yellow(), circuit_key, e);
-                None
-            }
-        };
-
-        // --- LIVE tone burst ---
-        let tone_burst =
-            match live_tone_burst(&src, LIVE_SR, lc.controls, FREQ_HZ, ON_MS, OFF_MS) {
-                Ok((a, r, t, gr)) if !t.is_empty() => Some((a, r, t, gr)),
-                Ok(_) => {
-                    println!("  {} {} — tone burst empty, skipping", "⚠".yellow(), circuit_key);
-                    None
-                }
-                Err(e) => {
-                    println!("  {} {} — tone burst error: {}", "⚠".yellow(), circuit_key, e);
-                    None
-                }
-            };
-
-        let entry = circuits.entry(circuit_key.clone()).or_insert_with(|| DynamicsCircuit {
-            suite: suite.to_string(),
-            test: lc.test.to_string(),
-            circuit: circuit_disp.clone(),
-            frequency_hz: FREQ_HZ,
-            static_curve: None,
-            tone_burst: None,
+        let entry =
+            circuits
+                .entry(format!("{}/{}", suite, lc.test))
+                .or_insert_with(|| DynamicsCircuit {
+                    suite: suite.to_string(),
+                    test: lc.test.to_string(),
+                    circuit: circuit_disp,
+                    frequency_hz: DYN_FREQ_HZ,
+                    static_curve: None,
+                    tone_burst: None,
+                });
+        entry.static_curve = Some(StaticCurve {
+            input_levels_dbvu: curve.iter().map(|p| p.0).collect(),
+            wdf_output_dbvu: curve.iter().map(|p| p.1).collect(),
+            spice_output_dbvu: None,
+            wdf_gr_db: gr_series(&curve),
+            spice_gr_db: None,
+            wdf_ratio,
+            spice_ratio: None,
+            wdf_gr_total_db: wdf_gr_total,
+            spice_gr_total_db: None,
         });
-
-        if let Some(curve) = static_curve {
-            let lo = curve.first().unwrap().0;
-            let hi = curve.last().unwrap().0;
-            let wdf_ratio = compression_ratio(&curve, lo, hi);
-            let wdf_gr_total = gain_reduction_db(&curve, lo, hi);
-            entry.static_curve = Some(StaticCurve {
-                input_levels_dbvu: curve.iter().map(|p| p.0).collect(),
-                wdf_output_dbvu: curve.iter().map(|p| p.1).collect(),
-                spice_output_dbvu: None,
-                wdf_gr_db: gr_series(&curve),
-                spice_gr_db: None,
-                wdf_ratio,
-                spice_ratio: None,
-                wdf_gr_total_db: wdf_gr_total,
-                spice_gr_total_db: None,
-            });
-            println!(
-                "  {} {} [live level_sweep] WDF GR {:.2} dB / ratio {:.2}:1 (WDF-only)",
-                "✓".green(),
-                circuit_key,
-                wdf_gr_total,
-                wdf_ratio,
-            );
-        }
-
-        if let Some((a, r, t, gr)) = tone_burst {
-            entry.tone_burst = Some(ToneBurstDyn {
-                on_ms: ON_MS,
-                off_ms: OFF_MS,
-                time_ms: t,
-                wdf_gr_db: gr,
-                spice_gr_db: None,
-                wdf_attack_ms: a,
-                wdf_release_ms: r,
-                spice_attack_ms: None,
-                spice_release_ms: None,
-            });
-            println!(
-                "  {} {} [live tone_burst] WDF atk {:.1} ms / rel {:.1} ms (WDF-only)",
-                "✓".green(),
-                circuit_key,
-                a,
-                r,
-            );
-        }
+        println!(
+            "  {} {}/{} [cached level_sweep] WDF GR {:.2} dB / ratio {:.2}:1",
+            "✓".green(),
+            suite,
+            lc.test,
+            wdf_gr_total,
+            wdf_ratio,
+        );
     }
-    let _ = cli;
 }
 
-fn generate_dynamics(cli: &Cli, timestamp: Option<String>) -> anyhow::Result<()> {
+fn generate_dynamics(cli: &Cli, timestamp: Option<String>, regen: bool) -> anyhow::Result<()> {
     use pedalkernel_validate::npy;
 
     println!("{} Generating dynamics dashboard JSON...", "▶".blue());
+
+    // Refresh the cached WDF goldens only when asked (this is the costly part).
+    if regen {
+        regen_dynamics_goldens(cli)?;
+    }
 
     let validation_config = if cli.config.exists() {
         ValidationConfig::load(&cli.config)?
@@ -1778,10 +1755,10 @@ fn generate_dynamics(cli: &Cli, timestamp: Option<String>) -> anyhow::Result<()>
     // LIVE_CIRCUITS that lack a golden entry). fet_leveler is intentionally
     // skipped here — it is measured from its committed WDF + ngspice goldens.
     println!(
-        "{} Measuring WDF-only compressors live through the engine...",
+        "{} Segmenting cached WDF dynamics goldens (use --regen to refresh)...",
         "▶".blue()
     );
-    add_live_dynamics(cli, &mut circuits, effective_sr);
+    add_cached_dynamics(cli, &mut circuits);
 
     let git_commit = std::env::var("GIT_COMMIT").ok().filter(|s| !s.is_empty());
     let run_timestamp = timestamp.unwrap_or_else(|| {
