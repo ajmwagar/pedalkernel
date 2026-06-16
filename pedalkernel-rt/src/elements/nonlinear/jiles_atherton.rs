@@ -58,6 +58,33 @@ impl CoreMaterial {
         }
     }
 
+    /// Nearest material for a measured saturation magnetization `ms` (A/m).
+    ///
+    /// A model file carries `MS` as a concrete number; this maps it to the
+    /// closest catalogued soft-magnetic class (by `|log10(ms/ms_class)|`) so the
+    /// derived hysteresis-loop SHAPE defaults (`alpha`, `k`, `c`) come from a
+    /// physically-appropriate family. The class's own `ms()` is then used for
+    /// the knee derivation, keeping the catalogue self-consistent.
+    pub fn from_ms(ms: Wave) -> CoreMaterial {
+        if !(ms.is_finite() && ms > 0.0) {
+            return CoreMaterial::SiliconSteel;
+        }
+        let mut best = CoreMaterial::SiliconSteel;
+        let mut best_d = Wave::INFINITY;
+        for cand in [
+            CoreMaterial::SiliconSteel,
+            CoreMaterial::NickelIron,
+            CoreMaterial::Ferrite,
+        ] {
+            let d = math::abs(math::ln(ms / cand.ms()));
+            if d < best_d {
+                best_d = d;
+                best = cand;
+            }
+        }
+        best
+    }
+
     /// Default `(alpha, k, c)` hysteresis-loop parameters for the material.
     ///
     /// These are reasonable soft-magnetic values that set the loop SHAPE
@@ -862,6 +889,20 @@ mod tests {
     use alloc::vec::Vec;
 
     const PI: Wave = core::f64::consts::PI;
+
+    #[test]
+    fn from_ms_picks_nearest_material_class() {
+        // Exact catalogue values map to their own class.
+        assert_eq!(CoreMaterial::from_ms(1.6e6), CoreMaterial::SiliconSteel);
+        assert_eq!(CoreMaterial::from_ms(6.0e5), CoreMaterial::NickelIron);
+        assert_eq!(CoreMaterial::from_ms(3.5e5), CoreMaterial::Ferrite);
+        // Off values pick the nearest (log-distance) class.
+        assert_eq!(CoreMaterial::from_ms(1.4e6), CoreMaterial::SiliconSteel);
+        assert_eq!(CoreMaterial::from_ms(5.0e5), CoreMaterial::NickelIron);
+        // Non-physical input falls back to the default (silicon steel).
+        assert_eq!(CoreMaterial::from_ms(0.0), CoreMaterial::SiliconSteel);
+        assert_eq!(CoreMaterial::from_ms(-1.0), CoreMaterial::SiliconSteel);
+    }
 
     fn drive_sine(
         root: &mut JaMagnetizingRoot,

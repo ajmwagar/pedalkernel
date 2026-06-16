@@ -166,9 +166,10 @@ fn cf_into_transformer_passes_signal() {
 
 // ── Transformer-core policy gate (task #3) ─────────────────────────────────
 
-/// DC-biased single-ended output transformer carrying explicit JA core data
-/// (the OT-DEMO-SE model: IDC=45m, A=1100, full geometry). Under the default
-/// `Derived` policy this core is excited past its knee and runs the JA root.
+/// DC-biased single-ended output transformer carrying JA core data (the
+/// OT-DEMO-SE model: IDC=45m, full geometry → derived knee a≈1100). Under the
+/// default `Derived` policy this core is excited past its knee and runs the JA
+/// root.
 const SE_OT_PEDAL: &str = r#"
 pedal "SE OT" {
     supply 9V
@@ -240,7 +241,7 @@ fn force_policies_override_derived_decision() {
     );
 }
 
-/// Default `Derived` runs JA for the DC-biased SE OT (explicit knee a=1100,
+/// Default `Derived` runs JA for the DC-biased SE OT (derived knee a≈1100,
 /// h_peak≈1033 > a·(1-0.2)=880): Derived output matches ForceJa, not ForceLinear.
 #[test]
 fn derived_runs_ja_for_dc_biased_se_ot() {

@@ -301,9 +301,10 @@ const DEFAULT_CORE_AREA_M2: f64 = 2.0e-4;
 const DEFAULT_CORE_PATH_LEN_M: f64 = 0.10;
 
 /// True when a transformer config carries enough physical core data to ground a
-/// nonlinear-core decision: either explicit Jiles-Atherton parameters (a model
-/// that ships a measured/validated B-H loop, e.g. the OT-DEMO-SE) OR real core
-/// geometry (`core_area` + `core_path_length` + `core_primary_turns`).
+/// nonlinear-core decision: real core geometry (`core_area` +
+/// `core_path_length` + `core_primary_turns`), which — together with the
+/// material from `MS` — places the derived saturation knee at the part's rated
+/// level (see `models/transformers.model`).
 ///
 /// A bare `transformer(ratio, L)` declares NO core physics — only an ideal
 /// coupled-inductor model. Deriving a saturation knee for it from fallback
@@ -311,63 +312,50 @@ const DEFAULT_CORE_PATH_LEN_M: f64 = 0.10;
 /// gate treats such transformers as linear (see the architecture directive:
 /// components carry physics, the engine derives boundaries — no declared core
 /// physics ⇒ no saturation).
+///
+/// Geometry is authoritative because the knee is ALWAYS derived from `Lm` +
+/// geometry + material (never an explicit `a`); a model with a material (`MS`)
+/// but no geometry has no grounded knee scale and stays linear.
 pub fn transformer_has_core_physics(cfg: &TransformerConfig) -> bool {
-    let has_explicit_ja = cfg.ja_a.is_some_and(|a| a.is_finite() && a > 0.0)
-        && cfg.ja_ms.is_some_and(|m| m.is_finite() && m > 0.0);
-    let has_geometry = cfg.core_area.is_some_and(|a| a.is_finite() && a > 0.0)
+    cfg.core_area.is_some_and(|a| a.is_finite() && a > 0.0)
         && cfg
             .core_path_length
             .is_some_and(|p| p.is_finite() && p > 0.0)
         && cfg
             .core_primary_turns
-            .is_some_and(|n| n.is_finite() && n > 0.0);
-    has_explicit_ja || has_geometry
+            .is_some_and(|n| n.is_finite() && n > 0.0)
 }
 
 /// Build the Jiles-Atherton core model for a (resolved) transformer config.
 ///
-/// Two grounded sources, in priority order:
+/// # The load-bearing invariant
 ///
-/// 1. **Explicit JA parameters.** When the model ships a complete, validated
-///    B-H loop (`ja_ms`, `ja_a`, `ja_alpha`, `ja_k`, `ja_c` + geometry — e.g.
-///    the OT-DEMO-SE measured against ngspice), use those verbatim. Re-deriving
-///    `a` from `(geometry, Lm)` would silently discard the validated knee — and
-///    for a model whose stated `Lm` is geometrically inconsistent (needs a
-///    diamagnetic χ) the derivation degenerates to an enormous `a`, so the
-///    explicit path is also the numerically robust one.
-/// 2. **Derived from small-signal Lm.** Otherwise pick `a` via
-///    [`JaCoreModel::from_small_signal`] so the JA branch's small-signal tangent
-///    reproduces the linear magnetizing inductance the linear skeleton would
-///    stamp (byte-stability for non-saturating drive). Geometry uses the
-///    documented defaults above (matching `operating_point`'s fallbacks so the
-///    field estimate and the core agree); `lm` is the explicit
-///    `magnetizing_inductance`, else `primary_inductance · coupling`; material
-///    is silicon steel.
+/// The JA branch's small-signal tangent MUST equal today's linear magnetizing
+/// inductance `Lm`, so a circuit that never saturates produces byte-identical
+/// output whether the gate runs JA or the linear tangent. Therefore the shape
+/// parameter `a` (= the saturation knee field) is ALWAYS derived from `Lm` +
+/// geometry + material via [`JaCoreModel::from_small_signal`] — it is never
+/// hand-set, because an explicit `a` would override the `Lm`-derived
+/// inductance and break the invariant.
+///
+/// # What the model fields contribute
+///
+/// - **Material** comes from the model's saturation magnetization `MS`
+///   ([`CoreMaterial::from_ms`] picks the nearest soft-magnetic class). The
+///   class fixes `Ms` and the *default* loop-shape `(alpha, k, c)`.
+/// - **Geometry** (`N1`/`AE`/`LE`/`GAP`) sets the knee scale: with `Lm` fixed,
+///   the geometry/material determine where saturation onsets. A part's
+///   geometry is calibrated (see `models/transformers.model`) so the derived
+///   knee sits at its datasheet rated max level, above line-level stimulus.
+/// - **Explicit loop params** (`ALPHA`/`JA_K`/`JA_C`) are treated ONLY as
+///   hysteresis-SHAPE overrides on top of the material defaults — coercivity,
+///   remanence, reversibility. They never set the inductance-fixing `a`.
+///
+/// `lm` is the explicit `magnetizing_inductance`, else `primary_inductance ·
+/// coupling` (matching `stamp_linear_transformer_skeleton`). Geometry falls
+/// back to the documented defaults above (matching `operating_point`'s
+/// field-estimate fallbacks) when a model omits a dimension.
 pub fn ja_core_from_transformer_cfg(cfg: &TransformerConfig) -> JaCoreModel {
-    // ── 1. Explicit, validated JA parameters take priority ───────────────
-    if let (Some(ms), Some(a)) = (cfg.ja_ms, cfg.ja_a) {
-        if ms.is_finite() && ms > 0.0 && a.is_finite() && a > 0.0 {
-            let (def_alpha, def_k, def_c) = (1.6e-3, 50.0, 0.15);
-            let model = JaCoreModel {
-                ms: ms as pedalkernel_rt::Wave,
-                a: a as pedalkernel_rt::Wave,
-                alpha: cfg.ja_alpha.unwrap_or(def_alpha) as pedalkernel_rt::Wave,
-                k: cfg.ja_k.unwrap_or(def_k) as pedalkernel_rt::Wave,
-                c: cfg.ja_c.unwrap_or(def_c) as pedalkernel_rt::Wave,
-                n_turns: cfg.core_primary_turns.unwrap_or(DEFAULT_CORE_TURNS)
-                    as pedalkernel_rt::Wave,
-                area: cfg.core_area.unwrap_or(DEFAULT_CORE_AREA_M2) as pedalkernel_rt::Wave,
-                path_len: cfg.core_path_length.unwrap_or(DEFAULT_CORE_PATH_LEN_M)
-                    as pedalkernel_rt::Wave,
-                gap: cfg.core_gap.unwrap_or(0.0) as pedalkernel_rt::Wave,
-            };
-            if model.is_complete() {
-                return model;
-            }
-        }
-    }
-
-    // ── 2. Derive `a` from the target small-signal inductance ────────────
     let n_turns = cfg
         .core_primary_turns
         .filter(|n| n.is_finite() && *n > 0.0)
@@ -395,14 +383,41 @@ pub fn ja_core_from_transformer_cfg(cfg: &TransformerConfig) -> JaCoreModel {
             cfg.primary_inductance * k
         });
 
-    JaCoreModel::from_small_signal(
+    // Material from the model's saturation magnetization (loop-shape family);
+    // default silicon steel when no `MS` was declared.
+    let material = match cfg.ja_ms.filter(|m| m.is_finite() && *m > 0.0) {
+        Some(ms) => CoreMaterial::from_ms(ms as pedalkernel_rt::Wave),
+        None => CoreMaterial::SiliconSteel,
+    };
+
+    // ALWAYS derive `a` from Lm so the small-signal tangent == today's `Lm`.
+    let mut model = JaCoreModel::from_small_signal(
         lm as pedalkernel_rt::Wave,
         n_turns as pedalkernel_rt::Wave,
         area as pedalkernel_rt::Wave,
         path_len as pedalkernel_rt::Wave,
         gap as pedalkernel_rt::Wave,
-        CoreMaterial::SiliconSteel,
-    )
+        material,
+    );
+
+    // Explicit loop params are hysteresis-SHAPE overrides only — never `a`.
+    // (`ALPHA` also feeds `a`'s reversible-coefficient derivation, but here it
+    // post-overrides the *runtime* loop shape after `a` is fixed; we leave
+    // `from_small_signal`'s `a` untouched so the tangent stays pinned to `Lm`.)
+    if let Some(alpha) = cfg.ja_alpha.filter(|v| v.is_finite()) {
+        model.alpha = alpha as pedalkernel_rt::Wave;
+    }
+    if let Some(k) = cfg.ja_k.filter(|v| v.is_finite() && *v > 0.0) {
+        model.k = k as pedalkernel_rt::Wave;
+    }
+    if let Some(c) = cfg
+        .ja_c
+        .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+    {
+        model.c = c as pedalkernel_rt::Wave;
+    }
+
+    model
 }
 
 #[cfg(test)]
@@ -433,12 +448,15 @@ mod tests {
 
         assert_eq!(resolved.model.as_deref(), Some("OT-DEMO-SE"));
         assert!((resolved.core_primary_turns.unwrap() - 2000.0).abs() < 1e-12);
-        assert!((resolved.core_area.unwrap() - 2.0e-4).abs() < 1e-18);
+        // AE made self-consistent (4.364e-3) so the DERIVED knee = the validated
+        // a≈1100 without an explicit `A` field (which was removed from the model).
+        assert!((resolved.core_area.unwrap() - 4.364e-3).abs() < 1e-9);
         assert!((resolved.core_path_length.unwrap() - 0.10).abs() < 1e-12);
         assert!((resolved.core_gap.unwrap() - 1.0e-3).abs() < 1e-18);
         assert!((resolved.dc_bias_current.unwrap() - 45.0e-3).abs() < 1e-18);
         assert!((resolved.ja_ms.unwrap() - 1.6e6).abs() < 1e-6);
-        assert!((resolved.ja_a.unwrap() - 1100.0).abs() < 1e-12);
+        // No explicit `A` any more — the knee is derived from Lm + geometry.
+        assert!(resolved.ja_a.is_none());
         assert!((resolved.ja_alpha.unwrap() - 1.6e-3).abs() < 1e-18);
         assert!((resolved.ja_k.unwrap() - 400.0).abs() < 1e-12);
         assert!((resolved.ja_c.unwrap() - 0.2).abs() < 1e-12);
@@ -457,19 +475,19 @@ mod tests {
     }
 
     #[test]
-    fn modelled_se_ot_has_core_physics_and_uses_explicit_knee() {
+    fn modelled_se_ot_has_core_physics_and_derives_validated_knee() {
         let cfg = transformer_config_from_dsl(&TransformerConfig::with_model(
             26.0,
             "OT-DEMO-SE".to_string(),
         ));
         assert!(transformer_has_core_physics(&cfg));
-        // Explicit JA params take priority: the validated knee `a = 1100`, NOT a
-        // re-derivation from the (geometrically inconsistent) Lm = 9.97 H, which
-        // would degenerate `a` to ~1e10.
+        // The knee is DERIVED from Lm + geometry + material (no explicit `a`).
+        // AE was made self-consistent (4.364e-3) so the derived knee reproduces
+        // the validated a≈1100 — uniform with the rest of the library.
         let core = ja_core_from_transformer_cfg(&cfg);
         assert!(
-            (core.a as f64 - 1100.0).abs() < 1.0,
-            "explicit JA knee should be used verbatim, got a = {}",
+            (core.a as f64 - 1100.0).abs() < 2.0,
+            "derived JA knee should reproduce the validated ~1100, got a = {}",
             core.a
         );
         assert!((core.ms as f64 - 1.6e6).abs() < 1.0);
@@ -489,6 +507,87 @@ mod tests {
         let core = ja_core_from_transformer_cfg(&cfg);
         // A finite, physical knee (not the degenerate clamp).
         assert!(core.a.is_finite() && (core.a as f64) > 0.0 && (core.a as f64) < 1.0e7);
+    }
+
+    /// Peak core field `H = N·I/le_eff` for a primary swing `v_peak` at
+    /// `F_LOW = 20 Hz`, matching `operating_point::transformer_core_excitation`.
+    fn h_peak_for(cfg: &TransformerConfig, v_peak: f64) -> f64 {
+        let core = ja_core_from_transformer_cfg(cfg);
+        let n = core.n_turns as f64;
+        let le_eff = (core.path_len + core.gap) as f64;
+        let lm = cfg.magnetizing_inductance.unwrap_or(cfg.primary_inductance);
+        let i_mag = v_peak / (2.0 * std::f64::consts::PI * 20.0 * lm);
+        n * i_mag / le_eff
+    }
+
+    fn dbu_to_vpeak(dbu: f64) -> f64 {
+        0.774_596_669_241_483 * 10f64.powf(dbu / 20.0) * std::f64::consts::SQRT_2
+    }
+
+    /// A calibrated library transformer (a) stays LINEAR at line level and
+    /// (b) flips to JA when driven near its rated max @20Hz. This is the
+    /// permanent acceptance anchor for the per-part core-data calibration
+    /// (`models/transformers.model`): the derived knee `a` must sit ABOVE the
+    /// line-level field and AT/BELOW the rated-max field.
+    #[test]
+    fn calibrated_library_transformer_linear_at_line_ja_at_rated() {
+        // GENERIC_10K_10K: NickelIron, rated ~+20 dBu @20Hz, no DC bias.
+        let cfg = transformer_config_from_dsl(&TransformerConfig::with_model(
+            1.0,
+            "GENERIC_10K_10K".to_string(),
+        ));
+        assert!(transformer_has_core_physics(&cfg));
+        let knee = ja_core_from_transformer_cfg(&cfg).a as f64;
+
+        // Line level (+4 dBu): well inside the linear band (h < 0.8·knee).
+        let h_line = h_peak_for(&cfg, dbu_to_vpeak(4.0));
+        let band = 0.8 * knee;
+        assert!(
+            h_line < band,
+            "expected LINEAR at line level: h_line={h_line:.1} vs 0.8·knee={band:.1}"
+        );
+
+        // Rated max (+20 dBu): field reaches/exceeds the knee → JA territory.
+        let h_rated = h_peak_for(&cfg, dbu_to_vpeak(20.0));
+        assert!(
+            h_rated >= knee,
+            "expected JA at rated max: h_rated={h_rated:.1} vs knee={knee:.1}"
+        );
+    }
+
+    /// JT11P1 carries a Jensen [DATASHEET] rated level (+20 dBu @20Hz); its
+    /// derived small-signal tangent must still reproduce `Lm` (the load-bearing
+    /// invariant) — `from_small_signal` pins `a` so `χ_i` gives `Lm` to ~0.01%.
+    #[test]
+    fn calibrated_jt11p1_derived_tangent_matches_lm() {
+        let cfg =
+            transformer_config_from_dsl(&TransformerConfig::with_model(1.0, "JT11P1".to_string()));
+        let core = ja_core_from_transformer_cfg(&cfg);
+        // Reconstruct the small-signal inductance the JA tangent delivers and
+        // compare to the model's Lm (the invariant that keeps goldens stable).
+        let lm = cfg.magnetizing_inductance.unwrap();
+        let (n, ae, le, gap) = (
+            core.n_turns as f64,
+            core.area as f64,
+            core.path_len as f64,
+            core.gap as f64,
+        );
+        let mu0 = 1.256_637_061_435_917_3e-6;
+        let k0 = n * n * mu0 * ae;
+        let le_eff = le + gap;
+        // Runtime small-signal χ_i = r/(1−α·r), r = c·ms/(3a).
+        let r = (core.c as f64) * (core.ms as f64) / (3.0 * core.a as f64);
+        let chi = r / (1.0 - core.alpha as f64 * r);
+        let lm_tangent = if gap > 0.0 {
+            k0 * (1.0 + chi) / (le_eff + chi * gap)
+        } else {
+            k0 * (1.0 + chi) / le_eff
+        };
+        let rel = (lm_tangent - lm).abs() / lm;
+        assert!(
+            rel < 1.0e-3,
+            "derived JA tangent must reproduce Lm: lm_tangent={lm_tangent:.6} vs Lm={lm:.6} (rel={rel:.2e})"
+        );
     }
 }
 

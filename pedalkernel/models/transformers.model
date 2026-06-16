@@ -7,12 +7,42 @@
 #   N1/N2 = turns, AE = m^2, LE/GAP = m, MS/A/ALPHA/JA_K/C = Jiles-Atherton,
 #   HC/BR/BS = datasheet hysteresis hints.
 
-.TRANSFORMER GENERIC_600_600 LP=1 K=0.995 RP=50 RS=50 LLP=5m LLS=5m LM=995m RC=200k CP=50p N1=1 N2=1
-.TRANSFORMER GENERIC_10K_10K LP=10 K=0.995 RP=500 RS=500 LLP=50m LLS=50m LM=9.95 RC=1MEG CP=75p N1=1 N2=1
-.TRANSFORMER JT11P1 LP=2 K=0.99 RP=75 RS=75 LLP=20m LLS=20m LM=1.98 RC=500k CP=200p N1=1 N2=1
-.TRANSFORMER JT10KB-D LP=10 K=0.995 RP=600 RS=150 LLP=50m LLS=12.5m LM=9.95 RC=1MEG CP=100p N1=2 N2=1
-.TRANSFORMER A262A2E LP=30 K=0.998 RP=1200 RS=300 LLP=60m LLS=15m LM=29.94 RC=2MEG CP=120p N1=2 N2=1
+# Core data (MS + N1/AE/LE) calibrated so the DERIVED saturation knee
+# (`JaCoreModel::from_small_signal`, which fixes `a` from LM so the linear
+# tangent stays == LM) sits at the part's rated max level @20Hz, ABOVE
+# line-level stimulus → LINEAR at line, JA when driven near rated. The knee is
+# never hand-set; geometry + material (from MS) place it. See the per-model
+# notes for the rated level and its [DATASHEET]/[ASSUMED] provenance.
+#
+# GENERIC_600_600: representative 600:600 line transformer. NickelIron (line/mic
+#   cores). Rated ~+20 dBu @20Hz [ASSUMED, line-transformer class]. Derived knee
+#   a≈656 A/m; h_peak ≈278 at +4 dBu (linear), ≈1750 at +20 dBu (JA).
+.TRANSFORMER GENERIC_600_600 LP=1 K=0.995 RP=50 RS=50 LLP=5m LLS=5m LM=995m RC=200k CP=50p N1=1200 N2=1200 AE=5e-4 LE=0.06 MS=6e5
+# GENERIC_10K_10K: representative 10k:10k bridging/interstage. NickelIron. Rated
+#   ~+20 dBu @20Hz [ASSUMED]. Derived knee a≈149; h_peak ≈42 (+4 dBu, linear),
+#   ≈263 (+20 dBu, JA).
+.TRANSFORMER GENERIC_10K_10K LP=10 K=0.995 RP=500 RS=500 LLP=50m LLS=50m LM=9.95 RC=1MEG CP=75p N1=2400 N2=2400 AE=3e-4 LE=0.08 MS=6e5
+# JT11P1: Jensen JT-11P-1, 1:1 line input. NickelIron (Jensen uses 80% Ni-Fe
+#   cores). Rated +20 dBu @20Hz [DATASHEET, jensen-transformers.com]. Derived
+#   knee a≈332; h_peak ≈163 (+4 dBu, linear), ≈1027 (+20 dBu, JA).
+.TRANSFORMER JT11P1 LP=2 K=0.99 RP=75 RS=75 LLP=20m LLS=20m LM=1.98 RC=500k CP=200p N1=1400 N2=1400 AE=3.5e-4 LE=0.06 MS=6e5
+# JT10KB-D: Jensen JT-10KB-D, 4:1 stepdown line input. NickelIron. Rated
+#   +21 dBu @20Hz [DATASHEET, jensen-transformers.com]. Derived knee a≈149;
+#   h_peak ≈42 (+4 dBu, linear), ≈295 (+21 dBu, JA).
+.TRANSFORMER JT10KB-D LP=10 K=0.995 RP=600 RS=150 LLP=50m LLS=12.5m LM=9.95 RC=1MEG CP=100p N1=2400 N2=600 AE=3e-4 LE=0.08 MS=6e5
+# A262A2E: large interstage transformer (Lm≈30H). NickelIron. Rated ~+24 dBu
+#   @20Hz [ASSUMED, no datasheet found for this part]. Derived knee a≈85;
+#   h_peak ≈14 (+4 dBu, linear), ≈138 (+24 dBu, JA).
+.TRANSFORMER A262A2E LP=30 K=0.998 RP=1200 RS=300 LLP=60m LLS=15m LM=29.94 RC=2MEG CP=120p N1=3000 N2=1500 AE=3e-4 LE=0.10 MS=6e5
 
 # Gapped single-ended output-transformer demo from the Phase-2 J-A prototype.
 # The magnetic parameters are behavioral test data, not a verified product fit.
-.TRANSFORMER OT-DEMO-SE LP=10 K=0.997 RP=270 RS=0.5 LLP=30m LLS=1.2u LM=9.97 CP=200p N1=2000 N2=76.923076923 AE=2e-4 LE=0.10 GAP=1e-3 IDC=45m MS=1.6e6 A=1100 ALPHA=1.6e-3 JA_K=400 JA_C=0.2
+# Geometry made SELF-CONSISTENT (2026-06-16): the old AE=2e-4 was geometrically
+# inconsistent with LM=9.97 H (forced a diamagnetic χ<0), which is why the
+# library carried an explicit A=1100 as a workaround. AE=4.364e-3 makes the
+# DERIVED knee (`from_small_signal`, SiliconSteel, LM=9.97, N1=2000, LE=0.10,
+# GAP=1e-3) equal the validated a≈1100 — so this part now derives `a` through
+# the SAME path as the whole library, no explicit-`a` special case. ALPHA/JA_K/
+# JA_C remain as hysteresis-SHAPE overrides (ALPHA matches the SiliconSteel
+# default, so the Lm-pinned tangent is unaffected). [ASSUMED behavioral test fit]
+.TRANSFORMER OT-DEMO-SE LP=10 K=0.997 RP=270 RS=0.5 LLP=30m LLS=1.2u LM=9.97 CP=200p N1=2000 N2=76.923076923 AE=4.364e-3 LE=0.10 GAP=1e-3 IDC=45m MS=1.6e6 ALPHA=1.6e-3 JA_K=400 JA_C=0.2

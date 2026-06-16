@@ -407,9 +407,9 @@ pedal "OT SE" {
         assert!(!exc.drive_unknown);
     }
 
-    /// Clean line transformer (GENERIC_600_600, N1=1, no DC bias) driven at
-    /// line level. No standing field; the worst-case field stays well below
-    /// the J-A knee → would classify LINEAR.
+    /// Clean line transformer (GENERIC_600_600, no DC bias) driven at line
+    /// level. No standing field; the worst-case field stays well below the
+    /// calibrated J-A knee (a≈656 A/m) → classifies LINEAR.
     #[test]
     fn clean_line_transformer_stays_linear() {
         let src = r#"
@@ -444,11 +444,16 @@ pedal "Line Iso" {
             "expected no DC standing field, got h_dc = {} A/m",
             exc.h_dc
         );
-        // N1=1 turn, Lm≈0.995 H: I_mag ≈ V/(2π·20·0.995) is tiny, H = 1·I/le.
+        // N1=1200, Lm≈0.995 H: h_peak ≈ 182 A/m at line level — well below the
+        // calibrated knee a≈656 (and its 0.8·knee≈524 linear band), so the core
+        // classifies LINEAR at line level. (Was `< 100` when N1=1; the threshold
+        // moved with the calibrated turn count, the LINEAR verdict did not.)
+        let knee = crate::model_lookup::ja_core_from_transformer_cfg(&cfg).a as f64;
         assert!(
-            exc.h_peak < 1.0e2,
-            "expected h_peak well below knee scale, got {} A/m",
-            exc.h_peak
+            exc.h_peak < 0.8 * knee,
+            "expected h_peak in the linear band, got {} A/m vs 0.8·knee = {}",
+            exc.h_peak,
+            0.8 * knee
         );
         assert!(!exc.drive_unknown);
     }

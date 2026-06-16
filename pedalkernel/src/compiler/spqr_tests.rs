@@ -1014,6 +1014,85 @@ fn ja_model_backed_transformer_compiles_and_stays_finite() {
     assert!(peak > 1.0e-6, "J-A transformer path produced silence");
 }
 
+/// Calibrated-library-transformer core-policy anchor. For a calibrated part
+/// (GENERIC_10K_10K — full geometry + material):
+///   - `ForceLinear` reproduces the pre-epic linear-inductor behaviour (output
+///     scales linearly with input amplitude → identical normalized response at
+///     small and large drive), and
+///   - `ForceJa` engages the Jiles-Atherton root: at a drive that pushes the
+///     core past its knee the output saturates (normalized large-drive response
+///     falls below the linear one).
+/// This is the permanent regression that the calibration places the knee where
+/// `ForceJa` can reach it while `ForceLinear` stays a pure scaler.
+#[test]
+fn calibrated_transformer_force_linear_vs_force_ja() {
+    use super::compile::{CompileOptions, TransformerCorePolicy};
+    use crate::PedalProcessor;
+
+    let src = r#"
+        pedal "iso" { supply 9V
+            components {
+                T1: transformer(1:1, GENERIC_10K_10K)
+                R_load: resistor(10k)
+            }
+            nets {
+                in -> T1.a
+                T1.b -> gnd
+                T1.c -> out, R_load.a
+                T1.d -> gnd
+                R_load.b -> gnd
+            }
+            controls {}
+        }"#;
+    let pedal = crate::dsl::parse_pedal_file(src).expect("parse");
+
+    // Drive a low frequency (where magnetizing current — and core field — is
+    // largest) at a small and a large amplitude; report peak/amplitude.
+    let normalized_peak = |policy: TransformerCorePolicy, amp: f64| -> f64 {
+        let opts = CompileOptions {
+            transformer_core: policy,
+            ..CompileOptions::default()
+        };
+        let mut c = super::spqr_build::compile_via_spqr_with_options(&pedal, 48000.0, opts)
+            .expect("compile");
+        let mut peak = 0.0f64;
+        for s in 0..9600 {
+            let input = amp * (2.0 * std::f64::consts::PI * 30.0 * s as f64 / 48000.0).sin();
+            let out = c.process(input);
+            assert!(out.is_finite());
+            if s > 4800 {
+                peak = peak.max(out.abs());
+            }
+        }
+        peak / amp
+    };
+
+    // ForceLinear: a pure scaler — normalized response is amplitude-independent.
+    let lin_small = normalized_peak(TransformerCorePolicy::ForceLinear, 0.01);
+    let lin_large = normalized_peak(TransformerCorePolicy::ForceLinear, 30.0);
+    assert!(
+        (lin_large - lin_small).abs() / lin_small < 1.0e-3,
+        "ForceLinear must stay linear: small={lin_small:.6} large={lin_large:.6}"
+    );
+
+    // ForceJa: small-signal tangent matches the linear path (the invariant),
+    // but a hard drive engages the nonlinear core → the JA response DIVERGES
+    // from the pure-linear scaler (saturation/hysteresis distortion the linear
+    // tangent cannot produce). Compared at the SAME large amplitude so the
+    // difference is purely the nonlinear core, not the drive level.
+    let ja_small = normalized_peak(TransformerCorePolicy::ForceJa, 0.01);
+    let ja_large = normalized_peak(TransformerCorePolicy::ForceJa, 30.0);
+    assert!(
+        (ja_small - lin_small).abs() / lin_small < 5.0e-2,
+        "ForceJa small-signal tangent should match the linear Lm: ja={ja_small:.6} lin={lin_small:.6}"
+    );
+    assert!(
+        (ja_large - lin_large).abs() / lin_large > 1.0e-3,
+        "ForceJa must depart from the linear scaler under hard drive: \
+         ja_large={ja_large:.6} lin_large={lin_large:.6}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Pendant → stage pipeline: SPQR tree with pendants must produce
 // PassiveWdf stages (not Rigid → IIR with b=[0,0,0])
