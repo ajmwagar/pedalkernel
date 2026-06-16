@@ -31,6 +31,51 @@ pub struct JaCoreModel {
     pub gap: Wave,
 }
 
+/// Soft-magnetic core material. Selects the saturation magnetization `ms` and a
+/// set of default hysteresis-loop parameters (`alpha`, `k`, `c`). These set the
+/// SHAPE of the B-H loop (coercivity, remanence, loop squareness) — NOT the
+/// small-signal magnetizing inductance, which is fixed independently by
+/// [`JaCoreModel::from_small_signal`] choosing `a`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum CoreMaterial {
+    /// Grain-oriented silicon (transformer) steel. ms ≈ 1.6e6 A/m.
+    #[default]
+    SiliconSteel,
+    /// Nickel-iron / permalloy (e.g. 80% Ni). ms ≈ 6.0e5 A/m.
+    NickelIron,
+    /// Soft ferrite (MnZn/NiZn). ms ≈ 3.5e5 A/m.
+    Ferrite,
+}
+
+impl CoreMaterial {
+    /// Saturation magnetization Ms (A/m) — textbook soft-magnetic values.
+    pub fn ms(self) -> Wave {
+        match self {
+            CoreMaterial::SiliconSteel => 1.6e6,
+            CoreMaterial::NickelIron => 6.0e5,
+            CoreMaterial::Ferrite => 3.5e5,
+        }
+    }
+
+    /// Default `(alpha, k, c)` hysteresis-loop parameters for the material.
+    ///
+    /// These are reasonable soft-magnetic values that set the loop SHAPE
+    /// (`alpha` = inter-domain coupling, `k` = pinning/coercivity scale, `c`
+    /// = reversible fraction in [0,1]); they do not affect the small-signal
+    /// inductance, which is set by `a` in [`JaCoreModel::from_small_signal`].
+    pub fn default_alpha_k_c(self) -> (Wave, Wave, Wave) {
+        match self {
+            // Higher coercivity (k) and modest reversibility for laminated steel.
+            CoreMaterial::SiliconSteel => (1.6e-3, 50.0, 0.15),
+            // Permalloy: very soft, low coercivity, slightly more reversible.
+            CoreMaterial::NickelIron => (1.0e-3, 15.0, 0.20),
+            // Ferrite: low coercivity, low loss.
+            CoreMaterial::Ferrite => (1.0e-3, 20.0, 0.18),
+        }
+    }
+}
+
 impl JaCoreModel {
     pub fn si_steel_demo() -> Self {
         Self {
@@ -54,6 +99,131 @@ impl JaCoreModel {
             && self.area > 0.0
             && self.path_len > 0.0
             && (0.0..=1.0).contains(&self.c)
+    }
+
+    /// Build a J-A core whose magnetizing branch reproduces a target linear
+    /// magnetizing inductance `lm` (henries) at the small-signal operating
+    /// point, for the given geometry and material.
+    ///
+    /// # Why
+    ///
+    /// The whole point of deriving the core nonlinearity is byte-stability for
+    /// circuits that never saturate: the JA branch's linear tangent must equal
+    /// today's plain `Lm`. We pick the shape parameter `a` so that the JA
+    /// initial susceptibility `χ_i = dM/dH|₀` gives exactly `lm`.
+    ///
+    /// # Derivation
+    ///
+    /// The branch relations (matching the runtime port law) are
+    ///   winding current `i = (H·le_eff + M·gap)/n_turns`,   `le_eff = path_len + gap`
+    ///   flux linkage    `λ = n_turns·μ0·area·(H + M)`.
+    /// Small-signal with `χ = dM/dH|₀`:
+    ///   `dλ = n_turns·μ0·area·(1 + χ)·dH`
+    ///   `di = (le_eff + χ·gap)/n_turns · dH`
+    /// so
+    ///   `Lm = dλ/di = n_turns²·μ0·area·(1 + χ) / (le_eff + χ·gap)`.
+    /// Solving for χ (general, gapped):
+    ///   `χ = (k0 − lm·le_eff) / (lm·gap − k0)`,   `k0 = n_turns²·μ0·area`.
+    /// Ungapped (gap=0): `χ = lm·le_eff/k0 − 1`.
+    ///
+    /// Langevin gives the anhysteretic slope `dM_an/dH|₀ = ms/(3a)`. But the
+    /// runtime advances M with the full Jiles-Atherton susceptibility
+    /// `χ_run = (g + r)/(1 − α·r)`, and AT A SYMMETRIC REVERSAL POINT (the
+    /// small-signal operating point — M = M_an, δM gates the irreversible term
+    /// to zero) the irreversible part `g` vanishes, leaving only the REVERSIBLE
+    /// part `r = c·dM_an/dH = c·ms/(3a)`. So the small-signal tangent the
+    /// runtime actually delivers is `χ_i = r/(1 − α·r)` with `r = c·ms/(3a)`.
+    ///
+    /// To make that tangent equal the target `χ_i`, let `r = χ_i/(1 + α·χ_i)`;
+    /// then `a = c·ms/(3·r) = c·ms·(1 + α·χ_i)/(3·χ_i)`. (The reversible
+    /// fraction `c` therefore scales the linear inductance; `from_small_signal`
+    /// derives `c` from the material first, then solves `a`.)
+    ///
+    /// # Guards
+    ///
+    /// If the requested `χ` is non-positive (target `lm` too small for the
+    /// geometry — the core would need diamagnetic behaviour) it is clamped to a
+    /// small positive minimum `CHI_MIN`, capping `a` at the corresponding
+    /// maximum (the branch then has the lowest physical inductance the geometry
+    /// allows rather than failing).
+    pub fn from_small_signal(
+        lm: Wave,
+        n_turns: Wave,
+        area: Wave,
+        path_len: Wave,
+        gap: Wave,
+        material: CoreMaterial,
+    ) -> JaCoreModel {
+        /// Minimum allowed initial susceptibility. Below this the requested
+        /// inductance is too small for the geometry; we clamp χ (→ cap `a`).
+        const CHI_MIN: Wave = 1.0e-6;
+
+        let le_eff = path_len + gap;
+        let k0 = n_turns * n_turns * MU0 * area;
+
+        // χ_i from the geometry/target inductance (general gapped form).
+        let mut chi = if gap > 0.0 {
+            let den = lm * gap - k0;
+            // den is normally negative (k0 dominates); numerator likewise.
+            let num = k0 - lm * le_eff;
+            if math::abs(den) < 1.0e-30 {
+                CHI_MIN
+            } else {
+                num / den
+            }
+        } else {
+            lm * le_eff / k0 - 1.0
+        };
+        // Clamp χ up to CHI_MIN; also catches NaN (a NaN comparison is false,
+        // so the `else` keeps the floor).
+        chi = if chi > CHI_MIN { chi } else { CHI_MIN };
+
+        let ms = material.ms();
+        let (alpha, k, c) = material.default_alpha_k_c();
+
+        // Reversible coefficient r = χ/(1 + α·χ); a = c·ms/(3·r). The reversible
+        // fraction `c` is what the runtime exposes as the small-signal slope at
+        // a symmetric reversal, so it scales `a` directly.
+        let r = chi / (1.0 + alpha * chi);
+        let c_eff = c.max(1.0e-6);
+        let a = c_eff * ms / (3.0 * r);
+
+        JaCoreModel {
+            ms,
+            a,
+            alpha,
+            k,
+            c,
+            n_turns,
+            area,
+            path_len,
+            gap,
+        }
+    }
+
+    /// Field scale (A/m) at which the core departs from its linear tangent
+    /// (saturation onset / knee of the B-H curve).
+    ///
+    /// The Langevin argument is `q = (H + α·M)/a`; the curve bends clearly once
+    /// `q ≈ 1` (there `M ≈ 0.31·ms`). Ignoring the small `α·M` term near the
+    /// knee, that corresponds to `H ≈ a`, so we return `a` as the knee field.
+    /// Convention: `knee_field()` is the field at which the magnetization has
+    /// departed ~30% toward saturation — not a hard limit, an onset scale.
+    pub fn knee_field(&self) -> Wave {
+        self.a
+    }
+
+    /// True iff a peak field `h_peak` (A/m) stays within the linear region with
+    /// the given fractional `margin`.
+    ///
+    /// Convention: linear iff `|h_peak| < knee_field()·(1 − margin)` for
+    /// `margin ∈ [0,1)`. A larger `margin` shrinks the accepted band, so the
+    /// predicate becomes more conservative (returns `false` sooner ⇒ the caller
+    /// runs the full JA solve sooner). `margin` is a pure parameter; this
+    /// predicate reads no external config and is side-effect-free.
+    pub fn is_linear_within(&self, h_peak: Wave, margin: Wave) -> bool {
+        let m = margin.clamp(0.0, 1.0);
+        math::abs(h_peak) < self.knee_field() * (1.0 - m)
     }
 }
 
@@ -803,5 +973,151 @@ mod tests {
             (reconstructed - ampere_turns).abs() < 1.0e-6 * ampere_turns.abs().max(1.0),
             "Ampere mismatch: {reconstructed} vs {ampere_turns}"
         );
+    }
+
+    // Analytic small-signal magnetizing inductance of the JA branch tangent:
+    //   Lm = n²·μ0·area·(1 + χ) / (le_eff + χ·gap),
+    // with χ the RUNTIME small-signal susceptibility at a symmetric reversal:
+    //   r = c·ms/(3a),  χ = r/(1 − α·r)  (irreversible g vanishes there).
+    fn analytic_lm(p: &JaCoreModel) -> Wave {
+        let le_eff = p.path_len + p.gap;
+        let r = p.c * p.ms / (3.0 * p.a);
+        let chi = r / (1.0 - p.alpha * r);
+        let k0 = p.n_turns * p.n_turns * MU0 * p.area;
+        k0 * (1.0 + chi) / (le_eff + chi * p.gap)
+    }
+
+    #[test]
+    fn from_small_signal_analytic_lm_roundtrips() {
+        // The χ → a → χ → Lm round-trip must return the requested Lm to high
+        // precision (this is the closed-form half of the proof). A gap adds
+        // reluctance that CAPS achievable inductance at ~k0/gap, so each gap
+        // gets a feasible target (a fraction of its ceiling) rather than a
+        // fixed value that would demand χ ≤ 0.
+        let (n_turns, area, path_len) = (2000.0, 2.0e-4, 0.10);
+        let k0 = n_turns * n_turns * MU0 * area;
+        for &gap in &[0.0, 1.0e-4, 5.0e-4] {
+            // Ungapped: any lm > k0/le_eff works (χ>0); pick a hefty 8 H.
+            // Gapped: ceiling is k0/gap; aim at half of it.
+            let lm_target = if gap > 0.0 { 0.5 * k0 / gap } else { 8.0 };
+            let p = JaCoreModel::from_small_signal(
+                lm_target,
+                n_turns,
+                area,
+                path_len,
+                gap,
+                CoreMaterial::SiliconSteel,
+            );
+            assert!(p.is_complete(), "model incomplete for gap={gap}");
+            let lm = analytic_lm(&p);
+            let rel = (lm - lm_target).abs() / lm_target;
+            assert!(
+                rel < 1.0e-9,
+                "gap={gap}: analytic Lm {lm} vs {lm_target} (rel {rel})"
+            );
+        }
+    }
+
+    #[test]
+    fn from_small_signal_tangent_reproduces_lm_under_drive() {
+        // THE LOAD-BEARING ASSERTION. Build a core for a target Lm, instantiate
+        // the real magnetizing root, drive a TINY sinusoid well below the knee,
+        // and recover the small-signal inductance from the port wave pair.
+        let lm_target = 8.0;
+        let n_turns = 2000.0;
+        let area = 2.0e-4;
+        let path_len = 0.10;
+        let model = JaCoreModel::from_small_signal(
+            lm_target,
+            n_turns,
+            area,
+            path_len,
+            0.0,
+            CoreMaterial::SiliconSteel,
+        );
+
+        // Tiny drive: keep H far below the knee (knee_field ≈ a). The winding
+        // current is i = H·le_eff/n_turns; pick an `a`-scaled tiny amplitude.
+        let fs = 48_000.0;
+        let rp = 1.0e6; // large Rp so the magnetizing branch dominates the port
+        let mut root = JaMagnetizingRoot::new(model);
+        root.prepare(fs, rp);
+
+        let f0 = 200.0;
+        let w = 2.0 * PI * f0;
+        let amp = 0.02;
+
+        // Run several periods to settle, then measure |V| and |I| over a window
+        // by tracking the peak of the port voltage and current.
+        let per = (fs / f0) as usize;
+        let n = per * 12;
+        let mut vmax: Wave = 0.0;
+        let mut imax: Wave = 0.0;
+        let mut hmax: Wave = 0.0;
+        for k in 0..n {
+            let a = amp * math::sin(w * k as Wave / fs);
+            let b = root.process(a);
+            if k >= per * 8 {
+                let v = 0.5 * (a + b);
+                let i = (a - b) / (2.0 * rp);
+                vmax = vmax.max(v.abs());
+                imax = imax.max(i.abs());
+                hmax = hmax.max(root.state().h.abs());
+            }
+        }
+        // Stay in the linear region (sanity on the drive level).
+        assert!(
+            root.model().is_linear_within(hmax, 0.5),
+            "drive not small-signal: hmax={hmax} knee={}",
+            root.model().knee_field()
+        );
+        assert!(imax > 0.0 && vmax > 0.0, "no port excitation");
+
+        // Effective inductance |V| = ω·L·|I| ⇒ L = |V|/(ω·|I|).
+        let lm_meas = vmax / (w * imax);
+        let rel = (lm_meas - lm_target).abs() / lm_target;
+        // Measured relative error is ~6e-5 with the c-folded `a` derivation.
+        assert!(
+            rel < 0.05,
+            "measured Lm {lm_meas} vs target {lm_target} (rel {rel}), hmax={hmax}"
+        );
+    }
+
+    #[test]
+    fn knee_field_is_order_of_a() {
+        let p = JaCoreModel::si_steel_demo();
+        let knee = p.knee_field();
+        assert!(
+            knee >= 0.5 * p.a && knee <= 2.0 * p.a,
+            "knee {knee} not on the order of a={}",
+            p.a
+        );
+    }
+
+    #[test]
+    fn is_linear_within_thresholds_and_monotonic() {
+        let p = JaCoreModel::si_steel_demo();
+        let knee = p.knee_field();
+        let margin = 0.2;
+        // Below knee·(1−margin) → true; above → false.
+        assert!(p.is_linear_within(knee * (1.0 - margin) * 0.5, margin));
+        assert!(!p.is_linear_within(knee * 1.5, margin));
+        // Right at the boundary it must be false (strict <).
+        assert!(!p.is_linear_within(knee * (1.0 - margin), margin));
+        // Monotonic in margin: a field that is linear at a large margin must
+        // also be linear at every smaller margin (larger margin = stricter).
+        let h = knee * 0.5;
+        let mut prev = true;
+        for i in 0..=9 {
+            let mgn = i as Wave * 0.1; // 0.0 .. 0.9
+            let lin = p.is_linear_within(h, mgn);
+            // once it flips to false at a larger margin, it stays false
+            assert!(prev || !lin, "non-monotonic at margin={mgn}");
+            prev = lin;
+        }
+        // Larger margin runs JA sooner: at margin 0.0 a sub-knee field is
+        // linear; pushing margin up eventually makes it false.
+        assert!(p.is_linear_within(knee * 0.7, 0.0));
+        assert!(!p.is_linear_within(knee * 0.7, 0.5));
     }
 }
