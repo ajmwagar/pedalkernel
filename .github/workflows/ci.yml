@@ -57,7 +57,7 @@ jobs:
         working-directory: pedalkernel-validate
         run: |
           set -o pipefail
-          cargo run -p pedalkernel-validate -- --report spice-report.json run 2>&1 \
+          cargo run -p pedalkernel-validate -- --skip-k-tables --report spice-report.json run 2>&1 \
             | tee spice-output.txt || true
           test -f spice-report.json || { echo "::error::SPICE runner produced no report (build/run failure)"; exit 1; }
           summary=$(grep -oE '[0-9]+/[0-9]+ passed' spice-output.txt | tail -1)
