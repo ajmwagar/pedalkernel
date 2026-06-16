@@ -263,7 +263,8 @@ def plot_circuit(
             )
 
     plt.tight_layout()
-    fig.savefig(str(out_path), dpi=100, bbox_inches="tight", facecolor=fig.get_facecolor())
+    # 140 dpi: crisp at the large widths the full-width accuracy dashboard renders.
+    fig.savefig(str(out_path), dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
@@ -344,7 +345,8 @@ def plot_accuracy_matrix(
     plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
 
     plt.tight_layout()
-    fig.savefig(str(out_path), dpi=100, bbox_inches="tight", facecolor=fig.get_facecolor())
+    # 140 dpi: crisp at the large widths the full-width accuracy dashboard renders.
+    fig.savefig(str(out_path), dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"[dashboard] accuracy-matrix -> {out_path}")
 

@@ -1,0 +1,236 @@
+{{ define "main" }}
+{{ $acc := site.Data.accuracy }}
+{{ $hist := index site.Data "accuracy-history" }}
+{{ $s := $acc.summary }}
+
+{{/* Build a flat slice of all circuits with the map key merged in, for filtering. */}}
+{{ $all := slice }}
+{{ range $k, $c := $acc.circuits }}{{ $all = $all | append (merge $c (dict "key" $k)) }}{{ end }}
+{{ $all = sort $all "key" }}
+
+{{/* Distinct suite names, sorted. */}}
+{{ $suites := slice }}
+{{ range $all }}{{ if not (in $suites .suite) }}{{ $suites = $suites | append .suite }}{{ end }}{{ end }}
+{{ $suites = sort $suites }}
+
+{{/* Failing circuits + the distinct suites they cluster in. */}}
+{{ $fails := where $all "passed" false }}
+{{ $fails = sort $fails "key" }}
+{{ $failSuites := slice }}
+{{ range $fails }}{{ if not (in $failSuites .suite) }}{{ $failSuites = $failSuites | append .suite }}{{ end }}{{ end }}
+
+<div class="acc-dash">
+
+  {{/* ---------- (b) GENERATED hero / summary ---------- */}}
+  <header class="acc-hero">
+    <h1>Accuracy Dashboard</h1>
+    <p class="acc-sub">WDF engine output vs ngspice golden references — every circuit, real dB errors, known gaps included.</p>
+    <div class="acc-stats">
+      <div class="acc-stat">
+        <span class="num">{{ printf "%.1f%%" (mul $s.pass_rate 100) }}</span>
+        <span class="lbl">Pass rate</span>
+      </div>
+      <div class="acc-stat">
+        <span class="num">{{ $s.passed }}/{{ $s.total_circuits }}</span>
+        <span class="lbl">Signals pass</span>
+      </div>
+      <div class="acc-stat{{ if gt $s.failed 0 }} acc-fail{{ end }}">
+        <span class="num">{{ $s.failed }}</span>
+        <span class="lbl">Failing</span>
+      </div>
+      <div class="acc-stat">
+        <span class="num">{{ $s.wdf_pending }}</span>
+        <span class="lbl">WDF pending</span>
+      </div>
+    </div>
+    <p class="acc-meta">
+      Run <code>{{ $acc.run_timestamp }}</code>
+      &middot; commit <code>{{ $acc.git_commit }}</code>
+      &middot; {{ $acc.sample_rate }} Hz &times;{{ $acc.oversample }} oversampling
+    </p>
+  </header>
+
+  {{/* ---------- (c) STATIC intro (markdown body) ---------- */}}
+  <section class="acc-intro">
+    {{ .Content }}
+  </section>
+
+  {{/* ---------- (d) GENERATED current gaps ---------- */}}
+  <section class="acc-section">
+    <h2>Current gaps</h2>
+    {{ if eq (len $fails) 0 }}
+      <p class="acc-allpass">All circuits currently pass. No outstanding accuracy gaps.</p>
+    {{ else }}
+      <p>
+        {{ len $fails }} of {{ $s.total_circuits }} signals currently fail, clustered in
+        {{ len $failSuites }} suite{{ if ne (len $failSuites) 1 }}s{{ end }}:
+        {{ range $i, $sn := $failSuites }}{{ if $i }}, {{ end }}<strong>{{ $sn }}</strong> ({{ len (where $fails "suite" $sn) }}){{ end }}.
+        Lower dB is better; large positive numbers below are real divergence from ngspice.
+      </p>
+      <table class="acc-table">
+        <thead>
+          <tr>
+            <th>Circuit</th>
+            <th class="num">RMS (dB)</th>
+            <th class="num">Peak (dB)</th>
+            <th class="num">Spectral (dB)</th>
+            <th class="num">THD (dB)</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{ range $fails }}
+          <tr>
+            <td class="acc-key">{{ .key }}</td>
+            {{ with .metrics }}
+            <td class="num">{{ printf "%.1f" .normalized_rms_error_db }}</td>
+            <td class="num">{{ printf "%.1f" .peak_error_db }}</td>
+            <td class="num">{{ printf "%.1f" .spectral_error_db }}</td>
+            <td class="num">{{ if ne .thd_error_db nil }}{{ printf "%.1f" .thd_error_db }}{{ else }}&mdash;{{ end }}</td>
+            {{ else }}
+            <td class="num">&mdash;</td>
+            <td class="num">&mdash;</td>
+            <td class="num">&mdash;</td>
+            <td class="num">&mdash;</td>
+            {{ end }}
+            <td>{{ with .error }}<code>{{ . }}</code>{{ end }}</td>
+          </tr>
+          {{ end }}
+        </tbody>
+      </table>
+    {{ end }}
+  </section>
+
+  {{/* ---------- (e) GENERATED per-suite pass table ---------- */}}
+  <section class="acc-section">
+    <h2>By suite</h2>
+    <table class="acc-table">
+      <thead>
+        <tr>
+          <th>Suite</th>
+          <th class="num">Pass / total</th>
+          <th>Pass ratio</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range $suites }}
+        {{ $rows := where $all "suite" . }}
+        {{ $pass := len (where $rows "passed" true) }}
+        {{ $tot := len $rows }}
+        {{ $ratio := 0.0 }}{{ if gt $tot 0 }}{{ $ratio = div (mul $pass 1.0) $tot }}{{ end }}
+        <tr>
+          <td class="acc-key">{{ . }}</td>
+          <td class="num">{{ $pass }} / {{ $tot }}</td>
+          <td>
+            <div class="acc-bar" title="{{ printf "%.0f%%" (mul $ratio 100) }}">
+              <div class="acc-bar-fill{{ if lt $pass $tot }} acc-bar-partial{{ end }}" style="width: {{ printf "%.1f%%" (mul $ratio 100) }};"></div>
+            </div>
+          </td>
+        </tr>
+        {{ end }}
+      </tbody>
+    </table>
+  </section>
+
+  {{/* ---------- (f) GENERATED drift history ---------- */}}
+  <section class="acc-section">
+    <h2>Drift history</h2>
+    {{ $n := len $hist }}
+    {{ if le $n 1 }}<p class="acc-note">Single run on record — this is the baseline.</p>{{ end }}
+    <table class="acc-table">
+      <thead>
+        <tr>
+          <th class="num">Run</th>
+          <th>Timestamp</th>
+          <th>Commit</th>
+          <th class="num">Pass rate</th>
+          <th class="num">Passed / total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ $start := 0 }}{{ if gt $n 12 }}{{ $start = sub $n 12 }}{{ end }}
+        {{ range $i, $r := $hist }}
+        {{ if ge $i $start }}
+        {{ $hs := $r.summary }}
+        <tr>
+          <td class="num">#{{ add $i 1 }}</td>
+          <td>{{ $r.timestamp }}</td>
+          <td class="acc-key">{{ substr $r.git_commit 0 9 }}</td>
+          <td class="num">{{ printf "%.1f%%" (mul $hs.pass_rate 100) }}</td>
+          <td class="num">{{ $hs.passed }} / {{ $hs.total_circuits }}</td>
+        </tr>
+        {{ end }}
+        {{ end }}
+      </tbody>
+    </table>
+  </section>
+
+  {{/* ---------- (g) Accuracy matrix PNG ---------- */}}
+  <section class="acc-section">
+    <h2>Accuracy matrix</h2>
+    <figure class="acc-fig">
+      <a href="/accuracy/accuracy-matrix.png" target="_blank" rel="noopener">
+        <img src="/accuracy/accuracy-matrix.png"
+             alt="Accuracy matrix: all circuits by RMS/peak/spectral error vs ngspice"
+             loading="lazy">
+      </a>
+      <figcaption>Every circuit by RMS / Peak / Spectral error against ngspice. Greener is closer to SPICE; rows in orange currently fail. Click to open full resolution.</figcaption>
+    </figure>
+  </section>
+
+  {{/* ---------- (h) Per-suite galleries (collapsible) ---------- */}}
+  <section class="acc-section">
+    <h2>Per-circuit detail</h2>
+    {{ range $suite := $suites }}
+    {{ $rows := where $all "suite" $suite }}
+    {{ $rows = sort $rows "key" }}
+    {{ $pass := len (where $rows "passed" true) }}
+    {{ $tot := len $rows }}
+    {{ $hasFail := lt $pass $tot }}
+    <details class="acc-suite"{{ if $hasFail }} open{{ end }}>
+      <summary>
+        <span class="acc-suite-name">{{ $suite }}</span>
+        <span class="acc-badge {{ if $hasFail }}acc-badge-fail{{ else }}acc-badge-pass{{ end }}">{{ $pass }} / {{ $tot }} pass</span>
+      </summary>
+      <div class="acc-cards">
+        {{ range $rows }}
+        <div class="acc-card">
+          <div class="acc-card-head">
+            <span class="acc-key">{{ .key }}</span>
+            {{ if .passed }}
+            <span class="acc-badge acc-badge-pass">PASS</span>
+            {{ else }}
+            <span class="acc-badge acc-badge-fail">FAIL</span>
+            {{ end }}
+          </div>
+          <div class="acc-metrics">
+            {{ with .metrics }}
+            <span><b>RMS</b> {{ printf "%.1f" .normalized_rms_error_db }}</span>
+            <span><b>Peak</b> {{ printf "%.1f" .peak_error_db }}</span>
+            <span><b>Spectral</b> {{ printf "%.1f" .spectral_error_db }}</span>
+            <span><b>THD</b> {{ if ne .thd_error_db nil }}{{ printf "%.1f" .thd_error_db }}{{ else }}&mdash;{{ end }}</span>
+            {{ else }}
+            <span class="acc-nodata">no metrics{{ with .error }} &middot; {{ . }}{{ end }}</span>
+            {{ end }}
+          </div>
+          <a href="/accuracy/circuits/{{ .suite }}/{{ .test }}/{{ .signal }}.png" target="_blank" rel="noopener">
+            <img src="/accuracy/circuits/{{ .suite }}/{{ .test }}/{{ .signal }}.png"
+                 alt="{{ .key }}: ngspice vs WDF time-domain overlay, difference trace, and FFT magnitude"
+                 loading="lazy">
+          </a>
+        </div>
+        {{ end }}
+      </div>
+    </details>
+    {{ end }}
+  </section>
+
+  {{/* ---------- (i) footer note ---------- */}}
+  <footer class="acc-footer">
+    Generated by <code>tools/dashboard/generate_dashboard.py</code> from committed WDF + ngspice goldens.
+    Machine-readable data: <code>data/accuracy.json</code>, <code>data/accuracy-history.json</code>.
+    Source on <a href="https://github.com/ajmwagar/pedalkernel" target="_blank" rel="noopener">GitHub</a>.
+  </footer>
+
+</div>
+{{ end }}
