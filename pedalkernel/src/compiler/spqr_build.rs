@@ -2959,6 +2959,25 @@ fn build_passive_rtype_stage(
         }
     }
 
+    // For PassiveRType groups that include a transformer, the output_node is
+    // typically one of the primary winding nodes (graph edge only has primary nodes).
+    // If the transformer's secondary node IS the graph output (OT.sec.a → out),
+    // override output_node to the secondary so extraction targets the correct terminal.
+    if output_node != graph.out_node {
+        for &eidx in edge_indices {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            if comp.kind.transformer_config().is_none() { continue; }
+            // Check if OT.c (secondary pos) is graph.out_node
+            if let Some(&sec_pos) = graph.node_names.get(&format!("{}.c", comp.id)) {
+                if sec_pos == graph.out_node {
+                    output_node = sec_pos;
+                    break;
+                }
+            }
+        }
+    }
+
     let mut nodes: Vec<NodeId> = edge_indices
         .iter()
         .flat_map(|&eidx| {
@@ -2969,6 +2988,37 @@ fn build_passive_rtype_stage(
         .collect();
     nodes.sort_unstable();
     nodes.dedup();
+
+    // For groups that include a transformer component, the graph edge only carries
+    // the PRIMARY winding nodes (node_a, node_b). The SECONDARY nodes (.c, .d) are
+    // absent from `nodes`, so `stamp_linear_transformer_skeleton` receives s_pos=None
+    // (secondary grounded) — making the secondary output inaccessible.
+    //
+    // Fix: add the transformer secondary node to `nodes` so the MNA can correctly
+    // model the coupled windings and extract the secondary voltage.
+    // The secondary node is the graph out_node (OT.sec.a → out) when the transformer
+    // bridges from the power stage to the speaker output.
+    for &eidx in edge_indices {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let Some(cfg) = comp.kind.transformer_config() else { continue };
+        if cfg.has_tertiary() { continue; }
+        // The secondary positive node is .c in the node_names (OT.c = OT.sec_a).
+        let sec_pos = graph.node_names.get(&format!("{}.c", comp.id)).copied();
+        if let Some(n) = sec_pos {
+            if !is_ground(n) && !nodes.contains(&n) {
+                nodes.push(n);
+            }
+        }
+        // The secondary negative node (.d) is usually gnd — don't add it.
+        // If it's not ground (e.g., floating secondary), add it too.
+        let sec_neg = graph.node_names.get(&format!("{}.d", comp.id)).copied();
+        if let Some(n) = sec_neg {
+            if !is_ground(n) && !nodes.contains(&n) {
+                nodes.push(n);
+            }
+        }
+    }
 
     let node_to_mna =
         |node: NodeId, nodes: &[NodeId]| -> Option<usize> { nodes.iter().position(|&n| n == node) };
@@ -3177,10 +3227,35 @@ fn build_passive_rtype_stage(
     };
     let output_mna = node_to_mna(output_node, &nodes);
     let (scattering, vs_injection) = mna.derive_scattering_and_vs_injection(&ports, 0);
-    let (extraction_coeffs, mut extraction_vs) =
+    let (mut extraction_coeffs, mut extraction_vs) =
         mna.derive_extraction_coeffs(&ports, 0, output_mna, None);
+
     if let Some(gain) = transformer_voltage_gain {
         extraction_vs = gain;
+    }
+
+    // Debug log for transformer groups
+    if !stamped_transformers.is_empty() {
+        let comp_names: Vec<String> = edge_indices
+            .iter()
+            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let in_name = graph.node_names.iter().find(|(_, &v)| v == input_node).map(|(k, _)| k.as_str()).unwrap_or("?");
+        let out_name = graph.node_names.iter().find(|(_, &v)| v == output_node).map(|(k, _)| k.as_str()).unwrap_or("?");
+        let n_ports = ports.len();
+        eprintln!(
+            "[XFMR-PRType] comps={:?} in={in_name}({input_node}) out={out_name}({output_node}) \
+             n_nodes={} output_mna={output_mna:?} n_ports={n_ports} ev={extraction_vs:.6} coeffs={extraction_coeffs:.6?}",
+            comp_names, nodes.len()
+        );
+        eprintln!("  vs_injection={vs_injection:.6?}");
+        eprintln!("  scattering ({}x{}):", n_ports, n_ports);
+        for i in 0..n_ports {
+            eprintln!("    row[{i}]={:.6?}", &scattering[i*n_ports..(i+1)*n_ports]);
+        }
+        eprintln!("  port_resistances={:.3?}", ports.iter().map(|p| p.resistance).collect::<Vec<_>>());
     }
 
     if scattering.iter().any(|v| !v.is_finite())
@@ -3194,6 +3269,79 @@ fn build_passive_rtype_stage(
     let mut child_runtime_states = Vec::with_capacity(children.len());
     for child in &mut children {
         child_runtime_states.push(child.bind_runtime_state());
+    }
+
+    // Pre-charge capacitor children to their DC steady-state voltage.
+    //
+    // Without this, coupling caps start at V=0 and take τ=RC samples to charge
+    // to the DC plate voltage. During that transient, extraction_vs*V_in passes
+    // the full plate voltage (100–400V) through to the output, causing test
+    // failures on preamp-only circuits (Bassman, Marshall) where the output
+    // coupling cap is in this PassiveRType stage.
+    //
+    // We use bias_node_voltages (DC Q-point analysis) to find the steady-state
+    // voltage at each cap's nodes and pre-charge via wdf_set_one_port_state.
+    // This is the same technique used for cathode bypass caps in NlWdf stages.
+    {
+        use pedalkernel_rt::boundary_math::OnePortState;
+        // Build a list of (comp_id, child_index) for capacitor children.
+        // Caps/inductors are inserted into `children` in the same order as
+        // they appear in `ports`, matching the edge-iteration order.
+        let mut cap_children: Vec<(String, usize)> = Vec::new();
+        {
+            let mut child_idx = 0usize;
+            for &eidx in edge_indices {
+                let e = &graph.edges[eidx];
+                let comp = &graph.components[e.comp_idx];
+                // Transformer children are added via add_dynamic_port (Llp, Lls, Lm).
+                // Skip transformer edges here — their inductors don't need pre-charging
+                // as they start at 0 current (correct for no-load startup).
+                if comp.kind.transformer_config().is_some() {
+                    // Each transformer adds 2–3 inductor children (Llp, Lls, Lm).
+                    // Count them by checking how many dynamic ports were added.
+                    // We skip by checking the comp ID prefix.
+                    continue;
+                }
+                if comp.kind.is_pot() {
+                    child_idx += 1;
+                    continue;
+                }
+                if comp.kind.capacitance().is_some() {
+                    cap_children.push((comp.id.clone(), child_idx));
+                    child_idx += 1;
+                } else if comp.kind.inductance().is_some() {
+                    child_idx += 1;
+                }
+            }
+        }
+
+        for (cap_id, child_idx) in cap_children {
+            if child_idx >= ports.len() || child_idx >= children.len() {
+                continue;
+            }
+            let port = &ports[child_idx];
+            // Map MNA indices back to graph NodeIds.
+            let node_a_id = port.node_pos.and_then(|idx| nodes.get(idx)).copied();
+            let node_b_id = port.node_neg.and_then(|idx| nodes.get(idx)).copied();
+            // Look up DC voltages. Gnd = 0.0.
+            let v_a = node_a_id.map_or(0.0, |n| {
+                *bias_node_voltages.get(&n).unwrap_or(&0.0)
+            });
+            let v_b = node_b_id.map_or(0.0, |n| {
+                *bias_node_voltages.get(&n).unwrap_or(&0.0)
+            });
+            let v_cap = v_a - v_b;
+            if v_cap.abs() > 0.1 {
+                let child = &mut children[child_idx];
+                let state = &mut child_runtime_states[child_idx];
+                if let Some(runtime) = child.one_port_runtime_binding_mut(&cap_id) {
+                    runtime.wdf_set_one_port_state(
+                        OnePortState::CapacitorVoltage(v_cap as pedalkernel_rt::Wave),
+                        state,
+                    );
+                }
+            }
+        }
     }
 
     let mut wdf = WdfStage::new(
@@ -4758,6 +4906,10 @@ pub(super) fn compute_group_terminals(
 struct TriodeDcQpoint {
     vgk: f64,
     v_cathode: f64,
+    /// DC plate voltage (V_supply - I_plate * R_plate).
+    v_plate: f64,
+    /// Graph NodeId of the plate node (for pre-charging downstream coupling caps).
+    plate_node: super::graph::NodeId,
 }
 
 /// Compute the load-line DC Q-point for a common-cathode triode stage.
@@ -4837,13 +4989,14 @@ fn compute_wdf_triode_dc_qpoint(
 
     let vgk = -ia * r_cathode;
     let v_cathode = ia * r_cathode;
+    let v_plate = (supply_voltage - ia * r_plate).max(0.0);
 
     // Sanity: Q-point should have negative Vgk.
     if vgk >= 0.0 || !vgk.is_finite() || !v_cathode.is_finite() {
         return None;
     }
 
-    Some(TriodeDcQpoint { vgk, v_cathode })
+    Some(TriodeDcQpoint { vgk, v_cathode, v_plate, plate_node })
 }
 
 /// Resolve a BJT init state name to the initial Vce warm-start for BjtRoot.
