@@ -1221,6 +1221,119 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // ── HOT variants — drive each FET/MOSFET device into its nonlinear region ──
+                //
+                // Each _hot TestCase reuses the SAME circuit deck as the clean variant.
+                // Amplitude is chosen to push the device beyond its linear operating region:
+                //   jfet_source_follower_hot : 2.0V — large gate swing forcing Vgs near
+                //     VTO=-2.0V; source follower compresses/saturates.
+                //   nmos_common_source_hot   : 0.5V — ~5-15x gain → drain clips on 9V rail.
+                //   pmos_source_follower_hot : 2.5V — pushes Vgs toward VTO=-3.5V; source
+                //     follower enters cutoff region.
+                //
+                // Part B (dcy4.4) will set honest thresholds after measuring the WDF gap.
+                // The gated distortion metrics (thd_plus_n_error_db, harmonic_mag_error_db,
+                // even_odd_ratio_error_db) are filled in by Part B once goldens exist.
+                // pending_reference=true so a missing ngspice golden is PENDING, not FAIL.
+                tests.insert(
+                    "jfet_source_follower_hot".to_string(),
+                    TestCase {
+                        circuit: "active/jfet_source_follower.pedal".to_string(),
+                        description:
+                            "JFET source follower (2N5457) driven hot — 2.0V pushes Vgs near VTO=-2.0V"
+                                .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 2.0V: large enough to saturate the source follower; VDD=9V,
+                            // VTO=-2.0V, source resistor 2.2k — gate swing exceeds Vgs
+                            // linear range on negative half-cycle.
+                            amplitude: 2.0,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER — replaced with honest values after Part B measurement.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            thd_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
+                    },
+                );
+
+                tests.insert(
+                    "nmos_common_source_hot".to_string(),
+                    TestCase {
+                        circuit: "active/nmos_common_source.pedal".to_string(),
+                        description:
+                            "2N7000 NMOS common source driven hot — 0.5V input clips on 9V rail"
+                                .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 0.5V: gain ~5-15x means drain clips on 9V rail.  VDD=9V,
+                            // VTO=2.1V, gate biased ~3.6V — 0.5V swing drives transistor
+                            // between subthreshold and hard saturation.
+                            amplitude: 0.5,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER — replaced with honest values after Part B measurement.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            thd_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
+                    },
+                );
+
+                tests.insert(
+                    "pmos_source_follower_hot".to_string(),
+                    TestCase {
+                        circuit: "active/pmos_source_follower.pedal".to_string(),
+                        description:
+                            "BS250 PMOS source follower driven hot — 0.8V into soft-saturation knee"
+                                .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 0.6V: VDD=9V, BS250 VTO=-3.5V, source follower. Clean at 0.5V
+                            // already shows -6.4 dB THD (asymmetric source swing). 0.6V
+                            // partially clips on the negative half-cycle (PMOS cutoff floor)
+                            // while keeping a coherent AC output for THD measurement.
+                            // Larger amplitudes (0.8V+) drive to near-total cutoff,
+                            // making THD undefined (nearly-DC output).
+                            amplitude: 0.6,
+                            duration: 0.05,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER — replaced with honest values after Part B measurement.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            thd_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: true,
+                    },
+                );
+
                 tests
             },
         },
@@ -2970,6 +3083,51 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: Some(100.0),
+                    },
+                );
+
+                // ── HOT variant — FET Leveler driven hard to produce measurable compression ──
+                //
+                // Reuses the SAME compressor/fet_leveler.pedal deck as the level_sweep/
+                // tone_burst tests above.  A fixed 2.0V sine at 1 kHz drives the input
+                // well above the existing sweep max (0 dBVU ≈ 0.894 Vpk) so the feedback
+                // detector envelope charges and the JFET attenuator enters deep gain
+                // reduction in ngspice.  VCC=30V, so 2.0V is well within the rail.
+                //
+                // Purpose: verify that ngspice shows materially higher THD in the hot case
+                // vs the clean level_sweep; the WDF engine gap (no GR) is the measured
+                // delta for Part B honest thresholds.
+                //
+                // pending_reference=true: golden generated by Part A generate-spice run.
+                tests.insert(
+                    "fet_leveler_hot".to_string(),
+                    TestCase {
+                        pending_reference: true,
+                        circuit: "compressor/fet_leveler.pedal".to_string(),
+                        description:
+                            "FET Leveler 1176-style driven hot — 2.0V sine, deep compression region"
+                                .to_string(),
+                        signals: vec![SignalConfig::Sine {
+                            frequency: 1000.0,
+                            // 2.0V: well above 0 dBVU (0.894 Vpk); feedback detector envelope
+                            // charges to full compression (VCC=30V, so no rail clip).  Drives
+                            // JFET shunt from near-off into hard attenuation.
+                            amplitude: 2.0,
+                            duration: 0.5,
+                            label: Some("hot".to_string()),
+                        }],
+                        metrics: vec![
+                            MetricConfig::TimeDomain,
+                            MetricConfig::Thd { fundamental: 1000.0 },
+                        ],
+                        pass_criteria: PassCriteria {
+                            // PLACEHOLDER — replaced with honest values after Part B measurement.
+                            normalized_rms_error_db: Some(30.0),
+                            peak_error_db: Some(30.0),
+                            thd_error_db: Some(30.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(200.0),
                     },
                 );
 

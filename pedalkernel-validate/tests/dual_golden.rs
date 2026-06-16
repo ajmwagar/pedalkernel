@@ -10,7 +10,7 @@
 //!   3. Missing either golden produces a "missing" row — not a panic.
 
 use pedalkernel_validate::{
-    config::PassCriteria,
+    config::{PassCriteria, ValidationProfile},
     metrics,
     npy,
     report::SignalResult,
@@ -237,6 +237,7 @@ fn report_json_shape_matches_run_format() {
     tests.insert(
         "tb303_vcf".to_string(),
         TestResult {
+            profile: ValidationProfile::MeasuredMargin,
             passed: true,
             pending: false,
             error: None,
