@@ -102,10 +102,14 @@ from PIL import Image  # rendered-PNG dimension readback (Pillow is a matplotlib
 SCHEMA_VERSION = 1
 SAMPLE_RATE_DEFAULT = 384_000  # 96kHz x4 oversample
 
-# RMS/Peak-error colour scale (dB difference, negative = good): capped at these
-# extremes for display. Green at VMIN (deep negative), red at VMAX (near 0).
+# RMS/Peak-error colour scale (dB difference, negative = good). Diverging around
+# 0: green at VMIN (deep negative = excellent), YELLOW at 0 (error == signal,
+# borderline), red at VMAX_POS (large positive = the engine is badly off). The
+# old scale capped at 0, so every positive error (0, +13, +90) rendered the same
+# max red and severity was invisible.
 HEATMAP_VMIN_DB = -100.0
-HEATMAP_VMAX_DB = 0.0
+HEATMAP_VMAX_DB = 0.0          # the diverging centre (neutral / yellow)
+HEATMAP_VMAX_POS_DB = 75.0     # positive error mapped to deepest red
 
 # Spectral error is a different quantity: a max-bin error that is always >= 0
 # (0 dB = identical spectra), so it needs its own scale and polarity — green at
@@ -213,7 +217,7 @@ def plot_circuit(
         )
 
     ax_t.set_xlabel("Time (ms)")
-    ax_t.set_ylabel("Amplitude")
+    ax_t.set_ylabel("Amplitude (V)")  # linear sample value (volts), NOT dB
     ax_t.set_title("Time Domain")
     ax_t.legend(facecolor="#0f3460", labelcolor="white", fontsize=8)
     ax_t.grid(True, color="#333", linewidth=0.4)
@@ -358,16 +362,18 @@ def plot_suite_matrix(
 
     cmap = plt.cm.RdYlGn_r
 
-    # Two independent scales, because the columns measure opposite-polarity
-    # quantities. RdYlGn_r maps low -> green, high -> red in both cases:
-    #   RMS / Peak — dB difference, negative = good. Scale [-100, 0]:
-    #                green at -100 (far below ngspice floor), red near 0.
+    # Two scales, because the columns measure different quantities. In BOTH,
+    # RdYlGn_r reads the same for the viewer: green = better (closer to ngspice),
+    # red = worse. They differ only in where "perfect" sits, which is intrinsic
+    # to the metric and shown by the per-cell number:
+    #   RMS / Peak — signed dB difference. Diverging: green at -100 (excellent),
+    #                yellow at 0 (error == signal), red at +VMAX_POS. So a +75
+    #                error is now clearly redder than 0 (which is yellow).
     #   Spectral   — max-bin error, always >= 0, 0 = identical spectra.
     #                Scale [0, SPECTRAL_VMAX_DB]: green at 0, red at the cap.
-    # Crucially, polarity is unified for the *reader*: in every column green is
-    # "better / closer to reference" and red is "worse", so scanning the matrix
-    # for red always means "this is where we are bad".
-    norm_diff = mcolors.Normalize(vmin=HEATMAP_VMIN_DB, vmax=HEATMAP_VMAX_DB)
+    norm_diff = mcolors.TwoSlopeNorm(
+        vmin=HEATMAP_VMIN_DB, vcenter=HEATMAP_VMAX_DB, vmax=HEATMAP_VMAX_POS_DB
+    )
     norm_spec = mcolors.Normalize(vmin=0.0, vmax=SPECTRAL_VMAX_DB)
 
     # Map each column through its own norm into an RGBA image, then draw once.
@@ -377,7 +383,7 @@ def plot_suite_matrix(
         if j == spectral_col:
             normed = norm_spec(np.clip(col, 0.0, SPECTRAL_VMAX_DB))
         else:
-            normed = norm_diff(np.clip(col, HEATMAP_VMIN_DB, HEATMAP_VMAX_DB))
+            normed = norm_diff(np.clip(col, HEATMAP_VMIN_DB, HEATMAP_VMAX_POS_DB))
         rgba[:, j, :] = cmap(normed)
 
     # NaN cells (no data) -> grey.
@@ -401,11 +407,14 @@ def plot_suite_matrix(
     ax.set_xticklabels(col_labels, color="white", fontsize=9)
     ax.set_yticks(range(n_rows))
 
-    # Colour row labels by pass/fail (green = pass, orange = fail).
-    ax.set_yticklabels(labels, fontsize=8, color="white")
-    for tick, passed in zip(ax.get_yticklabels(), pass_flags):
-        tick.set_color("#90ee90" if passed else "#ff6b35")
+    # Tick marks + column headers white FIRST — this must precede the per-row
+    # colouring below, or it overrides the row label colours back to white.
     ax.tick_params(colors="white")
+    # Colour row labels by pass/fail: failures stand out in orange, passes stay
+    # legible white.
+    ax.set_yticklabels(labels, fontsize=8)
+    for tick, passed in zip(ax.get_yticklabels(), pass_flags):
+        tick.set_color("white" if passed else "#ff6b35")
 
     ax.set_title(f"{suite} — RMS / Peak / Spectral error vs ngspice",
                  color="white", pad=8, fontsize=11, fontweight="bold")
