@@ -861,6 +861,16 @@ body.page.t-accuracy main {
 .acc-badge-pass { color: #3fb950; border-color: rgba(63, 185, 80, 0.5); }
 .acc-badge-fail { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.5); }
 
+/* Validation-tolerance profile chips. Hue tracks strictness:
+   strict (cyan) → measured_margin (blue) → smoke (slate) →
+   known_gap (amber) → pending (muted grey). */
+.acc-profile { text-transform: none; letter-spacing: 0; }
+.acc-profile-strict          { color: #58c4ff; border-color: rgba(88, 196, 255, 0.5); }
+.acc-profile-measured_margin { color: #7aa2ff; border-color: rgba(122, 162, 255, 0.5); }
+.acc-profile-smoke           { color: #9aa7b8; border-color: rgba(154, 167, 184, 0.5); }
+.acc-profile-known_gap       { color: #e3a83c; border-color: rgba(227, 168, 60, 0.5); }
+.acc-profile-pending         { color: #8a8f98; border-color: rgba(138, 143, 152, 0.5); }
+
 /* Matrix figure */
 .acc-fig { margin: 0; }
 .acc-fig img {
@@ -1048,3 +1058,63 @@ body.page.t-dynamics main {
 }
 .acc-trend-line { stroke: var(--accent); stroke-width: 2; fill: none; vector-effect: non-scaling-stroke; }
 .acc-trend-grid { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+
+/* ---------- accuracy plot lightbox / carousel ---------- */
+.acc-lb {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.92);
+  padding: 2rem;
+}
+.acc-lb[hidden] { display: none; }
+.acc-lb-img {
+  max-width: 96vw;
+  max-height: 86vh;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #1a1a2e;
+  box-shadow: 0 6px 40px rgba(0, 0, 0, 0.6);
+}
+.acc-lb-btn {
+  position: fixed;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  font-size: 1.9rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.acc-lb-btn:hover { background: var(--accent-weak); border-color: var(--accent); color: var(--accent); }
+.acc-lb-close { top: 1rem; right: 1rem; }
+.acc-lb-prev { left: 1rem; top: 50%; transform: translateY(-50%); }
+.acc-lb-next { right: 1rem; top: 50%; transform: translateY(-50%); }
+.acc-lb-cap {
+  position: fixed;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 90vw;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: #e8e6e3;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+}
+.acc-lb-count { color: var(--accent); margin-left: 0.4rem; }
+a.acc-zoom { cursor: zoom-in; display: block; }
+@media (max-width: 640px) {
+  .acc-lb-btn { width: 2.4rem; height: 2.4rem; font-size: 1.5rem; }
+  .acc-lb-img { max-height: 80vh; }
+}

@@ -76,20 +76,29 @@
             <th class="num">Spec full (dB)</th>
             <th class="num">Spec audio (dB)</th>
             <th class="num">THD (dB)</th>
+            <th class="num">THD+N (dB)</th>
+            <th class="num">Harm (dB)</th>
+            <th class="num">E/O err (dB)</th>
             <th>Notes</th>
           </tr>
         </thead>
         <tbody>
           {{ range $fails }}
           <tr>
-            <td class="acc-key">{{ .key }}</td>
+            <td class="acc-key">{{ .key }}{{ with .profile }} <span class="acc-badge acc-profile acc-profile-{{ . }}">{{ . }}</span>{{ end }}</td>
             {{ with .metrics }}
             <td class="num">{{ printf "%.1f" .normalized_rms_error_db }}</td>
             <td class="num">{{ printf "%.1f" .peak_error_db }}</td>
             <td class="num acc-muted">{{ if ne .spectral_error_full_db nil }}{{ printf "%.1f" .spectral_error_full_db }}{{ else }}&mdash;{{ end }}</td>
             <td class="num">{{ printf "%.1f" .spectral_error_db }}</td>
             <td class="num">{{ if ne .thd_error_db nil }}{{ printf "%.1f" .thd_error_db }}{{ else }}&mdash;{{ end }}</td>
+            <td class="num acc-muted">{{ if ne .thd_plus_n_error_db nil }}{{ printf "%.1f" .thd_plus_n_error_db }}{{ else }}&mdash;{{ end }}</td>
+            <td class="num acc-muted">{{ if ne .harmonic_mag_error_db nil }}{{ printf "%.1f" .harmonic_mag_error_db }}{{ else }}&mdash;{{ end }}</td>
+            <td class="num acc-muted">{{ if ne .even_odd_ratio_error_db nil }}{{ printf "%.1f" .even_odd_ratio_error_db }}{{ else }}&mdash;{{ end }}</td>
             {{ else }}
+            <td class="num">&mdash;</td>
+            <td class="num">&mdash;</td>
+            <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
             <td class="num">&mdash;</td>
@@ -134,6 +143,60 @@
       </tbody>
     </table>
   </section>
+
+  {{/* ---------- (e2) GENERATED per-profile tolerance buckets ---------- */}}
+  {{ with $s.profiles }}
+  <section class="acc-section">
+    <h2>By tolerance profile</h2>
+    <p>
+      Not every circuit is held to the same bar. Each test declares a
+      <strong>validation profile</strong> that sets how its ngspice gap is scored —
+      from bit-tight equivalence down to known, intentionally-visible modeling gaps.
+      A failing <em>strict</em> test is a regression; a failing <em>known&nbsp;gap</em>
+      test is an honesty marker, not a surprise.
+    </p>
+    {{ $profileDesc := dict
+        "strict" "Bit-tight equivalence — a failure here is a real regression."
+        "measured_margin" "Threshold = currently-measured SPICE/WDF gap plus margin."
+        "smoke" "Behavioral signal-path coverage, not a full harmonic accuracy claim."
+        "known_gap" "Known architectural/modeling gap, kept intentionally visible."
+        "pending" "Reference or honest threshold not ready yet; excluded from the gate."
+    }}
+    {{ $profileOrder := slice "strict" "measured_margin" "smoke" "known_gap" "pending" }}
+    <table class="acc-table">
+      <thead>
+        <tr>
+          <th>Profile</th>
+          <th class="num">Pass / total</th>
+          <th>Pass ratio</th>
+          <th class="num">Pending</th>
+          <th>What it means</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{ range $pname := $profileOrder }}
+        {{ $p := index $s.profiles $pname }}
+        {{ with $p }}
+        {{ $tot := .total_tests }}
+        {{ $pass := .passed }}
+        {{ $ratio := 0.0 }}{{ if gt $tot 0 }}{{ $ratio = div (mul $pass 1.0) $tot }}{{ end }}
+        <tr>
+          <td><span class="acc-badge acc-profile acc-profile-{{ $pname }}">{{ $pname }}</span></td>
+          <td class="num">{{ $pass }} / {{ $tot }}</td>
+          <td>
+            <div class="acc-bar" title="{{ printf "%.0f%%" (mul $ratio 100) }}">
+              <div class="acc-bar-fill{{ if lt $pass $tot }} acc-bar-partial{{ end }}" style="width: {{ printf "%.1f%%" (mul $ratio 100) }};"></div>
+            </div>
+          </td>
+          <td class="num acc-muted">{{ if .pending }}{{ .pending }}{{ else }}&mdash;{{ end }}</td>
+          <td class="acc-muted">{{ index $profileDesc $pname }}</td>
+        </tr>
+        {{ end }}
+        {{ end }}
+      </tbody>
+    </table>
+  </section>
+  {{ end }}
 
   {{/* ---------- (f) GENERATED drift history ---------- */}}
   <section class="acc-section">
@@ -235,6 +298,7 @@
         <div class="acc-card">
           <div class="acc-card-head">
             <span class="acc-key">{{ .key }}</span>
+            {{ with .profile }}<span class="acc-badge acc-profile acc-profile-{{ . }}">{{ . }}</span>{{ end }}
             {{ if .passed }}
             <span class="acc-badge acc-badge-pass">PASS</span>
             {{ else }}
@@ -248,11 +312,14 @@
             <span class="acc-muted"><b>Spec full</b> {{ if ne .spectral_error_full_db nil }}{{ printf "%.1f" .spectral_error_full_db }}{{ else }}&mdash;{{ end }}</span>
             <span><b>Spec audio</b> {{ printf "%.1f" .spectral_error_db }}</span>
             <span><b>THD</b> {{ if ne .thd_error_db nil }}{{ printf "%.1f" .thd_error_db }}{{ else }}&mdash;{{ end }}</span>
+            <span class="acc-muted"><b>THD+N</b> {{ if ne .thd_plus_n_error_db nil }}{{ printf "%.1f" .thd_plus_n_error_db }}{{ else }}&mdash;{{ end }}</span>
+            <span class="acc-muted"><b>Harm</b> {{ if ne .harmonic_mag_error_db nil }}{{ printf "%.1f" .harmonic_mag_error_db }}{{ else }}&mdash;{{ end }}</span>
+            <span class="acc-muted"><b>E/O err</b> {{ if ne .even_odd_ratio_error_db nil }}{{ printf "%.1f" .even_odd_ratio_error_db }}{{ else }}&mdash;{{ end }}</span>
             {{ else }}
             <span class="acc-nodata">no metrics{{ with .error }} &middot; {{ . }}{{ end }}</span>
             {{ end }}
           </div>
-          <a href="/accuracy/circuits/{{ .suite }}/{{ .test }}/{{ .signal }}.png" target="_blank" rel="noopener">
+          <a class="acc-zoom" href="/accuracy/circuits/{{ .suite }}/{{ .test }}/{{ .signal }}.png" data-caption="{{ .key }}" target="_blank" rel="noopener">
             <img src="/accuracy/circuits/{{ .suite }}/{{ .test }}/{{ .signal }}.png"
                  alt="{{ .key }}: ngspice vs WDF time-domain overlay, difference trace, and FFT magnitude"
                  loading="lazy">
@@ -271,5 +338,65 @@
     Source on <a href="https://github.com/ajmwagar/pedalkernel" target="_blank" rel="noopener">GitHub</a>.
   </footer>
 
+  {{/* ---------- lightbox / carousel for the per-circuit plots ---------- */}}
+  <div class="acc-lb" id="acc-lb" tabindex="-1" role="dialog" aria-modal="true" aria-label="Circuit plot viewer" hidden>
+    <button class="acc-lb-btn acc-lb-close" type="button" aria-label="Close (Esc)">&times;</button>
+    <button class="acc-lb-btn acc-lb-prev" type="button" aria-label="Previous (left arrow)">&#8249;</button>
+    <img class="acc-lb-img" alt="">
+    <button class="acc-lb-btn acc-lb-next" type="button" aria-label="Next (right arrow)">&#8250;</button>
+    <div class="acc-lb-cap"><span class="acc-lb-caption"></span> <span class="acc-lb-count"></span></div>
+  </div>
+
 </div>
+
+<script>
+// Click/keyboard carousel over every per-circuit plot (a.acc-zoom). Links keep
+// their href so it still opens the PNG if JS is off.
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('a.acc-zoom'));
+  if (!links.length) return;
+  var lb = document.getElementById('acc-lb');
+  if (!lb) return;
+  var img = lb.querySelector('.acc-lb-img');
+  var capEl = lb.querySelector('.acc-lb-caption');
+  var countEl = lb.querySelector('.acc-lb-count');
+  var idx = 0, lastFocus = null;
+
+  function show(i) {
+    idx = (i + links.length) % links.length; // wrap around
+    var a = links[idx];
+    img.src = a.getAttribute('href');
+    var cap = a.getAttribute('data-caption') || '';
+    img.alt = cap;
+    capEl.textContent = cap;
+    countEl.textContent = (idx + 1) + ' / ' + links.length;
+  }
+  function open(i) {
+    lastFocus = document.activeElement;
+    show(i);
+    lb.hidden = false;
+    document.body.style.overflow = 'hidden';
+    lb.focus();
+  }
+  function close() {
+    lb.hidden = true;
+    document.body.style.overflow = '';
+    img.removeAttribute('src');
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  links.forEach(function (a, i) {
+    a.addEventListener('click', function (e) { e.preventDefault(); open(i); });
+  });
+  lb.querySelector('.acc-lb-close').addEventListener('click', close);
+  lb.querySelector('.acc-lb-prev').addEventListener('click', function (e) { e.stopPropagation(); show(idx - 1); });
+  lb.querySelector('.acc-lb-next').addEventListener('click', function (e) { e.stopPropagation(); show(idx + 1); });
+  lb.addEventListener('click', function (e) { if (e.target === lb) close(); }); // backdrop click
+  document.addEventListener('keydown', function (e) {
+    if (lb.hidden) return;
+    if (e.key === 'Escape') close();
+    else if (e.key === 'ArrowLeft') show(idx - 1);
+    else if (e.key === 'ArrowRight') show(idx + 1);
+  });
+})();
+</script>
 {{ end }}
