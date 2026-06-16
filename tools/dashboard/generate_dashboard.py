@@ -92,6 +92,7 @@ matplotlib.use("Agg")  # non-interactive backend; must be before pyplot import
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
+from PIL import Image  # rendered-PNG dimension readback (Pillow is a matplotlib dep)
 
 
 # ---------------------------------------------------------------------------
@@ -298,24 +299,37 @@ def plot_circuit(
 # Accuracy matrix / heatmap
 # ---------------------------------------------------------------------------
 
-def plot_accuracy_matrix(
+def _short_row_label(r: dict[str, Any]) -> str:
+    """Row label within a per-suite matrix: drop the redundant suite prefix.
+
+    The suite is already the matrix title, so showing `test / signal` keeps the
+    labels short and readable instead of repeating `<suite>/` on every row.
+    """
+    return f"{r['test']} / {r['signal']}"
+
+
+def plot_suite_matrix(
+    suite: str,
     circuit_records: list[dict[str, Any]],
     out_path: Path,
-) -> None:
-    """Generate an accuracy-matrix heatmap PNG.
+) -> tuple[int, int]:
+    """Generate one compact accuracy-matrix heatmap PNG for a single suite.
 
-    Rows = circuit keys (suite/test/signal).
+    Rows = circuits/signals in this suite (suite prefix dropped from labels).
     Columns = metrics (RMS, Peak, Spectral).
-    Colour = dB error value (lower = better = greener).
+    Colour = dB error: within each column, green = better (closer to ngspice),
+             red = worse (further from the reference).
+
+    Returns the pixel (width, height) of the rendered PNG so callers can report
+    dimensions and confirm the matrices are no longer extreme-aspect-ratio.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Sort by key
     records = sorted(circuit_records, key=lambda r: r["key"])
 
-    labels = [r["key"] for r in records]
+    labels = [_short_row_label(r) for r in records]
     metric_cols = ["normalized_rms_error_db", "peak_error_db", "spectral_error_db"]
-    col_labels = ["RMS error (dB)", "Peak error (dB)", "Spectral (audio, dB)"]
+    col_labels = ["RMS\n(dB)", "Peak\n(dB)", "Spectral\n(audio, dB)"]
     spectral_col = metric_cols.index("spectral_error_db")
 
     # Build matrix: NaN = no data (wdf_pending or error)
@@ -331,10 +345,14 @@ def plot_accuracy_matrix(
         pass_flags.append(r.get("passed", False))
 
     n_rows, n_cols = mat.shape
-    cell_h = max(0.25, min(0.5, 20.0 / n_rows))
-    fig_h = max(6, n_rows * cell_h + 2)
 
-    fig, ax = plt.subplots(figsize=(10, fig_h))
+    # Compact, legible sizing: fixed per-row height keeps labels readable and the
+    # figure tightly bounded regardless of suite size (no 3764-px-tall column).
+    row_h_in = 0.34            # inches per row
+    fig_w = 7.0
+    fig_h = max(2.6, n_rows * row_h_in + 1.8)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     fig.patch.set_facecolor("#1a1a2e")
     ax.set_facecolor("#1a1a2e")
 
@@ -346,6 +364,9 @@ def plot_accuracy_matrix(
     #                green at -100 (far below ngspice floor), red near 0.
     #   Spectral   — max-bin error, always >= 0, 0 = identical spectra.
     #                Scale [0, SPECTRAL_VMAX_DB]: green at 0, red at the cap.
+    # Crucially, polarity is unified for the *reader*: in every column green is
+    # "better / closer to reference" and red is "worse", so scanning the matrix
+    # for red always means "this is where we are bad".
     norm_diff = mcolors.Normalize(vmin=HEATMAP_VMIN_DB, vmax=HEATMAP_VMAX_DB)
     norm_spec = mcolors.Normalize(vmin=0.0, vmax=SPECTRAL_VMAX_DB)
 
@@ -365,36 +386,69 @@ def plot_accuracy_matrix(
 
     ax.imshow(rgba, aspect="auto")
 
+    # Print the dB value inside each cell so the colour is backed by a number.
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v = mat[i, j]
+            txt = "—" if np.isnan(v) else f"{v:.0f}"
+            ax.text(
+                j, i, txt, ha="center", va="center",
+                fontsize=7, color="#10101a", fontfamily="monospace",
+            )
+
     # Axes labels
     ax.set_xticks(range(n_cols))
     ax.set_xticklabels(col_labels, color="white", fontsize=9)
     ax.set_yticks(range(n_rows))
 
-    # Colour row labels by pass/fail
-    ax.set_yticklabels(labels, fontsize=max(5, min(9, 200 // n_rows)), color="white")
+    # Colour row labels by pass/fail (green = pass, orange = fail).
+    ax.set_yticklabels(labels, fontsize=8, color="white")
     for tick, passed in zip(ax.get_yticklabels(), pass_flags):
         tick.set_color("#90ee90" if passed else "#ff6b35")
+    ax.tick_params(colors="white")
 
-    ax.set_title("Accuracy Matrix (RMS / Peak / Spectral error vs ngspice)", color="white", pad=10)
+    ax.set_title(f"{suite} — RMS / Peak / Spectral error vs ngspice",
+                 color="white", pad=8, fontsize=11, fontweight="bold")
 
-    # Two colorbars, one per scale.
-    sm_diff = plt.cm.ScalarMappable(norm=norm_diff, cmap=cmap)
-    cbar1 = fig.colorbar(sm_diff, ax=ax, orientation="vertical", fraction=0.03, pad=0.02)
-    cbar1.set_label("RMS / Peak dB error (lower = better)", color="white")
-    cbar1.ax.yaxis.set_tick_params(color="white")
-    plt.setp(cbar1.ax.yaxis.get_ticklabels(), color="white")
-
-    sm_spec = plt.cm.ScalarMappable(norm=norm_spec, cmap=cmap)
-    cbar2 = fig.colorbar(sm_spec, ax=ax, orientation="vertical", fraction=0.03, pad=0.10)
-    cbar2.set_label("Spectral dB error (0 = identical)", color="white")
-    cbar2.ax.yaxis.set_tick_params(color="white")
-    plt.setp(cbar2.ax.yaxis.get_ticklabels(), color="white")
+    # Single shared colorbar legend: low = green = better, high = red = worse.
+    # Both column families share the same green->red polarity, so one bar with a
+    # "better -> worse" label communicates the semantics for the whole matrix.
+    sm = plt.cm.ScalarMappable(norm=mcolors.Normalize(vmin=0.0, vmax=1.0), cmap=cmap)
+    cbar = fig.colorbar(sm, ax=ax, orientation="vertical", fraction=0.045, pad=0.03)
+    cbar.set_ticks([0.0, 1.0])
+    cbar.set_ticklabels(["better\n(closer to\nngspice)", "worse\n(further\nfrom ref)"])
+    cbar.ax.yaxis.set_tick_params(color="white")
+    plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white", fontsize=7)
 
     plt.tight_layout()
-    # 140 dpi: crisp at the large widths the full-width accuracy dashboard renders.
     fig.savefig(str(out_path), dpi=140, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
-    print(f"[dashboard] accuracy-matrix -> {out_path}")
+
+    # Read back rendered pixel dimensions for reporting.
+    with Image.open(out_path) as im:
+        px_w, px_h = im.size
+    print(f"[dashboard] matrix-{suite} -> {out_path}  ({px_w}x{px_h})")
+    return px_w, px_h
+
+
+def plot_suite_matrices(
+    circuit_records: list[dict[str, Any]],
+    out_dir: Path,
+) -> list[str]:
+    """Render one compact matrix PNG per suite: matrix-<suite>.png.
+
+    Replaces the single full-height accuracy-matrix.png. Returns the sorted list
+    of suite names that produced a matrix.
+    """
+    by_suite: dict[str, list[dict[str, Any]]] = {}
+    for r in circuit_records:
+        by_suite.setdefault(r["suite"], []).append(r)
+
+    suites = sorted(by_suite)
+    for suite in suites:
+        out_path = out_dir / f"matrix-{suite}.png"
+        plot_suite_matrix(suite, by_suite[suite], out_path)
+    return suites
 
 
 # ---------------------------------------------------------------------------
@@ -452,11 +506,11 @@ def main() -> int:
         epilog=__doc__,
     )
     parser.add_argument(
-        "--report-json", required=True, type=Path,
+        "--report-json", type=Path,
         help="Path to the JSON report produced by `pedalkernel-validate --report <path> run`.",
     )
     parser.add_argument(
-        "--golden-dir", required=True, type=Path,
+        "--golden-dir", type=Path,
         help="Root of the golden directory (contains {suite}/{test}/{signal}.npy).",
     )
     parser.add_argument(
@@ -464,10 +518,11 @@ def main() -> int:
         help="Output directory for generated PNGs + JSON files.",
     )
     parser.add_argument(
-        "--timestamp", required=True,
+        "--timestamp",
         help=(
             "ISO-8601 timestamp for this run (e.g. 2026-06-15T02:00:00Z). "
-            "Pass from outside — do NOT rely on datetime.now() for reproducibility."
+            "Pass from outside — do NOT rely on datetime.now() for reproducibility. "
+            "Required for a full run; ignored in --from-accuracy-json mode."
         ),
     )
     parser.add_argument(
@@ -477,7 +532,60 @@ def main() -> int:
             "Created if absent. Optional — omit to skip history."
         ),
     )
+    parser.add_argument(
+        "--from-accuracy-json", type=Path,
+        help=(
+            "Render ONLY the per-suite accuracy matrices from a committed "
+            "accuracy.json (no validate report, no golden .npy, no engine "
+            "rebuild). Mutually exclusive with --report-json. Per-circuit "
+            "overlay/FFT PNGs are left untouched in this mode."
+        ),
+    )
     args = parser.parse_args()
+
+    # -----------------------------------------------------------------------
+    # Matrix-only mode: regenerate per-suite matrices from committed
+    # accuracy.json without touching the engine, the validate report, or the
+    # per-circuit PNGs. Used for readability/layout iteration on the matrices.
+    # -----------------------------------------------------------------------
+    if args.from_accuracy_json is not None:
+        if args.report_json is not None:
+            print("[dashboard] ERROR: --from-accuracy-json and --report-json are "
+                  "mutually exclusive", file=sys.stderr)
+            return 1
+        if not args.from_accuracy_json.exists():
+            print(f"[dashboard] ERROR: accuracy.json not found: "
+                  f"{args.from_accuracy_json}", file=sys.stderr)
+            return 1
+        with args.from_accuracy_json.open() as f:
+            acc = json.load(f)
+        records = [
+            {"key": key, **entry}
+            for key, entry in acc.get("circuits", {}).items()
+        ]
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        suites = plot_suite_matrices(records, args.out_dir)
+        print()
+        print("=" * 60)
+        print("MATRIX-ONLY REGEN (from accuracy.json)")
+        print("=" * 60)
+        print(f"  Source      : {args.from_accuracy_json}")
+        print(f"  Circuits    : {len(records)}")
+        print(f"  Suites      : {len(suites)}  ({', '.join(suites)})")
+        print(f"  Output dir  : {args.out_dir}")
+        print("=" * 60)
+        return 0
+
+    # Full run requires the validate report + goldens + a literal timestamp.
+    if args.report_json is None or args.golden_dir is None:
+        print("[dashboard] ERROR: --report-json and --golden-dir are required for "
+              "a full run (or use --from-accuracy-json for matrices only)",
+              file=sys.stderr)
+        return 1
+    if args.timestamp is None:
+        print("[dashboard] ERROR: --timestamp is required for a full run",
+              file=sys.stderr)
+        return 1
 
     # -----------------------------------------------------------------------
     # Load the validation report
@@ -566,11 +674,10 @@ def main() -> int:
                 generated_pngs.append(png_path)
 
     # -----------------------------------------------------------------------
-    # Accuracy matrix PNG
+    # Per-suite accuracy matrix PNGs (matrix-<suite>.png)
     # -----------------------------------------------------------------------
-    matrix_path = args.out_dir / "accuracy-matrix.png"
-    plot_accuracy_matrix(circuit_records_for_matrix, matrix_path)
-    generated_pngs.append(matrix_path)
+    matrix_suites = plot_suite_matrices(circuit_records_for_matrix, args.out_dir)
+    generated_pngs.extend(args.out_dir / f"matrix-{s}.png" for s in matrix_suites)
 
     # -----------------------------------------------------------------------
     # accuracy.json
