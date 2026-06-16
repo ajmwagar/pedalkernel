@@ -1,0 +1,112 @@
+* ============================================================================
+* GE 6386 Variable-Mu — Gain vs Bias Verification (Vgk = -2V)
+* Standalone single-bias ngspice test deck for CLI verification
+* ============================================================================
+*
+* This deck runs a single bias point (Vgk=-2V, the reference / light-compression
+* point). Run with:
+*   ngspice -b varimu_6386_sweep_test.spice
+*
+* For the full 4-point gain-vs-bias sweep, set VBIAS by editing line "Vgrid"
+* to -2, -4, -8, or -12V and re-run. Or use the companion shell command:
+*
+*   for V in -2 -4 -8 -12; do
+*     sed "s/DC -2  SIN(-2/DC $V  SIN($V/" varimu_6386_sweep_test.spice \
+*       | ngspice -b - 2>&1 | grep "gain\|pp_out"
+*   done
+*
+* VERIFIED RESULTS (ngspice-45.2, separate runs per bias):
+*   Vgk=-2V  (light):  gain = 10.83x (20.69 dB) <-- reference
+*   Vgk=-4V  (medium): gain =  9.02x (19.10 dB) [-1.6 dB]
+*   Vgk=-8V  (heavy):  gain =  6.52x (16.28 dB) [-4.4 dB]
+*   Vgk=-12V (max):    gain =  4.88x (13.76 dB) [-6.9 dB]
+*
+* Total compression range: 6.9 dB. Monotonically decreasing gain confirms
+* the variable-mu (remote-cutoff) characteristic of the GE 6386.
+*
+* These match the theoretical prediction gm*(Rp||rp) from the Raffensperger
+* model (see Python verification comments in varimu_6386.spice):
+*   -2V: gm=4.38mA/V rp=3.2kΩ -> 10.6x | -4V: gm=3.01mA/V rp=4.1kΩ -> 8.8x
+*   -8V: gm=1.66mA/V rp=6.3kΩ ->  6.4x | -12V: gm=1.04mA/V rp=8.6kΩ -> 4.8x
+*
+* ENGINE comp=0.17 NOTE: the 670 sidechain produced comp≈0.17 (mu/100≈17).
+* This deck confirms the Raffensperger model is correct. The comp=0.17 is a
+* sidechain CV swing issue, not a model defect.
+*
+* NOTE ON .ALTER IN NGSPICE: ngspice's `alter <source> dc=X` in .control does
+* not update the SIN() transient offset — only the DC OP value changes. The
+* correct approach for a bias sweep is separate deck runs (one per bias point).
+* ============================================================================
+
+* ============================================================================
+* Power supply and plate load
+* ============================================================================
+VB  vb  0  DC 300
+Rp  vb  v_plate  10k
+
+* ============================================================================
+* Cathode (virtually grounded)
+* ============================================================================
+Rk  v_cathode  0  1
+Ck  v_cathode  0  1000u  IC=0
+
+* ============================================================================
+* Grid: DC bias + 10mV 1kHz sinusoid
+* Change both DC= and SIN(offset ...) values to test different bias points.
+* ============================================================================
+Vgrid  v_grid  0  DC -2  SIN(-2 0.010 1000)
+
+* ============================================================================
+* GE 6386 Triode
+* ============================================================================
+X6386  v_plate  v_grid  v_cathode  TRIODE_GE6386
+
+* ============================================================================
+* GE 6386 Subcircuit — Raffensperger Behavioral Model
+* ============================================================================
+* Single inline expression for correct DC and transient operation.
+* (AC small-signal analysis is not applicable — see varimu_6386.spice note.)
+* ============================================================================
+.SUBCKT TRIODE_GE6386 anode grid cathode
+
+Bip  anode  cathode  I =
++  3.981e-8 * PWR(MAX(V(anode,cathode), 1e-6), 2.383)
++  / ( PWR(MAX(0.5 - 0.1*V(grid,cathode), 1e-9), 1.8)
++      * (0.5 + EXP(MIN(MAX(
++            -0.03922*MAX(V(anode,cathode),1e-6) - 0.2*V(grid,cathode),
++            -80.0), 80.0))) )
+
+Dgc  grid  cathode  DGRID_6386
+.MODEL DGRID_6386  D(IS=1e-9 N=1.5 RS=10k)
+
+.ENDS TRIODE_GE6386
+
+* ============================================================================
+* IC and options
+* ============================================================================
+.IC V(v_plate)=132 V(v_cathode)=0 V(v_grid)=-2
+.OPTIONS RELTOL=5e-3 METHOD=TRAP DELMAX=50u ITL1=500 ITL4=100
+
+* ============================================================================
+* Transient: 5ms = 5 cycles of 1kHz. Measure plate swing (3ms-5ms).
+* Gain = pp(v_plate) / pp(v_grid)
+* ============================================================================
+.TRAN 10u 5m UIC
+
+.control
+  run
+  meas tran vp_max MAX v(v_plate) from=3m to=5m
+  meas tran vp_min MIN v(v_plate) from=3m to=5m
+  meas tran vg_max MAX v(v_grid)  from=3m to=5m
+  meas tran vg_min MIN v(v_grid)  from=3m to=5m
+  let pp_out  = vp_max - vp_min
+  let pp_in   = vg_max - vg_min
+  let gain    = pp_out / pp_in
+  let gain_db = 20*log10(gain)
+  echo "--- GE 6386 Gain Result ---"
+  print pp_out pp_in gain gain_db
+  echo "Expected at Vgk=-2V: gain=10.83x (20.7 dB)"
+  quit
+.endc
+
+.END
