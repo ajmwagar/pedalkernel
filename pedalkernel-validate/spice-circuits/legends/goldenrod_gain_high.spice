@@ -1,0 +1,130 @@
+* ============================================================================
+* Klon Centaur v3 — Full Signal Path, HIGH GAIN position
+* PedalKernel Legends Validation Circuit (Goldenrod — gain_high variant)
+*
+* Cross-reference: based on goldenrod.spice (mid-gain, Gain=0.5).
+* Changes from base deck:
+*   RgainA    50k  → 1m     (Gain pot gang A at pos=1.0: wiper at bottom → ~0 Ω to gnd → max gain)
+*   RgainB_top 50k → 100k   (Gain pot gang B at pos=1.0: wiper at bottom → full 100k from top)
+*   RgainB_bot 50k → 1m     (Gain pot gang B at pos=1.0: wiper at bottom → ~0 Ω to gnd)
+*
+* Gain formula (non-inverting): A = 1 + R_feedbk / R_gnd
+*   R_gnd = R5 + R6 + RgainA = 15k + 2k + 1m ≈ 17k  → A ≈ 1 + 422k/17k ≈ 25.8×
+*
+* Control positions (high-gain):
+*   Gain   = 1.0  → Gain_A: top=100k-1mΩ≈100k, bot=1mΩ≈0; Gain_B: wiper at bottom
+*   Treble = 0.5  → Rtreble: 5k each half (unchanged from base deck)
+*   Output = 0.7  → Routput_top=3k, Routput_bot=7k (unchanged from base deck)
+*
+* Supply: VCC = 9V; VB+ = 4.5V (derived from R_bias1/R_bias2 divider)
+*
+* Op-amp model: ideal VCVS (gain=100000), all four amplifiers.
+*
+* Diode model: 1N34A germanium (hard clip to ground)
+*   Is=200n N=1.4 Rs=20 Cjo=2p  (typical 1N34A parameters)
+*   At ~25.8× gain the diodes will hard-clip a 0.1 V input, producing
+*   rich harmonics (THD materially above mid-gain reference).
+* ============================================================================
+
+* ---- Supply -----------------------------------------------------------------
+VCC  vcc  0  DC 9
+
+* Bias divider: VB+ = 4.5V. C_vgnd bypasses VB+ to AC ground.
+R_bias1 vcc  vb1   27k
+R_bias2 vb1  0     27k
+C_vgnd  vb1  0     47u
+
+* ---- Input buffer (U1: unity-gain voltage follower) -------------------------
+* R1: input protection 10k. C1: DC block 100nF. R2: bias to VB+ 1M.
+R1   v_in    v_r1b    10k
+C1   v_r1b   v_c1b    100n
+R2   v_c1b   vb1      1MEG
+* U1 is a unity-gain follower: out = pos input = v_c1b
+Eu1  v_u1out 0        v_c1b v_u1out  100000
+
+* ---- Non-inverting gain stage (U2) -----------------------------------------
+* R3: input resistor 1.5k to non-inverting input.
+R3   v_u1out  v_u2pos  1.5k
+
+* Feedback: R_feedbk (422k) // C_fb1 (3.9nF) // C_fb2 (47pF) from neg to out.
+R_feedbk  v_u2neg  v_u2out  422k
+C_fb1     v_u2neg  v_u2out  3.9n
+C_fb2     v_u2neg  v_u2out  47p
+
+* Ground leg: R5 (15k) + R6 (2k) + Gain_A (100k, pos=1.0 → bot≈0Ω).
+* At pos=1.0, Gain_A wiper is at bottom: RgainA ≈ 0 → R_gnd ≈ R5+R6 = 17k
+* ngspice rejects literal 0; use 1m (1 mΩ) as the near-zero stand-in.
+R5     v_u2neg  v_r5b    15k
+R6     v_r5b    v_r6b    2k
+RgainA v_r6b    0        1m
+* C_gnd (1µF) bypasses R5.b to ground (LF boost)
+C_gnd  v_r5b    0        1u
+
+Eu2    v_u2out  0        v_u2pos v_u2neg  100000
+
+* ---- Germanium hard clipping -----------------------------------------------
+* C_clip (1µF) AC-couples U2 output to diode junction.
+* D1: anode at junction, clips positive swings at ~0.25V.
+* D2: cathode at junction, clips negative swings at ~0.25V.
+* R_clip (27k) carries clipped signal to summing amp.
+C_clip   v_u2out   v_ge_jnct  1u
+D1       v_ge_jnct 0          DGermanium
+D2       0         v_ge_jnct  DGermanium
+.model DGermanium D(Is=200n N=1.4 Rs=20 Cjo=2p)
+R_clip   v_ge_jnct v_sum_clip 27k
+
+* ---- Feedforward network 1 (clean low-pass blend) --------------------------
+* R_ff1a (15k) → C_ff1 (100nF) → R_ff1b (422k) → summing amp
+* fc = 1/(2π × 15k × 100n) ≈ 106Hz (adds clean low end)
+R_ff1a  v_u1out   v_ff1_rc   15k
+C_ff1   v_ff1_rc  v_ff1_bot  100n
+R_ff1b  v_ff1_bot v_sum_ff1  422k
+
+* ---- Feedforward network 2 (gain-dependent clean blend) --------------------
+* Gain_B (100k, tracks Gain_A — same-name binding; pos=1.0 → wiper at bottom).
+* At pos=1.0: wiper at bottom → Vwiper ≈ 0 (near-zero feedforward blend)
+* RgainB_top = 100k (wiper sees full top resistance), RgainB_bot = 1m ≈ 0
+RgainB_top  v_u1out    v_gainB_w  100k
+RgainB_bot  v_gainB_w  0          1m
+R_ff2       v_gainB_w  v_sum_ff2  392k
+
+* ---- Summing amplifier (U3: inverting summer) -------------------------------
+* Three inputs to U3.neg: v_sum_clip (via R_clip), v_sum_ff1 (via R_ff1b), v_sum_ff2 (via R_ff2).
+* Feedback: R_sum_fb (560k) // C_sum_fb (560pF). U3.pos = VB+.
+R_sum_fb  v_u3neg  v_u3out  560k
+C_sum_fb  v_u3neg  v_u3out  560p
+Eu3       v_u3out  0        vb1 v_u3neg  100000
+* Connect all three input resistor outputs to U3.neg via zero-ohm wires
+* (direct connections — SPICE requires at least one named node)
+Rw_clip  v_sum_clip  v_u3neg  1m
+Rw_ff1   v_sum_ff1   v_u3neg  1m
+Rw_ff2   v_sum_ff2   v_u3neg  1m
+
+* ---- Active tone control (U4: HP shelving EQ) ------------------------------
+* pedal: U3.out → R_tone_in → U4.neg; C_tone from U4.neg to Treble.a;
+*   Treble.w → R_tone_shelf → U4.out; Treble.b → U4.out;
+*   U4.neg → R_tone_fb → U4.out; U4.pos = VB+.
+R_tone_in    v_u3out    v_u4neg    1.8k
+C_tone       v_u4neg    v_ctone_b  3.9n
+* Treble pot (10k, pos=0.5 → 5k each half)
+Rtreble_top  v_ctone_b  v_treble_w  5k
+Rtreble_bot  v_treble_w v_treble_b  5k
+R_tone_shelf v_treble_w v_u4out     4.7k
+* Treble.b → U4.out (direct connection via shelf resistor bot)
+Rw_treble_b  v_treble_b v_u4out     1m
+* DC feedback path
+R_tone_fb    v_u4neg    v_u4out     1.8k
+Eu4          v_u4out    0           vb1 v_u4neg  100000
+R_tone_out   v_u4out    v_tone_out  1.8k
+
+* ---- Output stage ----------------------------------------------------------
+* C_out (470nF) DC-blocks. Output pot (10k, pos=0.7 audio taper).
+* Audio taper at 0.7: bottom ≈ 70% → 7k, top → 3k.
+* Anti-pop: R_out1 (68k) from pot input to gnd; R_out2 (68k) from wiper to out.
+* R_out3 (100k) output load to ground.
+C_out        v_tone_out  v_cout_b  470n
+R_out1       v_cout_b    0         68k
+Routput_top  v_cout_b    v_out_w   3k
+Routput_bot  v_out_w     0         7k
+R_out2       v_out_w     v_out     68k
+R_out3       v_out       0         100k

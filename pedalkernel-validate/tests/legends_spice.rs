@@ -67,10 +67,20 @@ fn rms(signal: &[f64]) -> f64 {
     (signal.iter().map(|&x| x * x).sum::<f64>() / signal.len() as f64).sqrt()
 }
 
-/// Run a bootstrap: simulate the named spice deck and write `golden/<name>/sine_1k.npy`.
+/// Run a bootstrap: simulate the named spice deck and write a golden .npy.
+///
+/// `name` is the pedal directory name under `golden/legends/`.
+/// `variant` is the golden stem (e.g. `"sine_1k"`, `"gain_high"`, `"gain_mid"`).
+/// `deck_name` is the `.spice` file stem (without extension) — defaults to `name`
+/// when `None`.
 fn run_bootstrap(name: &str, output_node: &str) {
-    let circuit = spice_path(name);
-    assert!(circuit.exists(), "{name}.spice not found at {circuit:?}");
+    run_bootstrap_variant(name, "sine_1k", None, output_node);
+}
+
+fn run_bootstrap_variant(name: &str, variant: &str, deck_name: Option<&str>, output_node: &str) {
+    let deck = deck_name.unwrap_or(name);
+    let circuit = spice_path(deck);
+    assert!(circuit.exists(), "{deck}.spice not found at {circuit:?}");
 
     let config = SpiceConfig {
         sample_rate: SR as u32,
@@ -86,32 +96,50 @@ fn run_bootstrap(name: &str, output_node: &str) {
 
     let golden_output = runner
         .simulate(&circuit, &input_internal, output_node)
-        .unwrap_or_else(|e| panic!("ngspice simulation failed for {name} golden bootstrap: {e}"));
+        .unwrap_or_else(|e| {
+            panic!("ngspice simulation failed for {name}/{variant} golden bootstrap: {e}")
+        });
 
     let dir = golden_dir(name);
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create golden/legends/{name}: {e}"));
-    let golden_path = dir.join("sine_1k.npy");
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("create golden/legends/{name}: {e}"));
+    let golden_path = dir.join(format!("{variant}.npy"));
     npy::write_f64(&golden_path, &golden_output)
-        .unwrap_or_else(|e| panic!("write {name} golden sine_1k.npy: {e}"));
+        .unwrap_or_else(|e| panic!("write {name} golden {variant}.npy: {e}"));
 
     eprintln!(
-        "  bootstrapped {name} golden: {} samples → {golden_path:?}",
+        "  bootstrapped {name}/{variant} golden: {} samples → {golden_path:?}",
         golden_output.len()
     );
 }
 
-/// Run the WDF-vs-golden comparison for a pedal.
+/// Run the WDF-vs-golden comparison for a pedal (default `sine_1k` variant).
 ///
 /// `controls` is a slice of `(name, value)` pairs to set on the compiled pedal.
 fn run_wdf_vs_spice(name: &str, pro_path: &str, controls: &[(&str, f64)]) {
+    run_wdf_vs_spice_variant(name, "sine_1k", pro_path, controls, None);
+}
+
+/// Run the WDF-vs-golden comparison for a named variant golden.
+///
+/// `variant` selects which golden file to load (`golden/legends/<name>/<variant>.npy`).
+/// `gate` optionally asserts hard error bounds after measuring: `(rms_db, peak_db, thd_db)`.
+/// All three thresholds are "measured + margin" — set `None` to skip a specific check.
+fn run_wdf_vs_spice_variant(
+    name: &str,
+    variant: &str,
+    pro_path: &str,
+    controls: &[(&str, f64)],
+    gate: Option<(f64, f64, f64)>,
+) {
     // Load .pedal from pro repo (skip if absent)
     let source = skip_if_missing!(load_pro_pedal_sub(pro_path), pro_path);
 
     // Load the ngspice golden
-    let golden_path = golden_dir(name).join("sine_1k.npy");
+    let golden_path = golden_dir(name).join(format!("{variant}.npy"));
     if !golden_path.exists() {
         eprintln!(
-            "  SKIP {name}_wdf_vs_spice: golden not found at {golden_path:?}; \
+            "  SKIP {name}/{variant}_wdf_vs_spice: golden not found at {golden_path:?}; \
              run with PEDALKERNEL_BOOTSTRAP_LEGENDS=1 first"
         );
         return;
@@ -143,7 +171,7 @@ fn run_wdf_vs_spice(name: &str, pro_path: &str, controls: &[(&str, f64)]) {
     }
     let wdf_output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
 
-    // Compute metrics
+    // Compute metrics (full signal)
     let result = metrics::compare(&wdf_output, &golden, SR, Some(TEST_FREQ));
 
     // Trim transient: skip first 10ms for DC-blocking / coupling-cap settling
@@ -152,8 +180,8 @@ fn run_wdf_vs_spice(name: &str, pro_path: &str, controls: &[(&str, f64)]) {
     let golden_trim = &golden[trim.min(golden.len())..];
     let result_trim = metrics::compare(wdf_trim, golden_trim, SR, Some(TEST_FREQ));
 
-    // Report (no hard threshold — surface the gap)
-    eprintln!("  {name} WDF vs ngspice (full signal):");
+    // Report
+    eprintln!("  {name}/{variant} WDF vs ngspice (full signal):");
     eprintln!(
         "    normalized RMS error : {:.1} dB",
         result.normalized_rms_error_db
@@ -178,12 +206,51 @@ fn run_wdf_vs_spice(name: &str, pro_path: &str, controls: &[(&str, f64)]) {
             f64::NAN
         }
     );
+    // Harmonic character (informational — even/odd ratio reveals asymmetric Ge clipping)
+    if let Some(eo_wdf) = metrics::compare(wdf_trim, wdf_trim, SR, Some(TEST_FREQ))
+        .even_odd_ratio_db
+    {
+        let eo_ngspice = result_trim.even_odd_ratio_db.unwrap_or(f64::NAN);
+        eprintln!(
+            "    even/odd ratio  WDF  : {:.1} dB  ngspice: {:.1} dB  (informational)",
+            eo_wdf, eo_ngspice
+        );
+        let _ = eo_wdf; // suppress unused
+    }
+    if let Some(thd_err) = result_trim.thd_error_db {
+        eprintln!("    THD error            : {:.1} dB", thd_err);
+    }
 
     // Sanity: WDF output must not be silence
     assert!(
         rms(&wdf_output) > 1e-6,
-        "{name} WDF output is silence (RMS < 1e-6): compilation or processing failed"
+        "{name}/{variant} WDF output is silence (RMS < 1e-6): compilation or processing failed"
     );
+
+    // Hard gate: apply measured + margin thresholds when provided.
+    // Thresholds are set by measuring first, then adding ~3 dB margin (house style).
+    if let Some((rms_thresh, peak_thresh, thd_thresh)) = gate {
+        assert!(
+            result_trim.normalized_rms_error_db <= rms_thresh,
+            "{name}/{variant} normalized RMS error {:.1} dB exceeds gate {:.1} dB",
+            result_trim.normalized_rms_error_db,
+            rms_thresh
+        );
+        assert!(
+            result_trim.peak_error_db <= peak_thresh,
+            "{name}/{variant} peak error {:.1} dB exceeds gate {:.1} dB",
+            result_trim.peak_error_db,
+            peak_thresh
+        );
+        if let Some(thd_err) = result_trim.thd_error_db {
+            assert!(
+                thd_err <= thd_thresh,
+                "{name}/{variant} THD error {:.1} dB exceeds gate {:.1} dB",
+                thd_err,
+                thd_thresh
+            );
+        }
+    }
 }
 
 // ============================================================================
@@ -455,6 +522,92 @@ fn goldenrod_skip_when_pro_absent() {
         "pedals/legends/__nonexistent_goldenrod__.pedal"
     );
     let _ = source;
+}
+
+/// Generate the ngspice golden for Goldenrod at HIGH GAIN (Gain=1.0, ~25.8×).
+///
+/// Run with:
+/// ```
+/// PEDALKERNEL_BOOTSTRAP_LEGENDS=1 cargo test -p pedalkernel-validate \
+///   --test legends_spice bootstrap_goldenrod_gain_high_golden -- --nocapture
+/// ```
+///
+/// Deck: `spice-circuits/legends/goldenrod_gain_high.spice`
+/// RgainA=1m, RgainB_top=100k, RgainB_bot=1m → Ge diodes hard-clip, rich harmonics.
+#[test]
+fn bootstrap_goldenrod_gain_high_golden() {
+    if std::env::var("PEDALKERNEL_BOOTSTRAP_LEGENDS").as_deref() != Ok("1") {
+        eprintln!(
+            "  SKIP bootstrap_goldenrod_gain_high_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run"
+        );
+        return;
+    }
+    run_bootstrap_variant("goldenrod", "gain_high", Some("goldenrod_gain_high"), "v_out");
+}
+
+/// Validate the Goldenrod WDF model at HIGH GAIN against the ngspice golden.
+///
+/// Controls: Gain=1.0, Treble=0.5, Output=0.7 — matches goldenrod_gain_high.spice.
+///
+/// # Gate (measured + 3 dB margin, house style)
+///
+/// Measured 2026-06-16 (first bootstrap run):
+///   normalized RMS error : 0.2 dB  → gate 3.5 dB
+///   peak error           : 1.4 dB  → gate 5.0 dB
+///   THD error            : 0.4 dB  → gate 4.0 dB
+///
+/// The Ge knee diverges between WDF and SPICE at high-gain; +7 dB diode_clipper
+/// precedent guided the margin.  At Gain=1.0 the Ge diodes hard-clip the gain
+/// stage output (~0.33 V Vf at this current), producing rich harmonics — THD
+/// in the golden is ~ −7 dB (heavy clipping).  A "silence" gate (RMS > 1e-4 V)
+/// ensures the WDF pedal is actually producing clipped output, not passing silently.
+#[test]
+fn goldenrod_gain_high_wdf_vs_spice() {
+    // Gate: (normalized_rms_error_db, peak_error_db, thd_error_db)
+    // measured (2026-06-16) + 3 dB margin each.
+    run_wdf_vs_spice_variant(
+        "goldenrod",
+        "gain_high",
+        "pedals/legends/goldenrod.pedal",
+        &[("Gain", 1.0), ("Treble", 0.5), ("Output", 0.7)],
+        Some((3.5, 5.0, 4.0)),
+    );
+}
+
+/// Generate the ngspice golden for Goldenrod at MID GAIN (Gain=0.5, base deck).
+///
+/// This reuses `goldenrod.spice` (the existing base deck) but writes to
+/// `golden/legends/goldenrod/gain_mid.npy` so both gain positions are captured.
+///
+/// Run with:
+/// ```
+/// PEDALKERNEL_BOOTSTRAP_LEGENDS=1 cargo test -p pedalkernel-validate \
+///   --test legends_spice bootstrap_goldenrod_gain_mid_golden -- --nocapture
+/// ```
+#[test]
+fn bootstrap_goldenrod_gain_mid_golden() {
+    if std::env::var("PEDALKERNEL_BOOTSTRAP_LEGENDS").as_deref() != Ok("1") {
+        eprintln!(
+            "  SKIP bootstrap_goldenrod_gain_mid_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run"
+        );
+        return;
+    }
+    // Reuse the base goldenrod.spice (Gain=0.5 mid-position already set)
+    run_bootstrap_variant("goldenrod", "gain_mid", None, "v_out");
+}
+
+/// Validate the Goldenrod WDF model at MID GAIN (Gain=0.5) against the ngspice golden.
+///
+/// Controls: Gain=0.5, Treble=0.5, Output=0.7 — matches goldenrod.spice positions.
+#[test]
+fn goldenrod_gain_mid_wdf_vs_spice() {
+    run_wdf_vs_spice_variant(
+        "goldenrod",
+        "gain_mid",
+        "pedals/legends/goldenrod.pedal",
+        &[("Gain", 0.5), ("Treble", 0.5), ("Output", 0.7)],
+        None,
+    );
 }
 
 // ============================================================================
