@@ -105,7 +105,11 @@ pub(in crate::compiler) fn build_iir_stage(
 
         // Gain: Rf/R1 (largest shunt R at the neg node diagonal entry).
         // The MNA G[neg,neg] diagonal includes R1 || R_fb → use Rf/R1 ≈ Rf/r_series[0].
-        let gain = if params.r_series[0] > 1e-9 { rf / params.r_series[0] } else { 1.0 };
+        let gain = if params.r_series[0] > 1e-9 {
+            rf / params.r_series[0]
+        } else {
+            1.0
+        };
 
         let pi = std::f64::consts::PI;
         let w0 = 2.0 * pi * f0 / sample_rate;

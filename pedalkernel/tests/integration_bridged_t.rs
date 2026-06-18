@@ -27,10 +27,7 @@ fn load_pro_pedal_sub(subpath: &str) -> Option<String> {
         let prefix: String = "../".repeat(levels);
         let candidate = format!("{manifest_dir}/{prefix}pedalkernel-pro/{subpath}");
         if let Ok(s) = std::fs::read_to_string(&candidate) {
-            eprintln!(
-                "  loaded {subpath} ({} bytes) from {candidate}",
-                s.len()
-            );
+            eprintln!("  loaded {subpath} ({} bytes) from {candidate}", s.len());
             return Some(s);
         }
     }

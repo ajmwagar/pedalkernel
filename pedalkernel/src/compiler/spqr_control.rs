@@ -85,14 +85,12 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
     // Materialize the dividers AND register a WiperDivider target on each
     // owning control so dispatch fans the position into the divider too.
     for (pot_comp_id, (after_stage_idx, position, taper)) in &output_dividers {
-        compiled
-            .wiper_dividers
-            .push(super::compiled::WiperDivider {
-                after_stage_idx: *after_stage_idx,
-                pot_comp_id: pot_comp_id.clone(),
-                position: *position,
-                taper: *taper,
-            });
+        compiled.wiper_dividers.push(super::compiled::WiperDivider {
+            after_stage_idx: *after_stage_idx,
+            pot_comp_id: pot_comp_id.clone(),
+            position: *position,
+            taper: *taper,
+        });
         for ctrl in compiled.controls.iter_mut() {
             if &ctrl.component_id == pot_comp_id
                 && !ctrl
@@ -235,10 +233,10 @@ fn pot_wiper_feeds_active_input(pedal: &PedalDef, comp_id: &str) -> bool {
 
     resistor_pin_on_wiper_net.iter().any(|(rcomp, rpin)| {
         pedal.nets.iter().any(|net| {
-            let touches_r = core::iter::once(&net.from)
-                .chain(net.to.iter())
-                .any(|pin| matches!(pin, Pin::ComponentPin { component, pin }
-                    if component == rcomp && pin == rpin));
+            let touches_r = core::iter::once(&net.from).chain(net.to.iter()).any(|pin| {
+                matches!(pin, Pin::ComponentPin { component, pin }
+                    if component == rcomp && pin == rpin)
+            });
             let has_active = core::iter::once(&net.from)
                 .chain(net.to.iter())
                 .any(is_active_input);

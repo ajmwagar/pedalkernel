@@ -337,10 +337,7 @@ impl Component for Pentode {
                     NeighborReq::optional(NeighborRole::Ref),
                 ],
             ),
-            (
-                "screen",
-                vec![NeighborReq::optional(NeighborRole::Ref)],
-            ),
+            ("screen", vec![NeighborReq::optional(NeighborRole::Ref)]),
             (
                 "grid",
                 vec![

@@ -136,10 +136,9 @@ fn passive_reaches_supply_rail(
             // Only walk passive series elements.
             match graph.effective_edge_kind(eidx) {
                 EdgeKind::Linear | EdgeKind::Reactive => {}
-                EdgeKind::Vcvs
-                | EdgeKind::Vccs
-                | EdgeKind::Behavioral
-                | EdgeKind::Nonlinear => continue,
+                EdgeKind::Vcvs | EdgeKind::Vccs | EdgeKind::Behavioral | EdgeKind::Nonlinear => {
+                    continue
+                }
             }
             if is_supply_rail(graph, next) {
                 return true;
@@ -163,11 +162,7 @@ fn passive_reaches_supply_rail(
 /// True if `node` is the terminal of *some other* active (gain) device — i.e.
 /// the far side of a neighbour is another active stage acting as the load
 /// (direct-coupled / active-load topologies).
-fn node_is_other_active_terminal(
-    graph: &CircuitGraph,
-    node: NodeId,
-    self_comp_idx: usize,
-) -> bool {
+fn node_is_other_active_terminal(graph: &CircuitGraph, node: NodeId, self_comp_idx: usize) -> bool {
     for (idx, comp) in graph.components.iter().enumerate() {
         if idx == self_comp_idx {
             continue;
@@ -235,8 +230,7 @@ fn terminal_has_load(
 
         // 2 + 3. Passive element whose far side reaches a supply rail.
         if is_passive_edge
-            && (is_supply_rail(graph, far)
-                || passive_reaches_supply_rail(graph, far, active_terms))
+            && (is_supply_rail(graph, far) || passive_reaches_supply_rail(graph, far, active_terms))
         {
             return true;
         }
@@ -360,9 +354,7 @@ fn is_follower_configuration(
     self_comp_idx: usize,
     load_terms: &[(&'static str, NodeId)],
 ) -> bool {
-    let any_on_rail = load_terms
-        .iter()
-        .any(|&(_, n)| terminal_on_rail(graph, n));
+    let any_on_rail = load_terms.iter().any(|&(_, n)| terminal_on_rail(graph, n));
     if !any_on_rail {
         return false;
     }
@@ -379,11 +371,9 @@ fn load_hint(type_tag: &str) -> String {
              or wire it as a cathode follower (load on the cathode)."
                 .to_string()
         }
-        "pentode" => {
-            "a pentode stage needs a plate-load (resistor, choke, or output \
+        "pentode" => "a pentode stage needs a plate-load (resistor, choke, or output \
              transformer) to a supply rail, or a cathode-follower load."
-                .to_string()
-        }
+            .to_string(),
         "NPN transistor" | "PNP transistor" => {
             "a common-emitter stage needs a collector-load resistor to a supply \
              rail, or wire it as an emitter follower (load on the emitter)."
@@ -429,9 +419,9 @@ pub(super) fn check_completeness(graph: &CircuitGraph) -> Vec<CompletenessError>
         let mut load_satisfied = false;
         let mut load_terms: Vec<(&'static str, NodeId)> = Vec::new();
         for (term, term_reqs) in &reqs {
-            let wants_required_load = term_reqs.iter().any(|r| {
-                r.role == NeighborRole::Load && r.card == Cardinality::Required
-            });
+            let wants_required_load = term_reqs
+                .iter()
+                .any(|r| r.role == NeighborRole::Load && r.card == Cardinality::Required);
             if !wants_required_load {
                 continue;
             }
@@ -447,7 +437,10 @@ pub(super) fn check_completeness(graph: &CircuitGraph) -> Vec<CompletenessError>
         }
         // Config tolerance: cathode / emitter / source follower — one output
         // terminal on a rail, the sibling output develops its load to ground.
-        if load_required && !load_satisfied && is_follower_configuration(graph, comp_idx, &load_terms) {
+        if load_required
+            && !load_satisfied
+            && is_follower_configuration(graph, comp_idx, &load_terms)
+        {
             load_satisfied = true;
         }
         if load_required && !load_satisfied {
@@ -531,11 +524,7 @@ fn classify_neighbor(
 
 /// Passive walk: does `start` reach the INPUT terminal (grid / base / gate) of
 /// some other active device, without crossing a rail or another active edge?
-fn passive_reaches_active_input(
-    graph: &CircuitGraph,
-    start: NodeId,
-    self_comp_idx: usize,
-) -> bool {
+fn passive_reaches_active_input(graph: &CircuitGraph, start: NodeId, self_comp_idx: usize) -> bool {
     // Collect input-terminal nodes of every OTHER active device.
     let mut input_nodes: HashSet<NodeId> = HashSet::new();
     for (idx, comp) in graph.components.iter().enumerate() {
@@ -579,10 +568,7 @@ fn passive_reaches_active_input(
             if input_nodes.contains(&next) {
                 return true;
             }
-            if next == graph.gnd_node
-                || is_supply_rail(graph, next)
-                || is_ac_ground(graph, next)
-            {
+            if next == graph.gnd_node || is_supply_rail(graph, next) || is_ac_ground(graph, next) {
                 continue;
             }
             if visited.insert(next) {

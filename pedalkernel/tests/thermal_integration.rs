@@ -219,7 +219,8 @@ fn thermal_on_diode_clipper_no_nan() {
         ..CompileOptions::default()
     };
 
-    let output = compile_test_pedal_with_options("clip_silicon.pedal", &input, SAMPLE_RATE, &[], options);
+    let output =
+        compile_test_pedal_with_options("clip_silicon.pedal", &input, SAMPLE_RATE, &[], options);
 
     for (i, &s) in output.iter().enumerate() {
         assert!(

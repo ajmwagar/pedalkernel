@@ -205,10 +205,10 @@
 // ============================================================================
 
 pub mod analytical;
-pub mod pro_pedal;
 pub mod config;
 pub mod metrics;
 pub mod npy;
+pub mod pro_pedal;
 pub mod report;
 pub mod runner;
 pub mod signals;

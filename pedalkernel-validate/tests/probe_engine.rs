@@ -25,8 +25,16 @@ fn rms_at(pedal_path: &str, freq: f64) -> (f64, f64) {
     let output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
     let in_rms = rms(&input[warmup..]);
     let out_rms = rms(&output[warmup..]);
-    let in_db = if in_rms < 1e-20 { -200.0 } else { 20.0 * in_rms.log10() };
-    let out_db = if out_rms < 1e-20 { -200.0 } else { 20.0 * out_rms.log10() };
+    let in_db = if in_rms < 1e-20 {
+        -200.0
+    } else {
+        20.0 * in_rms.log10()
+    };
+    let out_db = if out_rms < 1e-20 {
+        -200.0
+    } else {
+        20.0 * out_rms.log10()
+    };
     (in_db, out_db)
 }
 
@@ -38,7 +46,7 @@ fn rms(buf: &[f64]) -> f64 {
 fn probe_all_configs() {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("circuits/eq");
     let configs = [
-        ("flat",     "pultec_eqp1a_passive_flat.pedal"),
+        ("flat", "pultec_eqp1a_passive_flat.pedal"),
         ("lf_boost", "pultec_eqp1a_passive_lf_boost.pedal"),
         ("lf_trick", "pultec_eqp1a_passive_lf_trick.pedal"),
         ("hf_boost", "pultec_eqp1a_passive_hf_boost.pedal"),
@@ -46,18 +54,20 @@ fn probe_all_configs() {
     ];
     // Key probe frequencies
     let freqs: &[(f64, &str)] = &[
-        (60.0,    "60"),
-        (100.0,   "100"),
-        (1000.0,  "1k"),
-        (3100.0,  "3.1k"),
-        (5000.0,  "5k"),
+        (60.0, "60"),
+        (100.0, "100"),
+        (1000.0, "1k"),
+        (3100.0, "3.1k"),
+        (5000.0, "5k"),
         (10000.0, "10k"),
         (16000.0, "16k"),
     ];
 
     println!("\n=== Engine Output Level (dBFS, input = 0.5 = -6dBFS) ===");
-    println!("{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "config", "60Hz", "100Hz", "1kHz", "3.1kHz", "5kHz", "10kHz", "16kHz");
+    println!(
+        "{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "config", "60Hz", "100Hz", "1kHz", "3.1kHz", "5kHz", "10kHz", "16kHz"
+    );
 
     for (name, file) in &configs {
         let path = base.join(file);
@@ -71,18 +81,30 @@ fn probe_all_configs() {
 
     println!("\n=== ngspice AC Reference (dBFS, input=0dBFS) ===");
     println!("(these are ABSOLUTE levels from SPICE AC analysis with 1V input)");
-    println!("{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "config", "60Hz", "100Hz", "1kHz", "3.1kHz", "5kHz", "10kHz", "16kHz");
-    println!("{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "flat",    "-76.5", "-72.0", "-52.0", "-44.3", "-40.9", "-42.9", "-53.9");
-    println!("{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "lf_boost","-75.4", "-71.7", "-52.2", "-44.3", "-40.9", "-42.9", "-53.9");
-    println!("{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "lf_trick","-75.5", "-71.8", "-52.2", "-41.1", "-34.8", "-31.5", "-38.7");
-    println!("{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "hf_boost","-33.3", "-32.0", "-31.7", "-35.1", "-38.0", "-42.9", "-50.4");
-    println!("{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "hf_atten","-76.5", "-72.0", "-52.0", "-44.5", "-42.1", "-42.7", "-50.7");
+    println!(
+        "{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "config", "60Hz", "100Hz", "1kHz", "3.1kHz", "5kHz", "10kHz", "16kHz"
+    );
+    println!(
+        "{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "flat", "-76.5", "-72.0", "-52.0", "-44.3", "-40.9", "-42.9", "-53.9"
+    );
+    println!(
+        "{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "lf_boost", "-75.4", "-71.7", "-52.2", "-44.3", "-40.9", "-42.9", "-53.9"
+    );
+    println!(
+        "{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "lf_trick", "-75.5", "-71.8", "-52.2", "-41.1", "-34.8", "-31.5", "-38.7"
+    );
+    println!(
+        "{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "hf_boost", "-33.3", "-32.0", "-31.7", "-35.1", "-38.0", "-42.9", "-50.4"
+    );
+    println!(
+        "{:<12} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "hf_atten", "-76.5", "-72.0", "-52.0", "-44.5", "-42.1", "-42.7", "-50.7"
+    );
 
     println!("\n=== Engine vs ngspice gap (engine_out - ngspice_ref) ===");
     println!("(negative = engine is quieter; positive = engine is louder)");

@@ -72,13 +72,8 @@ const MIN_OUTPUT_RMS: f64 = 1e-6;
 /// skip the transient window, then return `(blockwise_out, mna_out)`.
 ///
 /// Panics if either compilation fails or either output is silent.
-fn compile_both_and_process(
-    src: &str,
-    input: &[f64],
-    label: &str,
-) -> (Vec<f64>, Vec<f64>) {
-    let pedal = parse_pedal_file(src)
-        .unwrap_or_else(|e| panic!("{label}: parse failed: {e}"));
+fn compile_both_and_process(src: &str, input: &[f64], label: &str) -> (Vec<f64>, Vec<f64>) {
+    let pedal = parse_pedal_file(src).unwrap_or_else(|e| panic!("{label}: parse failed: {e}"));
 
     // Use skip_k_tables for speed (NR instead of K-lookup tables).
     // `force_monolithic()` sets skip_blockwise=true, routing through the

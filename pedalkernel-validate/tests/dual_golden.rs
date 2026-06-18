@@ -9,12 +9,7 @@
 //!   2. Comparing a golden against itself yields near-zero error (the pass case).
 //!   3. Missing either golden produces a "missing" row — not a panic.
 
-use pedalkernel_validate::{
-    config::PassCriteria,
-    metrics,
-    npy,
-    report::SignalResult,
-};
+use pedalkernel_validate::{config::PassCriteria, metrics, npy, report::SignalResult};
 use tempfile::TempDir;
 
 /// Helper: write a known signal to `golden/{suite}/{test}/{signal}.npy` (ngspice slot)
@@ -111,17 +106,16 @@ fn missing_wdf_golden_produces_missing_signal_result_not_panic() {
     let signal: Vec<f64> = vec![0.1, 0.2, 0.3];
 
     // Write only the ngspice golden; leave the wdf/ slot empty.
-    let spice_path = dir
-        .path()
-        .join("pedals/pultec/sine.npy");
+    let spice_path = dir.path().join("pedals/pultec/sine.npy");
     npy::write_f64(&spice_path, &signal).unwrap();
 
-    let wdf_path = dir
-        .path()
-        .join("pedals/pultec/wdf/sine.npy");
+    let wdf_path = dir.path().join("pedals/pultec/wdf/sine.npy");
 
     assert!(spice_path.exists());
-    assert!(!wdf_path.exists(), "WDF golden must be absent for this test");
+    assert!(
+        !wdf_path.exists(),
+        "WDF golden must be absent for this test"
+    );
 
     // Simulate what compare-goldens does: detect absence, produce a missing row.
     let signal_result = if !wdf_path.exists() {
@@ -138,7 +132,10 @@ fn missing_wdf_golden_produces_missing_signal_result_not_panic() {
     };
 
     assert!(!signal_result.passed, "missing-golden row must not pass");
-    assert!(signal_result.comparison.is_none(), "missing-golden row must have no metrics");
+    assert!(
+        signal_result.comparison.is_none(),
+        "missing-golden row must have no metrics"
+    );
     let err_msg = signal_result.error.as_deref().unwrap_or("");
     assert!(
         err_msg.contains("missing"),
@@ -152,14 +149,15 @@ fn missing_spice_golden_produces_missing_signal_result_not_panic() {
     let signal: Vec<f64> = vec![0.1, 0.2, 0.3];
 
     // Write only the WDF golden; leave the ngspice slot empty.
-    let wdf_path = dir
-        .path()
-        .join("pedals/pultec/wdf/sine.npy");
+    let wdf_path = dir.path().join("pedals/pultec/wdf/sine.npy");
     npy::write_f64(&wdf_path, &signal).unwrap();
 
     let spice_path = dir.path().join("pedals/pultec/sine.npy");
     assert!(wdf_path.exists());
-    assert!(!spice_path.exists(), "ngspice golden must be absent for this test");
+    assert!(
+        !spice_path.exists(),
+        "ngspice golden must be absent for this test"
+    );
 
     let signal_result = if !spice_path.exists() {
         let msg = format!("missing ngspice golden: {}", spice_path.display());
@@ -224,12 +222,7 @@ fn report_json_shape_matches_run_format() {
     // Build a minimal report that mirrors what compare-goldens emits.
     let signal_result = SignalResult::from_comparison(
         "sine".to_string(),
-        metrics::compare(
-            &[0.0f64; 100],
-            &[0.0f64; 100],
-            48000.0,
-            None,
-        ),
+        metrics::compare(&[0.0f64; 100], &[0.0f64; 100], 48000.0, None),
         true,
     );
 
@@ -263,10 +256,22 @@ fn report_json_shape_matches_run_format() {
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     // Top-level required fields.
-    assert!(parsed["summary"]["total_tests"].is_number(), "summary.total_tests missing");
-    assert!(parsed["summary"]["passed"].is_number(), "summary.passed missing");
-    assert!(parsed["summary"]["failed"].is_number(), "summary.failed missing");
-    assert!(parsed["summary"]["pass_rate"].is_number(), "summary.pass_rate missing");
+    assert!(
+        parsed["summary"]["total_tests"].is_number(),
+        "summary.total_tests missing"
+    );
+    assert!(
+        parsed["summary"]["passed"].is_number(),
+        "summary.passed missing"
+    );
+    assert!(
+        parsed["summary"]["failed"].is_number(),
+        "summary.failed missing"
+    );
+    assert!(
+        parsed["summary"]["pass_rate"].is_number(),
+        "summary.pass_rate missing"
+    );
     assert!(parsed["timestamp"].is_string(), "timestamp missing");
     assert!(parsed["sample_rate"].is_number(), "sample_rate missing");
     assert!(parsed["oversample"].is_number(), "oversample missing");

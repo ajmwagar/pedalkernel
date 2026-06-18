@@ -11,10 +11,10 @@ mod bbd_lowering;
 mod bias_analysis;
 mod bind;
 mod blockwise;
+pub mod boundary_rules;
 mod build;
 mod calibrate;
 mod classify;
-pub mod boundary_rules;
 mod compile;
 mod compiled;
 pub mod component;
@@ -43,21 +43,17 @@ mod vco_lowering;
 mod warnings;
 pub(crate) mod wdf_leaf;
 
+pub use boundary_rules::{
+    classify_control_path, classify_edges, classify_ports, smoke_classify, BoundaryPolicy,
+    ClassifiedEdge, ClassifiedPort, Directive, Domain, PortClass,
+};
 #[cfg(feature = "build-cache")]
 pub use compile::compile_pedal_cached;
 pub use compile::{compile_cache_key, compile_pedal, compile_pedal_with_options, CompileOptions};
 pub(crate) use compiled::extract_precomputed_from_compiled;
 pub use compiled::CompiledPedal;
-pub use component::{
-    Cardinality, Component, NeighborReq, NeighborRole, PinDirection,
-};
-pub use boundary_rules::{
-    classify_control_path, classify_edges, classify_ports, smoke_classify, BoundaryPolicy,
-    ClassifiedEdge, ClassifiedPort, Directive, Domain, PortClass,
-};
-pub use neighbor_roles::{
-    completeness_errors, infer_neighbor_roles, InferredNeighbor,
-};
+pub use component::{Cardinality, Component, NeighborReq, NeighborRole, PinDirection};
+pub use neighbor_roles::{completeness_errors, infer_neighbor_roles, InferredNeighbor};
 pub use split::{compile_split_pedal, SplitCompiledPedal};
 pub use spqr_build::{compile_via_spqr, compile_via_spqr_with_options};
 pub use validate::{validate_pedal, validate_pedal_files, PedalWarning, Severity};

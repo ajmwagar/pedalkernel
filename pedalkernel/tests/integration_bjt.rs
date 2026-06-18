@@ -637,13 +637,11 @@ fn bjt_astable_init_hints_affect_compiled_state_and_initial_transient() {
         "with-init pedal must have exactly 2 init hints (Q1 + Q2)"
     );
     assert_eq!(
-        with_pedal.init_hints[0].device_label,
-        "Q1",
+        with_pedal.init_hints[0].device_label, "Q1",
         "first hint must target Q1"
     );
     assert_eq!(
-        with_pedal.init_hints[1].device_label,
-        "Q2",
+        with_pedal.init_hints[1].device_label, "Q2",
         "second hint must target Q2"
     );
     assert!(
@@ -668,8 +666,7 @@ fn bjt_astable_init_hints_affect_compiled_state_and_initial_transient() {
         if let Stage::MultiNl(m) = s {
             eprintln!(
                 "with-init  stage[{si}] n_nl={} initial_v_prev={:.4?}",
-                m.n_nl,
-                m.initial_v_prev,
+                m.n_nl, m.initial_v_prev,
             );
         }
     }
@@ -677,8 +674,7 @@ fn bjt_astable_init_hints_affect_compiled_state_and_initial_transient() {
         if let Stage::MultiNl(m) = s {
             eprintln!(
                 "without-init stage[{si}] n_nl={} initial_v_prev={:.4?}",
-                m.n_nl,
-                m.initial_v_prev,
+                m.n_nl, m.initial_v_prev,
             );
         }
     }
@@ -733,8 +729,7 @@ fn bjt_astable_init_hints_affect_compiled_state_and_initial_transient() {
          Cross-coupled BJT astables need asymmetric seeds so reset() starts the \
          NR solver at a known asymmetric operating point. \
          with={:?} without={:?}",
-        with_all_ivp,
-        without_all_ivp
+        with_all_ivp, without_all_ivp
     );
 
     // Guarantee 2: early transient differs at runtime (first 10ms after reset).
@@ -762,9 +757,7 @@ fn bjt_astable_init_hints_affect_compiled_state_and_initial_transient() {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f64, f64::max);
 
-    eprintln!(
-        "Early transient max_diff (first 10ms): {early_max_diff:.9}"
-    );
+    eprintln!("Early transient max_diff (first 10ms): {early_max_diff:.9}");
     eprintln!(
         "with-init   peak_early={:.6}",
         with_buf.iter().cloned().fold(0.0_f64, f64::max)

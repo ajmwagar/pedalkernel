@@ -7,11 +7,13 @@ fn load_goldenrod() -> Option<String> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     for levels in 2..=6 {
         let prefix: String = "../".repeat(levels);
-        let candidate = format!(
-            "{manifest_dir}/{prefix}pedalkernel-pro/pedals/legends/goldenrod.pedal"
-        );
+        let candidate =
+            format!("{manifest_dir}/{prefix}pedalkernel-pro/pedals/legends/goldenrod.pedal");
         if let Ok(s) = std::fs::read_to_string(&candidate) {
-            eprintln!("  loaded goldenrod.pedal ({} bytes) from {candidate}", s.len());
+            eprintln!(
+                "  loaded goldenrod.pedal ({} bytes) from {candidate}",
+                s.len()
+            );
             return Some(s);
         }
     }

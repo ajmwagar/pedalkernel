@@ -359,7 +359,13 @@ pub type StageRef = Stage;
 
 /// Return type for [`CompiledPedal::multi_nl_debug_info`]:
 /// `(stage_index, n_nl, scattering_flat, adapted_resistance, dc_bias)`.
-pub type MultiNlDebugInfo = (usize, usize, Vec<crate::Wave>, crate::Wave, Vec<crate::Wave>);
+pub type MultiNlDebugInfo = (
+    usize,
+    usize,
+    Vec<crate::Wave>,
+    crate::Wave,
+    Vec<crate::Wave>,
+);
 
 #[cfg(test)]
 mod tests {
@@ -663,9 +669,7 @@ mod tests {
             let mut work = alloc::vec![0.0; n_states];
             let mut peak = 0.0 as crate::Wave;
             for i in 0..n {
-                let u = crate::math::sin(
-                    2.0 * crate::math::PI * freq * i as crate::Wave / fs,
-                );
+                let u = crate::math::sin(2.0 * crate::math::PI * freq * i as crate::Wave / fs);
                 for r in 0..n_states {
                     let mut v = b_d[r] * u;
                     for cc in 0..n_states {
@@ -954,9 +958,7 @@ pub enum ControlTarget {
     /// re-stamps so the divided wiper voltage actually reaches the load. The
     /// matching [`WiperDivider`] entry (keyed by component id) carries the
     /// live position; this target marks that a divider exists for the control.
-    WiperDivider {
-        after_stage_idx: usize,
-    },
+    WiperDivider { after_stage_idx: usize },
     /// Modify the feedback pot in a BlackFeedback stage (recomputes Rf → gain).
     PotInBlackFeedbackStage(usize),
     /// Forward a control change to a sidechain sub-circuit.
@@ -4477,12 +4479,7 @@ impl PedalProcessor for CompiledPedal {
         if !self.internal_ports.is_empty() {
             for idx in 0..self.internal_ports.len() {
                 let src = self.internal_ports[idx].source_node_id;
-                if let Some(&(_, v)) = self
-                    .node_signals
-                    .iter()
-                    .rev()
-                    .find(|(nid, _)| *nid == src)
-                {
+                if let Some(&(_, v)) = self.node_signals.iter().rev().find(|(nid, _)| *nid == src) {
                     self.internal_ports[idx].prev_value = v;
                 }
             }

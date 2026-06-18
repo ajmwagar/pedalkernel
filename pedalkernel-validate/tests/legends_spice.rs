@@ -208,17 +208,12 @@ fn screamer_golden_dir() -> PathBuf {
 #[test]
 fn bootstrap_screamer_golden() {
     if std::env::var("PEDALKERNEL_BOOTSTRAP_LEGENDS").as_deref() != Ok("1") {
-        eprintln!(
-            "  SKIP bootstrap_screamer_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run"
-        );
+        eprintln!("  SKIP bootstrap_screamer_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run");
         return;
     }
 
     let circuit = screamer_spice_circuit_path();
-    assert!(
-        circuit.exists(),
-        "screamer.spice not found at {circuit:?}"
-    );
+    assert!(circuit.exists(), "screamer.spice not found at {circuit:?}");
 
     let config = SpiceConfig {
         sample_rate: SR as u32,
@@ -239,8 +234,7 @@ fn bootstrap_screamer_golden() {
     let dir = screamer_golden_dir();
     std::fs::create_dir_all(&dir).expect("create golden/legends/screamer");
     let golden_path = dir.join("sine_1k.npy");
-    npy::write_f64(&golden_path, &golden_output)
-        .expect("write screamer golden sine_1k.npy");
+    npy::write_f64(&golden_path, &golden_output).expect("write screamer golden sine_1k.npy");
 
     eprintln!(
         "  bootstrapped golden: {} samples → {golden_path:?}",
@@ -313,10 +307,7 @@ fn screamer_wdf_vs_spice() {
         "    normalized RMS error : {:.1} dB",
         result.normalized_rms_error_db
     );
-    eprintln!(
-        "    peak error           : {:.1} dB",
-        result.peak_error_db
-    );
+    eprintln!("    peak error           : {:.1} dB", result.peak_error_db);
     eprintln!("  After {trim}-sample transient trim:");
     eprintln!(
         "    normalized RMS error : {:.1} dB",
@@ -326,14 +317,8 @@ fn screamer_wdf_vs_spice() {
         "    peak error           : {:.1} dB",
         result_trim.peak_error_db
     );
-    eprintln!(
-        "    WDF RMS amplitude    : {:.4} V",
-        rms(&wdf_trim)
-    );
-    eprintln!(
-        "    ngspice RMS amplitude: {:.4} V",
-        rms(&golden_trim)
-    );
+    eprintln!("    WDF RMS amplitude    : {:.4} V", rms(&wdf_trim));
+    eprintln!("    ngspice RMS amplitude: {:.4} V", rms(&golden_trim));
 
     // Sanity: WDF output must not be silence — compilation/processing worked.
     assert!(
@@ -369,9 +354,7 @@ fn screamer_skip_when_pro_absent() {
 #[test]
 fn bootstrap_ratking_golden() {
     if std::env::var("PEDALKERNEL_BOOTSTRAP_LEGENDS").as_deref() != Ok("1") {
-        eprintln!(
-            "  SKIP bootstrap_ratking_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run"
-        );
+        eprintln!("  SKIP bootstrap_ratking_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run");
         return;
     }
     run_bootstrap("ratking", "v_out");
@@ -420,9 +403,7 @@ fn ratking_skip_when_pro_absent() {
 #[test]
 fn bootstrap_goldenrod_golden() {
     if std::env::var("PEDALKERNEL_BOOTSTRAP_LEGENDS").as_deref() != Ok("1") {
-        eprintln!(
-            "  SKIP bootstrap_goldenrod_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run"
-        );
+        eprintln!("  SKIP bootstrap_goldenrod_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run");
         return;
     }
     run_bootstrap("goldenrod", "v_out");
@@ -471,9 +452,7 @@ fn goldenrod_skip_when_pro_absent() {
 #[test]
 fn bootstrap_sd1_golden() {
     if std::env::var("PEDALKERNEL_BOOTSTRAP_LEGENDS").as_deref() != Ok("1") {
-        eprintln!(
-            "  SKIP bootstrap_sd1_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run"
-        );
+        eprintln!("  SKIP bootstrap_sd1_golden: set PEDALKERNEL_BOOTSTRAP_LEGENDS=1 to run");
         return;
     }
     run_bootstrap("sd1", "v_out");

@@ -1104,8 +1104,11 @@ fn claim_passive_edges(
         .flat_map(|&ei| active_elements[ei].output_nodes.iter().copied())
         .filter(|n| !rails.contains(n))
         .collect();
-    let group_active_edges: HashSet<usize> =
-        active_edges.iter().chain(feedback_edges.iter()).copied().collect();
+    let group_active_edges: HashSet<usize> = active_edges
+        .iter()
+        .chain(feedback_edges.iter())
+        .copied()
+        .collect();
     let forward_signal_nodes = forward_signal_nodes_to_out(
         &group_output_nodes,
         &group_active_edges,

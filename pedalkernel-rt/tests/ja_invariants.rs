@@ -61,7 +61,6 @@ fn loop_area_hm(hs: &[f64], ms: &[f64]) -> f64 {
     0.5 * area
 }
 
-
 // ─── invariant 1: hysteresis loop closure ────────────────────────────────────
 
 /// Invariant 1 — Why: a physically correct J-A model must produce a periodic
@@ -217,12 +216,17 @@ fn ja_anhysteretic_properties() {
             .map(|(_, mn)| (mp + mn).abs() < 0.05 * model.ms)
             .unwrap_or(true) // can't check if no pair found
     });
-    assert!(sym_ok, "Invariant 3 FAIL — anhysteretic is not odd-symmetric");
+    assert!(
+        sym_ok,
+        "Invariant 3 FAIL — anhysteretic is not odd-symmetric"
+    );
 
     // (b) monotonic: sort by H, M must be non-decreasing
     let mut sorted = pts.clone();
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let monotonic = sorted.windows(2).all(|w| w[1].1 >= w[0].1 - 1.0e-4 * model.ms);
+    let monotonic = sorted
+        .windows(2)
+        .all(|w| w[1].1 >= w[0].1 - 1.0e-4 * model.ms);
     assert!(
         monotonic,
         "Invariant 3 FAIL — anhysteretic M is not monotonic in H"
@@ -358,8 +362,8 @@ fn ja_dc_bias_ampere_law() {
         let le_eff = model.path_len + gap;
         let ampere_turns = model.n_turns * dc_current;
         let reconstructed = st.h * le_eff + st.m * gap;
-        let rel_err = (reconstructed - ampere_turns).abs()
-            / ampere_turns.abs().max(1.0e-6 * model.ms);
+        let rel_err =
+            (reconstructed - ampere_turns).abs() / ampere_turns.abs().max(1.0e-6 * model.ms);
 
         assert!(
             rel_err < 1.0e-4,
@@ -496,9 +500,8 @@ fn ja_nan_instability_corners() {
                             }
                         }
                         if bad {
-                            failures.push(format!(
-                                "ms={ms:.1e} a={a} alpha={alpha:.1e} k={k} c={c}"
-                            ));
+                            failures
+                                .push(format!("ms={ms:.1e} a={a} alpha={alpha:.1e} k={k} c={c}"));
                         }
                     }
                 }

@@ -497,7 +497,10 @@ mod tests {
         let remaining = signal_len - trim_samples;
         let remaining_ms = remaining as f64 / sample_rate * 1000.0;
         let cycles_at_1khz = remaining_ms / 1.0; // 1 ms per cycle at 1 kHz
-        assert!(remaining_ms >= 20.0, "at least 20 ms must remain after trim");
+        assert!(
+            remaining_ms >= 20.0,
+            "at least 20 ms must remain after trim"
+        );
         assert!(
             cycles_at_1khz >= 5.0,
             "at least 5 cycles required for THD; got {cycles_at_1khz}"

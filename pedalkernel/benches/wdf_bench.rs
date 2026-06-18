@@ -891,7 +891,11 @@ fn bench_pultec_passive_makeup(c: &mut Criterion) {
         eprintln!("  xRT headroom:     {xrt:.1}× realtime");
         eprintln!(
             "  Status:           {}",
-            if xrt >= 1.0 { "REAL-TIME SAFE" } else { "OVER BUDGET" }
+            if xrt >= 1.0 {
+                "REAL-TIME SAFE"
+            } else {
+                "OVER BUDGET"
+            }
         );
         eprintln!("══════════════════════════════════════════════════════════════════");
     }

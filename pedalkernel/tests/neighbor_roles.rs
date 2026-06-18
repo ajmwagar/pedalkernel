@@ -217,7 +217,9 @@ fn cathode_follower_compiles_clean() {
     // interpretation applied by the completeness check, not the per-edge view.
     let roles = infer_neighbor_roles(&pedal);
     assert!(
-        roles.iter().any(|r| r.comp_id == "V1" && r.terminal == "cathode"),
+        roles
+            .iter()
+            .any(|r| r.comp_id == "V1" && r.terminal == "cathode"),
         "cathode neighbours should be classified; roles = {roles:?}"
     );
 }
@@ -261,8 +263,14 @@ fn no_load_triode_trips_completeness_error() {
     );
     let msg = errs.join("\n");
     assert!(msg.contains("V1"), "error must name the component: {msg}");
-    assert!(msg.contains("triode"), "error must name the device type: {msg}");
-    assert!(msg.contains("no Load found"), "error must name the role: {msg}");
+    assert!(
+        msg.contains("triode"),
+        "error must name the device type: {msg}"
+    );
+    assert!(
+        msg.contains("no Load found"),
+        "error must name the role: {msg}"
+    );
     assert!(
         msg.contains("cathode follower"),
         "error must give the fix hint: {msg}"

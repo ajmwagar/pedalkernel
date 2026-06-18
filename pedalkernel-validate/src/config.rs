@@ -2489,7 +2489,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_lf_boost.pedal".to_string(),
                         pending_reference: false,
-                        description: "Pultec EQP-1A passive, LF boost on (LF_Boost=1.0)".to_string(),
+                        description: "Pultec EQP-1A passive, LF boost on (LF_Boost=1.0)"
+                            .to_string(),
                         signals: vec![
                             SignalConfig::Sine {
                                 frequency: 60.0,
@@ -2526,7 +2527,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_lf_trick.pedal".to_string(),
                         pending_reference: false,
-                        description: "Pultec EQP-1A passive, LF trick (Boost+Atten=1.0)".to_string(),
+                        description: "Pultec EQP-1A passive, LF trick (Boost+Atten=1.0)"
+                            .to_string(),
                         signals: vec![
                             SignalConfig::Sine {
                                 frequency: 60.0,
@@ -2564,7 +2566,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_hf_boost.pedal".to_string(),
                         pending_reference: false,
-                        description: "Pultec EQP-1A passive, HF boost on (HF_Boost=1.0, f0≈3.1kHz)".to_string(),
+                        description: "Pultec EQP-1A passive, HF boost on (HF_Boost=1.0, f0≈3.1kHz)"
+                            .to_string(),
                         signals: vec![
                             SignalConfig::Sine {
                                 frequency: 3100.0,
@@ -2601,7 +2604,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_hf_atten.pedal".to_string(),
                         pending_reference: false,
-                        description: "Pultec EQP-1A passive, HF atten on (HF_Atten=1.0)".to_string(),
+                        description: "Pultec EQP-1A passive, HF atten on (HF_Atten=1.0)"
+                            .to_string(),
                         signals: vec![
                             SignalConfig::Sine {
                                 frequency: 10000.0,
@@ -2985,8 +2989,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
     suites.insert(
         "tubes".to_string(),
         TestSuite {
-            description: "Tube amplifier stage validation — triodes, pentode, vari-mu"
-                .to_string(),
+            description: "Tube amplifier stage validation — triodes, pentode, vari-mu".to_string(),
             tests: {
                 let mut tests = BTreeMap::new();
 

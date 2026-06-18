@@ -435,10 +435,8 @@ impl RTypeAdaptor {
         // a_parent enters as power wave: b̅_parent = a_parent / √R_parent
         let b_parent_power = a_parent * self.inv_sqrt_r[n - 1];
 
-        for (i, (a_child, &sqrt_r_i)) in a_children
-            .iter_mut()
-            .zip(&self.sqrt_r[..n - 1])
-            .enumerate()
+        for (i, (a_child, &sqrt_r_i)) in
+            a_children.iter_mut().zip(&self.sqrt_r[..n - 1]).enumerate()
         {
             let row = &self.power_scattering[i * n..i * n + n];
             let mut sum_power = row[n - 1] * b_parent_power;
@@ -461,9 +459,7 @@ impl RTypeAdaptor {
         let n = self.num_ports;
         let inv_sqrt_r_parent = self.inv_sqrt_r[n - 1];
         (0..n - 1)
-            .map(|i| {
-                self.power_scattering[i * n + n - 1] * inv_sqrt_r_parent * self.sqrt_r[i]
-            })
+            .map(|i| self.power_scattering[i * n + n - 1] * inv_sqrt_r_parent * self.sqrt_r[i])
             .collect()
     }
 
@@ -488,11 +484,7 @@ impl RTypeAdaptor {
         let n = self.num_ports;
         debug_assert_eq!(b_all.len(), n);
         debug_assert!(a_out.len() >= n);
-        for (i, (a_i, &sqrt_r_i)) in a_out[..n]
-            .iter_mut()
-            .zip(&self.sqrt_r[..n])
-            .enumerate()
-        {
+        for (i, (a_i, &sqrt_r_i)) in a_out[..n].iter_mut().zip(&self.sqrt_r[..n]).enumerate() {
             let row = &self.power_scattering[i * n..i * n + n];
             let sum_power: crate::Wave = row
                 .iter()

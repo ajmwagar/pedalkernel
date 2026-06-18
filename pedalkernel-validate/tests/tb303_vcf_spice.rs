@@ -197,13 +197,11 @@ fn nrms_error_db(wdf: &[f64], reference: &[f64]) -> f64 {
     if n == 0 {
         return 0.0;
     }
-    let diff_rms = rms(
-        &wdf[..n]
-            .iter()
-            .zip(reference[..n].iter())
-            .map(|(&a, &b)| a - b)
-            .collect::<Vec<_>>(),
-    );
+    let diff_rms = rms(&wdf[..n]
+        .iter()
+        .zip(reference[..n].iter())
+        .map(|(&a, &b)| a - b)
+        .collect::<Vec<_>>());
     let ref_rms = rms(&reference[..n]);
     db(diff_rms) - db(ref_rms)
 }
@@ -416,7 +414,11 @@ fn parse_wrdata(path: &Path) -> Option<Vec<(f64, f64)>> {
             }
         }
     }
-    if data.is_empty() { None } else { Some(data) }
+    if data.is_empty() {
+        None
+    } else {
+        Some(data)
+    }
 }
 
 /// Resample SPICE output onto uniform grid at SR.
@@ -502,9 +504,7 @@ fn golden_path(label: &str) -> PathBuf {
 /// Save f64 slice as a NumPy .npy v1.0 file.
 fn save_npy(path: &Path, data: &[f64]) {
     let n = data.len();
-    let header_str = format!(
-        "{{'descr': '<f8', 'fortran_order': False, 'shape': ({n},), }}"
-    );
+    let header_str = format!("{{'descr': '<f8', 'fortran_order': False, 'shape': ({n},), }}");
     // Pad so that header block (10 + len) is a multiple of 64 bytes.
     let block_size = 10 + header_str.len() + 1; // +1 for trailing '\n'
     let pad = (64 - block_size % 64) % 64;
@@ -539,7 +539,11 @@ fn load_npy(path: &Path) -> Option<Vec<f64>> {
     for chunk in data_bytes.chunks_exact(8) {
         out.push(f64::from_le_bytes(chunk.try_into().unwrap()));
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -574,8 +578,7 @@ fn tb303_vcf_skips_when_pro_pedal_absent() {
 ///   until do9/d7u/wbe are resolved.
 #[test]
 fn tb303_vcf_wdf_vs_ngspice() {
-    let source =
-        skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
+    let source = skip_if_missing!(load_pro_pedal("tb303_filter.pedal"), "tb303_filter.pedal");
 
     let input = sine_signal(SINE_FREQ, SR, N_SAMPLES, SINE_AMP);
     let _input_gain = db(goertzel_mag(&input[WARMUP..], SR, SINE_FREQ));
@@ -585,9 +588,7 @@ fn tb303_vcf_wdf_vs_ngspice() {
     eprintln!(
         "  EXPECTED RED — beads do9/d7u/wbe: BKM diode-ladder broken, ~38 failing tb303 tests"
     );
-    eprintln!(
-        "  Once do9/d7u/wbe are resolved, target is nRMS < 6 dB per config."
-    );
+    eprintln!("  Once do9/d7u/wbe are resolved, target is nRMS < 6 dB per config.");
     eprintln!();
     eprintln!(
         "  {:<30}  {:>15}  {:>12}  {:>12}  {:>8}",
@@ -609,10 +610,7 @@ fn tb303_vcf_wdf_vs_ngspice() {
         let wdf_out = match wdf_process(&source, config) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!(
-                    "  {:<30}  WDF ERROR: {}",
-                    config.label, e
-                );
+                eprintln!("  {:<30}  WDF ERROR: {}", config.label, e);
                 gap_entries.push((config.label.to_string(), None, -300.0, None));
                 continue;
             }
@@ -670,23 +668,20 @@ fn tb303_vcf_wdf_vs_ngspice() {
         );
     } else {
         let avg = measured.iter().sum::<f64>() / measured.len() as f64;
-        let max = measured.iter().cloned().fold(0.0_f64, |a, b| a.abs().max(b.abs()));
+        let max = measured
+            .iter()
+            .cloned()
+            .fold(0.0_f64, |a, b| a.abs().max(b.abs()));
         eprintln!(
             "  Average nRMS error: {:+.1} dB  |  Max |nRMS| error: {:.1} dB  ({}/{} configs measured)",
             avg, max, measured.len(), CONFIGS.len()
         );
         eprintln!();
         eprintln!("  DIAGNOSIS for do9/d7u/wbe:");
-        eprintln!(
-            "    WDF diverges {max:.0} dB max / {avg:.0} dB avg from ngspice reference."
-        );
-        eprintln!(
-            "    Root cause: BKM diode-ladder scattering path does not correctly model"
-        );
+        eprintln!("    WDF diverges {max:.0} dB max / {avg:.0} dB avg from ngspice reference.");
+        eprintln!("    Root cause: BKM diode-ladder scattering path does not correctly model");
         eprintln!("    the differential TB-303 ladder cutoff sweep.");
-        eprintln!(
-            "    Acceptance target once do9 is resolved: all configs < 6 dB nRMS."
-        );
+        eprintln!("    Acceptance target once do9 is resolved: all configs < 6 dB nRMS.");
     }
 
     // The test does NOT assert a pass threshold — gap reporting IS the deliverable.
@@ -706,8 +701,7 @@ fn tb303_vcf_wdf_vs_ngspice() {
 fn tb303_vcf_regen_golden() {
     let input = sine_signal(SINE_FREQ, SR, N_SAMPLES, SINE_AMP);
     let golden_dir = golden_dir();
-    std::fs::create_dir_all(&golden_dir)
-        .expect("failed to create golden dir");
+    std::fs::create_dir_all(&golden_dir).expect("failed to create golden dir");
 
     let mut ok = 0;
     let mut fail = 0;
@@ -729,7 +723,10 @@ fn tb303_vcf_regen_golden() {
     }
 
     eprintln!();
-    eprintln!("  Regen complete: {ok}/{} goldens written, {fail} failed.", CONFIGS.len());
+    eprintln!(
+        "  Regen complete: {ok}/{} goldens written, {fail} failed.",
+        CONFIGS.len()
+    );
     assert!(
         fail == 0,
         "Golden regen failed for {fail} configs — check ngspice errors above"

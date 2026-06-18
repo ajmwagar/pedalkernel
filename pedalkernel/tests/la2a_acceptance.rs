@@ -162,7 +162,11 @@ fn la2a_release_slower_after_heavy_gr() {
     eprintln!(
         "LA-2A program dependence: heavy {heavy:.3} s vs light {light:.3} s — \
          T4B memory predicts heavy > light; measured {}",
-        if heavy > light { "TRUE" } else { "FALSE (no/backwards memory)" }
+        if heavy > light {
+            "TRUE"
+        } else {
+            "FALSE (no/backwards memory)"
+        }
     );
     assert!(
         heavy > light + 0.1,

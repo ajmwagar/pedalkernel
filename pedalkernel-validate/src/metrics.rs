@@ -363,7 +363,12 @@ pub fn compare(
         // Full-band (raw) spectral error up to the data Nyquist. The production
         // runners overwrite `spectral_error_db` with the audio-band cap, but
         // leave this raw value intact for display.
-        spectral_error_full_db: spectral_error_db(wdf, reference, sample_rate, Some(sample_rate / 2.0)),
+        spectral_error_full_db: spectral_error_db(
+            wdf,
+            reference,
+            sample_rate,
+            Some(sample_rate / 2.0),
+        ),
         even_odd_ratio_db: even_odd,
         dc_drift_mv: Some(dc_drift_mv(wdf, sample_rate, 100.0)),
     }

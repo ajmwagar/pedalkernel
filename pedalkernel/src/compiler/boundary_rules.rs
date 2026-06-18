@@ -245,11 +245,7 @@ fn node_is_rail(graph: &CircuitGraph, node: NodeId) -> bool {
 ///
 /// The two analyses each call this once to decide "also traverse this coupled
 /// link", keeping the transformer-specific knowledge HERE in the broker.
-pub(super) fn is_tight_coupled_link(
-    graph: &CircuitGraph,
-    node_a: NodeId,
-    node_b: NodeId,
-) -> bool {
+pub(super) fn is_tight_coupled_link(graph: &CircuitGraph, node_a: NodeId, node_b: NodeId) -> bool {
     // The pair must be a recorded coupled link (magnetic, not a graph edge).
     if !graph
         .coupled_nodes
@@ -315,10 +311,11 @@ pub(super) fn tight_coupled_neighbors(graph: &CircuitGraph, node: NodeId) -> Vec
 /// coupled-link-aware flow distance must be used instead. False for ordinary amps
 /// (output transformer to `out`, or cap-coupled) — they keep their existing order.
 pub(super) fn has_tight_coupled_transformer(graph: &CircuitGraph) -> bool {
-    graph
-        .coupled_nodes
-        .iter()
-        .any(|(&node, others)| others.iter().any(|&o| is_tight_coupled_link(graph, node, o)))
+    graph.coupled_nodes.iter().any(|(&node, others)| {
+        others
+            .iter()
+            .any(|&o| is_tight_coupled_link(graph, node, o))
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -511,7 +508,8 @@ pub fn classify_edges(pedal: &crate::dsl::PedalDef) -> Vec<ClassifiedEdge> {
         for ce in comp.kind.edges() {
             let a_key = format!("{}.{}", comp.id, ce.pin_a);
             let b_key = format!("{}.{}", comp.id, ce.pin_b);
-            let (Some(&na), Some(&nb)) = (graph.node_names.get(&a_key), graph.node_names.get(&b_key))
+            let (Some(&na), Some(&nb)) =
+                (graph.node_names.get(&a_key), graph.node_names.get(&b_key))
             else {
                 continue;
             };
@@ -546,9 +544,13 @@ pub fn classify_edges(pedal: &crate::dsl::PedalDef) -> Vec<ClassifiedEdge> {
             // Re-orient so the control-input feedback end is the SINK if needed.
             let (from_pin, from_node, from_class, to_pin, to_node, to_class, back) =
                 if back_from && !back_to {
-                    (to_pin, to_node, to_class, from_pin, from_node, from_class, true)
+                    (
+                        to_pin, to_node, to_class, from_pin, from_node, from_class, true,
+                    )
                 } else {
-                    (from_pin, from_node, from_class, to_pin, to_node, to_class, back_to)
+                    (
+                        from_pin, from_node, from_class, to_pin, to_node, to_class, back_to,
+                    )
                 };
 
             let policy = BoundaryPolicy::classify((from_class, to_class), back, has_memory);
@@ -656,7 +658,12 @@ fn class_of_keyed_pin(
     node: NodeId,
 ) -> Option<PortClass> {
     let comp = graph.components.iter().find(|c| c.id == comp_id)?;
-    Some(PortClass::from_pin_in_graph(comp.kind.as_ref(), pin, node, graph))
+    Some(PortClass::from_pin_in_graph(
+        comp.kind.as_ref(),
+        pin,
+        node,
+        graph,
+    ))
 }
 
 /// Split a `"Comp.pin"` key into `(comp, pin)`.
@@ -828,9 +835,8 @@ pub fn detector_subnetwork_nodes(graph: &CircuitGraph) -> HashSet<NodeId> {
     }
     // Forward boundary nodes are hard barriers: the detector sub-network must
     // never absorb the global `in`/`out` (those belong to the forward path).
-    let blocked = |n: NodeId| -> bool {
-        n == graph.in_node || n == graph.out_node || node_is_rail(graph, n)
-    };
+    let blocked =
+        |n: NodeId| -> bool { n == graph.in_node || n == graph.out_node || node_is_rail(graph, n) };
     let mut stack: Vec<NodeId> = Vec::new();
     for &s in &seeds {
         if !blocked(s) && visited.insert(s) {

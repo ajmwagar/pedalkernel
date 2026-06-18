@@ -205,7 +205,10 @@ fn pending_excluded_from_gate_but_missing_golden_still_fails() {
     assert_eq!(suite.pending, 1, "pending_reference test must be PENDING");
 
     let pending = &suite.tests["tape_head_saturation"];
-    assert!(pending.pending, "tape_head_saturation must be marked pending");
+    assert!(
+        pending.pending,
+        "tape_head_saturation must be marked pending"
+    );
     assert!(!pending.passed, "pending is not a pass");
 
     let failing = &suite.tests["not_pending_missing_golden"];

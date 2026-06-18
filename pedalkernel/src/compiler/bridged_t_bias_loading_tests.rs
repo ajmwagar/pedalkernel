@@ -265,7 +265,11 @@ fn bridged_t_no_bias_divider_resonates_near_textbook() {
         "bridged_t_no_bias: textbook={:.1} Hz, measured={:.1} Hz, ratio={:.2}",
         f_textbook,
         f_measured,
-        if f_textbook > 0.0 { f_measured / f_textbook } else { 0.0 }
+        if f_textbook > 0.0 {
+            f_measured / f_textbook
+        } else {
+            0.0
+        }
     );
 
     assert!(
@@ -290,7 +294,8 @@ fn bridged_t_bias_divider_does_not_shift_resonant_frequency() {
     let pedal_no_bias = crate::dsl::parse_pedal_file(BRIDGED_T_NO_BIAS).expect("parse no_bias");
     let mut compiled_no_bias = compile_via_spqr(&pedal_no_bias, SR).expect("compile no_bias");
 
-    let pedal_with_bias = crate::dsl::parse_pedal_file(BRIDGED_T_WITH_BIAS).expect("parse with_bias");
+    let pedal_with_bias =
+        crate::dsl::parse_pedal_file(BRIDGED_T_WITH_BIAS).expect("parse with_bias");
     let mut compiled_with_bias = compile_via_spqr(&pedal_with_bias, SR).expect("compile with_bias");
 
     let f_no_bias = measure_spectral_centroid_hz(&mut compiled_no_bias, 512, 4096, 50.0, 500.0);
@@ -337,7 +342,8 @@ fn kick_style_bias_divider_does_not_shift_vs_no_bias() {
     let pedal_no_bias = crate::dsl::parse_pedal_file(KICK_STYLE_NO_BIAS).expect("parse no_bias");
     let mut compiled_no_bias = compile_via_spqr(&pedal_no_bias, SR).expect("compile no_bias");
 
-    let pedal_with_bias = crate::dsl::parse_pedal_file(KICK_STYLE_WITH_BIAS).expect("parse with_bias");
+    let pedal_with_bias =
+        crate::dsl::parse_pedal_file(KICK_STYLE_WITH_BIAS).expect("parse with_bias");
     let mut compiled_with_bias = compile_via_spqr(&pedal_with_bias, SR).expect("compile with_bias");
 
     let f_textbook = 1.0 / (std::f64::consts::TAU * 150_000.0 * 18.0e-9);
@@ -352,15 +358,29 @@ fn kick_style_bias_divider_does_not_shift_vs_no_bias() {
         "  no_bias ratio={:.2}  with_bias ratio={:.2}  relative={:.2}",
         f_no_bias / f_textbook,
         f_with_bias / f_textbook,
-        if f_no_bias > 0.0 { f_with_bias / f_no_bias } else { 0.0 }
+        if f_no_bias > 0.0 {
+            f_with_bias / f_no_bias
+        } else {
+            0.0
+        }
     );
 
-    assert!(f_no_bias > 10.0, "No-bias kick must produce output: {f_no_bias:.1} Hz");
-    assert!(f_with_bias > 10.0, "With-bias kick must produce output: {f_with_bias:.1} Hz");
+    assert!(
+        f_no_bias > 10.0,
+        "No-bias kick must produce output: {f_no_bias:.1} Hz"
+    );
+    assert!(
+        f_with_bias > 10.0,
+        "With-bias kick must produce output: {f_with_bias:.1} Hz"
+    );
 
     // The bias divider must NOT shift the resonant frequency by more than 15%.
     // Before the fix, this ratio was ~2.6-3.1 (bias shifts frequency up 2-3x).
-    let relative_shift = if f_no_bias > 0.0 { f_with_bias / f_no_bias } else { 0.0 };
+    let relative_shift = if f_no_bias > 0.0 {
+        f_with_bias / f_no_bias
+    } else {
+        0.0
+    };
     assert!(
         relative_shift >= 0.85 && relative_shift <= 1.15,
         "Bias-divider should not shift kick resonance: no_bias={f_no_bias:.1} Hz, \
@@ -392,7 +412,13 @@ fn kick_style_iir_resonance_within_5pct_of_textbook() {
 
     let f_textbook = 1.0 / (std::f64::consts::TAU * 150_000.0 * 18.0e-9);
     // Peak measurement window: [0.3*f0, 3*f0] = [17.7, 176.7] Hz
-    let f_peak = measure_peak_freq_hz(&mut compiled, 512, 16384, f_textbook * 0.3, f_textbook * 3.0);
+    let f_peak = measure_peak_freq_hz(
+        &mut compiled,
+        512,
+        16384,
+        f_textbook * 0.3,
+        f_textbook * 3.0,
+    );
 
     eprintln!(
         "kick_style peak: textbook={:.1} Hz, peak={:.1} Hz, ratio={:.3}",
@@ -421,7 +447,8 @@ fn bridged_t_c_sweep_all_within_5pct() {
         let cnf = c * 1e9;
         let f0_textbook = 1.0 / (2.0 * PI * r * c);
 
-        let pedal_src = format!(r#"
+        let pedal_src = format!(
+            r#"
             pedal "BT-csweep-{cnf}" {{ supply 9V
                 components {{
                     U1: opamp(tl072)
@@ -447,17 +474,24 @@ fn bridged_t_c_sweep_all_within_5pct() {
                 }}
                 controls {{}}
             }}
-        "#, cnf = cnf);
+        "#,
+            cnf = cnf
+        );
 
         let pedal = crate::dsl::parse_pedal_file(&pedal_src).expect("parse");
         let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
         let f_peak = measure_peak_freq_hz(
-            &mut compiled, 512, 16384,
-            f0_textbook * 0.3, f0_textbook * 3.0,
+            &mut compiled,
+            512,
+            16384,
+            f0_textbook * 0.3,
+            f0_textbook * 3.0,
         );
         let ratio = f_peak / f0_textbook;
 
-        eprintln!("C={cnf:.1}n: textbook={f0_textbook:.1} Hz, peak={f_peak:.1} Hz, ratio={ratio:.3}");
+        eprintln!(
+            "C={cnf:.1}n: textbook={f0_textbook:.1} Hz, peak={f_peak:.1} Hz, ratio={ratio:.3}"
+        );
         assert!(
             ratio >= 0.95 && ratio <= 1.05,
             "C={cnf:.1}n: IIR peak {f_peak:.1} Hz should be within 5% of textbook \
@@ -519,13 +553,17 @@ fn sweep_c_values_debug_coefficients() {
     let r = 150_000.0f64;
 
     eprintln!("\n=== C SWEEP (R=150k, R_fb=1M, R_trig=100k) ===");
-    eprintln!("{:>8} {:>12} {:>12} {:>8}", "C (nF)", "f0_textbook", "f0_measured", "ratio");
+    eprintln!(
+        "{:>8} {:>12} {:>12} {:>8}",
+        "C (nF)", "f0_textbook", "f0_measured", "ratio"
+    );
 
     for &c in &c_values {
         let f0_textbook = 1.0 / (2.0 * PI * r * c);
         let cnf = c * 1e9;
 
-        let pedal_src = format!(r#"
+        let pedal_src = format!(
+            r#"
             pedal "BridgedT-C{cnf}" {{ supply 9V
                 components {{
                     U1: opamp(tl072)
@@ -551,30 +589,42 @@ fn sweep_c_values_debug_coefficients() {
                 }}
                 controls {{}}
             }}
-        "#, cnf = cnf);
-        
+        "#,
+            cnf = cnf
+        );
+
         let pedal = crate::dsl::parse_pedal_file(&pedal_src).expect("parse");
         let mut compiled = super::spqr_build::compile_via_spqr(&pedal, SR).expect("compile");
-        
+
         let lo = (f0_textbook * 0.3).max(5.0);
         let hi = f0_textbook * 4.0;
         let f0_measured = measure_spectral_centroid_hz(&mut compiled, 512, 8192, lo, hi);
         let ratio = f0_measured / f0_textbook;
-        
-        eprintln!("{:>8.1} {:>12.1} {:>12.1} {:>8.3}", c * 1e9, f0_textbook, f0_measured, ratio);
+
+        eprintln!(
+            "{:>8.1} {:>12.1} {:>12.1} {:>8.3}",
+            c * 1e9,
+            f0_textbook,
+            f0_measured,
+            ratio
+        );
     }
-    
+
     // Also sweep R at fixed C=18n
     let c_fixed = 18e-9f64;
     eprintln!("\n=== R SWEEP (C=18n, R_fb=1M, R_trig=100k) ===");
-    eprintln!("{:>8} {:>12} {:>12} {:>8}", "R (kΩ)", "f0_textbook", "f0_measured", "ratio");
-    
+    eprintln!(
+        "{:>8} {:>12} {:>12} {:>8}",
+        "R (kΩ)", "f0_textbook", "f0_measured", "ratio"
+    );
+
     let r_values = [47_000.0f64, 100_000.0, 150_000.0, 220_000.0];
     for &r_val in &r_values {
         let f0_textbook = 1.0 / (2.0 * PI * r_val * c_fixed);
-        
+
         let r_k = r_val / 1000.0;
-        let pedal_src = format!(r#"
+        let pedal_src = format!(
+            r#"
             pedal "BridgedT R={r_k:.0}k" {{ supply 9V
                 components {{
                     U1: opamp(tl072)
@@ -600,17 +650,25 @@ fn sweep_c_values_debug_coefficients() {
                 }}
                 controls {{}}
             }}
-        "#, r_k = r_k);
-        
+        "#,
+            r_k = r_k
+        );
+
         let pedal = crate::dsl::parse_pedal_file(&pedal_src).expect("parse");
         let mut compiled = super::spqr_build::compile_via_spqr(&pedal, SR).expect("compile");
-        
+
         let lo = (f0_textbook * 0.3).max(5.0);
         let hi = f0_textbook * 4.0;
         let f0_measured = measure_spectral_centroid_hz(&mut compiled, 512, 8192, lo, hi);
         let ratio = f0_measured / f0_textbook;
-        
-        eprintln!("{:>8.1} {:>12.1} {:>12.1} {:>8.3}", r_val / 1000.0, f0_textbook, f0_measured, ratio);
+
+        eprintln!(
+            "{:>8.1} {:>12.1} {:>12.1} {:>8.3}",
+            r_val / 1000.0,
+            f0_textbook,
+            f0_measured,
+            ratio
+        );
     }
 }
 
@@ -623,15 +681,18 @@ fn sweep_peak_frequency_with_and_without_r_trig() {
     let r = 150_000.0f64;
 
     eprintln!("\n=== PEAK FREQ SWEEP (R=150k, R_fb=1M, with/without R_trig=100k) ===");
-    eprintln!("{:>8} {:>12} {:>12} {:>8} {:>12} {:>8}",
-        "C (nF)", "f0_textbook", "f0_peak_trig", "ratio_trig", "f0_peak_notrig", "ratio_notrig");
+    eprintln!(
+        "{:>8} {:>12} {:>12} {:>8} {:>12} {:>8}",
+        "C (nF)", "f0_textbook", "f0_peak_trig", "ratio_trig", "f0_peak_notrig", "ratio_notrig"
+    );
 
     for &c in &c_values {
         let f0_textbook = 1.0 / (2.0 * PI * r * c);
         let cnf = c * 1e9;
 
         // WITH R_trig
-        let pedal_trig = crate::dsl::parse_pedal_file(&format!(r#"
+        let pedal_trig = crate::dsl::parse_pedal_file(&format!(
+            r#"
             pedal "BT-trig-{cnf}" {{ supply 9V
                 components {{
                     U1: opamp(tl072)
@@ -657,11 +718,15 @@ fn sweep_peak_frequency_with_and_without_r_trig() {
                 }}
                 controls {{}}
             }}
-        "#, cnf = cnf)).expect("parse with_trig");
+        "#,
+            cnf = cnf
+        ))
+        .expect("parse with_trig");
         let mut comp_trig = super::spqr_build::compile_via_spqr(&pedal_trig, SR).expect("compile");
 
         // WITHOUT R_trig: inject directly at junction (R1.b)
-        let pedal_notrig = crate::dsl::parse_pedal_file(&format!(r#"
+        let pedal_notrig = crate::dsl::parse_pedal_file(&format!(
+            r#"
             pedal "BT-notrig-{cnf}" {{ supply 9V
                 components {{
                     U1: opamp(tl072)
@@ -687,16 +752,26 @@ fn sweep_peak_frequency_with_and_without_r_trig() {
                 }}
                 controls {{}}
             }}
-        "#, cnf = cnf)).expect("parse no_trig");
-        let mut comp_notrig = super::spqr_build::compile_via_spqr(&pedal_notrig, SR).expect("compile");
+        "#,
+            cnf = cnf
+        ))
+        .expect("parse no_trig");
+        let mut comp_notrig =
+            super::spqr_build::compile_via_spqr(&pedal_notrig, SR).expect("compile");
 
         let lo = (f0_textbook * 0.3).max(5.0);
         let hi = f0_textbook * 6.0;
         let f_peak_trig = measure_peak_freq_hz(&mut comp_trig, 512, 16384, lo, hi);
         let f_peak_notrig = measure_peak_freq_hz(&mut comp_notrig, 512, 16384, lo, hi);
 
-        eprintln!("{:>8.1} {:>12.1} {:>12.1} {:>8.3} {:>12.1} {:>8.3}",
-            cnf, f0_textbook, f_peak_trig, f_peak_trig / f0_textbook,
-            f_peak_notrig, f_peak_notrig / f0_textbook);
+        eprintln!(
+            "{:>8.1} {:>12.1} {:>12.1} {:>8.3} {:>12.1} {:>8.3}",
+            cnf,
+            f0_textbook,
+            f_peak_trig,
+            f_peak_trig / f0_textbook,
+            f_peak_notrig,
+            f_peak_notrig / f0_textbook
+        );
     }
 }

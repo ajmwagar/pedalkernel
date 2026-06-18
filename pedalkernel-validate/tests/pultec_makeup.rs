@@ -25,7 +25,11 @@ fn rms(buf: &[f64]) -> f64 {
 }
 
 fn db(v: f64) -> f64 {
-    if v < 1e-20 { -200.0 } else { 20.0 * v.log10() }
+    if v < 1e-20 {
+        -200.0
+    } else {
+        20.0 * v.log10()
+    }
 }
 
 /// Measure steady-state RMS output level relative to input at the given frequency.
@@ -38,7 +42,7 @@ fn rms_gain_at(freq: f64, controls: &[(&str, f64)]) -> (f64, f64, f64) {
         proc.set_control(label, val);
     }
     let n = (SR as usize) / 2; // 500 ms
-    let warmup = n / 4;        // discard first 125 ms
+    let warmup = n / 4; // discard first 125 ms
     let amp = 0.1;
     let input: Vec<f64> = (0..n)
         .map(|i| amp * (2.0 * PI * freq * i as f64 / SR).sin())
@@ -61,7 +65,13 @@ fn makeup_pedal_parses() {
     let def = parse_pedal_file(&src).expect("parse");
     assert_eq!(def.name, "Pultec EQP-1A (Passive+Makeup)");
     let labels: Vec<_> = def.controls.iter().map(|c| c.label.as_str()).collect();
-    for expected in ["LF Boost", "LF Atten", "HF Boost", "HF Bandwidth", "HF Atten"] {
+    for expected in [
+        "LF Boost",
+        "LF Atten",
+        "HF Boost",
+        "HF Bandwidth",
+        "HF Atten",
+    ] {
         assert!(
             labels.contains(&expected),
             "missing control {expected:?}; have {labels:?}"
@@ -119,17 +129,18 @@ fn makeup_stages_are_realtime_safe() {
     assert!(!dump.is_empty(), "debug_dump returned empty string");
 
     // Verify: output passes audio (not silent).
-    let mut proc2 = compile_pedal(
-        &parse_pedal_file(&src).unwrap(),
-        SR,
-    ).unwrap();
+    let mut proc2 = compile_pedal(&parse_pedal_file(&src).unwrap(), SR).unwrap();
     let n = SR as usize / 2;
     let out: Vec<f64> = (0..n)
         .map(|i| proc2.process(0.1 * (2.0 * PI * 1_000.0 * i as f64 / SR).sin()))
         .collect();
     let warmup = n / 4;
     let out_rms = rms(&out[warmup..]);
-    println!("\nSteady-state RMS at 1 kHz: {:.6} ({:.2} dBFS)", out_rms, db(out_rms));
+    println!(
+        "\nSteady-state RMS at 1 kHz: {:.6} ({:.2} dBFS)",
+        out_rms,
+        db(out_rms)
+    );
     assert!(
         out_rms > 1e-4,
         "output essentially silent: RMS={out_rms:.2e} — makeup stage not passing audio"
@@ -155,9 +166,7 @@ fn makeup_recovers_passive_insertion_loss() {
     // makeup is significantly louder than the passive section alone.
 
     let (in_db, out_db, gain_db) = rms_gain_at(1_000.0, &[]);
-    println!(
-        "\n[FLAT 1kHz] input={in_db:.2} dBFS  output={out_db:.2} dBFS  gain={gain_db:+.2} dB"
-    );
+    println!("\n[FLAT 1kHz] input={in_db:.2} dBFS  output={out_db:.2} dBFS  gain={gain_db:+.2} dB");
 
     // The makeup should at minimum raise the signal vs the passive baseline.
     // Passive-only at 1kHz (from probe_engine.rs data): ~-52 dBFS for 0.5 input
@@ -174,7 +183,7 @@ fn makeup_recovers_passive_insertion_loss() {
 #[test]
 fn makeup_gain_plausible_across_configs() {
     let configs: &[(&str, &[(&str, f64)])] = &[
-        ("flat",     &[]),
+        ("flat", &[]),
         ("lf_boost", &[("LF Boost", 1.0)]),
         ("hf_boost", &[("HF Boost", 1.0)]),
         ("hf_atten", &[("HF Atten", 1.0)]),
@@ -182,11 +191,17 @@ fn makeup_gain_plausible_across_configs() {
     ];
 
     println!("\n=== Gain at 1 kHz per EQ config ===");
-    println!("{:<12} {:>10} {:>10} {:>10}", "config", "in dBFS", "out dBFS", "gain dB");
+    println!(
+        "{:<12} {:>10} {:>10} {:>10}",
+        "config", "in dBFS", "out dBFS", "gain dB"
+    );
 
     for &(name, ctrls) in configs {
         let (in_db, out_db, gain_db) = rms_gain_at(1_000.0, ctrls);
-        println!("{:<12} {:>10.2} {:>10.2} {:>10.2}", name, in_db, out_db, gain_db);
+        println!(
+            "{:<12} {:>10.2} {:>10.2} {:>10.2}",
+            name, in_db, out_db, gain_db
+        );
         assert!(
             gain_db > -20.0 && gain_db < 40.0,
             "config={name}: gain {gain_db:.2} dB out of plausible range [-20, +40]"
@@ -228,8 +243,7 @@ fn validate_vs_golden(config_name: &str, controls: &[(&str, f64)], freq: f64, la
         return;
     }
 
-    let golden = npy::read_f64(std::path::Path::new(&golden_path))
-        .expect("read golden npy");
+    let golden = npy::read_f64(std::path::Path::new(&golden_path)).expect("read golden npy");
 
     let src = load(MAKEUP_PEDAL);
     let def = parse_pedal_file(&src).expect("parse");
@@ -262,7 +276,8 @@ fn validate_vs_golden(config_name: &str, controls: &[(&str, f64)], freq: f64, la
 
     println!(
         "\n[{config_name} {label}] engine={:.2} dBFS  golden={:.2} dBFS  gap={gain_gap_db:+.2} dB",
-        db(out_rms), db(gold_rms)
+        db(out_rms),
+        db(gold_rms)
     );
 
     // Report the gap. Do NOT assert tight tolerance here —
@@ -301,5 +316,10 @@ fn validate_makeup_hf_atten_vs_golden() {
 
 #[test]
 fn validate_makeup_lf_trick_vs_golden() {
-    validate_vs_golden("lf_trick", &[("LF Boost", 1.0), ("LF Atten", 1.0)], 60.0, "sine_60");
+    validate_vs_golden(
+        "lf_trick",
+        &[("LF Boost", 1.0), ("LF Atten", 1.0)],
+        60.0,
+        "sine_60",
+    );
 }

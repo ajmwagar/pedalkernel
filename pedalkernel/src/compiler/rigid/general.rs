@@ -541,8 +541,8 @@ fn classify_nl_devices(
                 let grid = *grid;
                 let plate = *plate_node;
                 let cathode = *cathode_node;
-                nl_terminals.push((grid, cathode));   // port 0: grid-cathode
-                nl_terminals.push((plate, cathode));  // port 1: plate-cathode
+                nl_terminals.push((grid, cathode)); // port 0: grid-cathode
+                nl_terminals.push((plate, cathode)); // port 1: plate-cathode
                 for &n in &[grid, plate, cathode] {
                     if !node_set.contains(&n)
                         && n != graph.gnd_node
@@ -564,8 +564,8 @@ fn classify_nl_devices(
                 let grid = *grid;
                 let plate = *plate_node;
                 let cathode = *cathode_node;
-                nl_terminals.push((grid, cathode));   // port 0: grid-cathode
-                nl_terminals.push((plate, cathode));  // port 1: plate-cathode
+                nl_terminals.push((grid, cathode)); // port 0: grid-cathode
+                nl_terminals.push((plate, cathode)); // port 1: plate-cathode
                 for &n in &[grid, plate, cathode] {
                     if !node_set.contains(&n)
                         && n != graph.gnd_node
@@ -964,8 +964,7 @@ fn compute_dc_bias(
                 port_idx += 2;
             }
             NonlinearKind::Triode {
-                grid_node: Some(_),
-                ..
+                grid_node: Some(_), ..
             } => {
                 // Port 0 = Vgk (grid-cathode), port 1 = Vpk (plate-cathode).
                 // Warm-start Vpk at half supply so the NR solver converges near
@@ -1452,8 +1451,7 @@ fn compute_triode_dc_qpoint(
             return None;
         }
         let (a, b) = (e.node_a, e.node_b);
-        if (a == cathode_node && b == graph.gnd_node)
-            || (b == cathode_node && a == graph.gnd_node)
+        if (a == cathode_node && b == graph.gnd_node) || (b == cathode_node && a == graph.gnd_node)
         {
             comp.kind.resistance()
         } else {

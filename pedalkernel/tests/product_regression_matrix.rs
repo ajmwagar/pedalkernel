@@ -22,37 +22,20 @@ const DECAY_CHECKS: &[ControlCheck] = &[ControlCheck::decay("Decay", 0.5)];
 /// Load all product circuits from the sibling pro repo at runtime.
 /// Returns `None` when the pro repo is absent (public CI).
 fn load_product_circuits() -> Option<Vec<CircuitRegressionSpec>> {
-    let tb303_filter = load_pro_pedal_sub(
-        "crates/acidattack/acidattack-core/tb303_filter.pedal",
-    )?;
-    let tb303_vca = load_pro_pedal_sub(
-        "crates/acidattack/acidattack-core/tb303_vca.pedal",
-    )?;
-    let ms20_lpf =
-        load_pro_pedal_sub("crates/bivalve/bivalve-core/ms20_lpf.pedal")?;
-    let ms20_hpf =
-        load_pro_pedal_sub("crates/bivalve/bivalve-core/ms20_hpf.pedal")?;
-    let sallen_key_lpf =
-        load_pro_pedal_sub("crates/bivalve/bivalve-core/sallen_key_lpf.pedal")?;
-    let sallen_key_hpf =
-        load_pro_pedal_sub("crates/bivalve/bivalve-core/sallen_key_hpf.pedal")?;
-    let mfb_lpf =
-        load_pro_pedal_sub("crates/bivalve/bivalve-core/mfb_lpf.pedal")?;
-    let kick_808 = load_pro_pedal_sub(
-        "crates/drummerboy/drummerboy-core/pedals/808_kick.pedal",
-    )?;
-    let snare_606 = load_pro_pedal_sub(
-        "crates/drummerboy/drummerboy-core/pedals/606_snare.pedal",
-    )?;
-    let tom_808 = load_pro_pedal_sub(
-        "crates/drummerboy/drummerboy-core/pedals/808_tom.pedal",
-    )?;
-    let rimshot_808 = load_pro_pedal_sub(
-        "crates/drummerboy/drummerboy-core/pedals/808_rimshot.pedal",
-    )?;
-    let claves_808 = load_pro_pedal_sub(
-        "crates/drummerboy/drummerboy-core/pedals/808_claves.pedal",
-    )?;
+    let tb303_filter = load_pro_pedal_sub("crates/acidattack/acidattack-core/tb303_filter.pedal")?;
+    let tb303_vca = load_pro_pedal_sub("crates/acidattack/acidattack-core/tb303_vca.pedal")?;
+    let ms20_lpf = load_pro_pedal_sub("crates/bivalve/bivalve-core/ms20_lpf.pedal")?;
+    let ms20_hpf = load_pro_pedal_sub("crates/bivalve/bivalve-core/ms20_hpf.pedal")?;
+    let sallen_key_lpf = load_pro_pedal_sub("crates/bivalve/bivalve-core/sallen_key_lpf.pedal")?;
+    let sallen_key_hpf = load_pro_pedal_sub("crates/bivalve/bivalve-core/sallen_key_hpf.pedal")?;
+    let mfb_lpf = load_pro_pedal_sub("crates/bivalve/bivalve-core/mfb_lpf.pedal")?;
+    let kick_808 = load_pro_pedal_sub("crates/drummerboy/drummerboy-core/pedals/808_kick.pedal")?;
+    let snare_606 = load_pro_pedal_sub("crates/drummerboy/drummerboy-core/pedals/606_snare.pedal")?;
+    let tom_808 = load_pro_pedal_sub("crates/drummerboy/drummerboy-core/pedals/808_tom.pedal")?;
+    let rimshot_808 =
+        load_pro_pedal_sub("crates/drummerboy/drummerboy-core/pedals/808_rimshot.pedal")?;
+    let claves_808 =
+        load_pro_pedal_sub("crates/drummerboy/drummerboy-core/pedals/808_claves.pedal")?;
 
     Some(vec![
         CircuitRegressionSpec {
@@ -204,9 +187,7 @@ fn product_audio_regression_matrix_captures_known_gaps() {
 #[test]
 #[ignore = "monolithic BJT VCA path is currently too slow for the default test tier"]
 fn acidbath_vca_gain_moves_output_regression() {
-    let tb303_vca = match load_pro_pedal_sub(
-        "crates/acidattack/acidattack-core/tb303_vca.pedal",
-    ) {
+    let tb303_vca = match load_pro_pedal_sub("crates/acidattack/acidattack-core/tb303_vca.pedal") {
         Some(s) => s,
         None => {
             eprintln!("  SKIP: tb303_vca.pedal not found (pro repo not present)");
@@ -224,9 +205,7 @@ fn acidbath_vca_gain_moves_output_regression() {
 
 #[test]
 fn acidbath_filter_short_render_does_not_panic() {
-    let src = match load_pro_pedal_sub(
-        "crates/acidattack/acidattack-core/tb303_filter.pedal",
-    ) {
+    let src = match load_pro_pedal_sub("crates/acidattack/acidattack-core/tb303_filter.pedal") {
         Some(s) => s,
         None => {
             eprintln!("  SKIP: tb303_filter.pedal not found (pro repo not present)");

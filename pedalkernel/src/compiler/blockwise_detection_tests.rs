@@ -2876,10 +2876,7 @@ fn mixed_active_diode_diff_pair_classifies_as_input_differential_pair() {
             has_input_diff,
             "mixed active+diode-connected BJTs sharing an emitter should compile as \
              InputDifferentialPair, not Generic — got blocks: {:?}",
-            plan.blocks
-                .iter()
-                .map(|b| &b.topology)
-                .collect::<Vec<_>>()
+            plan.blocks.iter().map(|b| &b.topology).collect::<Vec<_>>()
         );
     }
     // Note: if plan is None (only 1 merged NL block → blockwise not applicable),

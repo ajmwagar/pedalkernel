@@ -31,7 +31,9 @@ use pedalkernel::dsl::parse_pedal_file;
 // ───────────────────────── helpers ─────────────────────────
 
 fn read_example(rel: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples").join(rel);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -172,7 +174,11 @@ fn two_tube_cascade_forward_grids_are_tight() {
     // V1a.grid fed from `in` (forward).
     let e1 =
         classify_control_path(&pedal, "V1a.grid", "in").expect("V1a.grid <- in path must resolve");
-    assert_eq!(e1.to_class, PortClass::ControlInput, "V1a.grid ControlInput");
+    assert_eq!(
+        e1.to_class,
+        PortClass::ControlInput,
+        "V1a.grid ControlInput"
+    );
     assert!(!e1.is_back_edge, "in -> V1a.grid is forward");
     assert_eq!(
         e1.policy,
@@ -184,7 +190,11 @@ fn two_tube_cascade_forward_grids_are_tight() {
     // V1b.grid fed from the V1a plate (forward cascade).
     let e2 = classify_control_path(&pedal, "V1b.grid", "V1a.plate")
         .expect("V1b.grid <- V1a.plate path must resolve");
-    assert_eq!(e2.to_class, PortClass::ControlInput, "V1b.grid ControlInput");
+    assert_eq!(
+        e2.to_class,
+        PortClass::ControlInput,
+        "V1b.grid ControlInput"
+    );
     assert!(!e2.is_back_edge, "V1a.plate -> V1b.grid is forward cascade");
     assert_eq!(
         e2.policy,
@@ -325,7 +335,10 @@ fn corpus_classification_is_total_and_panic_free() {
     collect_pedal_files(&root.join("examples"), &mut files);
     collect_pedal_files(&root.join("../pedalkernel-validate/circuits"), &mut files);
 
-    assert!(!files.is_empty(), "no .pedal corpus files found — wrong CWD?");
+    assert!(
+        !files.is_empty(),
+        "no .pedal corpus files found — wrong CWD?"
+    );
 
     let mut checked = 0usize;
     let mut total_pins = 0usize;

@@ -40,20 +40,13 @@ const HEADROOM: f64 = 2.0;
 
 // Compile-time inclusion of public example pedals (no file search at runtime).
 // Paths are relative to the crate root (CARGO_MANIFEST_DIR).
-const TUBE_SCREAMER: &str =
-    include_str!("../examples/pedals/overdrive/tube_screamer.pedal");
-const BIG_MUFF: &str =
-    include_str!("../examples/pedals/fuzz/big_muff.pedal");
-const KLON_CENTAUR: &str =
-    include_str!("../examples/pedals/overdrive/klon_centaur.pedal");
-const PROCO_RAT: &str =
-    include_str!("../examples/pedals/distortion/proco_rat.pedal");
-const FUZZ_FACE: &str =
-    include_str!("../examples/pedals/fuzz/fuzz_face.pedal");
-const BLUES_DRIVER: &str =
-    include_str!("../examples/pedals/overdrive/blues_driver.pedal");
-const DYNA_COMP: &str =
-    include_str!("../examples/pedals/compressor/dyna_comp.pedal");
+const TUBE_SCREAMER: &str = include_str!("../examples/pedals/overdrive/tube_screamer.pedal");
+const BIG_MUFF: &str = include_str!("../examples/pedals/fuzz/big_muff.pedal");
+const KLON_CENTAUR: &str = include_str!("../examples/pedals/overdrive/klon_centaur.pedal");
+const PROCO_RAT: &str = include_str!("../examples/pedals/distortion/proco_rat.pedal");
+const FUZZ_FACE: &str = include_str!("../examples/pedals/fuzz/fuzz_face.pedal");
+const BLUES_DRIVER: &str = include_str!("../examples/pedals/overdrive/blues_driver.pedal");
+const DYNA_COMP: &str = include_str!("../examples/pedals/compressor/dyna_comp.pedal");
 
 /// Process `BUFFER_SIZE` samples through a compiled pedal and return
 /// (ns_per_sample, samples_per_sec).  Same formula as wdf_bench.rs.
@@ -63,9 +56,7 @@ fn measure(src: &str) -> (f64, f64) {
 
     // Sine wave at 440 Hz, 0.5 amplitude (same stimulus as bench_realtime_budget)
     let block: Vec<f64> = (0..BUFFER_SIZE)
-        .map(|i| {
-            0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SAMPLE_RATE).sin()
-        })
+        .map(|i| 0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / SAMPLE_RATE).sin())
         .collect();
 
     // Warm-up pass — primes caches and K-table lookups
@@ -111,9 +102,7 @@ fn check(name: &str, src: &str, gated: bool) {
 #[test]
 fn realtime_gate_all_pedals() {
     println!();
-    println!(
-        "  Realtime gate — HEADROOM={HEADROOM}x, {SAMPLE_RATE} Hz, {BUFFER_SIZE} samples"
-    );
+    println!("  Realtime gate — HEADROOM={HEADROOM}x, {SAMPLE_RATE} Hz, {BUFFER_SIZE} samples");
     println!("  ──────────────────────────────────────────────────────────────────");
 
     // Gated: must meet HEADROOM

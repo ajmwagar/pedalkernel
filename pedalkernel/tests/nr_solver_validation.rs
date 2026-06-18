@@ -434,7 +434,11 @@ fn nr_l0_jfet_gate_conduction_nr_convergence() {
     eprintln!(
         "[gate conduction NR] solves={}, avg_iter={:.1}, max_iter={}, max_residual={:.3e}",
         stats.solves,
-        if stats.solves > 0 { stats.total_iterations as f64 / stats.solves as f64 } else { 0.0 },
+        if stats.solves > 0 {
+            stats.total_iterations as f64 / stats.solves as f64
+        } else {
+            0.0
+        },
         stats.max_iterations,
         stats.max_residual,
     );

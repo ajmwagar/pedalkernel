@@ -57,8 +57,7 @@ const F0_HZ_EXPECTED: f64 = 129.4;
 const F0_TOLERANCE_HZ: f64 = 15.0;
 
 /// Relative path from the engine repo manifest to the 808 kick pedal in pro.
-const PEDAL_REL_PATH: &str =
-    "crates/drummerboy/drummerboy-core/pedals/808_kick.pedal";
+const PEDAL_REL_PATH: &str = "crates/drummerboy/drummerboy-core/pedals/808_kick.pedal";
 
 // ---------------------------------------------------------------------------
 // Loader — self-contained, independent of load_pro_pedal shared helper.
@@ -97,7 +96,9 @@ fn load_808_kick_pedal() -> Option<String> {
 /// Returns `None` if the golden file is absent (CI or fresh checkout).
 fn load_golden(name: &str) -> Option<Vec<f64>> {
     let manifest: PathBuf = env!("CARGO_MANIFEST_DIR").into();
-    let path = manifest.join("golden/drums/808_kick").join(format!("{name}.npy"));
+    let path = manifest
+        .join("golden/drums/808_kick")
+        .join(format!("{name}.npy"));
     npy::read_f64(&path).ok()
 }
 

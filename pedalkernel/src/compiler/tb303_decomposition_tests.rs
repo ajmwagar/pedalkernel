@@ -656,9 +656,7 @@ pub(crate) fn load_pro_pedal_sub(pro_sub_path: &str) -> Option<String> {
 /// Convenience wrapper: loads `filename` from the acidattack-core directory.
 /// All existing TB-303 tests call this form.
 fn load_pro_pedal(filename: &str) -> Option<String> {
-    load_pro_pedal_sub(&format!(
-        "crates/acidattack/acidattack-core/{filename}"
-    ))
+    load_pro_pedal_sub(&format!("crates/acidattack/acidattack-core/{filename}"))
 }
 
 fn tb303_bkm_vs_signals(
