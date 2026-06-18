@@ -1,0 +1,1 @@
+{"id":"int-f8d27393791e493151f75c9c62c04308","kind":"field_change","created_at":"2026-06-18T13:10:02.350693Z","actor":"Avery Wagar","issue_id":"pedalkernel-6vjg","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Added AGPL Section 7 hardware commercial license condition to LICENSE and README"}}

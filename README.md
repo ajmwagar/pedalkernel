@@ -122,15 +122,15 @@ Especially valued: new vintage circuits with public schematics, SPICE reference 
 
 ## Commercial licenses and bindings
 
-PedalKernel is AGPLv3 — free to use, modify, and redistribute under the AGPL. The same source tree powers a commercial product line maintained by **[Puget Audio](mailto:info@puget.audio)** for teams that need closed-source distribution, prebuilt host bindings, or vendor support:
+PedalKernel is AGPLv3 — free to use, modify, and redistribute under the AGPL, with the additional condition in [LICENSE](LICENSE) for qualifying hardware product incorporation. The same source tree powers a commercial product line maintained by **[Puget Audio](mailto:info@puget.audio)** for teams that need closed-source distribution, prebuilt host bindings, hardware product rights, or vendor support:
 
 - **VST3 bindings** — plug PedalKernel circuits into any DAW (Ableton, Logic, Reaper, Bitwig, …) as a VST3 plug-in with multi-instance state, parameter automation, and DAW preset I/O.
 - **VCV Rack bindings** — exposes any `.pedal` as a Rack module with full CV/audio I/O, polyphony, and Rack's preset/automation surface.
 - **Daisy Seed runtime** — a tuned `no_std` build of `pedalkernel-rt` for the Electrosmith Daisy Seed family (Patch, Pod, Field), with hardware abstraction for the audio codec, knobs, and switches.
-- **Commercial license + support** — a closed-source license for the kernel and runtime crates, plus priority bug fixes, feature work, and direct engineering support.
+- **Commercial license + support** — a closed-source license for the kernel and runtime crates, hardware product licenses from Future Present Labs LLC where required, plus priority bug fixes, feature work, and direct engineering support.
 
 Contact **info@puget.audio** for licensing, pricing, and integration questions.
 
 ## License
 
-AGPLv3 © [Avery Wagar](https://github.com/ajmwagar). Contributions are licensed to the project under the [CLA](CLA.md). Embedding the kernel or runtime in a closed-source product, or shipping the commercial bindings listed above, requires a commercial license from [Puget Audio](mailto:info@puget.audio).
+AGPLv3 © [Avery Wagar](https://github.com/ajmwagar), with the Section 7 additional condition in [LICENSE](LICENSE). Contributions are licensed to the project under the [CLA](CLA.md). Embedding the kernel or runtime in a closed-source product, shipping the commercial bindings listed above, or incorporating the software into qualifying hardware products requires a commercial license. Contact [Puget Audio](mailto:info@puget.audio).

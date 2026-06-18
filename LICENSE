@@ -16,6 +16,15 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+Additional Condition under AGPLv3 Section 7:
+
+Incorporation of this software into hardware products by any entity with
+annual revenue exceeding $1M USD, or any entity majority-owned by such an
+organization, requires a separate commercial license from Future Present Labs
+LLC.
+
+Contact: info@puget.audio
+
 Also add information on how to contact you by electronic and paper mail.
 
 If your software can interact with users remotely through a computer
