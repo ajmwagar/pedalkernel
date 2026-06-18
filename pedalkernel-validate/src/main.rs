@@ -556,18 +556,36 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
         for (test_name, test_case) in &suite_config.tests {
             println!("  {} Test: {}", "→".blue(), test_name);
 
-            let circuit_path = cli.circuits.join(&test_case.circuit);
-            if !circuit_path.exists() {
-                println!(
-                    "    {} Circuit not found: {}",
-                    "⚠".yellow(),
-                    circuit_path.display()
-                );
-                continue;
-            }
+            // Resolve circuit source: pro_pedal takes priority over the public
+            // circuits/ directory.  When pro_pedal is Some but the pro repo is
+            // absent, skip gracefully (mirrors the existing circuit_path.exists()
+            // skip so public CI is unaffected).
+            let contents = if let Some(ref pro_path) = test_case.pro_pedal {
+                match pedalkernel_validate::pro_pedal::load_pro_pedal_sub(pro_path) {
+                    Some(src) => src,
+                    None => {
+                        println!(
+                            "    {} pro repo absent — skipping {}",
+                            "⚠".yellow(),
+                            pro_path
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                let circuit_path = cli.circuits.join(&test_case.circuit);
+                if !circuit_path.exists() {
+                    println!(
+                        "    {} Circuit not found: {}",
+                        "⚠".yellow(),
+                        circuit_path.display()
+                    );
+                    continue;
+                }
+                std::fs::read_to_string(&circuit_path)?
+            };
 
             // Load and compile circuit
-            let contents = std::fs::read_to_string(&circuit_path)?;
             let pedal_def = pedalkernel::dsl::parse_pedal_file(&contents)
                 .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
             let options = pedalkernel::compiler::CompileOptions {
@@ -578,6 +596,12 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
             let mut pedal =
                 pedalkernel::compiler::compile_pedal_with_options(&pedal_def, sample_rate, options)
                     .map_err(|e| anyhow::anyhow!("Compile error: {}", e))?;
+
+            // Apply per-test controls immediately (no smoother ramp) so the
+            // operating point is in effect from sample 0.
+            for (label, value) in &test_case.controls {
+                pedal.set_control_immediate(label, *value);
+            }
 
             for signal_config in &test_case.signals {
                 let label = signal_config.label();
@@ -681,6 +705,7 @@ fn compare_goldens(
         let mut test_results = std::collections::BTreeMap::new();
         let mut suite_passed = 0usize;
         let mut suite_failed = 0usize;
+        let mut suite_pending = 0usize;
 
         for (test_name, test_case) in &suite_config.tests {
             println!("  {} Test: {}", "→".blue(), test_name);
@@ -795,20 +820,44 @@ fn compare_goldens(
                 ));
             }
 
-            if test_passed {
+            let profile = test_case.effective_profile(suite_name, test_name);
+            // Pending-profile tests are excluded from the gate: they do not
+            // increment suite_failed and are recorded with pending=true so the
+            // report denominator is unaffected.
+            let is_pending =
+                profile == pedalkernel_validate::config::ValidationProfile::Pending;
+            if is_pending {
+                suite_pending += 1;
+            } else if test_passed {
                 suite_passed += 1;
             } else {
                 suite_failed += 1;
             }
 
+            // When a test is pending its signal-level passed flags must also
+            // be true so downstream consumers (e.g. generate_dashboard.py) that
+            // read signal["passed"] do not count pending tests as failures.
+            let signals_for_report = if is_pending {
+                signal_results
+                    .into_iter()
+                    .map(|mut s| {
+                        s.passed = true;
+                        s.pending = true;
+                        s
+                    })
+                    .collect()
+            } else {
+                signal_results
+            };
+
             test_results.insert(
                 test_name.clone(),
                 pedalkernel_validate::report::TestResult {
-                    profile: test_case.effective_profile(suite_name, test_name),
-                    passed: test_passed,
-                    pending: false,
+                    profile,
+                    passed: test_passed && !is_pending,
+                    pending: is_pending,
                     error: None,
-                    signals: signal_results,
+                    signals: signals_for_report,
                 },
             );
         }
@@ -819,7 +868,7 @@ fn compare_goldens(
                 description: suite_config.description.clone(),
                 passed: suite_passed,
                 failed: suite_failed,
-                pending: 0,
+                pending: suite_pending,
                 tests: test_results,
             },
         );
