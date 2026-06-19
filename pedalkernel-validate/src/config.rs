@@ -223,6 +223,26 @@ pub enum SignalConfig {
         #[serde(default)]
         label: Option<String>,
     },
+    #[serde(rename = "sawtooth")]
+    Sawtooth {
+        frequency: f64,
+        #[serde(default = "default_amplitude")]
+        amplitude: f64,
+        #[serde(default = "default_duration")]
+        duration: f64,
+        #[serde(default)]
+        label: Option<String>,
+    },
+    #[serde(rename = "triangle")]
+    Triangle {
+        frequency: f64,
+        #[serde(default = "default_amplitude")]
+        amplitude: f64,
+        #[serde(default = "default_duration")]
+        duration: f64,
+        #[serde(default)]
+        label: Option<String>,
+    },
 }
 
 fn default_amplitude() -> f64 {
@@ -263,6 +283,12 @@ impl SignalConfig {
             }
             SignalConfig::LevelSweep { label, .. } => {
                 label.clone().unwrap_or_else(|| "level_sweep".to_string())
+            }
+            SignalConfig::Sawtooth { label, .. } => {
+                label.clone().unwrap_or_else(|| "sawtooth".to_string())
+            }
+            SignalConfig::Triangle { label, .. } => {
+                label.clone().unwrap_or_else(|| "triangle".to_string())
             }
         }
     }
@@ -341,6 +367,26 @@ impl SignalConfig {
                 levels_dbvu: levels_dbvu.clone(),
                 duration_per_level: *duration_per_level,
             },
+            SignalConfig::Sawtooth {
+                frequency,
+                amplitude,
+                duration,
+                ..
+            } => SignalSpec::Sawtooth {
+                frequency: *frequency,
+                amplitude: *amplitude,
+                duration: *duration,
+            },
+            SignalConfig::Triangle {
+                frequency,
+                amplitude,
+                duration,
+                ..
+            } => SignalSpec::Triangle {
+                frequency: *frequency,
+                amplitude: *amplitude,
+                duration: *duration,
+            },
         }
     }
 
@@ -351,6 +397,8 @@ impl SignalConfig {
             SignalConfig::TwoTone { f1, .. } => Some(*f1),
             SignalConfig::ToneBurst { frequency, .. } => Some(*frequency),
             SignalConfig::LevelSweep { frequency, .. } => Some(*frequency),
+            SignalConfig::Sawtooth { frequency, .. } => Some(*frequency),
+            SignalConfig::Triangle { frequency, .. } => Some(*frequency),
             _ => None,
         }
     }
@@ -2661,7 +2709,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_lf_boost.pedal".to_string(),
                         pending_reference: false,
-                        description: "Pultec EQP-1A passive, LF boost on (LF_Boost=1.0)".to_string(),
+                        description: "Pultec EQP-1A passive, LF boost on (LF_Boost=1.0)"
+                            .to_string(),
                         signals: vec![
                             SignalConfig::Sine {
                                 frequency: 60.0,
@@ -2698,7 +2747,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_lf_trick.pedal".to_string(),
                         pending_reference: false,
-                        description: "Pultec EQP-1A passive, LF trick (Boost+Atten=1.0)".to_string(),
+                        description: "Pultec EQP-1A passive, LF trick (Boost+Atten=1.0)"
+                            .to_string(),
                         signals: vec![
                             SignalConfig::Sine {
                                 frequency: 60.0,
@@ -2736,7 +2786,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_hf_boost.pedal".to_string(),
                         pending_reference: false,
-                        description: "Pultec EQP-1A passive, HF boost on (HF_Boost=1.0, f0≈3.1kHz)".to_string(),
+                        description: "Pultec EQP-1A passive, HF boost on (HF_Boost=1.0, f0≈3.1kHz)"
+                            .to_string(),
                         signals: vec![
                             SignalConfig::Sine {
                                 frequency: 3100.0,
@@ -2773,7 +2824,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_hf_atten.pedal".to_string(),
                         pending_reference: false,
-                        description: "Pultec EQP-1A passive, HF atten on (HF_Atten=1.0)".to_string(),
+                        description: "Pultec EQP-1A passive, HF atten on (HF_Atten=1.0)"
+                            .to_string(),
                         signals: vec![
                             SignalConfig::Sine {
                                 frequency: 10000.0,
@@ -3213,8 +3265,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
     suites.insert(
         "tubes".to_string(),
         TestSuite {
-            description: "Tube amplifier stage validation — triodes, pentode, vari-mu"
-                .to_string(),
+            description: "Tube amplifier stage validation — triodes, pentode, vari-mu".to_string(),
             tests: {
                 let mut tests = BTreeMap::new();
 
