@@ -5,6 +5,7 @@ members = [
     "pedalkernel-rt",
     "pedalkernel-layout",
     "pedalkernel-validate",
+    "pedalkernel-fx-loop",
     "xtask",
 ]
 

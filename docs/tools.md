@@ -40,6 +40,49 @@ tools/.venv/bin/python tools/mouser_bom.py \
 
 `--qty` multiplies the per-circuit quantity by the number of units you want to build (5 units of the Big Muff in this example). The tool reads `.pedal` files directly and picks up part-name overrides from any companion `.pedalhw` file. See the [Hardware export](./hardware.md) page for the broader story.
 
+## Hardware FX-loop capture
+
+`pedalkernel-fx-loop` is a cross-platform Rust utility for capturing real hardware references through an audio interface. It uses `cpal`, so the same binary targets CoreAudio, WASAPI, ALSA, and JACK backends where supported.
+
+List visible audio devices:
+
+```bash
+cargo run -p pedalkernel-fx-loop -- list
+```
+
+Capture a Scarlett 4i4 FX insert with output 3 feeding a pedal and input 3 recording the return:
+
+```bash
+cargo run -p pedalkernel-fx-loop -- capture \
+    --device Scarlett \
+    --send-channel 3 \
+    --return-channel 3 \
+    --signal sine \
+    --freq 1000 \
+    --duration 4 \
+    --amp 0.15 \
+    --out-dir hardware-goldens/ts9_noon \
+    --label sine_1k
+```
+
+Artifacts are written as `*.stimulus.wav`, `*.return.wav`, `*.send_return.wav`, `*.stimulus.npy`, `*.return.npy`, and `*.json`. Channel numbers are 1-based to match the labels on the interface.
+
+For realtime checking, loop a signal through the same insert and mirror the return to monitor outputs 1 and 2:
+
+```bash
+cargo run -p pedalkernel-fx-loop -- monitor \
+    --device Scarlett \
+    --send-channel 3 \
+    --return-channel 3 \
+    --monitor-channels 1,2 \
+    --monitor-gain 0.5 \
+    --signal sweep \
+    --duration 8 \
+    --run-duration 30
+```
+
+Use `--signal wav --input-wav path/to/file.wav` to play a guitar or reamp file instead of generated sine, sweep, or impulse stimuli. WAV files must already match `--sample-rate`.
+
 ## Benchmarks
 
 PedalKernel ships a Criterion benchmark harness. Run it on your machine to get authoritative per-pedal timing:

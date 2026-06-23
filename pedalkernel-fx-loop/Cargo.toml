@@ -1,0 +1,12 @@
+[package]
+name = "pedalkernel-fx-loop"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform hardware FX-loop capture tool for PedalKernel validation"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+cpal = "0.15"
+hound = "3.5"

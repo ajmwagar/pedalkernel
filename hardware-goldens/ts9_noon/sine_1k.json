@@ -1,0 +1,13 @@
+{
+  "tool": "pedalkernel-fx-loop",
+  "device_input": "Scarlett 4i4 4th Gen",
+  "device_output": "Scarlett 4i4 4th Gen",
+  "sample_rate": 48000,
+  "send_channel": 3,
+  "return_channel": 3,
+  "signal": "Sine",
+  "duration_seconds": 2,
+  "amp": 0.15,
+  "frames": 120000,
+  "note": "Scarlett channel numbers are 1-based; TS9 noon capture is output 3 to input 3."
+}

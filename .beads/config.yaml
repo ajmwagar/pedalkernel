@@ -54,3 +54,5 @@
 # - github.repo
 
 dolt.port: 22345
+
+sync.remote: "git+ssh://git@github.com/ajmwagar/pedalkernel"
