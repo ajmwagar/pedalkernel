@@ -125,6 +125,9 @@ struct SignalArgs {
     /// Sweep end frequency.
     #[arg(long, default_value_t = 20_000.0)]
     end_freq: f32,
+    /// Seed for deterministic noise signals.
+    #[arg(long, default_value_t = 0x5EED_2026)]
+    seed: u64,
     /// WAV file to send when --signal wav is selected.
     #[arg(long)]
     input_wav: Option<PathBuf>,
@@ -135,6 +138,7 @@ enum SignalKind {
     Sine,
     Sweep,
     Impulse,
+    Pink,
     Wav,
 }
 
@@ -721,6 +725,7 @@ fn build_signal(args: &SignalArgs, sample_rate: u32) -> Result<Vec<f32>> {
             signal[0] = amp;
             Ok(signal)
         }
+        SignalKind::Pink => Ok(pink_noise(frames, amp, args.seed)),
         SignalKind::Wav => {
             let path = args
                 .input_wav
@@ -746,6 +751,74 @@ fn build_signal(args: &SignalArgs, sample_rate: u32) -> Result<Vec<f32>> {
                 Ok(out)
             }
         }
+    }
+}
+
+fn pink_noise(frames: usize, amp: f32, seed: u64) -> Vec<f32> {
+    let mut rng = XorShift64::new(seed);
+    let mut rows = [0.0_f32; 16];
+    for row in &mut rows {
+        *row = rng.next_bipolar();
+    }
+
+    let mut out = Vec::with_capacity(frames);
+    let mut running_sum: f32 = rows.iter().sum();
+    let mut counter = 0_u64;
+    for _ in 0..frames {
+        counter = counter.wrapping_add(1);
+        let changed_rows = counter.trailing_zeros().min((rows.len() - 1) as u32) as usize;
+        for row in rows.iter_mut().take(changed_rows + 1) {
+            running_sum -= *row;
+            *row = rng.next_bipolar();
+            running_sum += *row;
+        }
+        let white = rng.next_bipolar() * 0.5;
+        out.push((running_sum / rows.len() as f32) + white);
+    }
+
+    normalize_peak(&mut out, amp);
+    out
+}
+
+fn normalize_peak(samples: &mut [f32], peak: f32) {
+    let max = samples
+        .iter()
+        .fold(0.0_f32, |max, &sample| max.max(sample.abs()));
+    if max > 0.0 {
+        let gain = peak / max;
+        for sample in samples {
+            *sample *= gain;
+        }
+    }
+}
+
+struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 {
+                0xA5A5_A5A5_A5A5_A5A5
+            } else {
+                seed
+            },
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    fn next_bipolar(&mut self) -> f32 {
+        let unit = (self.next_u64() >> 40) as f32 / ((1_u32 << 24) - 1) as f32;
+        (unit * 2.0) - 1.0
     }
 }
 
@@ -885,6 +958,7 @@ fn write_metadata(
             "  \"signal\": \"{:?}\",\n",
             "  \"duration_seconds\": {},\n",
             "  \"amp\": {},\n",
+            "  \"seed\": {},\n",
             "  \"frames\": {},\n",
             "  \"note\": \"Scarlett channel numbers are 1-based; TS9 noon capture is output 3 to input 3.\"\n",
             "}}\n"
@@ -897,6 +971,7 @@ fn write_metadata(
         args.signal.signal,
         args.signal.duration,
         args.signal.amp,
+        args.signal.seed,
         frames
     );
     fs::write(path, metadata)?;
@@ -939,9 +1014,23 @@ mod tests {
             freq: 1000.0,
             start_freq: 20.0,
             end_freq: 20_000.0,
+            seed: 0x5EED_2026,
             input_wav: None,
         };
         assert_eq!(build_signal(&args, 48_000).unwrap().len(), 48_000);
+    }
+
+    #[test]
+    fn pink_noise_is_seeded_and_peak_limited() {
+        let a = pink_noise(4096, 0.2, 1234);
+        let b = pink_noise(4096, 0.2, 1234);
+        let c = pink_noise(4096, 0.2, 5678);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let peak = a
+            .iter()
+            .fold(0.0_f32, |peak, &sample| peak.max(sample.abs()));
+        assert!(peak <= 0.200_001, "peak {peak}");
     }
 
     #[test]

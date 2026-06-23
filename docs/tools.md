@@ -83,6 +83,21 @@ cargo run -p pedalkernel-fx-loop -- monitor \
 
 Use `--signal wav --input-wav path/to/file.wav` to play a guitar or reamp file instead of generated sine, sweep, or impulse stimuli. WAV files must already match `--sample-rate`.
 
+For music-like broadband validation, use seeded pink noise. Keep the seed in the command and metadata so the stimulus can be regenerated exactly:
+
+```bash
+cargo run -p pedalkernel-fx-loop -- capture \
+    --device Scarlett \
+    --send-channel 3 \
+    --return-channel 3 \
+    --signal pink \
+    --duration 8 \
+    --amp 0.12 \
+    --seed 1592598566 \
+    --out-dir hardware-goldens/ts9_noon \
+    --label pink_seed_1592598566
+```
+
 ## Benchmarks
 
 PedalKernel ships a Criterion benchmark harness. Run it on your machine to get authoritative per-pedal timing:
