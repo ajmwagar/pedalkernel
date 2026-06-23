@@ -29,8 +29,16 @@ enum Command {
         input: String,
         /// Output WAV file.
         output: String,
+        /// Optional companion .pedalhw file for presets and mods.
+        #[arg(long)]
+        pedalhw: Option<String>,
+        /// Factory preset name from .pedalhw [[presets]].
+        #[arg(long)]
+        preset: Option<String>,
+        /// Named .pedalhw [[mods]] entry to apply. Repeat to stack mods.
+        #[arg(long = "mod")]
+        mods: Vec<String>,
         /// Knob overrides (e.g. Drive=0.8 or ts.Drive=0.7 for boards).
-        #[arg(trailing_var_arg = true)]
         knobs: Vec<String>,
     },
     /// Debug a .pedal file — compile and print stage structure, WDF trees,
@@ -93,8 +101,21 @@ fn main() {
             file,
             input,
             output,
+            pedalhw,
+            preset,
+            mods,
             knobs,
-        } => cli::process::run(&file, &input, &output, &knobs),
+        } => cli::process::run(
+            &file,
+            &input,
+            &output,
+            cli::process::ProcessOptions {
+                pedalhw: pedalhw.as_deref(),
+                preset: preset.as_deref(),
+                mods: &mods,
+            },
+            &knobs,
+        ),
         Command::Debug { file } => cli::debug::run(&file),
         Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
         Command::Models {

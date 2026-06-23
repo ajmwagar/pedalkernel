@@ -98,6 +98,20 @@ cargo run -p pedalkernel-fx-loop -- capture \
     --label pink_seed_1592598566
 ```
 
+Render a matching software reference from a `.pedal` file with its `.pedalhw` preset/mod metadata:
+
+```bash
+cargo run -p pedalkernel -- process \
+    ../pedalkernel-pro/pedals/legends/screamer.pedal \
+    hardware-goldens/ts9_noon/pink_seed_1592598566.stimulus.wav \
+    /tmp/screamer_ts9_pink.wav \
+    --pedalhw ../pedalkernel-pro/pedals/legends/screamer.pedalhw \
+    --preset "Classic TS" \
+    --mod "TS9 Conversion"
+```
+
+If `--pedalhw` is omitted, `process` looks for a sibling file with the same stem and the `.pedalhw` extension. Direct knob overrides still work after the flags and take precedence over preset values, for example `Tone=0.45`.
+
 ## Benchmarks
 
 PedalKernel ships a Criterion benchmark harness. Run it on your machine to get authoritative per-pedal timing:

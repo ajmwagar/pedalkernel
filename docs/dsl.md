@@ -678,7 +678,7 @@ board "Blues Rig" {
 
 ```bash
 # Single pedal
-pedalkernel process <file.pedal> <input.wav> <output.wav> [Knob=value ...]
+pedalkernel process <file.pedal> <input.wav> <output.wav> [--pedalhw <file.pedalhw>] [--preset <name>] [--mod <name> ...] [Knob=value ...]
 
 # Pedalboard
 pedalkernel process <file.board> <input.wav> <output.wav> [pedal_id.Knob=value ...]
@@ -687,6 +687,11 @@ pedalkernel process <file.board> <input.wav> <output.wav> [pedal_id.Knob=value .
 **Pedal knob overrides** use `Knob=value`:
 ```bash
 pedalkernel process tube_screamer.pedal input.wav out.wav Drive=0.9 Level=0.5
+```
+
+**Hardware presets and mods** can be pulled from `.pedalhw` without generating another `.pedal` file. If `--pedalhw` is omitted, `process` looks for a sibling file with the same stem:
+```bash
+pedalkernel process screamer.pedal input.wav out.wav --preset "Classic TS" --mod "TS9 Conversion"
 ```
 
 **Board knob overrides** use `pedal_id.Knob=value` (the `pedal_id` matches the identifier in the `.board` file):
