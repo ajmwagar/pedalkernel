@@ -40,6 +40,18 @@ Removing `calibrate` in a temporary copy does not change the aligned shape metri
 
 This is a better reference-render level, but it should not be treated as a circuit gain-stage fix. `calibrate` is a product/output-normalization layer, not part of the TS9 circuit.
 
+## No-Calibrate With TS9 `.pedalhw` Mod
+
+Using `--preset "Classic TS" --mod "TS9 Conversion" --no-calibrate` against the original `legends/screamer.pedal` and companion `.pedalhw` avoids a temporary edited `.pedal` file. It confirms that disabling `calibrate` removes the product normalization, but the TS9 output-network mod still leaves the software render hotter than the hardware return:
+
+| Stimulus | Best latency | Model vs hardware RMS | Best-fit gain | Correlation | Relative fit error |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sine_1k` | 2,785 samples | +7.06 dB | -7.24 dB | 0.9795 | -13.91 dB |
+| `sweep_20_20k` | 2,785 samples | +8.87 dB | -10.97 dB | 0.7858 | -4.17 dB |
+| `pink_seed_1592598566` | 2,780 samples | +13.25 dB | -14.74 dB | 0.8420 | -5.36 dB |
+
+The higher level versus the no-mod no-calibrate check is expected directionally: `TS9 Conversion` changes `R_out_g` from `10k` to `100k`, reducing the output shunt loss in the simplified model.
+
 ## Tone Mapping Check
 
 Using the no-calibrate temporary copy with pink noise:

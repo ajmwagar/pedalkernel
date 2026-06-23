@@ -38,6 +38,9 @@ enum Command {
         /// Named .pedalhw [[mods]] entry to apply. Repeat to stack mods.
         #[arg(long = "mod")]
         mods: Vec<String>,
+        /// Disable the .pedal file's calibrate output normalization for this render.
+        #[arg(long)]
+        no_calibrate: bool,
         /// Knob overrides (e.g. Drive=0.8 or ts.Drive=0.7 for boards).
         knobs: Vec<String>,
     },
@@ -104,6 +107,7 @@ fn main() {
             pedalhw,
             preset,
             mods,
+            no_calibrate,
             knobs,
         } => cli::process::run(
             &file,
@@ -113,6 +117,7 @@ fn main() {
                 pedalhw: pedalhw.as_deref(),
                 preset: preset.as_deref(),
                 mods: &mods,
+                no_calibrate,
             },
             &knobs,
         ),

@@ -1,6 +1,6 @@
 use hound::{SampleFormat, WavWriter};
 use pedalkernel::compiler::compile_pedal;
-use pedalkernel::dsl::parse_pedal_file;
+use pedalkernel::dsl::{parse_pedal_file, PedalDef};
 use pedalkernel::PedalProcessor;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -9,6 +9,7 @@ pub struct ProcessOptions<'a> {
     pub pedalhw: Option<&'a str>,
     pub preset: Option<&'a str>,
     pub mods: &'a [String],
+    pub no_calibrate: bool,
 }
 
 pub fn run(
@@ -19,8 +20,14 @@ pub fn run(
     knob_args: &[String],
 ) {
     if file_path.ends_with(".board") {
-        if options.pedalhw.is_some() || options.preset.is_some() || !options.mods.is_empty() {
-            eprintln!("Error: --pedalhw, --preset, and --mod are only supported for .pedal files");
+        if options.pedalhw.is_some()
+            || options.preset.is_some()
+            || !options.mods.is_empty()
+            || options.no_calibrate
+        {
+            eprintln!(
+                "Error: --pedalhw, --preset, --mod, and --no-calibrate are only supported for .pedal files"
+            );
             process::exit(1);
         }
         run_board(file_path, input_path, output_path, knob_args);
@@ -73,10 +80,13 @@ fn run_pedal(
             eprintln!("Applied .pedalhw mod: {}", pedal_mod.name);
         }
     }
-    let pedal = parse_pedal_file(&source).unwrap_or_else(|e| {
+    let mut pedal = parse_pedal_file(&source).unwrap_or_else(|e| {
         eprintln!("Parse error: {e}");
         process::exit(1);
     });
+    if options.no_calibrate && disable_calibrate(&mut pedal) {
+        eprintln!("Disabled .pedal calibrate normalization for this render");
+    }
 
     // Read input WAV
     let (input_samples, sample_rate) = pedalkernel::wav::read_wav_mono(Path::new(input_path))
@@ -157,6 +167,12 @@ fn run_pedal(
         eprintln!("  {label}: {val:.2}");
     }
     eprintln!("Output: {} ({} samples)", output_path, output_samples.len());
+}
+
+fn disable_calibrate(pedal: &mut PedalDef) -> bool {
+    let was_enabled = pedal.calibrate;
+    pedal.calibrate = false;
+    was_enabled
 }
 
 #[derive(Debug)]
@@ -621,5 +637,28 @@ mod tests {
 
         assert!(updated.contains("R_out_s: resistor(470)      # Series output resistor"));
         assert!(updated.contains("R_out_g: resistor(100k)      # Shunt to ground"));
+    }
+
+    #[test]
+    fn no_calibrate_override_disables_parsed_calibrate_keyword() {
+        let source = r#"
+            pedal "Test" {
+                components {
+                    R1: resistor(10k)
+                }
+                nets {
+                    in -> R1.a
+                    R1.b -> out
+                }
+                calibrate
+            }
+        "#;
+
+        let mut pedal = parse_pedal_file(source).unwrap();
+        assert!(pedal.calibrate);
+
+        assert!(disable_calibrate(&mut pedal));
+        assert!(!pedal.calibrate);
+        assert!(!disable_calibrate(&mut pedal));
     }
 }

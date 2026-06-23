@@ -107,10 +107,11 @@ cargo run -p pedalkernel -- process \
     /tmp/screamer_ts9_pink.wav \
     --pedalhw ../pedalkernel-pro/pedals/legends/screamer.pedalhw \
     --preset "Classic TS" \
-    --mod "TS9 Conversion"
+    --mod "TS9 Conversion" \
+    --no-calibrate
 ```
 
-If `--pedalhw` is omitted, `process` looks for a sibling file with the same stem and the `.pedalhw` extension. Direct knob overrides still work after the flags and take precedence over preset values, for example `Tone=0.45`.
+If `--pedalhw` is omitted, `process` looks for a sibling file with the same stem and the `.pedalhw` extension. Direct knob overrides still work after the flags and take precedence over preset values, for example `Tone=0.45`. Use `--no-calibrate` for hardware-reference comparisons when you want the raw circuit level without the `.pedal` file's product output normalization.
 
 ## Benchmarks
 
