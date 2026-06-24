@@ -6,7 +6,7 @@
 * SCHEMATIC-VERIFIED values (B183.110 BA283 makeup amplifier):
 *   TR3 (BC184) common-emitter voltage gain  — R3" 68k load, R4" 1k2 emitter
 *   TR1 (BC184) + TR2 (2N3055) Darlington output — R6" 18k, R7" 47
-*   Shunt feedback: out -> RV1 4K7 -> C4 80u -> R2" 56k -> gnd, C3" 4n7 to base
+*   Shunt feedback: out -> RV1 4K7 -> C4 100u -> R2" 56k -> gnd, C3" 4n7 to base
 *   Input: C"4 10u -> R"1 2k2 -> TR3 base.   Single +24 V rail (node m via R1 10R).
 *
 * Pot RV1 = pot(4.7k) linear, GAIN at 0.5 -> 0.5 * 4700 = 2350 Ohm (matches WDF).
@@ -38,7 +38,7 @@ R7    nd    0    47
 
 * ── Shunt feedback: out → RU1 → CGAIN → R2" → gnd, C3" → TR3 base ─────────────
 Rru   nd    nx   2350
-Cgn   nx    nfb  80u
+Cgn   nx    nfb  100u
 Rfb   nfb   0    56k
 Cfb   nfb   nb3  4.7n
 
