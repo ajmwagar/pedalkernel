@@ -1,7 +1,7 @@
 //! SPICE validation for the Neve 1073 — 500-series target (public spice / private .pedal).
 //!
 //! First milestone: the **BA283 discrete Class-A gain block** in isolation
-//! (`pedals/500/1073/ba283.pedal`), validated 1:1 against an ngspice golden.
+//! (`pedals/500/1073/sub/ba283.pedal`), validated 1:1 against an ngspice golden.
 //! The full mic preamp (with input/output transformers) and the program EQ are
 //! layered on once this clean-signal block matches — see the 1073 README in the
 //! pro repo.
@@ -38,7 +38,7 @@ const SINE_DURATION: f64 = 0.1;
 const SINE_AMP: f64 = 0.1;
 const TEST_FREQ: f64 = 1_000.0;
 
-const PRO_PATH: &str = "pedals/500/1073/ba283.pedal";
+const PRO_PATH: &str = "pedals/500/1073/sub/ba283.pedal";
 const DECK: &str = "neve1073_ba283";
 const GOLDEN: &str = "neve1073_ba283";
 
