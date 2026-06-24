@@ -1,0 +1,20 @@
+# sub_ctrl.pedal — a subcircuit exposing a pot control to re-expose upstream.
+pedal "SubCtrl" {
+  ports {
+    in: input
+    out: output
+  }
+  components {
+    C1: cap(100n)
+    Gain: pot(100k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> Gain.a
+    Gain.w -> out
+    Gain.b -> gnd
+  }
+  controls {
+    Gain.position -> "Gain" [0.0, 1.0] = 0.5
+  }
+}

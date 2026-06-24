@@ -550,6 +550,7 @@ mod tests {
             subcircuits: vec![],
             ports: vec![],
             init_hints: vec![],
+            uses: vec![],
         };
 
         let netlist = export_kicad_netlist(&pedal);

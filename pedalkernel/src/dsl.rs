@@ -207,6 +207,24 @@ pub struct PedalDef {
     /// which is required for free-running oscillators (BJT astable multivibrators)
     /// that would otherwise converge to a symmetric saddle point.
     pub init_hints: Vec<InitHint>,
+    /// File-based subcircuit instances declared via `id: use("path.pedal")`
+    /// inside the `components { ... }` block. These are FLATTENED into the
+    /// parent's component/net/control lists by [`crate::dsl_expand::expand_uses`]
+    /// before compilation; the compiler never sees them. Empty for the common
+    /// case (no `use(...)` instances).
+    pub uses: Vec<UseInstance>,
+}
+
+/// A file-based subcircuit instance: `micamp: use("../sub/ba284.pedal")`.
+///
+/// Declared inside the `components { ... }` block. The instance `id` namespaces
+/// every component/node of the instantiated sub when flattened into the parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseInstance {
+    /// Instance identifier (e.g. `micamp`). Used as the namespace prefix.
+    pub id: String,
+    /// Path to the sub `.pedal` file, relative to the parent file's directory.
+    pub path: String,
 }
 
 /// Named port declaration from the .pedal DSL.
@@ -2493,25 +2511,78 @@ fn parse_lfo(input: &str) -> IResult<&str, BoxComp> {
 // Section parsers
 // ---------------------------------------------------------------------------
 
+/// One entry inside a `components { ... }` block: either a real component
+/// definition (with optional `mirrors` target) or a file-based `use(...)`
+/// subcircuit instance.
+enum ComponentEntry {
+    Component(ComponentDef, Option<String>),
+    Use(UseInstance),
+}
+
+/// Parse a `use(...)` subcircuit instance line: `id: use("path string")`.
+/// Tried BEFORE `component_def` so the `use(...)` form is recognized; falls
+/// through to a normal component otherwise (backward compatible).
+fn use_instance(input: &str) -> IResult<&str, UseInstance> {
+    let (input, _) = ws_comments(input)?;
+    let (input, id) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("use")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, path) = quoted_string(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((
+        input,
+        UseInstance {
+            id: id.to_string(),
+            path: path.to_string(),
+        },
+    ))
+}
+
+fn component_entry(input: &str) -> IResult<&str, ComponentEntry> {
+    alt((
+        nom::combinator::map(use_instance, ComponentEntry::Use),
+        nom::combinator::map(component_def, |(c, m)| ComponentEntry::Component(c, m)),
+    ))(input)
+}
+
 fn components_section(
     input: &str,
-) -> IResult<&str, (Vec<ComponentDef>, hashbrown::HashMap<String, String>)> {
+) -> IResult<
+    &str,
+    (
+        Vec<ComponentDef>,
+        hashbrown::HashMap<String, String>,
+        Vec<UseInstance>,
+    ),
+> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = tag("components")(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
-    let (input, pairs) = many0(component_def)(input)?;
+    let (input, entries) = many0(component_entry)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
     let mut mirrors = hashbrown::HashMap::new();
-    let mut comps = Vec::with_capacity(pairs.len());
-    for (comp, mirror_target) in pairs {
-        if let Some(target) = mirror_target {
-            mirrors.insert(comp.id.clone(), target);
+    let mut comps = Vec::new();
+    let mut uses = Vec::new();
+    for entry in entries {
+        match entry {
+            ComponentEntry::Component(comp, mirror_target) => {
+                if let Some(target) = mirror_target {
+                    mirrors.insert(comp.id.clone(), target);
+                }
+                comps.push(comp);
+            }
+            ComponentEntry::Use(u) => uses.push(u),
         }
-        comps.push(comp);
     }
-    Ok((input, (comps, mirrors)))
+    Ok((input, (comps, mirrors, uses)))
 }
 
 fn nets_section(input: &str) -> IResult<&str, Vec<NetDef>> {
@@ -3037,7 +3108,9 @@ fn subcircuit_block(input: &str) -> IResult<&str, SubcircuitDef> {
     let (input, rate) = opt(parse_rate)(input)?;
 
     // Parse inner sections (same as parse_pedal internals)
-    let (input, (components, mirrors)) = components_section(input)?;
+    // `use(...)` instances are not supported inside inline subcircuit blocks;
+    // discard any third tuple element.
+    let (input, (components, mirrors, _uses)) = components_section(input)?;
     let (input, nets) = nets_section(input)?;
     let (input, controls) = opt(controls_section)(input)?;
     let (input, trims) = opt(trims_section)(input)?;
@@ -3066,7 +3139,14 @@ fn subcircuit_block(input: &str) -> IResult<&str, SubcircuitDef> {
 /// becomes `SubcircuitPort { subcircuit: "audio", port: "ctrl" }`.
 fn resolve_subcircuit_pins(pedal: &mut PedalDef) {
     use std::collections::HashSet;
-    let sc_names: HashSet<&str> = pedal.subcircuits.iter().map(|s| s.name.as_str()).collect();
+    // Both inline subcircuit names AND file-based `use(...)` instance ids are
+    // treated as subcircuit-port owners: a net pin `id.port` resolves to a
+    // `Pin::SubcircuitPort { subcircuit: id, port }`. The file-based ones are
+    // later consumed by `crate::dsl_expand::expand_uses`.
+    let mut sc_names: HashSet<&str> = pedal.subcircuits.iter().map(|s| s.name.as_str()).collect();
+    for u in &pedal.uses {
+        sc_names.insert(u.id.as_str());
+    }
     if sc_names.is_empty() {
         return;
     }
@@ -3205,12 +3285,12 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
 
     // When subcircuits are present, the top-level components/nets become
     // an optional routing layer. When absent, keep existing required behavior.
-    let (input, (components, mirrors)) = if subcircuits.is_empty() {
+    let (input, (components, mirrors, uses)) = if subcircuits.is_empty() {
         components_section(input)?
     } else if let Ok((rest, result)) = components_section(input) {
         (rest, result)
     } else {
-        (input, (Vec::new(), hashbrown::HashMap::new()))
+        (input, (Vec::new(), hashbrown::HashMap::new(), Vec::new()))
     };
     let (input, nets) = if subcircuits.is_empty() {
         nets_section(input)?
@@ -3245,6 +3325,7 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         subcircuits,
         ports: ports.unwrap_or_default(),
         init_hints: init_hints.unwrap_or_default(),
+        uses,
     };
     resolve_subcircuit_pins(&mut pedal);
     Ok((input, pedal))

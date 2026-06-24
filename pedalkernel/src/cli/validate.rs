@@ -37,7 +37,7 @@ pub fn run(paths: &[String], fix: bool) {
             }
         };
 
-        let pedal = match parse_pedal_file(&src) {
+        let mut pedal = match parse_pedal_file(&src) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("\n\x1b[1m{}\x1b[0m", file.display());
@@ -46,6 +46,21 @@ pub fn run(paths: &[String], fix: bool) {
                 continue;
             }
         };
+
+        // Expand file-based subcircuit `use(...)` instances before validating,
+        // so the validator sees the real flat circuit (not the routing shell).
+        if !pedal.uses.is_empty() {
+            let base_dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
+            match pedalkernel::dsl_expand::expand_uses(&pedal, base_dir) {
+                Ok(flat) => pedal = flat,
+                Err(e) => {
+                    eprintln!("\n\x1b[1m{}\x1b[0m", file.display());
+                    eprintln!("  \x1b[31merror\x1b[0m[subcircuit]: {}", e);
+                    total_err += 1;
+                    continue;
+                }
+            }
+        }
 
         let warnings = validate_pedal(&pedal);
         if warnings.is_empty() {

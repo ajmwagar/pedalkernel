@@ -1,0 +1,15 @@
+# c_leaf.pedal — innermost subcircuit (a single series resistor).
+pedal "CLeaf" {
+  ports {
+    in: input
+    out: output
+  }
+  components {
+    R1: resistor(4.7k)
+  }
+  nets {
+    in -> R1.a
+    R1.b -> out
+  }
+  controls {}
+}

@@ -1165,6 +1165,7 @@ mod tests {
             subcircuits: vec![],
             ports: vec![],
             init_hints: vec![],
+            uses: vec![],
         }
     }
 
@@ -1309,6 +1310,7 @@ mod tests {
             subcircuits: vec![],
             ports: vec![],
             init_hints: vec![],
+            uses: vec![],
         };
         let warnings = validate_pedal(&pedal);
         assert!(has_code(&warnings, "no-signal-path"));
@@ -2092,6 +2094,7 @@ mod tests {
             subcircuits: vec![],
             ports: vec![],
             init_hints: vec![],
+            uses: vec![],
         }
     }
 

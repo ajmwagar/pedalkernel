@@ -1,0 +1,24 @@
+# sub_vcc.pedal — a subcircuit that uses the vcc rail internally.
+# By default vcc is implicit-global; the parent may override it by wiring
+# <instance>.vcc to a node.
+pedal "SubVcc" {
+  supply 9V
+  ports {
+    in: input
+    out: output
+  }
+  components {
+    Rin: resistor(10k)
+    Rload: resistor(100k)
+    C1: cap(1u)
+  }
+  nets {
+    in -> Rin.a
+    Rin.b -> n1
+    vcc -> Rload.a
+    Rload.b -> n1
+    n1 -> C1.a
+    C1.b -> out
+  }
+  controls {}
+}

@@ -58,6 +58,7 @@ pub fn resolve_subcircuits(pedal: &PedalDef) -> Result<Vec<ResolvedSubcircuit>, 
             calibrate: false,
             ports: Vec::new(),
             init_hints: Vec::new(),
+            uses: Vec::new(),
         };
 
         resolved.push(ResolvedSubcircuit {

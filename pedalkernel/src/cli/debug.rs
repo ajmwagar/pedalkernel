@@ -9,10 +9,21 @@ pub fn run(file_path: &str) {
         process::exit(1);
     });
 
-    let pedal = parse_pedal_file(&source).unwrap_or_else(|e| {
+    let mut pedal = parse_pedal_file(&source).unwrap_or_else(|e| {
         eprintln!("Parse error: {e}");
         process::exit(1);
     });
+
+    // Expand file-based subcircuit `use(...)` instances into a flat pedal.
+    if !pedal.uses.is_empty() {
+        let base_dir = std::path::Path::new(file_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        pedal = pedalkernel::dsl_expand::expand_uses(&pedal, base_dir).unwrap_or_else(|e| {
+            eprintln!("Subcircuit expansion error: {e}");
+            process::exit(1);
+        });
+    }
 
     // Print parsed component summary
     println!("file: {file_path}");

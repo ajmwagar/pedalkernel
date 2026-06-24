@@ -1,0 +1,14 @@
+# a_top.pedal — uses b_mid.pedal (which uses c_leaf.pedal).
+# After expand, the leaf resistor id should be `b.c.R1`.
+pedal "ATop" {
+  components {
+    Rin: resistor(1k)
+    b: use("b_mid.pedal")
+  }
+  nets {
+    in -> Rin.a
+    Rin.b -> b.in
+    b.out -> out
+  }
+  controls {}
+}

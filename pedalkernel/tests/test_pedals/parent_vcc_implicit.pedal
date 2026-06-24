@@ -1,0 +1,13 @@
+# parent_vcc_implicit.pedal — instantiates sub_vcc without mapping vcc.
+# The sub's `vcc` unifies with the parent's global vcc rail (implicit-global).
+pedal "ParentVccImplicit" {
+  supply 9V
+  components {
+    s: use("sub/sub_vcc.pedal")
+  }
+  nets {
+    in -> s.in
+    s.out -> out
+  }
+  controls {}
+}

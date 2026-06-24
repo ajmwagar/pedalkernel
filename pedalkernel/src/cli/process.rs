@@ -84,6 +84,17 @@ fn run_pedal(
         eprintln!("Parse error: {e}");
         process::exit(1);
     });
+    // Flatten any file-based `use("...")` subcircuit instances relative to the
+    // .pedal file's directory before compilation.
+    if !pedal.uses.is_empty() {
+        let base_dir = Path::new(pedal_path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."));
+        pedal = pedalkernel::dsl_expand::expand_uses(&pedal, base_dir).unwrap_or_else(|e| {
+            eprintln!("Subcircuit expansion error: {e}");
+            process::exit(1);
+        });
+    }
     if options.no_calibrate && disable_calibrate(&mut pedal) {
         eprintln!("Disabled .pedal calibrate normalization for this render");
     }

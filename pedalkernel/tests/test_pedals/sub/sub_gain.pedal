@@ -1,0 +1,22 @@
+# sub_gain.pedal — passive input-cap + resistor divider subcircuit.
+# Declares its interface with the existing ports { } block (in/out).
+pedal "SubGain" {
+  ports {
+    in: input
+    out: output
+  }
+  components {
+    C1: cap(100n)
+    R1: resistor(10k)
+    R2: resistor(10k)
+  }
+  nets {
+    in -> C1.a
+    C1.b -> R1.a
+    R1.b -> mid
+    mid -> R2.a
+    R2.b -> gnd
+    mid -> out
+  }
+  controls {}
+}
