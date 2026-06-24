@@ -192,6 +192,7 @@ pub mod analysis;
 pub mod board;
 pub mod compiler;
 pub mod dsl;
+pub mod dsl_expand;
 pub mod elements;
 pub mod fast_math;
 #[cfg(feature = "fault-injection")]

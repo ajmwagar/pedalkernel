@@ -1,0 +1,17 @@
+# b_mid.pedal — uses c_leaf.pedal, adds a series cap.
+pedal "BMid" {
+  ports {
+    in: input
+    out: output
+  }
+  components {
+    C1: cap(220n)
+    c: use("c_leaf.pedal")
+  }
+  nets {
+    in -> C1.a
+    C1.b -> c.in
+    c.out -> out
+  }
+  controls {}
+}

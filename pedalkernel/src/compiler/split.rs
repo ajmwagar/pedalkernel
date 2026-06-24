@@ -230,6 +230,7 @@ fn build_half(
         subcircuits: vec![],
         ports: vec![],
         init_hints: vec![],
+        uses: vec![],
     }
 }
 

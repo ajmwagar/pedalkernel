@@ -1269,6 +1269,7 @@ fn extract_sidechain_def(
         subcircuits: vec![],
         ports: vec![],
         init_hints: vec![],
+        uses: vec![],
     }
 }
 

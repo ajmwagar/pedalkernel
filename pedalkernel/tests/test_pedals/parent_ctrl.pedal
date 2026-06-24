@@ -1,0 +1,14 @@
+# parent_ctrl.pedal — instantiates sub_ctrl and re-exposes its Gain control
+# with a new label "Mic Gain" and a new default.
+pedal "ParentCtrl" {
+  components {
+    micamp: use("sub/sub_ctrl.pedal")
+  }
+  nets {
+    in -> micamp.in
+    micamp.out -> out
+  }
+  controls {
+    micamp.Gain -> "Mic Gain" [0.0, 1.0] = 0.6
+  }
+}

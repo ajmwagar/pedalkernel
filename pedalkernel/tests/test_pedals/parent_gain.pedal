@@ -1,0 +1,13 @@
+# parent_gain.pedal — instantiates sub/sub_gain.pedal via use(...).
+pedal "ParentGain" {
+  components {
+    Rs: resistor(1k)
+    g: use("sub/sub_gain.pedal")
+  }
+  nets {
+    in -> Rs.a
+    Rs.b -> g.in
+    g.out -> out
+  }
+  controls {}
+}
