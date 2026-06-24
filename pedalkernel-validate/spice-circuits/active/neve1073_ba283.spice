@@ -1,0 +1,51 @@
+* ============================================================================
+* Neve 1073 — BA283 discrete Class-A gain block (isolated)
+* PedalKernel Validation Circuit
+* ============================================================================
+* Mirrors pedalkernel-pro/pedals/500/1073/ba283.pedal exactly (no transformers).
+* Three-transistor Class-A feedback amplifier, +24 V single rail:
+*   TR1 common-emitter ▸ TR2 common-emitter ▸ TR3 emitter-follower,
+*   global negative feedback from the output to TR1's emitter via Rf/Cf.
+*
+* Pot model: WdfPot rp = taper.apply(pos) * max_R, audio taper A.
+*   GAIN at 0.5: rp = (10^0.5 - 1)/9 * 2200 = 528.6 Ω   (matches compiled stage)
+*
+* Source node: v_in (harness-driven). Output node: v_out. Supply: +24 V.
+* ============================================================================
+
+* ── Input coupling ───────────────────────────────────────────────────────────
+Cin   v_in   b1   2.2u
+
+* ── TR1 common-emitter input ─────────────────────────────────────────────────
+Rb1   vcc    b1   150k
+Rb1g  b1     0    22k
+Rc1   vcc    c1   15k
+Re1   e1     0    680
+Q1    c1     b1   e1   QBC184C
+
+* ── TR2 common-emitter gain (direct-coupled from c1) ─────────────────────────
+Rc2   vcc    c2   6.8k
+Re2   e2     0    330
+Ce2   e2     0    47u
+Q2    c2     c1   e2   QBC184C
+
+* ── TR3 emitter-follower (collector to rail) ─────────────────────────────────
+Re3   e3     0    1k
+Q3    vcc    c2   e3   QBC184C
+
+* ── Global feedback: output → GAIN shunt → (Cf) → TR1 emitter ────────────────
+Rf      e3   fb   8.2k
+Rgain   fb   0    528.6
+Cf      fb   e1   220u
+
+* ── Output coupling + load ───────────────────────────────────────────────────
+Cout  e3     v_out  10u
+RL    v_out  0      10k
+
+* ── Supply ───────────────────────────────────────────────────────────────────
+VCC   vcc    0    DC 24
+
+* ── BC184C model (mirrors models/transistors.model) ──────────────────────────
+.MODEL QBC184C NPN(IS=14.8f BF=500 BR=10 NF=1.0 NR=1.0 VAF=50 VAR=15
++ IKF=100m IKR=200m ISE=10p NE=1.5 ISC=0 NC=2.0 RB=500 RE=0.5 RC=1
++ CJE=15p VJE=0.65 MJE=0.33 CJC=5p VJC=0.5 MJC=0.33 TF=0.5n TR=10n)
