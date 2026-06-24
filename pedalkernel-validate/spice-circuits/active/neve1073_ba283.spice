@@ -1,51 +1,55 @@
 * ============================================================================
-* Neve 1073 — BA283 discrete Class-A gain block (isolated)
+* Neve BA283 — discrete Class-A gain block (B183.110 makeup amp, isolated)
 * PedalKernel Validation Circuit
 * ============================================================================
 * Mirrors pedalkernel-pro/pedals/500/1073/ba283.pedal exactly (no transformers).
-* Three-transistor Class-A feedback amplifier, +24 V single rail:
-*   TR1 common-emitter ▸ TR2 common-emitter ▸ TR3 emitter-follower,
-*   global negative feedback from the output to TR1's emitter via Rf/Cf.
+* SCHEMATIC-VERIFIED values (B183.110 BA283 makeup amplifier):
+*   TR3 (BC184) common-emitter voltage gain  — R3" 68k load, R4" 1k2 emitter
+*   TR1 (BC184) + TR2 (2N3055) Darlington output — R6" 18k, R7" 47
+*   Shunt feedback: out -> RU1 5k -> CGAIN" 100u -> R2" 56k -> gnd, C3" 4n7 to base
+*   Input: C"4 10u -> R"1 2k2 -> TR3 base.   Single +24 V rail (node m via R1 10R).
 *
-* Pot model: WdfPot rp = taper.apply(pos) * max_R, audio taper A.
-*   GAIN at 0.5: rp = (10^0.5 - 1)/9 * 2200 = 528.6 Ω   (matches compiled stage)
-*
+* Pot RU1 = pot(5k) linear, GAIN at 0.5 -> 0.5 * 5000 = 2500 Ohm (matches WDF).
 * Source node: v_in (harness-driven). Output node: v_out. Supply: +24 V.
 * ============================================================================
 
-* ── Input coupling ───────────────────────────────────────────────────────────
-Cin   v_in   b1   2.2u
+* ── Rail decoupling ──────────────────────────────────────────────────────────
+VCC   vcc   0    DC 24
+R1d   vcc   m    10
 
-* ── TR1 common-emitter input ─────────────────────────────────────────────────
-Rb1   vcc    b1   150k
-Rb1g  b1     0    22k
-Rc1   vcc    c1   15k
-Re1   e1     0    680
-Q1    c1     b1   e1   QBC184C
+* ── Input → TR3 base ─────────────────────────────────────────────────────────
+Cin   v_in  ni1  10u
+Rin   ni1   nb3  2.2k
 
-* ── TR2 common-emitter gain (direct-coupled from c1) ─────────────────────────
-Rc2   vcc    c2   6.8k
-Re2   e2     0    330
-Ce2   e2     0    47u
-Q2    c2     c1   e2   QBC184C
+* ── TR3 common-emitter voltage gain ──────────────────────────────────────────
+R3    m     n1   68k
+Cmil  nb3   n1   220p
+Q3    n1    nb3  ne3   QBC184C
+R4    ne3   0    1.2k
+* R5" + C5'1 series HF comp: n1 → ne3
+Rcmp  n1    nrc  3.3k
+Ccmp  nrc   ne3  330p
 
-* ── TR3 emitter-follower (collector to rail) ─────────────────────────────────
-Re3   e3     0    1k
-Q3    vcc    c2   e3   QBC184C
+* ── TR1 / TR2 Darlington output ──────────────────────────────────────────────
+Q1    m     n1   ne1   QBC184C
+R6    ne1   0    18k
+Q2    m     ne1  nd    Q2N3055
+R7    nd    0    47
 
-* ── Global feedback: output → GAIN shunt → (Cf) → TR1 emitter ────────────────
-Rf      e3   fb   8.2k
-Rgain   fb   0    528.6
-Cf      fb   e1   220u
+* ── Shunt feedback: out → RU1 → CGAIN → R2" → gnd, C3" → TR3 base ─────────────
+Rru   nd    nx   2500
+Cgn   nx    nfb  100u
+Rfb   nfb   0    56k
+Cfb   nfb   nb3  4.7n
 
-* ── Output coupling + load ───────────────────────────────────────────────────
-Cout  e3     v_out  10u
-RL    v_out  0      10k
+* ── Output coupling + load (validation only) ─────────────────────────────────
+Cout  nd    v_out  10u
+RL    v_out 0      10k
 
-* ── Supply ───────────────────────────────────────────────────────────────────
-VCC   vcc    0    DC 24
-
-* ── BC184C model (mirrors models/transistors.model) ──────────────────────────
+* ── Models (mirror models/transistors.model) ─────────────────────────────────
 .MODEL QBC184C NPN(IS=14.8f BF=500 BR=10 NF=1.0 NR=1.0 VAF=50 VAR=15
 + IKF=100m IKR=200m ISE=10p NE=1.5 ISC=0 NC=2.0 RB=500 RE=0.5 RC=1
 + CJE=15p VJE=0.65 MJE=0.33 CJC=5p VJC=0.5 MJC=0.33 TF=0.5n TR=10n)
+.MODEL Q2N3055 NPN(IS=4.66p BF=360 BR=2.0 NF=1.0 NR=1.0 VAF=100 IKF=250m
++ ISE=33.39p NE=1.5 ISC=5n NC=2.0 RB=3 RE=0 RC=0.04 CJE=580.2p VJE=1.2
++ MJE=0.45 CJC=212.1p VJC=0.75 MJC=0.4 TF=80n TR=2.55u)
