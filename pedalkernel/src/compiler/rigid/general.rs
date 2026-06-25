@@ -1,8 +1,10 @@
 //! General rigid stage building.
 //!
-//! Two public builders:
-//! - `build_opamp_nl_feedback()` — Op-amp gain + NL root (TS/RAT/Klon)
-//! - `build_general_mna()` / `build_general_mna_from_edges()` — Full MNA + NR
+//! Public builder:
+//! - `build_general_mna()` / `build_general_mna_from_edges()` — Full MNA + NR.
+//!   Co-solves op-amp VCVS + in-loop NL (TS/SD-1 diode-across-feedback) and
+//!   passive/BJT/tube groups in one grouped-NR system. (Retired the
+//!   build_opamp_nl_feedback shortcut — pedalkernel-9xu1.)
 //!
 //! The MNA path is decomposed into focused helpers:
 //! 1. `collect_mna_nodes()` — unique circuit nodes (skipping GND/supply)
@@ -15,20 +17,17 @@
 
 use std::collections::HashSet;
 
-use super::super::build::create_root;
 use super::super::classify::NonlinearKind;
 use super::super::component::EdgeKind;
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use super::super::helpers::{gummel_poon_model, pentode_model, triode_model, vari_mu_model};
-use super::super::signal_flow::FlowGroup;
 use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
-    ScatteringRecomputeData, WdfStage, NR_ITERATION_BUDGET,
+    ScatteringRecomputeData, NR_ITERATION_BUDGET,
 };
-use super::super::wdf_leaf::{LeafKind, WdfVoltageSource};
-use super::opamp_root::{extract_opamp_config, make_opamp_root};
-use super::{is_inverting_topology, StageStats};
+use super::super::wdf_leaf::LeafKind;
+use super::StageStats;
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
@@ -38,155 +37,6 @@ use pedalkernel_rt::boundary_math::{
 };
 use pedalkernel_rt::wdf_leaf::WdfLeaf;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Op-amp + NL root (TS/RAT/Klon pattern)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Build a stage with op-amp gain driving a nonlinear root.
-///
-/// Uses classified FlowGroup: Rf from feedback_edges, Ri from
-/// pendant_edges, NL root from active_edges.
-pub(in crate::compiler) fn build_opamp_nl_feedback(
-    group: &FlowGroup,
-    stats: &StageStats,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-    supply_voltage: f64,
-    bias_v_max: Option<(f64, f64)>,
-) -> Result<WdfStage, String> {
-    let inverting = is_inverting_topology(stats, graph);
-    let config = extract_opamp_config(group, inverting, graph)?;
-    let mut opamp = make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
-
-    // Collect ALL NL active edges
-    let nl_edge_indices: Vec<usize> = group
-        .active_edges
-        .iter()
-        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
-        .copied()
-        .collect();
-
-    if nl_edge_indices.is_empty() {
-        return Err("General stage has no NL edge".to_string());
-    }
-
-    // Classify all NL edges
-    let mut nl_kinds: Vec<(NonlinearKind, usize)> = Vec::new(); // (kind, edge_idx)
-    for &eidx in &nl_edge_indices {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-        if let Some((kind, _)) = comp.kind.classify_nonlinear(
-            &comp.id,
-            e.node_a,
-            e.node_b,
-            graph.gnd_node,
-            &graph.node_names,
-        ) {
-            nl_kinds.push((kind, eidx));
-        }
-    }
-
-    // Detect antiparallel diode pairs from separate diode components.
-    // Two SingleDiode edges between the same pair of nodes (with swapped polarity)
-    // form an antiparallel pair → synthesize a DiodePair root using the first diode's model.
-    let (root, base_diode_model) = if nl_kinds.len() >= 2 {
-        let mut synthesized = false;
-        let mut result_root = None;
-        let mut result_model = None;
-
-        // Check each pair of diode edges for antiparallel topology
-        for i in 0..nl_kinds.len() {
-            for j in (i + 1)..nl_kinds.len() {
-                if let (
-                    (NonlinearKind::SingleDiode(dt_a), eidx_a),
-                    (NonlinearKind::SingleDiode(dt_b), eidx_b),
-                ) = (&nl_kinds[i], &nl_kinds[j])
-                {
-                    let ea = &graph.edges[*eidx_a];
-                    let eb = &graph.edges[*eidx_b];
-                    // Antiparallel: node_a↔node_b swapped (same two nodes, opposite polarity)
-                    let antiparallel = (ea.node_a == eb.node_b && ea.node_b == eb.node_a)
-                        || (ea.node_a == eb.node_a && ea.node_b == eb.node_b);
-                    if antiparallel {
-                        // Use the higher-Vf diode's model for the pair.
-                        // For asymmetric pairs (SD-1: silicon + germanium), this gives
-                        // approximately correct symmetric clipping at the silicon threshold.
-                        // TODO: implement AsymmetricDiodePairRoot for exact behavior.
-                        use crate::dsl::DiodeType;
-                        let dt = if dt_a == dt_b {
-                            *dt_a
-                        } else {
-                            // Pick silicon (higher Vf) for now
-                            match (dt_a, dt_b) {
-                                (DiodeType::Silicon, _) | (_, DiodeType::Silicon) => {
-                                    DiodeType::Silicon
-                                }
-                                _ => *dt_a,
-                            }
-                        };
-                        let model = super::super::helpers::diode_model(dt);
-                        result_root = Some(super::super::stage::RootKind::ExplicitDiodePair(
-                            ExplicitDiodePairRoot::new(model),
-                        ));
-                        result_model = Some(model);
-                        synthesized = true;
-                        break;
-                    }
-                }
-            }
-            if synthesized {
-                break;
-            }
-        }
-
-        if synthesized {
-            (result_root.unwrap(), result_model)
-        } else {
-            // Multiple NL edges but not antiparallel — use the first one
-            create_root(&nl_kinds[0].0, false)
-        }
-    } else {
-        create_root(&nl_kinds[0].0, false)
-    };
-
-    // VS with op-amp output impedance as source resistance.
-    //
-    // No pendant tree. The pendant edges (input coupling: Cin, R_b1, etc.)
-    // are either in their own SPQR passive stage or provide DC bias handled
-    // by bias_analysis. They don't affect the diode clipping — the diode
-    // sees the op-amp's output impedance, not the input coupling impedance.
-    //
-    // The gain is already computed from Rf/Ri by extract_opamp_config and
-    // applied by OpAmpRoot.compute_vs_voltage(). The VS output IS the
-    // op-amp output voltage. The diode clips it.
-    let tree = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
-        voltage: 0.0,
-        rp: config.model.output_impedance,
-        is_cathode_bias: false,
-        port_name: None,
-    }));
-
-    let oversampler = Oversampler::new(OversamplingFactor::X2);
-    let mut stage = WdfStage::new(tree, root, oversampler);
-
-    // Find feedback pot
-    let feedback_pot = super::find_feedback_pot(group, graph);
-    if let Some((pot_id, pot_leaf, fixed_r, _parallel_r)) = feedback_pot {
-        let ri = if config.ri.is_finite() && config.ri > 0.0 {
-            config.ri
-        } else {
-            stage.tree.port_resistance()
-        };
-        stage.feedback_pot_id = Some(pot_id);
-        stage.feedback_series_r = fixed_r;
-        stage.feedback_ri = ri;
-        stage.opamp_children.push(pot_leaf);
-    }
-
-    stage.feedback_opamp = Some(opamp);
-    stage.base_diode_model = base_diode_model;
-    Ok(stage)
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // General MNA + NR solver
