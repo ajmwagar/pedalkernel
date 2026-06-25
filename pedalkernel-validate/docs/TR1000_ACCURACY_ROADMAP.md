@@ -6,7 +6,7 @@ TR-1000 drum voices. Updated as batches land. Worst-score-first drives fix order
 **Batch status:**
 - B1 (lq6.4 + lq6.6): 808 kick + snare + tom + mid_tom + hi_tom — SPICE decks done, all in drums suite, all RED (known_gap)
 - B2 (lq6.7): Remaining 808 voices (clap, claves, closed_hat, open_hat, cowbell, maracas, rimshot) — DONE. All 7 SPICE decks + drums suite cases added. 1/7 B2 voices passes gate (closed\_hat RMS +8.3dB < 20dB threshold).
-- B3 (lq6.8): 909 voices (kick, snare, clap, hi_tom, mid_tom, lo_tom, rim) + 606 snare
+- B3 (lq6.8): 909 voices (kick, snare, clap, hi_tom, mid_tom, lo_tom, rim) + 606 snare — DONE. All 8 SPICE decks + drums suite cases added. 0/8 B3 voices passes gate (all known\_gap: lq6.1 resonator bug dominates).
 
 **How to read scores:** RMS and Peak errors are in dB relative to the SPICE
 behavioral golden.  Positive values mean the WDF output is louder or more
@@ -36,52 +36,57 @@ distorted than reference — large positive values indicate a broken voice
 
 | Voice | SPICE deck | In drums suite | RMS error (dB) | Peak error (dB) | Profile | Topology / modeling approach | Gap to close |
 |---|---|---|---|---|---|---|---|
-| 909 kick | todo (B3) | no | — | — | pending | BJT-based bridged-T relaxation oscillator with pitch sweep (experimental UJT variant also exists). Different topology from 808 kick — BJT NPN pairs. | BJT two-port solver implemented but 909 kick WDF voice not validated. |
-| 909 snare | todo (B3) | no | — | — | pending | Bridged-T resonator + noise. Similar dual-tone approach to 808 snare. | Noise path gap + WDF resonator bug (f0 may differ). |
-| 909 clap | todo (B3) | no | — | — | pending | Multiple overlapping noise bursts (reverb effect). | Noise source gap. |
-| 909 hi tom | todo (B3) | no | — | — | pending | Bridged-T resonator (higher f0 than 808 toms). | WDF resonator bug. |
-| 909 mid tom | todo (B3) | no | — | — | pending | Bridged-T resonator (mid f0). | WDF resonator bug. |
-| 909 lo tom | todo (B3) | no | — | — | pending | Bridged-T resonator (low f0, longer decay). | WDF resonator bug. |
-| 909 rim | todo (B3) | no | — | — | pending | Short click + brief resonance. | To be measured. |
+| 909 kick | done (B3) | yes | +47.1 | +72.7 | known\_gap | Bridged-T body approx (f0=48.2 Hz, Q=5.71; R=330k, C=10n, R\_fb=1200k). SPICE: state-space G-source for .pedal bridged-T body only. GAP 1: Authentic 909 kick uses 2SC1583 dual-NPN transistor multivibrator (BJT oscillator, convergence-hard — too stiff for SPICE harness transient solver); behavioral body substituted. GAP 2: PitchEnvelope sweep (190→45 Hz over 80ms, amount=3.2) not in SPICE. GAP 3: VoiceNoise (4kHz, decay=8ms) + VoiceClick (3ms) DSP layers not modeled. Highest peak error of B3 (+72.7dB) — three stacked gaps + lq6.1. | lq6.1 WDF resonator bug. After fix: BJT oscillator gap + PitchEnvelope gap will remain as separate modeling limitations. |
+| 909 snare | done (B3) | yes | +60.9 | +44.8 | known\_gap | Dual bridged-T (lo f0=338.6 Hz Q=5.0 + hi f0=451.4 Hz Q=6.0; R\_lo=100k, R\_hi=75k, C=4.7n). Higher-pitched than 808 snare (~154+339 Hz) — characteristic 909 brightness. SPICE: two state-space resonators summed. GAP: VoiceNoise (6kHz, Q=2.5, decay=60ms, amount=0.7) not modeled. | lq6.1 WDF resonator bug + noise path gap. |
+| 909 clap | done (B3) | yes | +26.9 | +41.2 | known\_gap | Single bridged-T body resonator (f0=1538.5 Hz, Q=1.43; R=22k, C=4.7n, R\_fb=220k). Identical resonator to 808 clap — distinction is 4-burst (909) vs 3-burst (808) DSP envelope pattern. SPICE: state-space G-source body only. GAP 1: ClapEnvelope909 4-burst DSP envelope not in WDF path. GAP 2: noise source not modeled. | lq6.1 WDF resonator bug + two envelope/noise gaps (same pattern as 808 clap). |
+| 909 hi tom | done (B3) | yes | +39.3 | +61.1 | known\_gap | Single bridged-T (f0=188.4 Hz, Q=4.86; R=180k, C=4.7n, R\_fb=680k). Authentic TR-909 HT uses UJT relaxation oscillator (~140-160 Hz). WDF loading shifts resonance toward 190-210 Hz. SPICE: state-space G-source. GAP: PitchEnvelope DSP sweep (decay=30ms, amount=0.5) not in SPICE. | lq6.1 WDF resonator bug. |
+| 909 mid tom | done (B3) | yes | +40.7 | +64.5 | known\_gap | Single bridged-T (f0=125.3 Hz, Q=5.26; R=270k, C=4.7n, R\_fb=1000k). Authentic TR-909 MT uses UJT relaxation oscillator (~110-120 Hz). SPICE: state-space G-source. GAP: PitchEnvelope DSP sweep (decay=30ms, amount=0.5) not in SPICE. | lq6.1 WDF resonator bug. |
+| 909 lo tom | done (B3) | yes | +44.4 | +68.5 | known\_gap | Single bridged-T (f0=79.6 Hz, Q=5.0; R=200k, C=10n, R\_fb=750k). Authentic TR-909 LT uses UJT relaxation oscillator (~65 Hz). SPICE: state-space G-source. GAP: PitchEnvelope DSP sweep (decay=30ms, amount=0.5) not in SPICE. | lq6.1 WDF resonator bug. |
+| 909 rim | done (B3) | yes | +32.3 | +54.0 | known\_gap | Single bridged-T (f0=412.3 Hz, Q=5.56 unloaded; R=82k, C=4.7n, R\_fb=300k). SPICE uses unloaded Q (Decay=1.0); WDF applies pot damping internally. Decay=0.3 default gives short click (~1-2ms ring). Same pitch range as 808 rimshot — character differentiation by shorter decay, not pitch. | lq6.1 WDF resonator bug + WDF bias-loading shift (same pattern as 808 rimshot). |
 
 ## 606 Voices
 
 | Voice | SPICE deck | In drums suite | RMS error (dB) | Peak error (dB) | Profile | Topology / modeling approach | Gap to close |
 |---|---|---|---|---|---|---|---|
-| 606 snare | todo (B3) | no | — | — | pending | Bridged-T resonator + noise (simpler than 808/909 snare). | WDF resonator bug + noise gap. |
+| 606 snare | done (B3) | yes | +62.4 | +47.7 | known\_gap | Dual bridged-T (lo f0=282.3 Hz Q=4.27 + hi f0=338.6 Hz Q=5.62; R\_lo=120k, R\_hi=100k, C=4.7n). Note: Hi-body R\_fb raised 330k→365k to fix prior imbalance (hi was 10× louder). SPICE: two state-space resonators summed. GAP: noise burst (VoiceNoise DSP layer) not modeled. | lq6.1 WDF resonator bug + noise path gap. |
 
 ---
 
-## Fix Priority (worst score first, B1+B2 combined)
+## Fix Priority (worst score first, B1+B2+B3 combined)
 
 1. **lq6.1** (root cause for all resonator voices): WDF bridged-T resonator compiles with f0 at
-   Nyquist. All 12 voices are affected. Score ordering worst-first (B2 voices in bold):
+   Nyquist. All 20 voices are affected. Score ordering worst-first (B3 voices in **bold**):
    - snare +65.1 RMS
-   - **cowbell +60.1 RMS** (dual resonator compounds the Nyquist error)
+   - **606\_snare +62.4 RMS** (dual resonator; same Nyquist error as 808 snare)
+   - cowbell +60.1 RMS (dual resonator compounds the Nyquist error)
+   - **909\_snare +60.9 RMS** (dual resonator)
+   - **909\_kick +47.1 RMS** (triple gap: BJT oscillator + PitchEnvelope + noise)
+   - **909\_lo\_tom +44.4 RMS**, **909\_mid\_tom +40.7 RMS**, **909\_hi\_tom +39.3 RMS**
    - mid\_tom +38.2, hi\_tom/tom +37.7, kick +35.2
-   - **rimshot +32.4**, **clap +26.9**, **claves +23.2**
-   - **open\_hat +17.2**, **maracas +10.1**, **closed\_hat +8.3**
+   - **909\_rim +32.3**, rimshot +32.4, clap +26.9, **909\_clap +26.9**, claves +23.2
+   - open\_hat +17.2, maracas +10.1, closed\_hat +8.3
 
-2. **808 rimshot WDF loading shift**: After lq6.1 fix, the rimshot resonator f0 will shift
+2. **808/909 rimshot WDF loading shift**: After lq6.1 fix, the rimshot resonator f0 will shift
    from Nyquist to the WDF-computed frequency (~1477 Hz with bias-divider loading, vs theoretical
-   1026 Hz). This is a separate engine gap (bridged-T bias-loading). Tracked in
+   1026 Hz). The 909 rim shares the same bias-loading effect. Tracked in
    ENGINE\_BUG\_BRIDGED\_T\_BIAS\_LOADING.md.
 
-3. **Noise/envelope gaps** (clap, maracas, snare): After lq6.1 fix, these voices will still
-   diverge from authentic hardware due to missing noise sources and the clap's multi-burst
-   ClapEnvelope DSP block. Separate work items for each.
+3. **Noise/envelope gaps** (808 clap, 808 maracas, 808 snare, 909 clap, 909 snare, 606 snare):
+   After lq6.1 fix, these voices will still diverge from authentic hardware due to missing noise
+   sources and multi-burst ClapEnvelope DSP blocks. Separate work items for each.
 
-4. **Six-oscillator metallic source gap** (closed\_hat, open\_hat, cowbell): The .pedal files use
+4. **909 kick BJT oscillator + PitchEnvelope gaps**: After lq6.1, the 909 kick will still fail
+   because (a) the .pedal uses a bridged-T body approx instead of the authentic 2SC1583 BJT
+   multivibrator; (b) the PitchEnvelope (190→45 Hz sweep) is a DSP-only layer not in the WDF
+   comparison path. These are .pedal modeling limitations, not engine bugs.
+
+5. **Six-oscillator metallic source gap** (808 closed\_hat, open\_hat, cowbell): The .pedal files use
    single/dual resonators as approximations. The authentic metallic source (6 square-wave osc)
-   is not modeled at the WDF level — this is a modeling limitation of the .pedal design, not
-   an engine bug. Separate work items if authentic metallic character is needed.
-
-5. **Snare noise gap** (also applies to 808\_snare B1): Tonal body will pass after lq6.1,
-   but noise burst component remains unmodeled.
+   is not modeled at the WDF level — modeling limitation of the .pedal design, not an engine bug.
 
 6. **808\_tom / 808\_hi\_tom component identity**: Both use identical R/C/Q values. If different
    tuning is intended, pedal files need updating before the SPICE decks diverge.
 
 ---
 
-*Updated: 2026-06-25 (B2 complete). Scores from report.json (drums suite, bd-pedalkernel-lq6.4 branch).*
+*Updated: 2026-06-25 (B3 complete — all 20 TR-1000 voices measured). Scores from report.json (drums suite, bd-pedalkernel-lq6.4 branch).*
