@@ -38,10 +38,38 @@ use pedalkernel_rt::processor::{CompiledPedal, Stage};
 use pedalkernel_rt::stage::RootKind;
 use pedalkernel_rt::PedalProcessor;
 
-/// Settle the processor at DC and compute its operating-point report.
+/// Amplitude of the diagnostic settle stimulus (volts of input). Tiny enough
+/// to stay deep in the small-signal regime around the Q-point, large enough to
+/// keep the NL solve OFF its clamps (see below).
+const SETTLE_STIM_AMPLITUDE: f64 = 1e-3;
+/// Frequency of the diagnostic settle stimulus (Hz). Low so a final cycle is
+/// many samples wide (≈ a clean Q-point average) yet completes within settle.
+const SETTLE_STIM_FREQ_HZ: f64 = 100.0;
+
+/// Settle the processor and compute its operating-point report.
 ///
-/// `settle_seconds` of input-`0.0` samples are pushed so coupling/bypass caps
-/// charge and the NL roots reach quiescence before the readout.
+/// ## Why a tiny sine, not pure DC
+///
+/// The original harness settled with pure-`0.0` input. That is faithful for the
+/// passive net table, but it MISREADS the BJT NL root's Q-point: the root solves
+/// incrementally around its seeded bias, and at EXACTLY DC=0 the Newton
+/// warm-start (`v0 = prev_v`) keeps the AC port voltage pinned at the negative
+/// clamp it hits during the initial cap-charge transient. `solved_vce()` =
+/// `vce_bias + prev_v` then reads the rail (e.g. −9 V) instead of the true
+/// Q-point (≈ +2.92 V), even though the audio path — which always sees a real,
+/// nonzero signal — tracks correctly.
+///
+/// So we settle the diagnostic the way the working audio path runs it: with a
+/// very small low-frequency sine (`SETTLE_STIM_AMPLITUDE` @ `SETTLE_STIM_FREQ_HZ`).
+/// The root then tracks off its clamp, and we read the Q-point as the AVERAGE of
+/// the root's solved Vce/Ic over the FINAL stimulus cycle (the sine is symmetric
+/// about its zero, so the cycle mean ≈ the DC operating point). The passive net
+/// table is still trustworthy: at this amplitude the cap voltages differ from
+/// their DC values by ~1e-3 V, negligible for the bias report.
+///
+/// This is a DIAGNOSTIC-ONLY change. After settling we `reset()` the processor
+/// so it returns to its audio-ready quiescent state (the caller hands the same
+/// processor on for audio use).
 pub(super) fn compute_operating_point(
     compiled: &mut CompiledPedal,
     graph: &CircuitGraph,
@@ -49,20 +77,71 @@ pub(super) fn compute_operating_point(
     settle_seconds: f64,
 ) {
     let settle_samples = (settle_seconds * sample_rate).round() as usize;
+    // Samples in one stimulus cycle (clamped to at least 1 and to the whole
+    // settle window, so very short settles or odd sample rates stay sane).
+    let cycle_samples = ((sample_rate / SETTLE_STIM_FREQ_HZ).round() as usize)
+        .max(1)
+        .min(settle_samples.max(1));
+    // The final cycle over which we average the root Q-point.
+    let avg_start = settle_samples.saturating_sub(cycle_samples);
+
+    // Per-root-component accumulated (sum_vce, sum_ic, count) over the final
+    // cycle, so the reported Q-point is the cycle MEAN (≈ DC operating point).
+    let mut root_avg: HashMap<String, (f64, f64, u64)> = HashMap::new();
+
+    // Start the settle from the clean, seeded quiescent state. Without this the
+    // NL root's NR warm-start (`prev_v`) can be left pinned at an alternate
+    // fixed point from a prior run/transient, which a tiny stimulus cannot
+    // escape — `reset()` restores each BJT root to `prev_v = initial_prev_v`
+    // (= 0, the seeded Q-point), so the solve tracks from the true operating
+    // point outward.
+    compiled.reset();
+
+    let two_pi = core::f64::consts::PI * 2.0;
     let mut last_out = 0.0;
-    for _ in 0..settle_samples {
-        last_out = compiled.process(0.0);
+    for n in 0..settle_samples {
+        let phase = two_pi * (n as f64) * SETTLE_STIM_FREQ_HZ / sample_rate;
+        let stim = SETTLE_STIM_AMPLITUDE * phase.sin();
+        last_out = compiled.process(stim);
+
+        // Accumulate the root Q-point over the final stimulus cycle only.
+        if n >= avg_start {
+            accumulate_root_qpoints(compiled, &mut root_avg);
+        }
     }
 
     let probe = NodeProbe::new(graph, compiled, last_out);
     let nets = build_net_table(graph, compiled, &probe);
-    let devices = build_device_table(graph, compiled, &probe);
+    let devices = build_device_table(graph, compiled, &probe, &root_avg);
 
     compiled.operating_point = Some(OperatingPoint {
         nets,
         devices,
         settle_samples,
     });
+
+    // Restore the processor to its quiescent, audio-ready state — the diagnostic
+    // settle must not leave the handed-on processor mid-transient.
+    compiled.reset();
+}
+
+/// Scan the compiled stages for BJT NL roots and add this sample's solved
+/// Vce/Ic to the running per-component average accumulator.
+fn accumulate_root_qpoints(
+    compiled: &CompiledPedal,
+    root_avg: &mut HashMap<String, (f64, f64, u64)>,
+) {
+    for stage in &compiled.stages {
+        let Stage::Wdf(wdf) = stage else { continue };
+        if let RootKind::Bjt(bjt) = &wdf.root {
+            let entry = root_avg
+                .entry(wdf.root_comp_id.clone())
+                .or_insert((0.0, 0.0, 0));
+            entry.0 += bjt.solved_vce() as f64;
+            entry.1 += bjt.solved_ic() as f64;
+            entry.2 += 1;
+        }
+    }
 }
 
 /// Resolves node voltages from a settled processor.
@@ -251,6 +330,7 @@ fn build_device_table(
     graph: &CircuitGraph,
     compiled: &CompiledPedal,
     probe: &NodeProbe,
+    root_avg: &HashMap<String, (f64, f64, u64)>,
 ) -> Vec<DeviceOp> {
     let mut devices = Vec::new();
 
@@ -292,7 +372,7 @@ fn build_device_table(
         // component compiled to one. For a BJT common-emitter stage the DC
         // operating point lives in the root's seeded bias + runtime-solved
         // state, NOT on the passive tree leaves above.
-        let root = root_op_for(&comp.id, compiled);
+        let root = root_op_for(&comp.id, compiled, root_avg);
 
         devices.push(DeviceOp {
             id: comp.id.clone(),
@@ -312,7 +392,11 @@ fn build_device_table(
 /// whose `root` is a NL root we can report. Returns `None` when no such stage
 /// exists — the caller renders that as "device folded to PassiveRType (no NL
 /// root)" rather than a bare n/a.
-fn root_op_for(comp_id: &str, compiled: &CompiledPedal) -> Option<RootOp> {
+fn root_op_for(
+    comp_id: &str,
+    compiled: &CompiledPedal,
+    root_avg: &HashMap<String, (f64, f64, u64)>,
+) -> Option<RootOp> {
     for stage in &compiled.stages {
         let Stage::Wdf(wdf) = stage else { continue };
         if wdf.root_comp_id != comp_id {
@@ -320,14 +404,23 @@ fn root_op_for(comp_id: &str, compiled: &CompiledPedal) -> Option<RootOp> {
         }
         if let RootKind::Bjt(bjt) = &wdf.root {
             let seed = wdf.bjt_seed;
+            // Prefer the final-cycle AVERAGE of the solved Q-point (faithful to
+            // the audio path); fall back to the instantaneous read only if the
+            // settle window collected no samples for this root.
+            let (solved_vce, solved_ic) = match root_avg.get(comp_id) {
+                Some(&(sum_vce, sum_ic, count)) if count > 0 => {
+                    (sum_vce / count as f64, sum_ic / count as f64)
+                }
+                _ => (bjt.solved_vce() as f64, bjt.solved_ic() as f64),
+            };
             return Some(RootOp {
                 kind: "Bjt".into(),
                 seed_resolved: seed.map(|s| s.resolved).unwrap_or(false),
                 seeded_vbe: seed.and_then(|s| s.seeded_vbe.map(|v| v as f64)),
                 seeded_vce: seed.and_then(|s| s.seeded_vce.map(|v| v as f64)),
                 vbe_bias: Some(bjt.vbe_bias() as f64),
-                solved_vce: Some(bjt.solved_vce() as f64),
-                solved_ic: Some(bjt.solved_ic() as f64),
+                solved_vce: Some(solved_vce),
+                solved_ic: Some(solved_ic),
             });
         }
     }
