@@ -38,3 +38,4 @@ tempfile = "3.10"
 
 [dev-dependencies]
 approx = "0.5"
+pedalkernel-rt = { path = "../pedalkernel-rt", version = "0.1" }
