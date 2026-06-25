@@ -151,3 +151,59 @@ suite, so its WDF-vs-reference delta is not gated in CI.)
 *Generated from a live validation run; profiles and error figures are quoted
 verbatim from `pedalkernel-validate run --suite all`. No source changed; the
 temporary `xtask` workspace exclusion was reverted.*
+
+---
+
+# Addendum — BJT bias deep-dive, op-point tool, and two fixes (same day)
+
+## New tool: `pedalkernel debug <file> --op`
+
+A DC operating-point report (gated behind `CompileOptions::compute_operating_point`,
+default off). Settles the built processor at DC and prints a per-net voltage table +
+per-device Q-point. **v1.1 reads the nonlinear ROOT directly** (`BjtRoot::vbe_bias /
+solved_vce / solved_ic`) — necessary because a WDF nonlinear-root stage carries its DC
+operating point in the **root bias**, not on the passive tree leaves.
+
+**Methodology finding:** the SPICE metric (`metrics.rs`) computes `residual / reference`
+for both RMS and peak, so a **dead or railing WDF output scores ~0 dB** and can *pass*.
+This is why PNP-CE "passed" while being completely dead, and why the BJT gaps are
+understated. Gate BJT bias with `--op`, not the scale-invariant suite.
+
+## Isolated: the BJT failures are THREE distinct bugs, not one
+
+| Bug | Symptom | Locus | Status |
+|---|---|---|---|
+| **NPN railing** | collector solves to −9 V (negated rail) despite a correct +2.92 V seed | runtime `BjtRoot` solve (`bjt.rs`) | **FIXED** |
+| **PNP eliminated** | no `Bjt` root built; folds to `PassiveRType` → dead | flow partitioning / `find_nl_blocks` (rail asymmetry) | **FIXED** |
+| **Self-bias Q-point** | `bigmuff_stage`/`fuzz_core` +70–90 dB — no compile-time Q-point | `compute_wdf_bjt_dc_qpoint` returns None for collector-feedback/self-bias | OPEN (#1, elsewhere) |
+
+## Fixes landed (both regression-neutral — full suite held at 55/94)
+
+1. **NPN incremental solve** (`bjt.rs`): the WDF tree models only AC (VCC enters the
+   collector via R_C as AC-ground → incident wave a=0 at rest), but `process()` solved
+   the *absolute* current equation, whose only root is the negative rail. Now solves
+   **incrementally around the Q-point** (`vce_bias` + `ic_quiescent`, mirroring
+   `biased_single_diode_reflection`). `npn_common_emitter`: railing gone, THD error
+   **5.05 → 1.83 dB**. Tubes 6/6 and other NL roots unchanged.
+2. **PNP rail-symmetry** (`signal_flow.rs` + `spqr_build.rs` + `component.rs`): the
+   emitter-at-VCC PNP-CE was split across flow groups so its two scattering edges never
+   paired into an NL block. Two rail-asymmetric heuristics made symmetric —
+   `claim_passive_edges` now keeps a fixed-resistor collector load to *either* rail
+   (`Component::is_fixed_resistor`), and `is_nonlinear_modulator_group` exempts a stage
+   whose collector reaches the global output. `pnp_common_emitter` now builds
+   `root=Bjt` (was two `PassiveRType` dummies).
+
+Both correctness wins are invisible to the pass-count because of the metric pathology
+above (the NPN's honest residual now reads as a ~10 dB gain-calibration gap — bug #2,
+worked elsewhere).
+
+## Honest correction
+
+The audit's lead hypothesis — that `bigmuff_stage`/`fuzz_core` were "the same NPN
+runaway, amplified" — **did not hold**. Their BJTs never receive a compile-time
+Q-point (self-bias topology, no rail divider), so the NPN fix does not touch them. The
+Big Muff catastrophe is the **self-bias Q-point gap (#1)**, tracked separately.
+
+*Fixes committed on `claude/nice-ride-utfvu7`; validated via `--op` + `run --suite all`
+(55/94 held). #1 (self-bias Q-point) and #2 (BJT gain calibration) are being worked
+elsewhere and were intentionally not touched.*

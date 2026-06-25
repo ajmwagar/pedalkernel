@@ -323,3 +323,46 @@ program-dependent release (`la2a_release_slower_after_heavy_gr`). NOTE: the bran
 SHARED — main is pushed to in parallel; fetch+build-gate before every push (two merges
 shipped compile breaks from main's SPICE `TestCase`s predating the `pending_reference`
 field).
+
+**2026-06-25 — Guitar-pedal audit + BJT bias isolation + `debug --op`**
+(`reports/guitar-pedal-audit-2026-06-25.md`): Full audit — **SPICE 55/94**
+(`run --suite all`); genuine gaps concentrate in **BJT common-emitter** circuits
+(all fuzz/gain cores fail), tubes/tape/opamp/eq/linear are clean. **Realtime gate
+is RED**: `blues_driver` regressed to **~1.5× realtime** (below the 2× gate, not
+the known outlier), `big_muff` ~0.3× (documented; 4 coupled NL stages); everything
+else 24–136×. Coverage gap: SD-1/OCD/Phase90/CE-2/DM-2/Memory Man/amps have neither
+a SPICE golden nor an RT-gate entry.
+
+**Op-point tracing tool** — `pedalkernel debug <file> --op` (`compiler/
+operating_point.rs` + `pedalkernel-rt/operating_point.rs`, gated behind
+`CompileOptions::compute_operating_point`, default off). Settles the built processor
+at DC and reports a per-net DC voltage table + per-device Q-point. v1.1 reads the
+**nonlinear ROOT** directly (`BjtRoot::vbe_bias/solved_vce/solved_ic`) because a WDF
+nonlinear-root stage carries its DC operating point in the root bias, NOT on the
+passive tree leaves. KEY METHOD NOTE: the SPICE metric (`metrics.rs`
+`normalized_rms_error_db`/`peak_error_db`) divides residual by the REFERENCE, so a
+dead/railing WDF output scores ~0 dB — it cannot see gain/operating-point errors;
+PNP-CE "passed" only because of this. Use `--op` (not the suite) to gate BJT bias.
+
+Two BJT bugs ISOLATED + FIXED this session (both regression-neutral, 55/94 held):
+(1) **NPN railing** (`bjt.rs`): a seeded CE BJT railed its collector to −v_max because
+the single-port `BjtRoot` solved the ABSOLUTE current equation while the WDF tree
+models only AC (VCC enters via R_C as AC-ground, a=0 at rest). Fix: solve
+**incrementally around the Q-point** (`vce_bias`+`ic_quiescent`, like
+`biased_single_diode_reflection`); npn_common_emitter THD err 5.05→1.83 dB, railing
+gone. (2) **PNP eliminated** (`signal_flow.rs`+`spqr_build.rs`+`component.rs`): the
+rail-swapped (emitter-at-VCC) PNP-CE was split across flow groups so `find_nl_blocks`
+never paired its two edges → no `Bjt` root → folded to `PassiveRType` (dead). Fix:
+two rail-asymmetric heuristics made rail-symmetric — `claim_passive_edges` keeps a
+fixed-resistor collector load to EITHER rail (`Component::is_fixed_resistor`), and
+`is_nonlinear_modulator_group` exempts a stage whose collector reaches the global
+output. PNP now builds `root=Bjt`.
+
+REMAINING (separate, being worked elsewhere — do NOT chase): **#1 self-bias Q-point**
+— `bigmuff_stage`/`fuzz_core` are UNCHANGED (still +70–90/+7 dB) because
+`compute_wdf_bjt_dc_qpoint` returns None for their collector-feedback/self-bias
+topology (base→gnd via 470k, no VCC/GND divider) → no Q-point seed → incremental path
+inactive. This (NOT the NPN railing) is the Big Muff catastrophe. **#2 BJT gain
+calibration** — NPN now alive but ~10 dB hot vs SPICE (the honest residual the metric
+pathology previously hid). **#4 metric**: make `compare` scale-aware so these
+correctness wins become gateable.
