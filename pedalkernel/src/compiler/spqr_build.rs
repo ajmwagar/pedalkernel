@@ -220,6 +220,7 @@ pub fn compile_via_spqr_with_options(
             internal_ports: Vec::new(),
             detector_led_coupling: None,
             initialized: false,
+            operating_point: None,
         };
         compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
@@ -283,6 +284,7 @@ pub fn compile_via_spqr_with_options(
             internal_ports: Vec::new(),
             detector_led_coupling: None,
             initialized: false,
+            operating_point: None,
         };
         compiled.set_supply_voltage(supply_voltage);
         super::spqr_control::bind_controls(pedal, &mut compiled);
@@ -2088,6 +2090,7 @@ pub fn compile_via_spqr_with_options(
         internal_ports: Vec::new(),
         detector_led_coupling: None,
         initialized: false,
+        operating_point: None,
     };
     compiled.set_supply_voltage(supply_voltage);
 
@@ -2193,6 +2196,18 @@ pub fn compile_via_spqr_with_options(
     // Cache raw pointers to all VS leaves for zero-cost runtime access.
     // Must be after port binding (wrap_leaf_with_vs) and recompute.
     compiled.cache_all_vs_pointers();
+
+    // Diagnostic: settle at DC and compute the per-net + per-device Q-point
+    // report. Off unless explicitly requested (it runs the full pipeline for
+    // ~0.5 s of samples). Used by `pedalkernel debug --op`.
+    if options.compute_operating_point {
+        super::operating_point::compute_operating_point(
+            &mut compiled,
+            &graph,
+            sample_rate,
+            0.5,
+        );
+    }
 
     Ok(compiled)
 }

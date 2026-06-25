@@ -99,6 +99,9 @@ pub mod glide;
 // ── Compiled pedal processor (audio pipeline) ────────────────────────
 pub mod processor;
 
+// ── DC operating-point report (compile-time Q-point snapshot) ─────────
+pub mod operating_point;
+
 // ── Audio processor trait ────────────────────────────────────────────
 
 use alloc::{string::String, vec::Vec};

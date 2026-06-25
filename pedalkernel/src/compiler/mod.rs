@@ -27,6 +27,7 @@ mod graph;
 mod helpers;
 mod k_method;
 pub mod neighbor_roles;
+mod operating_point;
 mod rigid;
 mod signal_flow;
 mod split;

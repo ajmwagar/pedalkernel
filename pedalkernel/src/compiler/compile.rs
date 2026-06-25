@@ -51,6 +51,12 @@ pub struct CompileOptions {
     /// When false, coupled blockwise stages use table-driven fixed-point
     /// iteration without building/solving the full Jacobian.
     pub coupled_blockwise_newton: bool,
+    /// Diagnostic mode: after building the processor, settle it at DC (input 0)
+    /// for ~0.5 s and compute a per-net + per-device DC operating-point report
+    /// into `CompiledPedal::operating_point`. Off by default — it is costly
+    /// (runs the full audio pipeline for thousands of samples). Used by
+    /// `pedalkernel debug --op` to trace transistor biasing.
+    pub compute_operating_point: bool,
 }
 
 impl Default for CompileOptions {
@@ -66,6 +72,7 @@ impl Default for CompileOptions {
             force_serial_blockwise_feedback_gain: 0.0,
             disable_iir: false,
             coupled_blockwise_newton: true,
+            compute_operating_point: false,
         }
     }
 }
@@ -169,6 +176,7 @@ pub fn compile_cache_key(source: &str, sample_rate: f64, options: &CompileOption
         .hash(&mut hasher);
     options.disable_iir.hash(&mut hasher);
     options.coupled_blockwise_newton.hash(&mut hasher);
+    options.compute_operating_point.hash(&mut hasher);
     (options.oversampling as u8).hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -353,6 +361,7 @@ fn compile_subcircuit_equipment(
         internal_ports: Vec::new(),
         detector_led_coupling: None,
         initialized: false,
+        operating_point: None,
     })
 }
 

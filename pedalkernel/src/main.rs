@@ -49,6 +49,10 @@ enum Command {
     Debug {
         /// Path to the .pedal file.
         file: String,
+        /// Print a DC operating-point report: per-net voltage table + per-device
+        /// Q-point (BJT Vb/Ve/Vc, Vbe/Vce, Ic). Settles the circuit at DC first.
+        #[arg(long = "op", alias = "operating-point")]
+        op: bool,
     },
     /// Validate .pedal files — check for common errors and warnings.
     ///
@@ -121,7 +125,7 @@ fn main() {
             },
             &knobs,
         ),
-        Command::Debug { file } => cli::debug::run(&file),
+        Command::Debug { file, op } => cli::debug::run(&file, op),
         Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
         Command::Models {
             model_type,

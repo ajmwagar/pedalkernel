@@ -1615,6 +1615,12 @@ pub struct CompiledPedal {
     /// Auto-init flag: cache_all_vs_pointers runs once on first process() call.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub initialized: bool,
+    /// Optional DC operating-point report (per-net + per-device Q-point).
+    /// Populated only when the compiler is asked to compute it
+    /// (`CompileOptions::compute_operating_point`); `None` otherwise so normal
+    /// compiles pay nothing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub operating_point: Option<crate::operating_point::OperatingPoint>,
 }
 
 /// Gain-like control labels.
@@ -2025,6 +2031,28 @@ impl CompiledPedal {
                 }
             })
             .collect()
+    }
+
+    /// Probe the settled DC voltage **across** a passive component (by id).
+    ///
+    /// Scans every WDF stage tree for a leaf whose `comp_id` matches and returns
+    /// its `(incident + reflected)/2` leaf voltage using the stage's own
+    /// settled `runtime_state`. This is a *component* voltage (V across the
+    /// two-terminal element), NOT a node voltage — the WDF tree erases circuit
+    /// node ids (leaves carry `()` terminals at runtime), so the compiler must
+    /// combine this with the graph's comp→terminal mapping to derive a node
+    /// voltage relative to a known rail. Returns `None` if no matching leaf is
+    /// found in any WDF tree (e.g. the component was absorbed into an MNA/
+    /// MultiNl stage, which does not expose per-leaf voltages this way).
+    pub fn probe_component_voltage(&self, comp_id: &str) -> Option<crate::Wave> {
+        for stage in &self.stages {
+            if let Stage::Wdf(wdf) = stage {
+                if let Some(v) = wdf.tree.leaf_voltage_with_state(comp_id, &wdf.runtime_state) {
+                    return Some(v);
+                }
+            }
+        }
+        None
     }
 
     /// Get the supply voltage.
