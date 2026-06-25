@@ -188,13 +188,28 @@ fn device_parallels_passive(
     })
 }
 
-/// Rail-shunt diode clamps are nonlinear loads, not active source boundaries.
+/// Whether this active element's output node should block passive-reachability
+/// BFS (i.e. acts as an isolating signal SOURCE that severs backward traversal).
 ///
-/// They must remain separate stages from an op-amp, but their signal node
-/// should not block passive reachability when the op-amp searches for its own
-/// resistive feedback path. Otherwise a post-gain clipper connected at
-/// `U1.out` hides `Rf: U1.out -> U1.neg` and the gain stage degenerates to
-/// unity.
+/// This is a **port-semantic** decision, not a blanket "block every active
+/// output". The blocking exists to kill FALSE backward cascade edges in op-amp
+/// chains: an op-amp output is a low-impedance VCVS source, so backward
+/// traversal from a downstream element through a shared interstage network into
+/// an upstream op-amp's output/feedback would invent a non-physical cycle. The
+/// op-amp `neg` summing junction is the dual of this — `feedback_input_is_barrier()`
+/// already captures exactly the family (VCVS op-amps, excluding OTAs) whose
+/// I/O ports are summing-junction / isolated-source barriers.
+///
+/// A DISCRETE active device (BJT / JFET / tube) is NOT such a barrier: its
+/// output node is routinely SHARED with a global negative-feedback bus
+/// (Neve BA283: TR3 emitter → R7 → RV1 → feedback bus → R2 → TR1 base). Blanket
+/// blocking every active output cuts that bus, so the global feedback loop never
+/// forms an SCC and closed-loop gain is never co-solved (the BA283 −49.5 dB gap).
+///
+/// Rail-shunt diode clamps were already exempt: they are nonlinear loads, not
+/// source boundaries, and must not hide an op-amp's own resistive feedback path
+/// (a post-gain clipper at `U1.out` would otherwise hide `Rf: U1.out -> U1.neg`
+/// and degenerate the gain stage to unity).
 fn active_output_blocks_passive_reachability(
     elem: &ActiveElement,
     graph: &CircuitGraph,
@@ -206,7 +221,11 @@ fn active_output_blocks_passive_reachability(
     {
         return false;
     }
-    true
+    // Port-semantic gate: only summing-junction-barrier sources (op-amp VCVS)
+    // isolate their output and warrant backward-traversal blocking. Discrete
+    // devices (BJT/JFET/tube) whose output may sit on a shared feedback bus do
+    // NOT — blocking them would sever a discrete global-NFB loop.
+    comp.kind.feedback_input_is_barrier()
 }
 
 /// Build undirected signal-edge adjacency (excludes rail nodes).
@@ -390,6 +409,40 @@ fn build_flow_graph(
             reachable.extend(r);
         }
 
+        if std::env::var("GAPF_DEBUG").as_deref() == Ok("1") {
+            // Per-element reachability diagnostic: for each candidate target j,
+            // show whether j's input is reachable WITH blocking on vs the
+            // unblocked geometric path, and whether the target itself is in the
+            // block set. A `reach_blocked=false reach_unblocked=true` pair with
+            // `tgt_in_blockset=false` means an INTERMEDIATE blocked node (an
+            // active output on a shared feedback bus) is severing a real path —
+            // the GAP-F signature.
+            let comp_i = &graph.components[graph.edges[elem_i.edge_idx].comp_idx];
+            let empty: HashSet<NodeId> = HashSet::new();
+            let mut unblocked = HashSet::new();
+            for &out_node in &elem_i.output_nodes {
+                if !rails.contains(&out_node) {
+                    unblocked.extend(bfs_reachable_nodes(out_node, adj, &empty));
+                }
+            }
+            for (j, elem_j) in elements.iter().enumerate() {
+                if j == i || rails.contains(&elem_j.input_node) {
+                    continue;
+                }
+                let comp_j = &graph.components[graph.edges[elem_j.edge_idx].comp_idx];
+                let tgt = elem_j.input_node;
+                eprintln!(
+                    "[GAPF-BFS] {}(i={i})->{}(j={j}) tgt_in={:?} reach_blocked={} reach_unblocked={} tgt_in_blockset={}",
+                    comp_i.id,
+                    comp_j.id,
+                    tgt,
+                    reachable.contains(&tgt),
+                    unblocked.contains(&tgt),
+                    blocked_outputs.contains(&tgt),
+                );
+            }
+        }
+
         // Also compute restricted reachability with i's own input blocked.
         // This prevents false backward paths where BFS traverses through i's
         // feedback network, across interstage coupling, and reaches another
@@ -471,6 +524,48 @@ fn build_flow_graph(
                 flow_adj[i].push(j);
             }
         }
+    }
+
+    // STEP-1 diagnostic (env-gated): dump the active elements, their I/O nodes,
+    // the barrier/block decision, the formed flow edges, and which targets were
+    // unreached. Used to empirically pin which block kills the BA283 back-edge.
+    if std::env::var("GAPF_DEBUG").as_deref() == Ok("1") {
+        eprintln!("[GAPF] ===== build_flow_graph: {} active elements =====", n);
+        for (i, e) in elements.iter().enumerate() {
+            let comp = &graph.components[graph.edges[e.edge_idx].comp_idx];
+            let blocks = active_output_blocks_passive_reachability(e, graph, rails);
+            eprintln!(
+                "[GAPF] elem[{i}] id={:<6} kind={:<10} in_node={:?} out_nodes={:?} barrier={} blocks_reach={}",
+                comp.id,
+                format!("{:?}", comp.kind.signal_terminals()),
+                e.input_node,
+                e.output_nodes,
+                comp.kind.feedback_input_is_barrier(),
+                blocks,
+            );
+        }
+        for (i, targets) in flow_adj.iter().enumerate() {
+            let comp_i = &graph.components[graph.edges[elements[i].edge_idx].comp_idx];
+            let edge_strs: Vec<String> = targets
+                .iter()
+                .map(|&j| {
+                    let comp_j = &graph.components[graph.edges[elements[j].edge_idx].comp_idx];
+                    format!("{}->{}", comp_i.id, comp_j.id)
+                })
+                .collect();
+            let unreached: Vec<String> = (0..n)
+                .filter(|&j| j != i && !targets.contains(&j))
+                .map(|j| {
+                    let comp_j = &graph.components[graph.edges[elements[j].edge_idx].comp_idx];
+                    format!("{}-/->{}", comp_i.id, comp_j.id)
+                })
+                .collect();
+            eprintln!(
+                "[GAPF] flow_adj[{i}={}]: edges={:?} unreached={:?}",
+                comp_i.id, edge_strs, unreached
+            );
+        }
+        eprintln!("[GAPF] ====================================================");
     }
 
     flow_adj
@@ -2023,6 +2118,22 @@ pub(in crate::compiler) fn find_flow_groups(
             pendant_edges: vec![eidx],
             ground_shunt_edges: Vec::new(),
         });
+    }
+
+    if std::env::var("GAPF_DEBUG").as_deref() == Ok("1") {
+        eprintln!("[GAPF] ===== find_flow_groups: {} groups, {} sccs =====", groups.len(), sccs.len());
+        for (gi, g) in groups.iter().enumerate() {
+            eprintln!(
+                "[GAPF] group[{gi}] is_feedback={} active={} feedback_edges={} pendant={} gshunt={}",
+                g.has_feedback(),
+                g.active_edges.len(),
+                g.feedback_edges.len(),
+                g.pendant_edges.len(),
+                g.ground_shunt_edges.len(),
+            );
+        }
+        eprintln!("[GAPF] sccs sizes={:?}", sccs.iter().map(|s| s.len()).collect::<Vec<_>>());
+        eprintln!("[GAPF] ============================================");
     }
 
     groups
