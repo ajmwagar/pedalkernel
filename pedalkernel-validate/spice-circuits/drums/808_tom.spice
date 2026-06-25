@@ -1,0 +1,56 @@
+* ============================================================================
+* 808 Tom (Lo-Tom / "808 Tom") — Bridged-T Resonator (Behavioral State-Space)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: Single bridged-T Sallen-Key resonator + inverting output
+* buffer (U2: Ri_out=10k / Rf_out=270k → gain ≈ −27×).  Same behavioral
+* state-space approach as 808_kick.spice — G-source second-order system.
+*
+* FILE NOTE: 808_tom.pedal is internally labelled "808 Mid Tom" but occupies
+* the lo-tom slot in the three-voice hierarchy (tom < mid_tom < hi_tom by
+* filename). The mid-tom .pedal (808_mid_tom.pedal) uses lower f0 = 125 Hz.
+* This discrepancy is a naming inconsistency in the drummerboy codebase;
+* this deck follows the filename (808_tom → lo-tom, ~154 Hz).
+*
+* PARAMETERS (from 808_tom.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 220kΩ, C1 = C2 = 4.7nF
+*   f0 = 1 / (2π·220k·4.7n) = 153.8 Hz
+*   r_crit = R1+R2+R1·(C1/C2) = 220k+220k+220k = 660kΩ
+*   R_fb = 750kΩ  →  Q = 750 / (750−660) = 8.33
+*   zeta = 1/(2·Q) = 0.0600
+*   omega0 = 2π·153.8 = 966.5 rad/s
+*   2·zeta·omega0 = 115.98
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* OUTPUT: v_x (resonator position state), normalized.
+*   The physical circuit has an inverting buffer (×27) after the resonator,
+*   but for WDF-vs-SPICE comparison we compare the resonant waveform shape.
+*
+* VERIFIED: f0 = 153.8 Hz (theory), Q = 8.33
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 966.5
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -966.5
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -115.98
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 966.5
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k
