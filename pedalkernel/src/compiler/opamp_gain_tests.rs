@@ -417,13 +417,23 @@ fn screamer_compiles_with_opamp_gain_stage() {
         .stages
         .iter()
         .any(|s| matches!(s, Stage::BlackFeedback(_)));
+    // pedalkernel-9xu1: the op-amp + in-loop diode clipping group now compiles to
+    // a MultiNl grouped-NR stage that co-solves the op-amp VCVS against the diode
+    // (the retired build_opamp_nl_feedback shortcut used a feedback_opamp WdfStage).
+    // The op-amp gain now lives inside the MultiNl MNA, so a MultiNl stage is a
+    // valid op-amp gain path for the Screamer.
+    let has_multi_nl = proc
+        .stages
+        .iter()
+        .any(|s| matches!(s, Stage::MultiNl(_)));
 
     eprintln!(
-        "[screamer_routing] stages={}, opamp_root={}, feedback_opamp={}, black_feedback={}",
+        "[screamer_routing] stages={}, opamp_root={}, feedback_opamp={}, black_feedback={}, multi_nl={}",
         proc.stages.len(),
         has_opamp_root,
         has_feedback_opamp,
         has_black_feedback,
+        has_multi_nl,
     );
     for (i, s) in proc.stages.iter().enumerate() {
         if let Stage::Wdf(w) = s {
@@ -446,8 +456,8 @@ fn screamer_compiles_with_opamp_gain_stage() {
     }
 
     assert!(
-        has_opamp_root || has_feedback_opamp || has_black_feedback,
-        "Screamer should have an opamp gain stage (OpAmpRoot, feedback_opamp, or BlackFeedback)"
+        has_opamp_root || has_feedback_opamp || has_black_feedback || has_multi_nl,
+        "Screamer should have an opamp gain stage (OpAmpRoot, feedback_opamp, BlackFeedback, or MultiNl co-solve)"
     );
 }
 
