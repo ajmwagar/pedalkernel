@@ -895,18 +895,24 @@ pub(super) fn build_rigid_from_group_with_hints(
             // BlackFeedback and IIR both fell through — use WDF.
             // Build an OpAmp WDF stage that handles reactive feedback
             // naturally through wave scattering.
-            if stats.vcvs_count == 1 && stats.nl_count == 1 {
-                if let Some(g) = group {
-                    return build_opamp_nl_feedback(
-                        g,
-                        &stats,
-                        graph,
-                        sample_rate,
-                        supply_voltage,
-                        bias_v_max,
-                    )
-                    .map(BuiltStage::Wdf);
-                }
+            //
+            // op-amp + in-loop NL (TS/SD-1/RAT diode-across-feedback) is
+            // routed to the General MNA + grouped-NR co-solve path instead of
+            // the legacy build_opamp_nl_feedback shortcut. The shortcut applied
+            // the op-amp closed-loop gain forward (compute_vs_voltage) then
+            // clipped the diode against the op-amp OUTPUT impedance — the wrong
+            // Thevenin, causing ~1.6-2x over-hot clipping. build_general_mna
+            // stamps the op-amp VCVS as another MNA row and lets the NR solver
+            // co-solve the diode against the closed-loop impedance, so the gain
+            // emerges from the solve. (pedalkernel-9xu1)
+            if stats.vcvs_count == 1 && stats.nl_count > 0 {
+                return build_general_mna_from_edges_with_hints(
+                    &edge_indices,
+                    graph,
+                    sample_rate,
+                    init_hints,
+                )
+                .map(BuiltStage::MultiNl);
             }
             if stats.vcvs_count == 1 && stats.nl_count == 0 {
                 if let Some(g) = group {
@@ -972,26 +978,12 @@ pub(super) fn build_rigid_from_group_with_hints(
             .map(BuiltStage::StateSpace)
         }
         RigidOptimization::General => {
-            // VCVS + NL with FlowGroup → op-amp drives NL root.
-            // For multiple NL edges (e.g. SD-1's two separate antiparallel diodes),
-            // build_opamp_nl_feedback detects antiparallel pairs and synthesizes
-            // a DiodePair root from individual diode components.
-            if let Some(g) = group {
-                if stats.vcvs_count == 1
-                    && stats.nl_count > 0
-                    && group_nl_edges_are_single_port_solvable(&edge_indices, graph)
-                {
-                    return build_opamp_nl_feedback(
-                        g,
-                        &stats,
-                        graph,
-                        sample_rate,
-                        supply_voltage,
-                        bias_v_max,
-                    )
-                    .map(BuiltStage::Wdf);
-                }
-            }
+            // VCVS + NL (op-amp + in-loop diode: TS/SD-1/RAT) now falls through
+            // to the General MNA + grouped-NR co-solve below, which stamps the
+            // op-amp VCVS and co-solves the diode against the closed-loop
+            // impedance. The legacy build_opamp_nl_feedback shortcut (which
+            // clipped the diode against the op-amp OUTPUT impedance, the wrong
+            // Thevenin → ~1.6-2x over-hot) has been retired. (pedalkernel-9xu1)
 
             // NL present → General MNA + NR solver.
             // Works with or without FlowGroup — uses raw edge indices.
