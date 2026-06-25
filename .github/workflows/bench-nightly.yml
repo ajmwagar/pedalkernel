@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install libjack-dev
-        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev libasound2-dev
       - uses: Swatinem/rust-cache@v2
 
       # Restore baseline from main (if exists)
