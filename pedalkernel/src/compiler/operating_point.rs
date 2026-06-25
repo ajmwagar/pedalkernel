@@ -32,9 +32,10 @@ use hashbrown::HashMap;
 use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
 use pedalkernel_rt::operating_point::{
-    DeviceOp, NetOp, OperatingPoint, VoltageSource,
+    DeviceOp, NetOp, OperatingPoint, RootOp, VoltageSource,
 };
-use pedalkernel_rt::processor::CompiledPedal;
+use pedalkernel_rt::processor::{CompiledPedal, Stage};
+use pedalkernel_rt::stage::RootKind;
 use pedalkernel_rt::PedalProcessor;
 
 /// Settle the processor at DC and compute its operating-point report.
@@ -287,15 +288,50 @@ fn build_device_table(
         // tying the output node to its rail, I = V_across(R_load) / R.
         let ic = output_current(comp_idx, graph, compiled, probe, &info);
 
+        // Pull the REAL device Q-point from the nonlinear WDF root, if this
+        // component compiled to one. For a BJT common-emitter stage the DC
+        // operating point lives in the root's seeded bias + runtime-solved
+        // state, NOT on the passive tree leaves above.
+        let root = root_op_for(&comp.id, compiled);
+
         devices.push(DeviceOp {
             id: comp.id.clone(),
             kind: info.kind_label.into(),
             terminals,
             ic,
+            root,
         });
     }
 
     devices
+}
+
+/// Read the nonlinear-root operating point for a device by its component id.
+///
+/// Scans the compiled stages for a `WdfStage` whose `root_comp_id` matches and
+/// whose `root` is a NL root we can report. Returns `None` when no such stage
+/// exists — the caller renders that as "device folded to PassiveRType (no NL
+/// root)" rather than a bare n/a.
+fn root_op_for(comp_id: &str, compiled: &CompiledPedal) -> Option<RootOp> {
+    for stage in &compiled.stages {
+        let Stage::Wdf(wdf) = stage else { continue };
+        if wdf.root_comp_id != comp_id {
+            continue;
+        }
+        if let RootKind::Bjt(bjt) = &wdf.root {
+            let seed = wdf.bjt_seed;
+            return Some(RootOp {
+                kind: "Bjt".into(),
+                seed_resolved: seed.map(|s| s.resolved).unwrap_or(false),
+                seeded_vbe: seed.and_then(|s| s.seeded_vbe.map(|v| v as f64)),
+                seeded_vce: seed.and_then(|s| s.seeded_vce.map(|v| v as f64)),
+                vbe_bias: Some(bjt.vbe_bias() as f64),
+                solved_vce: Some(bjt.solved_vce() as f64),
+                solved_ic: Some(bjt.solved_ic() as f64),
+            });
+        }
+    }
+    None
 }
 
 struct DeviceTerminals {

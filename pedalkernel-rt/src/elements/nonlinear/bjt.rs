@@ -1341,6 +1341,29 @@ impl BjtRoot {
         self.v_max = v_max.max(1.0);
     }
 
+    /// Runtime-solved collector-emitter voltage (port voltage).
+    ///
+    /// After `process()` the root stores `prev_v = (a + b) / 2`, which is the
+    /// WDF port voltage at the C-E terminals — i.e. the device's solved Vce at
+    /// the current operating point. Reading this AFTER a DC settle gives the
+    /// true runtime Q-point Vce. PNP roots solve in the device's positive-forward
+    /// sign convention, so the value is the magnitude in that convention.
+    #[inline]
+    pub fn solved_vce(&self) -> crate::Wave {
+        self.prev_v
+    }
+
+    /// Runtime-solved collector current at the present operating point.
+    ///
+    /// Evaluates the device I-V characteristic at the solved Vce (`prev_v`) using
+    /// the currently-set `vbe` (bias + any AC). After a DC settle with 0 input,
+    /// `vbe == vbe_bias` so this is the quiescent Ic. The sign matches the device
+    /// convention (PNP returns negative Ic, as `collector_current` already does).
+    #[inline]
+    pub fn solved_ic(&self) -> crate::Wave {
+        self.collector_current(self.prev_v)
+    }
+
     /// Collector current Ic as a function of Vce, with Vbe held constant.
     /// This is the I-V characteristic seen at the WDF port.
     #[inline]

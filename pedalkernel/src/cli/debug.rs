@@ -114,4 +114,46 @@ fn print_operating_point(report: &OperatingPoint, supply: f64) {
             }
         }
     }
+    println!();
+
+    // Device Q-point read from the nonlinear ROOT (the real bias point for a
+    // WDF NL-root stage). This is the load-bearing section for the bias bug:
+    // the passive table above is propagated through caps and does NOT see the
+    // root's seeded bias or runtime-solved state.
+    println!("Device Q-point (root):");
+    let mut any_root = false;
+    for dev in &report.devices {
+        let Some(root) = &dev.root else { continue };
+        any_root = true;
+        println!("  {} [{} root]", dev.id, root.kind);
+        let resolved = if root.seed_resolved {
+            "Some (DC Q-point resolved)"
+        } else {
+            "None (UNRESOLVED -> root left at cutoff, vbe_bias=0)"
+        };
+        println!("    seed             {resolved}");
+        println!("    seeded Vbe       {}", fmt_v(root.seeded_vbe));
+        println!("    seeded Vce       {}", fmt_v(root.seeded_vce));
+        println!("    vbe_bias (held)  {}", fmt_v(root.vbe_bias));
+        println!("    solved Vce       {}", fmt_v(root.solved_vce));
+        match root.solved_ic {
+            Some(i) => println!("    solved Ic        {:+8.4} mA", i * 1e3),
+            None => println!("    solved Ic        {:>10}", "n/a"),
+        }
+    }
+    // Devices that compiled WITHOUT a reachable NL root (e.g. PNP folded to
+    // PassiveRType dummies) are reported explicitly so the reader does not
+    // mistake an absent root for an unrecoverable value.
+    for dev in &report.devices {
+        if dev.root.is_none() {
+            any_root = true;
+            println!(
+                "  {} [{}]: no nonlinear root (device folded to PassiveRType)",
+                dev.id, dev.kind
+            );
+        }
+    }
+    if !any_root {
+        println!("  none (no nonlinear-root devices)");
+    }
 }

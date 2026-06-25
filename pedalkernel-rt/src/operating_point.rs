@@ -72,4 +72,35 @@ pub struct DeviceOp {
     pub terminals: Vec<(String, Option<crate::Wave>)>,
     /// Collector (BJT) / drain (FET) current, amps. `None` if unrecoverable.
     pub ic: Option<crate::Wave>,
+    /// Nonlinear-ROOT Q-point, when this device compiled to a WDF NL root
+    /// (`RootKind::Bjt`, ...). `None` when the device folded to a passive
+    /// approximation (e.g. PNP → PassiveRType dummies) with no NL root, in which
+    /// case the report says so explicitly rather than rendering bare "n/a".
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub root: Option<RootOp>,
+}
+
+/// Operating point read directly from a nonlinear WDF root after a DC settle.
+///
+/// This is the REAL device Q-point for an NL-root stage — distinct from the
+/// passive per-net `terminals`/`ic` above, which are propagated through caps and
+/// do NOT see the root's seeded bias or runtime-solved state.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RootOp {
+    /// Root kind label (e.g. "Bjt").
+    pub kind: String,
+    /// Whether the compile-time DC Q-point solve resolved (`Some`) a seed.
+    /// `false` ⇒ root left at vbe_bias = 0 (cutoff). The key bias diagnostic.
+    pub seed_resolved: bool,
+    /// Seeded base-emitter bias from compile-time DC analysis, if resolved.
+    pub seeded_vbe: Option<crate::Wave>,
+    /// Seeded collector-emitter warm-start from compile-time DC analysis.
+    pub seeded_vce: Option<crate::Wave>,
+    /// Current bias the root is actually holding (`BjtRoot::vbe_bias`).
+    pub vbe_bias: Option<crate::Wave>,
+    /// Runtime-solved Vce after the DC settle (root port voltage).
+    pub solved_vce: Option<crate::Wave>,
+    /// Runtime-solved collector current after the DC settle, amps.
+    pub solved_ic: Option<crate::Wave>,
 }

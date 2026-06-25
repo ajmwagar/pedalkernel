@@ -1649,6 +1649,33 @@ pub struct WdfStage {
     /// only when a blend pot moves — the per-sample cost is `N` multiply-adds.
     #[cfg_attr(feature = "serde", serde(default))]
     pub convergence: Option<crate::convergence::ConvergenceSum>,
+
+    /// Compile-time DC seed diagnostics for a `RootKind::Bjt` stage.
+    ///
+    /// Captured at build time from `compute_wdf_bjt_dc_qpoint`. `Some` records
+    /// whether the Q-point solve succeeded and the seeded `vbe`/`vce` that were
+    /// pushed into the `BjtRoot`. `None` means the stage has no BJT root (or the
+    /// seed was never attempted). Used ONLY by the `--op` operating-point report
+    /// to surface whether the root was biased into conduction or left at cutoff.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub bjt_seed: Option<BjtSeedInfo>,
+}
+
+/// Compile-time DC seeding outcome for a single common-emitter BJT WDF root.
+///
+/// `resolved == false` means `compute_wdf_bjt_dc_qpoint` returned `None`, so the
+/// root keeps its default `vbe_bias = 0` (cutoff). The `seeded_*` fields are then
+/// `None`. When `resolved == true` they carry the exact values handed to
+/// `BjtRoot::set_bias` / `set_initial_prev_v`.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BjtSeedInfo {
+    /// Whether the compile-time DC Q-point solve returned a value.
+    pub resolved: bool,
+    /// Seeded base-emitter bias voltage (`BjtRoot::set_bias`), if resolved.
+    pub seeded_vbe: Option<crate::Wave>,
+    /// Seeded collector-emitter warm-start (`set_initial_prev_v`), if resolved.
+    pub seeded_vce: Option<crate::Wave>,
 }
 
 /// Per-component gating state for controlled-resistor recomputes.
@@ -1769,6 +1796,7 @@ impl WdfStage {
             boundary_bindings: Vec::new(),
             ctrl_r_last_applied: Vec::new(),
             convergence: None,
+            bjt_seed: None,
         }
     }
 

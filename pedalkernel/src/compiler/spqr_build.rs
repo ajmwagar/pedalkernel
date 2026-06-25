@@ -3086,6 +3086,21 @@ pub(super) fn build_spqr_stage_with_options(
             };
             let oversampler = Oversampler::new(OversamplingFactor::X1);
             let mut wdf_stage = WdfStage::new(tree, root, oversampler);
+            // Record the BJT root device id + its compile-time DC seeding outcome
+            // for the `--op` operating-point report. `bjt_dc.is_some()` is the key
+            // diagnostic: None means `compute_wdf_bjt_dc_qpoint` could not resolve
+            // a Q-point so the root stays at vbe_bias = 0 (cutoff).
+            if matches!(wdf_stage.root, RootKind::Bjt(_)) {
+                wdf_stage.root_comp_id = comp.id.clone();
+                wdf_stage.bjt_seed = Some(pedalkernel_rt::stage::BjtSeedInfo {
+                    resolved: bjt_dc.is_some(),
+                    seeded_vbe: bjt_dc.as_ref().map(|dc| dc.vbe as pedalkernel_rt::Wave),
+                    seeded_vce: bjt_dc
+                        .as_ref()
+                        .filter(|dc| dc.vce.is_finite())
+                        .map(|dc| dc.vce as pedalkernel_rt::Wave),
+                });
+            }
             if let (Some(topology), Some(dc)) = (fet_topology, fet_dc.as_ref()) {
                 wdf_stage.output_bias = if topology.source_follower {
                     dc.source_voltage as pedalkernel_rt::Wave
