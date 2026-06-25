@@ -1254,13 +1254,28 @@ pub struct BjtRoot {
     vbe: crate::Wave,
     /// Maximum collector-emitter voltage (from supply rail).
     v_max: crate::Wave,
-    /// Previous sample's Vce for NR warm-starting.
-    prev_v: crate::Wave,
-    /// Initial Vce warm-start, restored on reset().
+    /// DC collector-emitter operating point (Q-point Vce), set at compile time
+    /// from load-line analysis.
     ///
-    /// Set from `init { }` block hints (e.g. `Q1: saturated` → 0.1 V).
-    /// For circuits without an init block, this is 0.0 and reset() preserves
-    /// the existing behavior (NR falls back to `a*0.5` cold start).
+    /// The runtime WDF tree models only the *incremental* (AC) behavior — the
+    /// supply rail VCC enters the collector node through R_C as a DC term that
+    /// the tree treats as AC ground. So the device must be solved around this
+    /// Q-point: the port voltage `prev_v` is the AC component (Vce − vce_bias)
+    /// and the collector current is referenced to its quiescent value
+    /// `ic_quiescent` so that, with no AC input, the net port current is zero
+    /// and Vce rests at `vce_bias`. This mirrors `biased_single_diode_reflection`.
+    vce_bias: crate::Wave,
+    /// Quiescent collector current at (vbe_bias, vce_bias), cached when the bias
+    /// is seeded. Subtracted from the absolute Ic so the WDF port solves the
+    /// incremental current. Zero until a Q-point is seeded (absolute fallback).
+    ic_quiescent: crate::Wave,
+    /// Previous sample's *incremental* Vce (AC) for NR warm-starting.
+    prev_v: crate::Wave,
+    /// Initial incremental-Vce warm-start, restored on reset().
+    ///
+    /// Set from `init { }` block hints (e.g. `Q1: saturated`). For circuits
+    /// without an init block, this is 0.0 (AC rest point) and reset() returns
+    /// the NR warm-start to the operating point.
     initial_prev_v: crate::Wave,
 }
 
@@ -1272,6 +1287,8 @@ impl BjtRoot {
             vbe_bias: 0.0,
             vbe: 0.0,
             v_max: 50.0,
+            vce_bias: 0.0,
+            ic_quiescent: 0.0,
             prev_v: 0.0,
             initial_prev_v: 0.0,
         }
@@ -1284,31 +1301,36 @@ impl BjtRoot {
             vbe_bias: 0.0,
             vbe: 0.0,
             v_max: v_max.max(1.0),
+            vce_bias: 0.0,
+            ic_quiescent: 0.0,
             prev_v: 0.0,
             initial_prev_v: 0.0,
         }
     }
 
-    /// Get the initial Vce warm-start (for diagnostics and testing).
+    /// Get the DC collector-emitter operating point (Q-point Vce).
     pub fn initial_prev_v(&self) -> crate::Wave {
-        self.initial_prev_v
+        self.vce_bias
     }
 
-    /// Set the initial Vce warm-start from an `init { }` hint.
+    /// Seed the DC collector-emitter operating point (Q-point Vce) from
+    /// compile-time load-line analysis (or an `init { }` hint).
     ///
-    /// Called once at compile time. On reset(), `prev_v` is restored to this
-    /// value, giving the NR solver an asymmetric starting point that can kick
-    /// free-running oscillators (e.g. BJT astable multivibrators) out of the
-    /// symmetric DC fixed point.
+    /// The argument is the *absolute* quiescent Vce. The WDF tree models only
+    /// the AC behavior, so this becomes the reference around which the device
+    /// is solved: `prev_v` (the warm-start) is the AC component and resets to 0
+    /// (the operating point). The quiescent collector current is recomputed so
+    /// the incremental solve has zero net port current at rest.
     pub fn set_initial_prev_v(&mut self, vce: crate::Wave) {
-        self.initial_prev_v = vce;
-        self.prev_v = vce;
+        self.vce_bias = vce;
+        self.initial_prev_v = 0.0;
+        self.prev_v = 0.0;
+        self.refresh_quiescent_current();
     }
 
-    /// Restore `prev_v` to the compile-time initial value.
+    /// Restore the AC warm-start to the operating point (incremental zero).
     ///
-    /// Called by WdfStage::reset() for Bjt roots so that DAW resets return
-    /// to the hint-specified asymmetric state rather than to 0.0.
+    /// Called by WdfStage::reset() for Bjt roots.
     pub fn reset(&mut self) {
         self.prev_v = self.initial_prev_v;
     }
@@ -1318,6 +1340,21 @@ impl BjtRoot {
     pub fn set_bias(&mut self, vbe_bias: crate::Wave) {
         self.vbe_bias = vbe_bias;
         self.vbe = vbe_bias; // Initialize runtime Vbe to bias point
+        self.refresh_quiescent_current();
+    }
+
+    /// Recompute the quiescent collector current at (vbe_bias, vce_bias).
+    ///
+    /// This is the DC current the external bias network establishes; it is
+    /// subtracted from the absolute Ic so the WDF port carries only the
+    /// incremental (signal) current.
+    fn refresh_quiescent_current(&mut self) {
+        let sign = if self.is_pnp { -1.0 } else { 1.0 };
+        let vbe = sign * self.vbe_bias;
+        let vce = sign * self.vce_bias;
+        let vbc = (vbe - vce).min(0.4);
+        let (ic, _ib) = self.model.currents(vbe, vbc);
+        self.ic_quiescent = sign * ic;
     }
 
     /// Get the DC bias operating point.
@@ -1341,27 +1378,25 @@ impl BjtRoot {
         self.v_max = v_max.max(1.0);
     }
 
-    /// Runtime-solved collector-emitter voltage (port voltage).
+    /// Runtime-solved (absolute) collector-emitter voltage.
     ///
-    /// After `process()` the root stores `prev_v = (a + b) / 2`, which is the
-    /// WDF port voltage at the C-E terminals — i.e. the device's solved Vce at
-    /// the current operating point. Reading this AFTER a DC settle gives the
-    /// true runtime Q-point Vce. PNP roots solve in the device's positive-forward
-    /// sign convention, so the value is the magnitude in that convention.
+    /// `prev_v` holds the *incremental* (AC) Vce solved by the last `process()`;
+    /// the absolute Vce is that plus the DC operating point `vce_bias`. Reading
+    /// this after a DC settle (zero input) gives the runtime Q-point Vce, which
+    /// must match the seeded `vce_bias` (positive for an NPN).
     #[inline]
     pub fn solved_vce(&self) -> crate::Wave {
-        self.prev_v
+        self.vce_bias + self.prev_v
     }
 
-    /// Runtime-solved collector current at the present operating point.
+    /// Runtime-solved (absolute) collector current at the present operating point.
     ///
-    /// Evaluates the device I-V characteristic at the solved Vce (`prev_v`) using
-    /// the currently-set `vbe` (bias + any AC). After a DC settle with 0 input,
-    /// `vbe == vbe_bias` so this is the quiescent Ic. The sign matches the device
-    /// convention (PNP returns negative Ic, as `collector_current` already does).
+    /// Evaluates the device I-V characteristic at the absolute solved Vce using
+    /// the currently-set `vbe` (bias + any AC). After a DC settle with 0 input
+    /// this is the quiescent Ic.
     #[inline]
     pub fn solved_ic(&self) -> crate::Wave {
-        self.collector_current(self.prev_v)
+        self.collector_current(self.vce_bias + self.prev_v)
     }
 
     /// Collector current Ic as a function of Vce, with Vbe held constant.
@@ -1394,30 +1429,47 @@ impl BjtRoot {
     }
 
     /// WDF NR solve: incident wave → reflected wave.
+    ///
+    /// The WDF tree carries only the AC behavior (VCC enters the collector node
+    /// through R_C as a DC term the tree treats as AC ground), so the solve is
+    /// *incremental* around the DC operating point: the port voltage `v` is the
+    /// AC component of Vce and the device current is referenced to its quiescent
+    /// value (`ic_quiescent`). At rest (a = 0) the net port current is zero, so
+    /// `v` settles at 0 and the absolute Vce rests at `vce_bias` — instead of
+    /// the absolute Ic dragging the port to the negated supply rail. This is the
+    /// same incremental-around-bias formulation as `biased_single_diode_reflection`.
     pub fn process(&mut self, a: crate::Wave, rp: crate::Wave) -> crate::Wave {
         let v_max = self.v_max;
+        // The AC port voltage can swing from collector saturation (≈ -vce_bias,
+        // Vce ≈ 0) up toward cutoff (Vce ≈ v_max). Keep the absolute Vce inside
+        // [-v_max, v_max] for the GP exponentials, expressed in AC coordinates.
+        let v_ac_lo = -v_max - self.vce_bias;
+        let v_ac_hi = v_max - self.vce_bias;
         let cold = a * 0.5;
-        let v0 = if self.prev_v != 0.0
-            && (self.prev_v - cold).abs() < v_max
-            && self.prev_v.abs() < v_max
-        {
+        let v0 = if (self.prev_v - cold).abs() < v_max && self.prev_v.abs() < v_max {
             self.prev_v
         } else {
-            cold
+            cold.clamp(v_ac_lo, v_ac_hi)
         };
         let root = self.clone();
+        let vce_bias = self.vce_bias;
+        let ic_q = self.ic_quiescent;
         let b = newton_raphson_solve(
             a,
             rp,
             v0,
             super::solver::NR_MAX_ITER,
             1e-6,
-            Some((-v_max, v_max)),
+            Some((v_ac_lo, v_ac_hi)),
             None,
-            |v| {
+            |v_ac| {
+                // Incremental current at AC port voltage `v_ac`: evaluate the
+                // device at the absolute Vce = vce_bias + v_ac and subtract the
+                // quiescent current the bias network already supplies.
+                let vce = vce_bias + v_ac;
                 (
-                    root.collector_current(v),
-                    root.collector_current_derivative(v),
+                    root.collector_current(vce) - ic_q,
+                    root.collector_current_derivative(vce),
                 )
             },
         );
