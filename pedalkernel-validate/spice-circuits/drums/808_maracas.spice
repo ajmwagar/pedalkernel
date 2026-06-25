@@ -1,0 +1,64 @@
+* ============================================================================
+* 808 Maracas — High-Frequency Bridged-T Resonator (Behavioral State-Space)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The 808 maracas circuit uses a high-frequency bridged-T
+* resonator (~4.8 kHz) to model the percussive click attack. The actual
+* maracas character is dominated by a DSP noise layer (VoiceNoise at ~6 kHz
+* bandpass) implemented outside the WDF .pedal — that noise component is a
+* documented gap in this SPICE deck.
+*
+* DESIGN RATIONALE (from 808_maracas.pedal comment):
+*   The TR-808 maracas schematic uses a simple noise + HPF circuit with no
+*   resonant body. The .pedal provides a high-frequency bridged-T that acts
+*   as a brief transient click at attack, not a sustained ring. The short
+*   decay (τ ≈ 2.24 ms per theory; Decay pot at 0.10 for very short ring)
+*   means only the first few cycles are audible.
+*
+* PARAMETERS (from 808_maracas.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 220kΩ, C1 = C2 = 150pF
+*   f0 = 1 / (2π·220k·150p) = 4822.9 Hz
+*   r_crit = 220k+220k+220k = 660kΩ
+*   R_fb = 680kΩ  →  Q = 680 / (680−660) = 34.00
+*   zeta = 1/(2·Q) = 0.01471
+*   omega0 = 2π·f0 = 30303.03 rad/s
+*   2·zeta·omega0 = 891.27
+*   τ ≈ Q / (π·f0) ≈ 2.24 ms  (Decay pot at 0.10 → very short effective ring)
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* NOISE GAP: The real TR-808 maracas character is almost entirely the noise burst
+*   (~50 ms decay, ~6 kHz bandpass). This SPICE deck models ONLY the tonal
+*   bridged-T click from the .pedal — the noise component is not modeled.
+*   Since the WDF model is also click-only (noise comes from DSP VoiceNoise),
+*   WDF-vs-SPICE comparison is valid for the tonal body.
+*   A noise-path deck would require an ngspice noise source + bandpass model and
+*   is tracked as a separate gap.
+*
+* VERIFIED: f0 = 4822.9 Hz (theory), Q = 34.00
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 30303.03
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -30303.03
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -891.27
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 30303.03
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

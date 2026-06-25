@@ -1,0 +1,63 @@
+* ============================================================================
+* 808 Clap Body — Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: This deck models the BANDPASS RESONATOR BODY of the 808 clap.
+* The full TR-808 clap circuit consists of:
+*   1. A noise source → 1.5 kHz bandpass filter → VCA
+*   2. A "comb" VCA envelope: three rapid bursts (~10 ms apart) + ~200 ms reverb tail
+*
+* MODELING LIMITATIONS (two documented gaps):
+*
+*   GAP 1 — Multi-burst envelope: The authentic clap has 3-4 rapid noise bursts
+*   (comb filter reverb effect) NOT a single decay. This SPICE deck triggers a
+*   SINGLE impulse response (one burst), modeling only the bandpass resonator body.
+*   The multi-burst timing is implemented as a DSP block (ClapEnvelope) in
+*   drummerboy-core/src/lib.rs — not in the WDF .pedal. The WDF engine receives
+*   only the single-impulse signal path.
+*
+*   GAP 2 — Noise component: The authentic clap uses bandpass-filtered noise.
+*   This deck models the resonator transfer function (1538 Hz, Q=1.43), not a
+*   noise source. The noise character of the actual clap is not captured.
+*   Since the WDF .pedal is also a resonator-only model (no noise source),
+*   WDF-vs-SPICE comparison for the tonal body is valid.
+*
+* PARAMETERS (from 808_clap.pedal — "808 Clap Body" — pedalkernel-pro, private):
+*   R1 = R2 = 22kΩ, C1 = C2 = 4.7nF
+*   f0 = 1 / (2π·22k·4.7n) = 1539.2 Hz (textbook; WDF loading shifts this)
+*   r_crit = 22k+22k+22k = 66kΩ
+*   R_fb = 220kΩ  →  Q = 220 / (220−66) = 1.43
+*   zeta = 1/(2·Q) = 0.350
+*   omega0 = 2π·f0 = 9671.18 rad/s
+*   2·zeta·omega0 = 6769.83
+*   τ ≈ Q / (π·f0) ≈ 0.30 ms  (extremely short ring — clap body is a click)
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* VERIFIED: f0 = 1539.2 Hz (theory), Q = 1.43, τ ≈ 0.30 ms
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 9671.18
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -9671.18
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -6769.83
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 9671.18
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k
