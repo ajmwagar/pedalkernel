@@ -4003,6 +4003,323 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // ── B3 voices: 909 analog + 606 snare ────────────────────────────────────
+
+                // 606 snare — dual bridged-T resonator (lo ~282 Hz + hi ~339 Hz)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/606_snare.pedal
+                // SPICE model: two state-space resonators summed; noise burst NOT modeled
+                //   (tonal-body-only gap documented in 606_snare.spice header).
+                //
+                // Lo body: R=120k, C=4.7n → f0=282.3Hz, Q=4.27 (R_fb=470k)
+                // Hi body: R=100k, C=4.7n → f0=338.6Hz, Q=5.62 (R_fb=365k)
+                //
+                // NOTE: Hi-body R_fb was raised 330k→365k to balance oscillator energy
+                // (fixes prior bug where hi-body was 10× louder than lo-body).
+                //
+                // Known failure: same WDF resonator bug as 808 voices (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "606_snare".to_string(),
+                    TestCase {
+                        circuit: "drums/606_snare.pedal".to_string(),
+                        description:
+                            "TR-606 snare: dual bridged-T (lo 282 Hz Q=4.27 + hi 339 Hz Q=5.62), tonal bodies only"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/606_snare.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 lo tom — single bridged-T resonator (~80 Hz, Q=5.0)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_lo_tom.pedal
+                // SPICE model: state-space resonator, f0=79.6Hz, Q=5.0
+                //
+                // Authentic TR-909 LT uses a UJT relaxation oscillator (~65 Hz target).
+                // .pedal approximates with bridged-T + PitchEnvelope. SPICE models
+                // the static body resonance; PitchEnvelope sweep not modeled in SPICE.
+                //
+                // Known failure: same WDF resonator bug as 808 voices (lq6.1).
+                tests.insert(
+                    "909_lo_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/909_lo_tom.pedal".to_string(),
+                        description:
+                            "TR-909 lo tom: bridged-T resonator, f0=79.6 Hz, Q=5.0; PitchEnvelope sweep not in SPICE"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_lo_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 mid tom — single bridged-T resonator (~125 Hz, Q=5.26)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_mid_tom.pedal
+                // SPICE model: state-space resonator, f0=125.3Hz, Q=5.26
+                //
+                // Authentic TR-909 MT uses a UJT relaxation oscillator (~110-120 Hz target).
+                // .pedal approximates with bridged-T + PitchEnvelope. SPICE models static body.
+                tests.insert(
+                    "909_mid_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/909_mid_tom.pedal".to_string(),
+                        description:
+                            "TR-909 mid tom: bridged-T resonator, f0=125.3 Hz, Q=5.26; PitchEnvelope sweep not in SPICE"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_mid_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 hi tom — single bridged-T resonator (~188 Hz, Q=4.86)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_hi_tom.pedal
+                // SPICE model: state-space resonator, f0=188.4Hz, Q=4.86
+                //
+                // Authentic TR-909 HT uses a UJT relaxation oscillator (~140-160 Hz target).
+                // .pedal approximates with bridged-T (WDF loading shifts peak to 190-210 Hz).
+                // PitchEnvelope sweep not modeled in SPICE.
+                tests.insert(
+                    "909_hi_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/909_hi_tom.pedal".to_string(),
+                        description:
+                            "TR-909 hi tom: bridged-T resonator, f0=188.4 Hz, Q=4.86; PitchEnvelope sweep not in SPICE"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_hi_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 rim — single bridged-T resonator (~412 Hz, Q=5.56)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_rim.pedal
+                // SPICE model: state-space resonator, f0=412.3Hz, Q=5.56 (unloaded, Decay=1.0)
+                //
+                // Default Decay=0.3 shunts the midpoint, reducing effective Q significantly.
+                // SPICE models the unloaded Q=5.56 (Decay=1.0 position); WDF engine applies
+                // pot damping internally. Same pitch range as 808 rimshot; character
+                // differentiation comes from shorter decay (Decay=0.3 default), not pitch.
+                //
+                // Same WDF resonator bug as 808 voices (lq6.1). Also expects WDF
+                // bias-loading shift (similar to 808 rimshot, see ENGINE_BUG_BRIDGED_T_BIAS_LOADING.md).
+                tests.insert(
+                    "909_rim".to_string(),
+                    TestCase {
+                        circuit: "drums/909_rim.pedal".to_string(),
+                        description:
+                            "TR-909 rim shot: bridged-T resonator, f0=412.3 Hz, Q=5.56 (unloaded); short click at Decay=0.3"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + WDF bias-loading shift.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_rim.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 snare — dual bridged-T resonator (lo ~339 Hz + hi ~452 Hz)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_snare.pedal
+                // SPICE model: two state-space resonators summed; noise burst NOT modeled.
+                //
+                // Lo body: R=100k, C=4.7n → f0=338.6Hz, Q=5.0
+                // Hi body: R=75k, C=4.7n  → f0=451.4Hz, Q=6.0
+                //
+                // Higher-pitched than 808 snare (~154+339 Hz) — characteristic 909 brightness.
+                // Noise gap: VoiceNoise (6kHz, Q=2.5, decay=60ms, amount=0.7) not modeled.
+                // Same WDF resonator bug as 808 voices (lq6.1).
+                tests.insert(
+                    "909_snare".to_string(),
+                    TestCase {
+                        circuit: "drums/909_snare.pedal".to_string(),
+                        description:
+                            "TR-909 snare: dual bridged-T (lo 339 Hz Q=5.0 + hi 452 Hz Q=6.0), tonal bodies only"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_snare.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 kick — bridged-T resonator body (~48 Hz, Q=5.71)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_kick.pedal
+                // SPICE model: state-space resonator, f0=48.2Hz, Q=5.71 (body resonance only)
+                //
+                // DOCUMENTED GAPS (three stacked):
+                //   1. BJT oscillator topology: authentic TR-909 kick uses a 2SC1583 dual-NPN
+                //      transistor multivibrator. This SPICE deck models the equivalent
+                //      bridged-T state-space body from the .pedal approximation — NOT the
+                //      transistor oscillator circuit. BJT transient convergence in the
+                //      multivibrator topology is too stiff for the standard SPICE harness.
+                //   2. PitchEnvelope sweep (190→45 Hz over 80ms, amount=3.2) not in SPICE.
+                //   3. VoiceNoise (4kHz, Q=1.5, decay=8ms) + VoiceClick (decay=3ms) DSP
+                //      layers not modeled (outside WDF path).
+                //
+                // Same WDF resonator bug as 808 voices (lq6.1).
+                tests.insert(
+                    "909_kick".to_string(),
+                    TestCase {
+                        circuit: "drums/909_kick.pedal".to_string(),
+                        description:
+                            "TR-909 kick: bridged-T body approx, f0=48.2 Hz, Q=5.71; BJT oscillator + pitch sweep + noise not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + BJT oscillator gap
+                            // + PitchEnvelope sweep gap + noise/click DSP gaps.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_kick.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 clap — bandpass body resonator (~1539 Hz, Q=1.43); 4-burst envelope not modeled
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_clap.pedal
+                // SPICE model: state-space resonator, f0=1538.5Hz, Q=1.43
+                //
+                // Same bandpass resonator as 808 clap (R=22k, C=4.7n, R_fb=220k).
+                // The distinction between 808 and 909 clap is in the DSP burst pattern:
+                //   808: 3 bursts (ClapEnvelope), 909: 4 bursts (ClapEnvelope909).
+                // Both body resonators are identical in spectral character.
+                //
+                // DOCUMENTED GAPS (same as 808 clap):
+                //   1. Multi-burst comb envelope (ClapEnvelope909 DSP block) not in WDF path.
+                //   2. Noise source not modeled.
+                //   3. SPICE models deterministic resonant body response only.
+                //
+                // Same WDF resonator bug as 808 voices (lq6.1).
+                tests.insert(
+                    "909_clap".to_string(),
+                    TestCase {
+                        circuit: "drums/909_clap.pedal".to_string(),
+                        description:
+                            "TR-909 clap body: bridged-T resonator, f0=1538.5 Hz, Q=1.43; 4-burst envelope + noise not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + 4-burst envelope gap
+                            // + noise source gap.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_clap.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
                 tests
             },
         },
