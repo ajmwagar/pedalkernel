@@ -51,6 +51,13 @@ pub struct CompileOptions {
     /// When false, coupled blockwise stages use table-driven fixed-point
     /// iteration without building/solving the full Jacobian.
     pub coupled_blockwise_newton: bool,
+    /// When true, an active-feedback loop containing a nonlinear element (e.g. a
+    /// diode across an op-amp's feedback path) is broken with a one-sample (z⁻¹)
+    /// delay instead of being co-solved simultaneously within the sample. Off by
+    /// default — the loop is co-solved (the physically correct, delay-free path).
+    /// Provided to measure the error a 1-sample delay introduces vs the exact
+    /// solve against the SPICE golden.
+    pub feedback_one_sample_delay: bool,
 }
 
 impl Default for CompileOptions {
@@ -66,6 +73,7 @@ impl Default for CompileOptions {
             force_serial_blockwise_feedback_gain: 0.0,
             disable_iir: false,
             coupled_blockwise_newton: true,
+            feedback_one_sample_delay: false,
         }
     }
 }

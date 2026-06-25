@@ -19,7 +19,7 @@ use super::super::build::create_root;
 use super::super::classify::NonlinearKind;
 use super::super::component::EdgeKind;
 use super::super::dyn_node::DynNode;
-use super::super::graph::{CircuitGraph, NodeId};
+use super::super::graph::{CircuitGraph, NodeId, NullorPinRecord};
 use super::super::helpers::{gummel_poon_model, pentode_model, triode_model, vari_mu_model};
 use super::super::signal_flow::FlowGroup;
 use super::super::stage::{
@@ -264,6 +264,18 @@ fn build_general_mna_from_edges_inner(
         None
     };
 
+    // Op-amps (nullors) in this group each get a VCVS vsource slot so the op-amp
+    // constraint can be stamped into the MNA below — NL devices in the op-amp's
+    // feedback path (e.g. a diode across R_fb) then solve against the
+    // op-amp-constrained network instead of in isolation.
+    let mut group_opamps: Vec<(usize, NullorPinRecord)> = Vec::new();
+    for p in &graph.nullor_pins {
+        if all_edges.iter().any(|&e| graph.edges[e].comp_idx == p.comp_idx) {
+            group_opamps.push((num_vsources, p.clone()));
+            num_vsources += 1;
+        }
+    }
+
     let node_to_mna = |node: NodeId| -> Option<usize> {
         if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
             None
@@ -289,6 +301,7 @@ fn build_general_mna_from_edges_inner(
         num_vsources,
         effective_rate,
         vcc_vs_idx,
+        &group_opamps,
     );
 
     // Step 4: Build WDF ports
@@ -626,6 +639,7 @@ fn stamp_passive_edges(
     num_vsources: usize,
     effective_rate: f64,
     vcc_vs_idx: Option<usize>,
+    opamps: &[(usize, NullorPinRecord)],
 ) -> (
     MnaSystem,
     Vec<(usize, OnePortKind)>,
@@ -699,6 +713,22 @@ fn stamp_passive_edges(
     if let Some(vcc_idx) = vcc_vs_idx {
         let vcc_mna = node_to_mna(graph.vcc_node);
         mna.stamp_voltage_source(vcc_mna, None, vcc_idx);
+    }
+
+    // Op-amp VCVS (nullor): v_out − Aol·(v_pos − v_neg) + Ro·i = 0. Stamping it
+    // here puts the op-amp constraint in the same MNA as the NL devices, so a
+    // diode (or other NL) in the feedback path is co-solved against the
+    // op-amp-constrained network rather than as an isolated clipper.
+    for (vsrc_idx, pins) in opamps {
+        mna.stamp_vcvs(
+            node_to_mna(pins.pos_node),
+            node_to_mna(pins.neg_node),
+            node_to_mna(pins.out_node),
+            None,
+            1.0e5,
+            75.0,
+            *vsrc_idx,
+        );
     }
 
     (mna, reactive_edges, variable_resistor_candidates)
