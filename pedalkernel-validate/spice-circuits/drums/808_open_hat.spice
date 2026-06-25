@@ -1,0 +1,67 @@
+* ============================================================================
+* 808 Open Hi-Hat — High-Q High-Freq Resonator (Behavioral State-Space Approx)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: Same six-oscillator metallic source simplification as
+* 808_closed_hat.spice — see that file's header for the full gap documentation.
+* The open hat differs from the closed hat ONLY in decay time:
+*   - R_fb=470k > r_crit=450k: ABOVE critical → sustains oscillation (longer ring)
+*   - Decay pot: 1M (vs 100k for closed) → wider range / longer sustain
+*
+* SIMPLIFICATION (documented gap):
+*   Same single-resonator approximation as closed hat. The six-oscillator metallic
+*   source is NOT modeled. The SPICE deck captures the behavioral output of the
+*   .pedal circuit (single bridged-T at 7.07 kHz, longer ring than closed hat).
+*
+* PARAMETERS (from 808_open_hat.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 150kΩ, C1 = C2 = 150pF  (IDENTICAL to closed hat resonator values)
+*   f0 = 1 / (2π·150k·150p) = 7073.6 Hz
+*   omega0 = 2π·f0 = 44444.44 rad/s
+*   r_crit = 150k+150k+150k = 450kΩ
+*   R_fb = 470kΩ  →  R_fb > r_crit: ABOVE CRITICAL (regenerative, sustained ring)
+*   Q = 470 / (470−450) = 23.50
+*   zeta = 1/(2·Q) = 0.0213
+*   2·zeta·omega0 = 44444.44 / 23.50 = 1891.25
+*   τ = 2·Q / ω₀ = 2·23.5 / 44444.44 ≈ 1.06 ms (WDF model ring time)
+*
+* NOTE ON DECAY VS AUTHENTIC HARDWARE:
+*   The authentic TR-808 open hat sustains ~200-400 ms. The .pedal model's ring
+*   time (~1ms at Q=23.5 in theory) is much shorter because the 7kHz resonator
+*   decays rapidly even at high Q. The Decay pot (1M, default 1.0 → max) extends
+*   this somewhat but cannot reach authentic hardware decay times. This is a
+*   modeling limitation of the single-resonator WDF approximation vs the
+*   authentic six-oscillator circuit with envelope VCA.
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* VERIFIED: f0 = 7073.6 Hz (theory), Q = 23.50
+* KNOWN GAPS:
+*   1. Six-oscillator metallic source not modeled (resonator approximation only).
+*   2. Authentic open hat decay (~300ms) not achievable with this .pedal topology.
+*   3. WDF engine lq6.1 bug: actual WDF output is at Nyquist, not 7073 Hz.
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 44444.44
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -44444.44
+
+* G-source: −2·zeta·omega0 * v_v  (damping; Q=23.5)
+Gv_v 0 v_v v_v 0 -1891.25
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 44444.44
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

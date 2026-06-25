@@ -3745,6 +3745,264 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // 808 claves — single high-Q bridged-T resonator (~2.25 kHz, Q≈23.5)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_claves.pedal
+                // SPICE model: state-space resonator, f0=2257.5Hz, Q=23.5
+                //
+                // R1=R2=150k, C=470p → f0=2257.5 Hz. Short percussive click with
+                // brief ring. Same WDF resonator bug as other voices (lq6.1).
+                tests.insert(
+                    "808_claves".to_string(),
+                    TestCase {
+                        circuit: "drums/808_claves.pedal".to_string(),
+                        description:
+                            "TR-808 claves: single bridged-T resonator, f0=2257.5 Hz, Q=23.5"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator is broken (f0 at Nyquist, lq6.1).
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_claves.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 rimshot — single low-Q bridged-T resonator (~1026 Hz, Q≈2.78)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_rimshot.pedal
+                // SPICE model: state-space resonator, f0=1026.1Hz, Q=2.78
+                //
+                // Very short click (τ≈0.86ms). WDF loading raises measured frequency
+                // to ~1477 Hz per .pedal comment (WDF bridged-T bias-loading effect).
+                // Same WDF resonator bug as other voices (lq6.1).
+                tests.insert(
+                    "808_rimshot".to_string(),
+                    TestCase {
+                        circuit: "drums/808_rimshot.pedal".to_string(),
+                        description:
+                            "TR-808 rimshot: single bridged-T resonator, f0=1026.1 Hz, Q=2.78, τ≈0.86ms"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + WDF loading shifts f0.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_rimshot.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 cowbell — dual bridged-T resonator (lo ~720 Hz + hi ~1026 Hz) summed
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_cowbell.pedal
+                // SPICE model: two state-space resonators summed (sinusoidal approximation).
+                //
+                // Authentic TR-808 uses two square-wave oscillators (~560/845 Hz). The .pedal
+                // uses bridged-T resonators as approximations — see cowbell.pedal for WDF
+                // loading rationale. SPICE deck models lo (Q=2.09) + hi (Q=1.98) resonators.
+                // Square-wave harmonic content is a documented gap.
+                tests.insert(
+                    "808_cowbell".to_string(),
+                    TestCase {
+                        circuit: "drums/808_cowbell.pedal".to_string(),
+                        description:
+                            "TR-808 cowbell: dual bridged-T (lo 720 Hz Q=2.09 + hi 1026 Hz Q=1.98), sinusoidal approx"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + square-wave harmonic gap.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_cowbell.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 maracas — high-freq bridged-T click resonator (~4823 Hz, Q=34)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_maracas.pedal
+                // SPICE model: state-space resonator, f0=4822.9Hz, Q=34
+                //
+                // The .pedal provides a brief click at attack; the actual maracas character
+                // is DSP noise (VoiceNoise at ~6 kHz bandpass) outside the WDF model.
+                // SPICE deck captures tonal body only; noise component is a documented gap.
+                tests.insert(
+                    "808_maracas".to_string(),
+                    TestCase {
+                        circuit: "drums/808_maracas.pedal".to_string(),
+                        description:
+                            "TR-808 maracas: high-freq bridged-T click, f0=4822.9 Hz, Q=34; noise component not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + noise component not modeled.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_maracas.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 clap — bandpass body resonator (~1539 Hz, Q=1.43); burst envelope not modeled
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_clap.pedal
+                // SPICE model: state-space resonator, f0=1539.2Hz, Q=1.43
+                //
+                // The authentic 808 clap has 3-4 retriggered noise bursts (reverb effect).
+                // The multi-burst envelope is a DSP block (ClapEnvelope in drummerboy-core);
+                // the .pedal provides only the bandpass resonator body. Two documented gaps:
+                // (1) multi-burst envelope not in WDF path; (2) noise source not modeled.
+                tests.insert(
+                    "808_clap".to_string(),
+                    TestCase {
+                        circuit: "drums/808_clap.pedal".to_string(),
+                        description:
+                            "TR-808 clap body: bridged-T resonator, f0=1539.2 Hz, Q=1.43; multi-burst envelope + noise not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + multi-burst envelope gap
+                            // + noise source gap. Three stacked modeling limitations.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_clap.pedal".to_string(),
+                        ),
+                    },
+                );
+
+                // 808 closed hat — damped high-freq resonator (~7074 Hz, Q_eff≈5 approx)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_closed_hat.pedal
+                // SPICE model: state-space resonator, f0=7073.6Hz, Q_eff=5 (approximation).
+                //
+                // Authentic TR-808: 6 square-wave oscillators (~205–800 Hz) + 7kHz HPF.
+                // The .pedal approximates this as a single 7kHz bridged-T with sub-critical
+                // feedback (R_fb=47k < r_crit=450k → highly damped, very short ring).
+                // Q_eff=5 is an approximation; the exact Q is not derivable from the
+                // sub-critical R_fb formula. Two documented gaps: 6-osc metallic source +
+                // sub-critical Q approximation.
+                tests.insert(
+                    "808_closed_hat".to_string(),
+                    TestCase {
+                        circuit: "drums/808_closed_hat.pedal".to_string(),
+                        description:
+                            "TR-808 closed hat: 7074 Hz resonator approx (Q_eff=5); 6-osc metallic source not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + 6-osc metallic gap
+                            // + Q_eff approximation (R_fb < r_crit, sub-critical feedback).
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_closed_hat.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 open hat — high-Q high-freq resonator (~7074 Hz, Q=23.5)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_open_hat.pedal
+                // SPICE model: state-space resonator, f0=7073.6Hz, Q=23.5
+                //
+                // Same resonator body as closed hat (identical R/C values) but with
+                // R_fb=470k > r_crit=450k → above critical: longer ring than closed hat.
+                // Same 6-osc metallic source gap as closed hat. Authentic decay (~300ms)
+                // is not achievable with this single-resonator .pedal topology.
+                tests.insert(
+                    "808_open_hat".to_string(),
+                    TestCase {
+                        circuit: "drums/808_open_hat.pedal".to_string(),
+                        description:
+                            "TR-808 open hat: 7074 Hz resonator (Q=23.5); 6-osc metallic source not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + 6-osc metallic gap.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_open_hat.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
                 tests
             },
         },
