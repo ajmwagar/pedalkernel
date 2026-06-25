@@ -4645,6 +4645,14 @@ fn is_nonlinear_modulator_group(
     let mut touches_output = false;
     let mut has_reactive = false;
     let mut has_vcvs = false;
+    // Collect the output (collector/drain) nodes of the group's transistors so
+    // we can test whether the device drives the global output through a
+    // downstream coupling network. A common-emitter / common-source GAIN stage
+    // is NOT a modulator even when its output coupling cap was split into a
+    // separate downstream group (so the group itself has no reactive edge and
+    // does not directly touch `out`). This is the rail-symmetric counterpart of
+    // the NPN case, whose in-group input cap already makes `has_reactive` true.
+    let mut transistor_outputs: Vec<(NodeId, NodeId)> = Vec::new(); // (output, other terminal)
     for &eidx in group.all_edges().iter() {
         let e = &graph.edges[eidx];
         touches_output |= e.node_a == graph.out_node || e.node_b == graph.out_node;
@@ -4666,12 +4674,74 @@ fn is_nonlinear_modulator_group(
         let comp = &graph.components[e.comp_idx];
         if comp.kind.is_bjt() || comp.kind.is_jfet() || comp.kind.is_mosfet() {
             has_transistor_nl = true;
+            // Resolve the device's signal-output pin (collector/drain). Fall
+            // back to the edge's node_a (the collector/drain endpoint of the
+            // C-E / D-S edge) when the pin name is not in the node map.
+            let out_pin = match comp.kind.signal_terminals() {
+                super::component::SignalTerminals::Amplifier { output, .. } => Some(output),
+                _ => None,
+            };
+            let out_node = out_pin
+                .and_then(|p| graph.node_names.get(&format!("{}.{p}", comp.id)).copied())
+                .unwrap_or(e.node_a);
+            // The "other terminal" is the one we must NOT cross when tracing the
+            // forward path (else we'd loop back through the device).
+            let other = if out_node == e.node_a { e.node_b } else { e.node_a };
+            transistor_outputs.push((out_node, other));
         } else {
             return false;
         }
     }
 
-    has_transistor_nl && !touches_output && !has_reactive && !has_vcvs
+    // Forward-path test: does any transistor output node reach the global
+    // output through passive (linear/reactive) edges, without re-entering the
+    // device's own terminals? Coupling caps, load resistors, and tone networks
+    // downstream of the collector all conduct here. If so, the device is a
+    // forward gain stage, not an impedance modulator.
+    let collector_reaches_output = transistor_outputs.iter().any(|&(out_node, blocked)| {
+        if out_node == graph.out_node {
+            return true;
+        }
+        let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+        let mut stack = vec![out_node];
+        seen.insert(out_node);
+        seen.insert(blocked);
+        while let Some(node) = stack.pop() {
+            if node == graph.out_node {
+                return true;
+            }
+            for (eidx, edge) in graph.edges.iter().enumerate() {
+                if !matches!(
+                    graph.effective_edge_kind(eidx),
+                    super::component::EdgeKind::Linear | super::component::EdgeKind::Reactive
+                ) {
+                    continue;
+                }
+                let Some(next) = other_node(edge, node) else {
+                    continue;
+                };
+                // Don't expand through rails — a forward audio path to `out`
+                // never routes through the supply/ground plane.
+                if next == graph.gnd_node
+                    || next == graph.vcc_node
+                    || graph.supply_nodes.contains(&next)
+                    || graph.ac_ground_nodes.contains(&next)
+                {
+                    continue;
+                }
+                if seen.insert(next) {
+                    stack.push(next);
+                }
+            }
+        }
+        false
+    });
+
+    has_transistor_nl
+        && !touches_output
+        && !has_reactive
+        && !has_vcvs
+        && !collector_reaches_output
 }
 
 /// Get the non-GND signal node from a ground-clip group.

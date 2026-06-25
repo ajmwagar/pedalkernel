@@ -32,6 +32,10 @@ impl Component for Resistor {
         true
     }
 
+    fn is_fixed_resistor(&self) -> bool {
+        true
+    }
+
     fn pin_config(&self) -> PinConfig {
         PinConfig {
             valid_pins: &["a", "b"],
@@ -567,6 +571,10 @@ impl Component for Tempco {
         true
     }
 
+    fn is_fixed_resistor(&self) -> bool {
+        true
+    }
+
     fn pin_config(&self) -> PinConfig {
         PinConfig {
             valid_pins: &["a", "b"],
@@ -833,6 +841,10 @@ impl Component for ResistorSwitched {
     }
 
     fn is_passive(&self) -> bool {
+        true
+    }
+
+    fn is_fixed_resistor(&self) -> bool {
         true
     }
 

@@ -1006,6 +1006,16 @@ pub trait Component: std::fmt::Debug {
     fn is_pot(&self) -> bool {
         false
     }
+    /// A fixed (non-variable, non-reactive) resistor: plain `Resistor`,
+    /// `Tempco`, or `ResistorSwitched`. Distinguishes a DC load/bias resistor
+    /// from reactive tone/coupling elements (caps, inductors) and variable
+    /// tone/level controls (pots). Used by the signal-flow grouping to decide
+    /// whether a branch off an active device's output node is the device's DC
+    /// load (claim it into the device group) versus a post-amp tone shunt
+    /// (split into its own passive stage).
+    fn is_fixed_resistor(&self) -> bool {
+        false
+    }
     fn is_diode_family(&self) -> bool {
         false
     }

@@ -1310,10 +1310,16 @@ fn claim_passive_edges(
         let b_rail = rails.contains(&e.node_b);
 
         // Ground shunt: one terminal on rail, other in group_nodes.
-        // But NOT if the non-rail terminal is an active output node AND
-        // the rail is ground — those are post-amp shunts (e.g. C_tone in
-        // RAT), not part of the amplifier. Supply-side load resistors
-        // (VCC → plate/drain/collector) ARE essential and must be claimed.
+        // But NOT if the non-rail terminal is an active output node AND the
+        // rail is ground AND the element is reactive/variable — those are
+        // post-amp tone/coupling shunts (e.g. C_tone in RAT), not part of the
+        // amplifier. A FIXED RESISTOR from the device's output node to ground
+        // is the DC collector/drain/plate LOAD and must be claimed: it is
+        // rail-symmetric to the supply-side load on an NPN/N-channel stage
+        // (VCC → collector). A PNP/P-channel common-emitter stage has emitter
+        // → VCC and its collector load returns to GND; without this the load
+        // resistor escapes into a downstream passive group and the device
+        // folds to a dummy PassiveRType (no Bjt root, dead stage).
         let non_rail_node = if a_rail {
             e.node_b
         } else if b_rail {
@@ -1324,7 +1330,9 @@ fn claim_passive_edges(
         let rail_node = if a_rail { e.node_a } else { e.node_b };
         let rail_is_ground =
             rail_node == graph.gnd_node || graph.ac_ground_nodes.contains(&rail_node);
-        let at_output = post_stage_output_nodes.contains(&non_rail_node) && rail_is_ground;
+        let is_dc_load = comp.kind.is_fixed_resistor();
+        let at_output =
+            post_stage_output_nodes.contains(&non_rail_node) && rail_is_ground && !is_dc_load;
 
         if !at_output
             && ((a_rail && group_nodes.contains(&e.node_b))
@@ -1459,7 +1467,14 @@ fn claim_passive_edges(
                 // Respect at_output exclusion for post-stage ground shunts.
                 // Two-port nonlinear devices are not impedance boundaries:
                 // their output-node caps can be part of a ladder rung.
-                if rail_is_gnd && post_stage_output_nodes.contains(&node) {
+                // A FIXED RESISTOR to ground at the device output is the DC
+                // load (PNP/P-channel collector load returns to GND), the
+                // rail-symmetric counterpart of the NPN supply-side load —
+                // always claim it (mirrors the single-hop pass above).
+                if rail_is_gnd
+                    && post_stage_output_nodes.contains(&node)
+                    && !comp.kind.is_fixed_resistor()
+                {
                     continue;
                 }
                 ground_shunt_edges.push(eidx);
@@ -3603,6 +3618,84 @@ mod tests {
         assert_eq!(
             q1_group, fb_group,
             "R_fb_limit (feedback limiting resistor) must be in the BJT group"
+        );
+    }
+
+    // ── PNP common-emitter: rail-swapped CE stage must group like the NPN ──
+    //
+    // A PNP CE stage has emitter → R_E → VCC and its collector LOAD returns to
+    // GND (the rail-mirror of the NPN: emitter → GND, collector load → VCC).
+    // The flow grouping must claim the collector load resistor (R_C, collector
+    // → GND) into the transistor group, exactly as the NPN claims its supply-
+    // side load (RC, collector → VCC). Without this, R_C escapes into a
+    // downstream passive group, the transistor group has no forward-signal
+    // collector load, and the device folds to a dummy PassiveRType (dead stage,
+    // no Bjt root).
+
+    const PNP_CE: &str = r#"
+        pedal "PNP" { supply 9V
+          components {
+            R_bias1: resistor(100k)
+            R_bias2: resistor(33k)
+            C_in: cap(1u)
+            R_in: resistor(10k)
+            Q1: pnp(2n3906)
+            R_E: resistor(2.2k)
+            R_C: resistor(4.7k)
+            C_out: cap(10u)
+            R_load: resistor(10k)
+          }
+          nets {
+            vcc -> R_bias1.a
+            R_bias1.b -> R_bias2.a
+            R_bias2.b -> gnd
+            in -> C_in.a
+            C_in.b -> R_in.a
+            R_in.b -> R_bias1.b, Q1.base
+            Q1.emitter -> R_E.a
+            R_E.b -> vcc
+            Q1.collector -> R_C.a
+            R_C.b -> gnd
+            Q1.collector -> C_out.a
+            C_out.b -> R_load.a
+            R_load.b -> gnd
+            C_out.b -> out
+          }
+        }"#;
+
+    #[test]
+    fn flow_pnp_ce_claims_ground_side_collector_load() {
+        let (graph, edges) = make_graph_all_edges(PNP_CE);
+        let groups = find_flow_groups(&edges, &graph);
+
+        let q1_group = find_group_containing(&groups, &graph, "Q1").expect("Q1 group");
+        let rc_group = find_group_containing(&groups, &graph, "R_C").expect("R_C group");
+        let re_group = find_group_containing(&groups, &graph, "R_E").expect("R_E group");
+
+        assert_eq!(
+            q1_group, rc_group,
+            "R_C (collector load to GND on a PNP CE stage) must be claimed into the \
+             transistor group, the rail-mirror of the NPN's supply-side collector load"
+        );
+        assert_eq!(
+            q1_group, re_group,
+            "R_E (emitter resistor to VCC) must be in the transistor group"
+        );
+    }
+
+    #[test]
+    fn pnp_ce_compiles_with_bjt_root() {
+        use pedalkernel_rt::stage::RootKind;
+        let pedal = crate::dsl::parse_pedal_file(PNP_CE).expect("parse");
+        let compiled =
+            crate::compiler::compile::compile_pedal(&pedal, 48000.0).expect("compile");
+        let has_bjt = compiled.stages.iter().any(|s| {
+            matches!(s, crate::compiler::compiled::Stage::Wdf(w) if matches!(w.root, RootKind::Bjt(_)))
+        });
+        assert!(
+            has_bjt,
+            "PNP common-emitter must compile to a WDF stage with a Bjt root, not fold \
+             to PassiveRType dummy stages (was the original dead-stage bug)"
         );
     }
 }
