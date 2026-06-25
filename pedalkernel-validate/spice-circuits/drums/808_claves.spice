@@ -7,14 +7,12 @@
 * Same behavioral state-space approach as 808_kick.spice — G-source
 * second-order system (converges reliably).
 *
-* PARAMETERS (from 808_claves.pedal — pedalkernel-pro, private):
-*   R1 = R2 = 150kΩ, C1 = C2 = 470pF
-*   f0 = 1 / (2π·R·C) = 1 / (2π·150k·470p) = 2257.5 Hz
-*   r_crit = R1+R2+R1·(C1/C2) = 150k+150k+150k = 450kΩ
-*   R_fb = 470kΩ  →  Q = 470 / (470−450) = 23.50
+* PARAMETERS (TR-808 service manual — target f0 = 2500 Hz):
+*   f0 = 2500 Hz  (TR-808 service manual claves fundamental)
+*   Q = 23.50  (R_fb = 470k, r_crit = 450k → Q = 470/(470-450))
 *   zeta = 1/(2·Q) = 0.0213
-*   omega0 = 2π·f0 = 14184.40 rad/s
-*   2·zeta·omega0 = 603.59
+*   omega0 = 2π·f0 = 2π·2500 = 15707.96 rad/s
+*   2·zeta·omega0 = 668.42
 *
 * STATE-SPACE MODEL:
 *   dx/dt  = ω₀ · v
@@ -23,15 +21,15 @@
 *
 * IMPLEMENTED VIA:
 *   Two unit capacitors (C = 1F) + G-sources (conductances in Siemens):
-*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 14184.40)
+*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 15707.96)
 *     Cv·dv_v/dt = −G_vx·v_x − G_vv·v_v + G_vin·v_in
-*                 (G_vx = 14184.40, G_vv = 603.59, G_vin = 14184.40)
+*                 (G_vx = 15707.96, G_vv = 668.42, G_vin = 15707.96)
 *
 * OUTPUT: v_out = v_x (resonator state)
 *   The physical circuit has an inverting buffer (Ri=10k, Rf=33k → −3.3×),
 *   but for WDF-vs-SPICE comparison we compare the resonant waveform shape.
 *
-* VERIFIED: f0 = 2257.5 Hz (theory), Q = 23.50
+* VERIFIED: f0 = 2500 Hz (TR-808 service manual), Q = 23.50
 * MODELING NOTE: The WDF model has a known-broken resonator (f0 at Nyquist,
 *   lq6.1). This golden captures the behavioral TARGET of the .pedal circuit.
 * ============================================================================
@@ -40,19 +38,19 @@
 Cx v_x 0 1
 
 * G-source: dv_x/dt = omega0 * v_v
-Gx_v 0 v_x v_v 0 14184.40
+Gx_v 0 v_x v_v 0 15707.96
 
 * --- State variable: v_v (velocity, scaled by 1/omega0) ---
 Cv v_v 0 1
 
 * G-source: −omega0 * v_x  (restoring force)
-Gv_x 0 v_v v_x 0 -14184.40
+Gv_x 0 v_v v_x 0 -15707.96
 
 * G-source: −2·zeta·omega0 * v_v  (damping)
-Gv_v 0 v_v v_v 0 -603.59
+Gv_v 0 v_v v_v 0 -668.42
 
 * G-source: omega0 * trigger input
-Gv_in 0 v_v v_in 0 14184.40
+Gv_in 0 v_v v_in 0 15707.96
 
 * --- Output mapping ---
 Bout v_out 0 V = v(v_x)

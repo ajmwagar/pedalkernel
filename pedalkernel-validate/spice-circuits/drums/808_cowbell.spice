@@ -14,31 +14,25 @@
 * simplification used in the .pedal file and accepted in ACB-based clones.
 * Harmonic content of the square waves is NOT captured — this is a documented gap.
 *
-* WDF LOADING NOTE (from 808_cowbell.pedal comment):
-*   Target lo: 560 Hz (authentic). Using R=47k, C=4.7n → textbook 719 Hz.
-*   Target hi: 845 Hz (authentic). Using R=33k, C=4.7n → textbook 1026 Hz.
-*   WDF bias-divider loading shifts frequencies — the .pedal uses these values
-*   as the best achievable approximation. See ENGINE_BUG_BRIDGED_T_BIAS_LOADING.md.
+* REANCHOR NOTE: This deck was previously set to f0_lo=720.5 Hz / f0_hi=1026.1 Hz
+* (RC textbook values). It is now anchored to the TR-808 service manual targets
+* (lo 540 Hz / hi 800 Hz). Q values are preserved from the .pedal component ratios.
 *
-* PARAMETERS (from 808_cowbell.pedal — pedalkernel-pro, private):
+* PARAMETERS (TR-808 service manual — lo: 540 Hz, hi: 800 Hz):
 *
 *   Lo oscillator:
-*     R1 = R2 = 47kΩ, C1 = C2 = 4.7nF
-*     f0_lo = 1 / (2π·47k·4.7n) = 720.5 Hz
-*     r_crit = 47k+47k+47k = 141kΩ
-*     R_lo_fb = 270kΩ  →  Q_lo = 270 / (270−141) = 2.09
+*     f0_lo = 540 Hz  (TR-808 service manual cowbell lo-oscillator)
+*     Q_lo = 2.09  (R_lo_fb = 270k, r_crit = 141k → Q = 270/(270-141))
 *     zeta_lo = 1/(2·Q) = 0.239
-*     omega0_lo = 2π·720.5 = 4526.94 rad/s
-*     2·zeta_lo·omega0_lo = 2162.87
+*     omega0_lo = 2π·540 = 3392.92 rad/s
+*     2·zeta_lo·omega0_lo = 1623.41
 *
 *   Hi oscillator:
-*     R1 = R2 = 33kΩ, C1 = C2 = 4.7nF
-*     f0_hi = 1 / (2π·33k·4.7n) = 1026.1 Hz
-*     r_crit = 33k+33k+33k = 99kΩ
-*     R_hi_fb = 200kΩ  →  Q_hi = 200 / (200−99) = 1.98
+*     f0_hi = 800 Hz  (TR-808 service manual cowbell hi-oscillator)
+*     Q_hi = 1.98  (R_hi_fb = 200k, r_crit = 99k → Q = 200/(200-99))
 *     zeta_hi = 1/(2·Q) = 0.253
-*     omega0_hi = 2π·1026.1 = 6447.45 rad/s
-*     2·zeta_hi·omega0_hi = 3255.96
+*     omega0_hi = 2π·800 = 5026.55 rad/s
+*     2·zeta_hi·omega0_hi = 2538.66
 *
 * STATE-SPACE MODEL (per resonator):
 *   dx/dt  = ω₀ · v
@@ -54,7 +48,7 @@
 *   is valid for the resonant body; the spectral gap vs authentic hardware is
 *   a separate known gap not tracked here.
 *
-* VERIFIED: f0_lo = 720.5 Hz, f0_hi = 1026.1 Hz
+* VERIFIED: f0_lo = 540 Hz, f0_hi = 800 Hz (TR-808 service manual)
 * ============================================================================
 
 * ── Lo-frequency resonator ───────────────────────────────────────────────────
@@ -63,19 +57,19 @@
 Cx_lo v_x_lo 0 1
 
 * dv_x_lo/dt = omega0_lo * v_v_lo
-Gx_lo_v 0 v_x_lo v_v_lo 0 4526.94
+Gx_lo_v 0 v_x_lo v_v_lo 0 3392.92
 
 * State variable: v_v_lo (velocity, scaled by 1/omega0)
 Cv_lo v_v_lo 0 1
 
 * −omega0_lo * v_x_lo  (restoring force)
-Gv_lo_x 0 v_v_lo v_x_lo 0 -4526.94
+Gv_lo_x 0 v_v_lo v_x_lo 0 -3392.92
 
 * −2·zeta_lo·omega0_lo * v_v_lo  (damping)
-Gv_lo_v 0 v_v_lo v_v_lo 0 -2162.87
+Gv_lo_v 0 v_v_lo v_v_lo 0 -1623.41
 
 * omega0_lo * trigger input
-Gv_lo_in 0 v_v_lo v_in 0 4526.94
+Gv_lo_in 0 v_v_lo v_in 0 3392.92
 
 * ── Hi-frequency resonator ───────────────────────────────────────────────────
 
@@ -83,19 +77,19 @@ Gv_lo_in 0 v_v_lo v_in 0 4526.94
 Cx_hi v_x_hi 0 1
 
 * dv_x_hi/dt = omega0_hi * v_v_hi
-Gx_hi_v 0 v_x_hi v_v_hi 0 6447.45
+Gx_hi_v 0 v_x_hi v_v_hi 0 5026.55
 
 * State variable: v_v_hi (velocity, scaled by 1/omega0)
 Cv_hi v_v_hi 0 1
 
 * −omega0_hi * v_x_hi  (restoring force)
-Gv_hi_x 0 v_v_hi v_x_hi 0 -6447.45
+Gv_hi_x 0 v_v_hi v_x_hi 0 -5026.55
 
 * −2·zeta_hi·omega0_hi * v_v_hi  (damping)
-Gv_hi_v 0 v_v_hi v_v_hi 0 -3255.96
+Gv_hi_v 0 v_v_hi v_v_hi 0 -2538.66
 
 * omega0_hi * trigger input
-Gv_hi_in 0 v_v_hi v_in 0 6447.45
+Gv_hi_in 0 v_v_hi v_in 0 5026.55
 
 * ── Output: sum of both resonator states ─────────────────────────────────────
 * The physical mixer sums both oscillators through equal-value resistors.

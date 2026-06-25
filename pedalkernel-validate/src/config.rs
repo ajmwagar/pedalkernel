@@ -3556,7 +3556,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 // 808 kick — bridged-T Sallen-Key resonator
                 //
                 // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_kick.pedal
-                // SPICE model: behavioral state-space equivalent (f0=129.4Hz, Q≈30).
+                // SPICE model: behavioral state-space equivalent (f0=56 Hz, Q≈30 — TR-808 manual).
                 //
                 // Signal: 2 ms gate trigger → 500 ms decay window.
                 // Label "trigger" matches the existing golden path convention in
@@ -3569,7 +3569,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "808_kick".to_string(),
                     TestCase {
                         circuit: "drums/808_kick.pedal".to_string(),
-                        description: "TR-808 kick: bridged-T resonator, f0=129.4 Hz, Q≈30"
+                        description: "TR-808 kick: bridged-T resonator, f0=56 Hz (manual), Q≈30"
                             .to_string(),
                         signals: vec![SignalConfig::Impulse {
                             // Single-sample impulse excites the resonator.
@@ -3607,8 +3607,8 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 // SPICE model: two state-space resonators summed; noise burst NOT modeled
                 //   (tonal-body-only gap is documented in 808_snare.spice header).
                 //
-                // Lo body: R=220k, C=4.7n → f0=153.8Hz, Q=2.5
-                // Hi body: R=100k, C=4.7n → f0=338.6Hz, Q=5.0
+                // Lo body: f0=238 Hz (TR-808 manual), Q=2.5
+                // Hi body: f0=476 Hz (TR-808 manual), Q=5.0
                 //
                 // Known failure: same WDF resonator bug as kick (lq6.1).
                 // Thresholds loose (20 dB) → KnownGap profile.
@@ -3617,7 +3617,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "drums/808_snare.pedal".to_string(),
                         description:
-                            "TR-808 snare: dual bridged-T (lo 154 Hz Q=2.5 + hi 339 Hz Q=5.0), tonal bodies only"
+                            "TR-808 snare: dual bridged-T (lo 238 Hz Q=2.5 + hi 476 Hz Q=5.0 — manual), tonal bodies only"
                                 .to_string(),
                         signals: vec![SignalConfig::Impulse {
                             amplitude: 1.0,
@@ -3642,7 +3642,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 // 808 tom (lo-tom) — single bridged-T resonator
                 //
                 // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_tom.pedal
-                // SPICE model: state-space resonator, f0=153.8Hz, Q=8.33
+                // SPICE model: state-space resonator, f0=90 Hz (TR-808 manual), Q=8.33
                 //
                 // NOTE: 808_tom.pedal is internally labelled "808 Mid Tom" but is the
                 // lo-tom voice in the three-voice hierarchy.  See 808_tom.spice header.
@@ -3654,7 +3654,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "drums/808_tom.pedal".to_string(),
                         description:
-                            "TR-808 tom (lo-tom): bridged-T resonator, f0=153.8 Hz, Q=8.33"
+                            "TR-808 tom (lo-tom): bridged-T resonator, f0=90 Hz (manual), Q=8.33"
                                 .to_string(),
                         signals: vec![SignalConfig::Impulse {
                             amplitude: 1.0,
@@ -3678,7 +3678,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 // 808 mid tom — single bridged-T resonator
                 //
                 // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_mid_tom.pedal
-                // SPICE model: state-space resonator, f0=125.3Hz, Q=9.1
+                // SPICE model: state-space resonator, f0=135 Hz (TR-808 manual), Q=9.1
                 //
                 // Known failure: same WDF resonator bug as kick (lq6.1).
                 // Thresholds loose (20 dB) → KnownGap profile.
@@ -3687,7 +3687,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "drums/808_mid_tom.pedal".to_string(),
                         description:
-                            "TR-808 mid tom: bridged-T resonator, f0=125.3 Hz, Q=9.1".to_string(),
+                            "TR-808 mid tom: bridged-T resonator, f0=135 Hz (manual), Q=9.1".to_string(),
                         signals: vec![SignalConfig::Impulse {
                             amplitude: 1.0,
                             label: Some("trigger".to_string()),
@@ -3711,11 +3711,10 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 // 808 hi tom — single bridged-T resonator
                 //
                 // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_hi_tom.pedal
-                // SPICE model: state-space resonator, f0=153.8Hz, Q=8.33
+                // SPICE model: state-space resonator, f0=185 Hz (TR-808 manual), Q=8.33
                 //
-                // COMPONENT IDENTITY: 808_hi_tom.pedal uses the same R/C/Q as 808_tom.pedal
-                // (R=220k, C=4.7n, R_fb=750k). Both SPICE goldens are therefore identical in
-                // resonant behavior; see 808_hi_tom.spice header for details.
+                // REANCHOR: Previously f0=153.8 Hz (RC textbook). Now anchored to TR-808
+                // service manual hi-tom target (185 Hz). Q preserved from .pedal component values.
                 //
                 // Known failure: same WDF resonator bug as kick (lq6.1).
                 // Thresholds loose (20 dB) → KnownGap profile.
@@ -3724,7 +3723,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "drums/808_hi_tom.pedal".to_string(),
                         description:
-                            "TR-808 hi tom: bridged-T resonator, f0=153.8 Hz, Q=8.33".to_string(),
+                            "TR-808 hi tom: bridged-T resonator, f0=185 Hz (manual), Q=8.33".to_string(),
                         signals: vec![SignalConfig::Impulse {
                             amplitude: 1.0,
                             label: Some("trigger".to_string()),
@@ -3748,16 +3747,15 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                 // 808 claves — single high-Q bridged-T resonator (~2.25 kHz, Q≈23.5)
                 //
                 // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_claves.pedal
-                // SPICE model: state-space resonator, f0=2257.5Hz, Q=23.5
+                // SPICE model: state-space resonator, f0=2500 Hz (TR-808 manual), Q=23.5
                 //
-                // R1=R2=150k, C=470p → f0=2257.5 Hz. Short percussive click with
-                // brief ring. Same WDF resonator bug as other voices (lq6.1).
+                // Short percussive click with brief ring. Same WDF resonator bug as other voices (lq6.1).
                 tests.insert(
                     "808_claves".to_string(),
                     TestCase {
                         circuit: "drums/808_claves.pedal".to_string(),
                         description:
-                            "TR-808 claves: single bridged-T resonator, f0=2257.5 Hz, Q=23.5"
+                            "TR-808 claves: single bridged-T resonator, f0=2500 Hz (manual), Q=23.5"
                                 .to_string(),
                         signals: vec![SignalConfig::Impulse {
                             amplitude: 1.0,
@@ -3780,20 +3778,18 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
-                // 808 rimshot — single low-Q bridged-T resonator (~1026 Hz, Q≈2.78)
+                // 808 rimshot — single low-Q bridged-T resonator (1667 Hz, Q≈2.78)
                 //
                 // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_rimshot.pedal
-                // SPICE model: state-space resonator, f0=1026.1Hz, Q=2.78
+                // SPICE model: state-space resonator, f0=1667 Hz (TR-808 manual), Q=2.78
                 //
-                // Very short click (τ≈0.86ms). WDF loading raises measured frequency
-                // to ~1477 Hz per .pedal comment (WDF bridged-T bias-loading effect).
-                // Same WDF resonator bug as other voices (lq6.1).
+                // Very short click (τ≈0.53ms). Same WDF resonator bug as other voices (lq6.1).
                 tests.insert(
                     "808_rimshot".to_string(),
                     TestCase {
                         circuit: "drums/808_rimshot.pedal".to_string(),
                         description:
-                            "TR-808 rimshot: single bridged-T resonator, f0=1026.1 Hz, Q=2.78, τ≈0.86ms"
+                            "TR-808 rimshot: single bridged-T resonator, f0=1667 Hz (manual), Q=2.78, τ≈0.53ms"
                                 .to_string(),
                         signals: vec![SignalConfig::Impulse {
                             amplitude: 1.0,
@@ -3816,21 +3812,21 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
-                // 808 cowbell — dual bridged-T resonator (lo ~720 Hz + hi ~1026 Hz) summed
+                // 808 cowbell — dual bridged-T resonator (lo 540 Hz + hi 800 Hz) summed
                 //
                 // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_cowbell.pedal
                 // SPICE model: two state-space resonators summed (sinusoidal approximation).
                 //
-                // Authentic TR-808 uses two square-wave oscillators (~560/845 Hz). The .pedal
-                // uses bridged-T resonators as approximations — see cowbell.pedal for WDF
-                // loading rationale. SPICE deck models lo (Q=2.09) + hi (Q=1.98) resonators.
+                // Authentic TR-808 uses two square-wave oscillators (~560/845 Hz). SPICE deck
+                // anchored to TR-808 service manual targets (540/800 Hz). Q preserved from
+                // .pedal component ratios (lo Q=2.09, hi Q=1.98).
                 // Square-wave harmonic content is a documented gap.
                 tests.insert(
                     "808_cowbell".to_string(),
                     TestCase {
                         circuit: "drums/808_cowbell.pedal".to_string(),
                         description:
-                            "TR-808 cowbell: dual bridged-T (lo 720 Hz Q=2.09 + hi 1026 Hz Q=1.98), sinusoidal approx"
+                            "TR-808 cowbell: dual bridged-T (lo 540 Hz Q=2.09 + hi 800 Hz Q=1.98 — manual), sinusoidal approx"
                                 .to_string(),
                         signals: vec![SignalConfig::Impulse {
                             amplitude: 1.0,

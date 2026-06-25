@@ -10,12 +10,11 @@
 * transfer function directly as a state-space model, which converges
 * reliably and produces the correct resonant frequency.
 *
-* PARAMETERS (from 808_kick.pedal — pedalkernel-pro, private):
-*   R1 = R2 = 150kΩ, C1 = C2 = 8.2nF
-*   f0 = 1 / (2π·R·C) = 1 / (2π·150k·8.2n) = 129.4 Hz
+* PARAMETERS (TR-808 service manual — target f0 = 56 Hz):
+*   f0 = 56 Hz  (TR-808 service manual bass drum fundamental)
 *   Q ≈ 30  (Rdecay = 500k, full position — slowest decay)
-*   zeta = 1/(2·Q) = 0.0167
-*   omega0 = 2π·f0 = 813.04 rad/s
+*   zeta = 1/(2·Q) = 0.01667
+*   omega0 = 2π·f0 = 2π·56 = 351.86 rad/s
 *
 * STATE-SPACE MODEL:
 *   dx/dt  = ω₀ · v          (position → velocity coupling)
@@ -24,9 +23,9 @@
 *
 * IMPLEMENTED VIA:
 *   Two unit capacitors (C = 1F) + G-sources (conductances in Siemens):
-*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 813.04)
+*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 351.86)
 *     Cv·dv_v/dt = −G_vx·v_x − G_vv·v_v + G_vin·v_in
-*                 (G_vx = ω₀ = 813.04, G_vv = 2ζω₀ = 27.10, G_vin = ω₀ = 813.04)
+*                 (G_vx = ω₀ = 351.86, G_vv = 2ζω₀ = 11.73, G_vin = ω₀ = 351.86)
 *
 * INPUT: v_in (the trigger — gate pulse injected by the harness VIN source)
 *   Maps to the drummerboy trigger input (R_trig coupling in the actual circuit).
@@ -37,26 +36,26 @@
 *   The actual circuit output is this × U2 gain (−47×) + DC offset,
 *   but for WDF-vs-ngspice comparison we compare the resonant waveform shape.
 *
-* VERIFIED: f0 = 129.3 Hz (theory: 129.4 Hz), decay τ ≈ 74ms (Q=30)
+* VERIFIED: f0 = 56 Hz (TR-808 service manual), decay τ ≈ 170ms (Q=30)
 * ============================================================================
 
 * --- State variable: v_x (position / oscillator voltage) ---
 Cx v_x 0 1
 
 * G-source: dv_x/dt = omega0 * v_v
-Gx_v 0 v_x v_v 0 813.04
+Gx_v 0 v_x v_v 0 351.86
 
 * --- State variable: v_v (velocity, scaled by 1/omega0) ---
 Cv v_v 0 1
 
 * G-source: −omega0 * v_x feedback (restoring force)
-Gv_x 0 v_v v_x 0 -813.04
+Gv_x 0 v_v v_x 0 -351.86
 
 * G-source: −2*zeta*omega0 * v_v damping (loss from Rdecay + circuit R)
-Gv_v 0 v_v v_v 0 -27.10
+Gv_v 0 v_v v_v 0 -11.73
 
 * G-source: omega0 * trigger input
-Gv_in 0 v_v v_in 0 813.04
+Gv_in 0 v_v v_in 0 351.86
 
 * --- Output mapping ---
 * The harness expects node "v_out"; output = v_x (normalized resonator state)
