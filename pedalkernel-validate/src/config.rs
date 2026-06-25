@@ -3601,6 +3601,150 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // 808 snare — dual bridged-T resonator (lo ~154 Hz + hi ~339 Hz)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_snare.pedal
+                // SPICE model: two state-space resonators summed; noise burst NOT modeled
+                //   (tonal-body-only gap is documented in 808_snare.spice header).
+                //
+                // Lo body: R=220k, C=4.7n → f0=153.8Hz, Q=2.5
+                // Hi body: R=100k, C=4.7n → f0=338.6Hz, Q=5.0
+                //
+                // Known failure: same WDF resonator bug as kick (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "808_snare".to_string(),
+                    TestCase {
+                        circuit: "drums/808_snare.pedal".to_string(),
+                        description:
+                            "TR-808 snare: dual bridged-T (lo 154 Hz Q=2.5 + hi 339 Hz Q=5.0), tonal bodies only"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_snare.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 tom (lo-tom) — single bridged-T resonator
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_tom.pedal
+                // SPICE model: state-space resonator, f0=153.8Hz, Q=8.33
+                //
+                // NOTE: 808_tom.pedal is internally labelled "808 Mid Tom" but is the
+                // lo-tom voice in the three-voice hierarchy.  See 808_tom.spice header.
+                //
+                // Known failure: same WDF resonator bug as kick (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "808_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/808_tom.pedal".to_string(),
+                        description:
+                            "TR-808 tom (lo-tom): bridged-T resonator, f0=153.8 Hz, Q=8.33"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_tom.pedal".to_string(),
+                        ),
+                    },
+                );
+
+                // 808 mid tom — single bridged-T resonator
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_mid_tom.pedal
+                // SPICE model: state-space resonator, f0=125.3Hz, Q=9.1
+                //
+                // Known failure: same WDF resonator bug as kick (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "808_mid_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/808_mid_tom.pedal".to_string(),
+                        description:
+                            "TR-808 mid tom: bridged-T resonator, f0=125.3 Hz, Q=9.1".to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_mid_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 hi tom — single bridged-T resonator
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_hi_tom.pedal
+                // SPICE model: state-space resonator, f0=153.8Hz, Q=8.33
+                //
+                // COMPONENT IDENTITY: 808_hi_tom.pedal uses the same R/C/Q as 808_tom.pedal
+                // (R=220k, C=4.7n, R_fb=750k). Both SPICE goldens are therefore identical in
+                // resonant behavior; see 808_hi_tom.spice header for details.
+                //
+                // Known failure: same WDF resonator bug as kick (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "808_hi_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/808_hi_tom.pedal".to_string(),
+                        description:
+                            "TR-808 hi tom: bridged-T resonator, f0=153.8 Hz, Q=8.33".to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_hi_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
                 tests
             },
         },

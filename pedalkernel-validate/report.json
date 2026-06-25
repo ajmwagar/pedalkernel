@@ -1,0 +1,163 @@
+{
+  "timestamp": "1782371066",
+  "git_commit": "c26c7fe",
+  "sample_rate": 96000,
+  "oversample": 4,
+  "suites": {
+    "drums": {
+      "description": "TR-808/909 drum voice resonator validation (SPICE vs WDF)",
+      "passed": 0,
+      "failed": 5,
+      "pending": 0,
+      "tests": {
+        "808_hi_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 37.685577426581816,
+                "peak_error_db": 62.31379369157309,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_kick": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 35.17948360109496,
+                "peak_error_db": 63.25184358600971,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_mid_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 38.18350681127719,
+                "peak_error_db": 64.03159138475797,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_snare": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 65.12850065263385,
+                "peak_error_db": 50.12240755900849,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 37.685577426581816,
+                "peak_error_db": 62.31379369157309,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        }
+      }
+    }
+  },
+  "summary": {
+    "total_tests": 5,
+    "passed": 0,
+    "failed": 5,
+    "skipped": 0,
+    "pending": 0,
+    "pass_rate": 0.0,
+    "profiles": {
+      "known_gap": {
+        "total_tests": 5,
+        "passed": 0,
+        "failed": 5,
+        "pending": 0,
+        "pass_rate": 0.0
+      }
+    }
+  }
+}
