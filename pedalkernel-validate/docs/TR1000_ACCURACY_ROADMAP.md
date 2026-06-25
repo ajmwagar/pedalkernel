@@ -5,7 +5,7 @@ TR-1000 drum voices. Updated as batches land. Worst-score-first drives fix order
 
 **Batch status:**
 - B1 (lq6.4 + lq6.6): 808 kick + snare + tom + mid_tom + hi_tom — SPICE decks done, all in drums suite, all RED (known_gap)
-- B2 (lq6.7): Remaining 808 voices (clap, claves, closed_hat, open_hat, cowbell, maracas, rimshot)
+- B2 (lq6.7): Remaining 808 voices (clap, claves, closed_hat, open_hat, cowbell, maracas, rimshot) — DONE. All 7 SPICE decks + drums suite cases added. 1/7 B2 voices passes gate (closed\_hat RMS +8.3dB < 20dB threshold).
 - B3 (lq6.8): 909 voices (kick, snare, clap, hi_tom, mid_tom, lo_tom, rim) + 606 snare
 
 **How to read scores:** RMS and Peak errors are in dB relative to the SPICE
@@ -24,13 +24,13 @@ distorted than reference — large positive values indicate a broken voice
 | 808 tom | done | yes | +37.7 | +62.3 | known\_gap | Single bridged-T (f0=153.8 Hz, Q=8.33). SPICE: state-space G-source. Note: 808\_tom.pedal is internally labelled "808 Mid Tom" — see naming note in 808\_tom.spice. | lq6.1 WDF resonator bug. |
 | 808 mid tom | done | yes | +38.2 | +64.0 | known\_gap | Single bridged-T (f0=125.3 Hz, Q=9.1). SPICE: state-space G-source. | lq6.1 WDF resonator bug. |
 | 808 hi tom | done | yes | +37.7 | +62.3 | known\_gap | Single bridged-T (f0=153.8 Hz, Q=8.33). Same component values as 808\_tom.pedal (R=220k, C=4.7n, R\_fb=750k) — identical SPICE behavior. See 808\_hi\_tom.spice naming note. | lq6.1 WDF resonator bug. Same values as 808\_tom: two separate voices with identical component tuning. |
-| 808 clap | todo (B2) | no | — | — | pending | Multiple noise bursts through short reverb decay (not a resonator). Likely needs noise-burst + IIR decay SPICE model. | Noise source not in WDF voice model at all. |
-| 808 claves | todo (B2) | no | — | — | pending | High-Q short-decay resonator (~2.5 kHz, Q≈5). Single bridged-T. | Same lq6.1 WDF resonator bug (different f0 range). |
-| 808 closed hat | todo (B2) | no | — | — | pending | Six-oscillator metallic tone (overlapping square waves + bandpass). Complex topology — full opamp simulation may be needed or state-space multi-resonator model. | WDF metallic-hat model not yet implemented. |
-| 808 open hat | todo (B2) | no | — | — | pending | Same six-oscillator source as closed hat + longer decay. | Same as closed hat. |
-| 808 cowbell | todo (B2) | no | — | — | pending | Two square-wave oscillators + bandpass. Similar multi-resonator approach to hat. | WDF cowbell model not yet implemented. |
-| 808 maracas | todo (B2) | no | — | — | pending | Noise burst + bandpass. Similar to clap topology. | Noise source gap. |
-| 808 rimshot | todo (B2) | no | — | — | pending | Short transient click + brief resonance. Likely impulse + single low-Q resonator. | To be measured after .pedal read. |
+| 808 clap | done (B2) | yes | +26.9 | +41.2 | known\_gap | Single bridged-T body resonator (f0=1539 Hz, Q=1.43; R=22k, C=4.7n, R\_fb=220k). SPICE: state-space G-source. GAP 1: multi-burst comb envelope (ClapEnvelope DSP block, not in WDF path). GAP 2: noise source not modeled. Three stacked limitations. | lq6.1 WDF resonator bug + two noise/envelope gaps. Fix order: lq6.1 first (resonator); noise+envelope gaps are separate work items. |
+| 808 claves | done (B2) | yes | +23.2 | +38.0 | known\_gap | Single bridged-T (f0=2257.5 Hz, Q=23.5; R=150k, C=470p, R\_fb=470k). SPICE: state-space G-source. Short percussive click. | lq6.1 WDF resonator bug. Expect improvement after fix. |
+| 808 closed hat | done (B2) | yes | +8.3 | +18.1 | known\_gap | 7074 Hz resonator approx (Q\_eff≈5). R\_fb=47k < r\_crit=450k → sub-critical, highly damped. **PASSES 20dB threshold** despite WDF lq6.1 bug — error is lower because both WDF and SPICE produce a very short transient at high freq. GAP: 6-osc metallic source not modeled (single-resonator .pedal approximation only). | lq6.1 fix may improve or worsen the gate — re-measure after fix. 6-osc metallic source gap is a separate modeling limitation of the .pedal design (not an engine bug). |
+| 808 open hat | done (B2) | yes | +17.2 | +28.3 | known\_gap | 7074 Hz resonator (Q=23.5; R=150k, C=150p, R\_fb=470k > r\_crit=450k → above critical). SPICE: state-space G-source. Same f0/Q as open hat (R/C values identical to closed hat). GAP: 6-osc metallic source not modeled. | lq6.1 WDF resonator bug. Authentic open-hat decay (~300ms) not achievable with single-resonator .pedal topology (modeling limitation, not engine bug). |
+| 808 cowbell | done (B2) | yes | +60.1 | +39.1 | known\_gap | Dual bridged-T: lo (f0=720.5 Hz, Q=2.09; R=47k, C=4.7n) + hi (f0=1026.1 Hz, Q=1.98; R=33k, C=4.7n). SPICE: two state-space resonators summed. GAP: authentic TR-808 cowbell uses square-wave oscillators (~560/845 Hz) — sinusoidal resonator approximation only. WDF loading shifts actual frequencies below textbook. | lq6.1 WDF resonator bug (highest RMS score of B2 at +60.1dB — dual resonator makes the Nyquist error compound). Square-wave harmonic gap is a separate .pedal modeling limitation. |
+| 808 maracas | done (B2) | yes | +10.1 | +26.8 | known\_gap | Single bridged-T click resonator (f0=4822.9 Hz, Q=34; R=220k, C=150p, R\_fb=680k). SPICE: state-space G-source. GAP: real maracas character is DSP noise (VoiceNoise at ~6 kHz bandpass, outside WDF model). Tonal body models only the attack click. | lq6.1 WDF resonator bug. Noise path gap is a separate DSP layer (not engine bug). |
+| 808 rimshot | done (B2) | yes | +32.4 | +47.2 | known\_gap | Single bridged-T (f0=1026.1 Hz, Q=2.78; R=47k, C=3.3n, R\_fb=220k), τ≈0.86ms. SPICE: state-space G-source. Very short click. WDF loading raises measured f0 to ~1477 Hz (WDF bias-loading effect documented in ENGINE\_BUG\_BRIDGED\_T\_BIAS\_LOADING.md). | lq6.1 WDF resonator bug + WDF bias-loading frequency shift (separate from lq6.1 — the loading shifts f0 even after lq6.1 is fixed). |
 
 ## 909 Voices
 
@@ -52,21 +52,36 @@ distorted than reference — large positive values indicate a broken voice
 
 ---
 
-## Fix Priority (worst score first, B1 batch)
+## Fix Priority (worst score first, B1+B2 combined)
 
 1. **lq6.1** (root cause for all resonator voices): WDF bridged-T resonator compiles with f0 at
-   Nyquist. All 5 B1 voices are blocked on this single fix. Once resolved, all five should move
-   from RMS +35–65 dB to near 0 dB error (the SPICE state-space goldens are behaviorally
-   correct). Score ordering: snare (+65.1 RMS) > mid\_tom (+38.2) > hi\_tom/tom (+37.7) > kick (+35.2).
+   Nyquist. All 12 voices are affected. Score ordering worst-first (B2 voices in bold):
+   - snare +65.1 RMS
+   - **cowbell +60.1 RMS** (dual resonator compounds the Nyquist error)
+   - mid\_tom +38.2, hi\_tom/tom +37.7, kick +35.2
+   - **rimshot +32.4**, **clap +26.9**, **claves +23.2**
+   - **open\_hat +17.2**, **maracas +10.1**, **closed\_hat +8.3**
 
-2. **Snare noise gap**: After lq6.1 fix, the tonal body will be validated but the noise burst
-   component remains unmodeled. A separate SPICE deck with a noise source + bandpass would be
-   needed for full snare character. Low priority until tonal body passes.
+2. **808 rimshot WDF loading shift**: After lq6.1 fix, the rimshot resonator f0 will shift
+   from Nyquist to the WDF-computed frequency (~1477 Hz with bias-divider loading, vs theoretical
+   1026 Hz). This is a separate engine gap (bridged-T bias-loading). Tracked in
+   ENGINE\_BUG\_BRIDGED\_T\_BIAS\_LOADING.md.
 
-3. **808\_tom / 808\_hi\_tom component identity**: Both use identical R/C/Q values. If the intent
-   is different tuning for hi vs lo tom, the pedal files need updating before the SPICE decks
-   diverge. Track as a design question in B2.
+3. **Noise/envelope gaps** (clap, maracas, snare): After lq6.1 fix, these voices will still
+   diverge from authentic hardware due to missing noise sources and the clap's multi-burst
+   ClapEnvelope DSP block. Separate work items for each.
+
+4. **Six-oscillator metallic source gap** (closed\_hat, open\_hat, cowbell): The .pedal files use
+   single/dual resonators as approximations. The authentic metallic source (6 square-wave osc)
+   is not modeled at the WDF level — this is a modeling limitation of the .pedal design, not
+   an engine bug. Separate work items if authentic metallic character is needed.
+
+5. **Snare noise gap** (also applies to 808\_snare B1): Tonal body will pass after lq6.1,
+   but noise burst component remains unmodeled.
+
+6. **808\_tom / 808\_hi\_tom component identity**: Both use identical R/C/Q values. If different
+   tuning is intended, pedal files need updating before the SPICE decks diverge.
 
 ---
 
-*Generated: 2026-06-25. Scores from report.json (drums suite, bd-pedalkernel-lq6.4 + lq6.6 branch).*
+*Updated: 2026-06-25 (B2 complete). Scores from report.json (drums suite, bd-pedalkernel-lq6.4 branch).*
