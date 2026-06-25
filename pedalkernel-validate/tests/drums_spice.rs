@@ -387,10 +387,15 @@ fn kick_808_wdf_vs_ngspice_golden_gap_report() {
     };
 
     // --- Decay envelope gap (RMS at 50ms vs 200ms) ---
-    let wdf_early = rms(&wdf_out[(0.02 * SR) as usize..(0.05 * SR) as usize]);
-    let wdf_late = rms(&wdf_out[(0.15 * SR) as usize..(0.25 * SR) as usize]);
-    let gold_early = rms(&golden_sr[(0.02 * SR) as usize..(0.05 * SR) as usize]);
-    let gold_late = rms(&golden_sr[(0.15 * SR) as usize..(0.25 * SR) as usize]);
+    // Clamp all indices to `n` so a shorter golden doesn't panic.
+    let early_lo = ((0.02 * SR) as usize).min(n);
+    let early_hi = ((0.05 * SR) as usize).min(n);
+    let late_lo = ((0.15 * SR) as usize).min(n);
+    let late_hi = ((0.25 * SR) as usize).min(n);
+    let wdf_early = rms(&wdf_out[early_lo..early_hi]);
+    let wdf_late = rms(&wdf_out[late_lo..late_hi]);
+    let gold_early = rms(&golden_sr[early_lo..early_hi]);
+    let gold_late = rms(&golden_sr[late_lo..late_hi]);
 
     let wdf_decay_db = if wdf_early > 1e-10 && wdf_late > 1e-10 {
         20.0 * (wdf_late / wdf_early).log10()
@@ -437,11 +442,19 @@ fn kick_808_wdf_vs_ngspice_golden_gap_report() {
     eprintln!("=== End Report ===");
 
     // Hard assertion: WDF must at least produce energy near f0.
-    // This ensures the resonator is functional, even if Q differs from ngspice.
-    // We do NOT assert exact match — gap reporting is the goal here.
+    // Use the full WDF output window (not truncated by golden length) for accurate
+    // pitch measurement — the golden may be shorter than the comparison window.
+    let full_start = (0.05 * SR) as usize;
+    let full_end = ((0.20 * SR) as usize).min(wdf_out.len());
+    let wdf_full_window = &wdf_out[full_start..full_end];
+    let wdf_f0_full = if rms(wdf_full_window) > 1e-6 {
+        estimate_f0(wdf_full_window, F0_HZ_EXPECTED, 40.0, SR)
+    } else {
+        f64::NAN
+    };
     assert!(
-        wdf_f0.is_nan() || (wdf_f0 - F0_HZ_EXPECTED).abs() < F0_TOLERANCE_HZ,
-        "WDF 808 kick pitch ({wdf_f0:.1} Hz) deviates too far from expected {F0_HZ_EXPECTED:.1} Hz"
+        wdf_f0_full.is_nan() || (wdf_f0_full - F0_HZ_EXPECTED).abs() < F0_TOLERANCE_HZ,
+        "WDF 808 kick pitch ({wdf_f0_full:.1} Hz) deviates too far from expected {F0_HZ_EXPECTED:.1} Hz"
     );
 }
 

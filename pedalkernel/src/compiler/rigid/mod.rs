@@ -814,7 +814,18 @@ pub(super) fn build_rigid_from_group_with_hints(
                     // Build biquad lookup table for pot-controlled stages.
                     // Each pot becomes its own dimension (ganged pots sharing a
                     // control label are handled at the BiValve/set_pot level).
-                    if !stage.pot_bindings.is_empty() {
+                    //
+                    // EXCEPTION: bridged-T oscillators (detected by r_crit > 0 and
+                    // r_series_product > 0 set by the Cookbook BPF path in
+                    // iir::build_iir_stage) must NOT get a biquad table. The MNA
+                    // transfer-function extractor used inside build_biquad_table
+                    // cannot observe the VCVS-controlled output node, so it emits
+                    // wrong LPF coefficients that overwrite the correct oscillator
+                    // poles when set_pot is first called. Runtime pot updates for
+                    // the bridged-T go through the r_fb/recompute() path instead.
+                    let is_bridged_t_oscillator =
+                        stage.iir.r_crit > 0.0 && stage.iir.r_series_product > 0.0;
+                    if !stage.pot_bindings.is_empty() && !is_bridged_t_oscillator {
                         let labels: Vec<String> = stage
                             .pot_bindings
                             .iter()
