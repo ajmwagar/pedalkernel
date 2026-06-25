@@ -557,17 +557,40 @@ fn bootstrap_golden(cli: &Cli, suite: &str) -> anyhow::Result<()> {
             println!("  {} Test: {}", "→".blue(), test_name);
 
             let circuit_path = cli.circuits.join(&test_case.circuit);
-            if !circuit_path.exists() {
+            let contents = if circuit_path.exists() {
+                std::fs::read_to_string(&circuit_path)?
+            } else if let Some(pro_path) = &test_case.pro_circuit_path {
+                // Public circuits dir doesn't have this file — try the private
+                // pedalkernel-pro repo via the same sibling-directory probe that
+                // `pro_pedal::load_pro_pedal_sub` uses.
+                match pedalkernel_validate::pro_pedal::load_pro_pedal_sub(pro_path) {
+                    Some(src) => {
+                        println!(
+                            "    {} loaded from pro repo: {}",
+                            "◦".dimmed(),
+                            pro_path
+                        );
+                        src
+                    }
+                    None => {
+                        println!(
+                            "    {} Circuit not found (checked circuits/ and pro repo): {}",
+                            "⚠".yellow(),
+                            test_case.circuit
+                        );
+                        continue;
+                    }
+                }
+            } else {
                 println!(
                     "    {} Circuit not found: {}",
                     "⚠".yellow(),
                     circuit_path.display()
                 );
                 continue;
-            }
+            };
 
             // Load and compile circuit
-            let contents = std::fs::read_to_string(&circuit_path)?;
             let pedal_def = pedalkernel::dsl::parse_pedal_file(&contents)
                 .map_err(|e| anyhow::anyhow!("Parse error: {}", e))?;
             let options = pedalkernel::compiler::CompileOptions {

@@ -1,0 +1,58 @@
+* ============================================================================
+* 909 Clap Body — Single Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The 909 clap uses FOUR noise bursts (vs three for 808) spaced
+* ~8ms apart, followed by a ~250ms reverb-tail decay. The burst envelope is
+* implemented by ClapEnvelope909 in lib.rs (a DSP block outside the WDF path).
+* This .pedal provides only the bandpass resonator body (~1.5 kHz, same R/C
+* as the 808 clap body).
+*
+* DOCUMENTED GAPS:
+*   1. Multi-burst comb envelope (ClapEnvelope909 DSP block) not in WDF path.
+*   2. Noise source (white noise filtered by the bandpass resonator) not modeled.
+*   3. SPICE deck models only the deterministic resonant body response to impulse.
+*
+* COMPARISON NOTE: The 909 clap uses identical bandpass resonator values to the
+* 808 clap (R=22k, C=4.7n, R_fb=220k) — same spectral character. The 4-burst
+* pattern (909) vs 3-burst (808) distinction is in the DSP envelope, not the
+* resonator body. WDF-vs-SPICE comparison is valid for the bandpass body only.
+*
+* PARAMETERS (from 909_clap.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 22kΩ, C1 = C2 = 4.7nF
+*   f0 = 1 / (2π·R·C) = 1 / (2π·22k·4.7n) = 1538.5 Hz
+*   r_crit = R1+R2+R1·(C1/C2) = 22k+22k+22k = 66kΩ
+*   R_fb = 220kΩ  →  Q = 220 / (220−66) = 1.43
+*   zeta = 1/(2·Q) = 0.3497
+*   omega0 = 2π·1538.5 = 9667.6 rad/s
+*   2·zeta·omega0 = 6764.4
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* VERIFIED: f0 = 1538.5 Hz (theory), Q = 1.43
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 9667.6
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -9667.6
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -6764.4
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 9667.6
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

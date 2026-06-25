@@ -1,0 +1,59 @@
+* ============================================================================
+* 808 Claves — Single Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The 808 claves body uses a single bridged-T Sallen-Key
+* resonator at high frequency (~2.25 kHz) with a moderate-to-high Q (~23.5).
+* Same behavioral state-space approach as 808_kick.spice — G-source
+* second-order system (converges reliably).
+*
+* PARAMETERS (from 808_claves.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 150kΩ, C1 = C2 = 470pF
+*   f0 = 1 / (2π·R·C) = 1 / (2π·150k·470p) = 2257.5 Hz
+*   r_crit = R1+R2+R1·(C1/C2) = 150k+150k+150k = 450kΩ
+*   R_fb = 470kΩ  →  Q = 470 / (470−450) = 23.50
+*   zeta = 1/(2·Q) = 0.0213
+*   omega0 = 2π·f0 = 14184.40 rad/s
+*   2·zeta·omega0 = 603.59
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* IMPLEMENTED VIA:
+*   Two unit capacitors (C = 1F) + G-sources (conductances in Siemens):
+*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 14184.40)
+*     Cv·dv_v/dt = −G_vx·v_x − G_vv·v_v + G_vin·v_in
+*                 (G_vx = 14184.40, G_vv = 603.59, G_vin = 14184.40)
+*
+* OUTPUT: v_out = v_x (resonator state)
+*   The physical circuit has an inverting buffer (Ri=10k, Rf=33k → −3.3×),
+*   but for WDF-vs-SPICE comparison we compare the resonant waveform shape.
+*
+* VERIFIED: f0 = 2257.5 Hz (theory), Q = 23.50
+* MODELING NOTE: The WDF model has a known-broken resonator (f0 at Nyquist,
+*   lq6.1). This golden captures the behavioral TARGET of the .pedal circuit.
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 14184.40
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -14184.40
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -603.59
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 14184.40
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

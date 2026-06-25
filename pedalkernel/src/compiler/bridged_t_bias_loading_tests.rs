@@ -700,3 +700,135 @@ fn sweep_peak_frequency_with_and_without_r_trig() {
             f_peak_notrig, f_peak_notrig / f0_textbook);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Full 808 kick topology: bridged-T with Decay pot + U2 output buffer
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Exact 808 kick topology (minus R_trig for isolated resonator test).
+const KICK_808_FULL: &str = r#"
+    pedal "808 Kick Full" { supply 9V
+        components {
+            U1: opamp(tl072)
+            Rb1: resistor(100k)
+            Rb2: resistor(100k)
+            R1: resistor(150k)
+            R2: resistor(150k)
+            C1: cap(8.2n)
+            C2: cap(8.2n)
+            R_fb: resistor(470k)
+            Decay: pot(500k, b)
+            R_trig: resistor(1k)
+            U2: opamp(tl072)
+            Ri_out: resistor(10k)
+            Rf_out: resistor(470k)
+        }
+        nets {
+            vcc -> Rb1.a
+            Rb1.b -> Rb2.a, U1.pos
+            Rb2.b -> gnd
+            U1.neg -> R1.a, C1.a
+            R1.b -> R2.a, C2.a
+            R2.b -> U1.out
+            C1.b -> gnd
+            C2.b -> gnd
+            U1.neg -> R_fb.a
+            R_fb.b -> U1.out
+            R1.b -> Decay.a
+            Decay.b -> gnd
+            in -> R_trig.a
+            R_trig.b -> R1.b
+            U1.out -> Ri_out.a
+            Ri_out.b -> U2.neg
+            U2.neg -> Rf_out.a
+            Rf_out.b -> U2.out
+            U2.pos -> gnd
+            U2.out -> out
+        }
+        controls {
+            Decay.position -> "Decay" [0.0, 1.0] = 1.0
+        }
+    }
+"#;
+
+/// Diagnostic: print IIR coefficients after compilation to see what the resonator gets.
+#[test]
+fn kick_808_full_iir_coefficients() {
+    use super::compiled::Stage;
+    let pedal = crate::dsl::parse_pedal_file(KICK_808_FULL).expect("parse");
+    let compiled = compile_via_spqr(&pedal, SR).expect("compile");
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        match stage {
+            Stage::Iir(iir) => {
+                eprintln!("Stage {i} IIR: b={:?} a={:?}", iir.iir.b_coeffs, iir.iir.a_coeffs);
+                if iir.iir.a_coeffs.len() >= 3 {
+                    let a2 = iir.iir.a_coeffs[2];
+                    let a1 = iir.iir.a_coeffs[1];
+                    eprintln!("  pole radius={:.8}, a1={:.8}, a2={:.8}", a2.sqrt(), a1, a2);
+                    eprintln!("  stable: a2<1={}, 1+a1+a2>0={}, 1-a1+a2>0={}",
+                        a2.abs() < 1.0, 1.0 + a1 + a2 > 0.0, 1.0 - a1 + a2 > 0.0);
+                }
+                if let Some(ref table) = iir.biquad_table {
+                    eprintln!("  BiquadTable: {} dims, {} steps, {} entries",
+                        table.dim_labels.len(), table.steps, table.coeffs.len()/5);
+                    // Print first few entries
+                    for i in 0..table.coeffs.len()/5 {
+                        let b = &table.coeffs[i*5..i*5+3];
+                        let a = &table.coeffs[i*5+3..i*5+5];
+                        if i < 3 || i == table.coeffs.len()/5-1 {
+                            eprintln!("    entry[{i}]: b=[{:.6e},{:.6e},{:.6e}] a=[{:.6e},{:.6e}]",
+                                b[0], b[1], b[2], a[0], a[1]);
+                        }
+                    }
+                }
+            }
+            Stage::StateSpace(ss) => eprintln!("Stage {i} StateSpace"),
+            Stage::Wdf(_) => eprintln!("Stage {i} WDF"),
+            _ => eprintln!("Stage {i} other"),
+        }
+    }
+}
+
+/// Impulse response: full 808 kick topology must ring at ~129 Hz for ≥100ms.
+/// This test catches the oscillation-dies-immediately bug.
+#[test]
+fn kick_808_full_topology_rings_at_129hz() {
+    let pedal = crate::dsl::parse_pedal_file(KICK_808_FULL).expect("parse");
+    let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
+
+    let f_textbook = 1.0 / (std::f64::consts::TAU * 150_000.0 * 8.2e-9);
+
+    // Impulse excitation
+    let n_samples = (0.5 * SR) as usize;
+    let trigger_samples = (0.002 * SR) as usize;
+    let mut output = vec![0.0f64; n_samples];
+    for i in 0..n_samples {
+        let input = if i < trigger_samples { 0.3 } else { 0.0 };
+        output[i] = compiled.process(input);
+    }
+
+    // RMS at 50–200ms: must be significant (not dying immediately)
+    let s0 = (0.05 * SR) as usize;
+    let s1 = (0.20 * SR) as usize;
+    let rms_ring = {
+        let window = &output[s0..s1.min(n_samples)];
+        (window.iter().map(|x| x * x).sum::<f64>() / window.len() as f64).sqrt()
+    };
+    eprintln!("kick_808_full: RMS [50-200ms] = {rms_ring:.6e} (want > 1e-4)");
+
+    assert!(
+        rms_ring > 1e-4,
+        "808 kick must sustain oscillation at 50-200ms: RMS={rms_ring:.4e}. \
+         If this fails, oscillation is dying immediately after trigger."
+    );
+
+    // Measure f0 in the ring window
+    let f_measured = measure_peak_freq_hz(&mut compiled, trigger_samples, 16384, 50.0, 500.0);
+    eprintln!("kick_808_full: f0={f_measured:.1} Hz (textbook={f_textbook:.1} Hz)");
+
+    let ratio = f_measured / f_textbook;
+    assert!(
+        ratio >= 0.85 && ratio <= 1.15,
+        "808 kick f0 {f_measured:.1} Hz should be within 15% of textbook {f_textbook:.1} Hz (ratio={ratio:.3})"
+    );
+}
