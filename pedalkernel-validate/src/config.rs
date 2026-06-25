@@ -125,7 +125,7 @@ pub struct TestSuite {
 }
 
 /// A single test case.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TestCase {
     /// Path to the circuit file (.pedal for WDF, .spice for reference)
     pub circuit: String,
@@ -148,6 +148,18 @@ pub struct TestCase {
     /// loudly, so accidental golden deletion is caught.
     #[serde(default)]
     pub pending_reference: bool,
+    /// Path to the WDF `.pedal` source relative to the pedalkernel-pro repo root.
+    ///
+    /// Set this for circuits whose `.pedal` files are proprietary (live in
+    /// `pedalkernel-pro`, never committed to the public engine repo).  When
+    /// the public `circuit` path is not found in `--circuits`, the bootstrap
+    /// command falls back to probing ancestor directories for
+    /// `pedalkernel-pro/<pro_circuit_path>` via the same sibling-directory
+    /// search used by `pro_pedal::load_pro_pedal_sub`.
+    ///
+    /// `None` means no private fallback: the circuit must exist at `circuit`.
+    #[serde(default)]
+    pub pro_circuit_path: Option<String>,
 }
 
 /// Signal configuration.
@@ -552,6 +564,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -588,6 +601,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -622,6 +636,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -644,6 +659,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -691,6 +707,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -734,6 +751,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -794,6 +812,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
                 // Zener diode clipper (back-to-back 5.1V zeners)
@@ -838,6 +857,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -891,6 +911,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
                 tests
@@ -933,6 +954,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -980,6 +1002,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1010,6 +1033,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1053,6 +1077,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1079,6 +1104,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1105,6 +1131,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1132,6 +1159,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1167,6 +1195,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1202,6 +1231,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1246,6 +1276,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: true,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1299,6 +1330,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: true,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1339,6 +1371,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: true,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1383,6 +1416,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: true,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1414,6 +1448,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
                 tests
@@ -1461,6 +1496,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1485,6 +1521,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1510,6 +1547,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1551,6 +1589,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1589,6 +1628,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1615,6 +1655,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1641,6 +1682,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1667,6 +1709,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1692,6 +1735,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1720,6 +1764,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1772,6 +1817,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1804,6 +1850,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1826,6 +1873,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1870,6 +1918,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1910,6 +1959,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1952,6 +2002,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2010,6 +2061,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2055,6 +2107,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2102,6 +2155,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2148,6 +2202,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2198,6 +2253,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2235,6 +2291,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2273,6 +2330,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2311,6 +2369,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2345,6 +2404,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2400,6 +2460,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2456,6 +2517,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2511,6 +2573,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2590,6 +2653,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         // Golden generated from ngspice (2026-06-15). Active in the
                         // gate; not hidden behind pending_reference.
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2624,6 +2688,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_flat.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, flat (all controls off)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2661,6 +2726,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_lf_boost.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, LF boost on (LF_Boost=1.0)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2698,6 +2764,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_lf_trick.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, LF trick (Boost+Atten=1.0)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2736,6 +2803,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_hf_boost.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, HF boost on (HF_Boost=1.0, f0≈3.1kHz)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2773,6 +2841,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_hf_atten.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, HF atten on (HF_Atten=1.0)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2838,6 +2907,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "fet_leveler_level_sweep".to_string(),
                     TestCase {
                         pending_reference: false,
+                        pro_circuit_path: None,
                         circuit: "compressor/fet_leveler.pedal".to_string(),
                         description:
                             "FET Leveler 1176-style: static gain curve (-40..0 dBVU, 9 levels)"
@@ -2874,6 +2944,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "fet_leveler_tone_burst".to_string(),
                     TestCase {
                         pending_reference: false,
+                        pro_circuit_path: None,
                         circuit: "compressor/fet_leveler.pedal".to_string(),
                         description:
                             "FET Leveler 1176-style: attack/release timing via tone burst"
@@ -2910,6 +2981,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "dyna_comp_level_sweep".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/dyna_comp.pedal".to_string(),
                         description:
                             "Dyna Comp (CA3080 OTA): static gain curve (-40..0 dBVU, 9 levels)"
@@ -2938,6 +3010,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "dyna_comp_tone_burst".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/dyna_comp.pedal".to_string(),
                         description:
                             "Dyna Comp (CA3080 OTA): attack/release timing via tone burst"
@@ -2967,6 +3040,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "vca_bus_comp_level_sweep".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/vca_bus_comp.pedal".to_string(),
                         description:
                             "VCA Bus Comp (SSM2164): static gain curve (-40..0 dBVU, 9 levels)"
@@ -2995,6 +3069,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "vca_bus_comp_tone_burst".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/vca_bus_comp.pedal".to_string(),
                         description:
                             "VCA Bus Comp (SSM2164): attack/release timing via tone burst"
@@ -3027,6 +3102,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "la2a_level_sweep".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/la2a.pedal".to_string(),
                         description:
                             "LA-2A T4B opto leveler: static gain curve (-40..0 dBVU, 9 levels)"
@@ -3055,6 +3131,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "la2a_tone_burst".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/la2a.pedal".to_string(),
                         description:
                             "LA-2A T4B opto leveler: attack/release timing via tone burst"
@@ -3086,6 +3163,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "opto_leveler_level_sweep".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/opto_leveler.pedal".to_string(),
                         description:
                             "Opto Leveler (T4B, single 12AX7): static gain curve (-40..0 dBVU, 9 levels)"
@@ -3114,6 +3192,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "opto_leveler_tone_burst".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/opto_leveler.pedal".to_string(),
                         description:
                             "Opto Leveler (T4B, single 12AX7): attack/release timing via tone burst"
@@ -3155,6 +3234,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "fet_leveler_hot".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/fet_leveler.pedal".to_string(),
                         description:
                             "FET Leveler 1176-style driven hot — 2.0V sine, deep compression region"
@@ -3258,6 +3338,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3299,6 +3380,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3340,6 +3422,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3373,6 +3456,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3406,6 +3490,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3438,6 +3523,81 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: Some(150.0),
                         pending_reference: false,
+                        pro_circuit_path: None,
+                    },
+                );
+
+                tests
+            },
+        },
+    );
+
+    // Drums suite — TR-808/909 voice validation
+    //
+    // WDF circuit: loaded from pedalkernel-pro at bootstrap/run time via the
+    // `circuit` path (bootstrap skips gracefully if the pro repo is absent; the
+    // validate runner's load path similarly skips).  The .pedal files are
+    // proprietary and must never be committed to this public repo.
+    //
+    // SPICE golden: spice-circuits/drums/<name>.spice (already committed).
+    // Generate with: cargo run -p pedalkernel-validate -- generate-spice --suite drums
+    //
+    // Profile: `KnownGap` — the WDF 808 kick is known-broken per lq6.1
+    // (f0 appears at Nyquist, no pitch sweep in the WDF layer).  Thresholds
+    // are intentionally loose (20 dB) so the gate correctly reports RED and
+    // the gap is visible on the accuracy dashboard without blocking CI.
+    suites.insert(
+        "drums".to_string(),
+        TestSuite {
+            description: "TR-808/909 drum voice resonator validation (SPICE vs WDF)".to_string(),
+            tests: {
+                let mut tests = BTreeMap::new();
+
+                // 808 kick — bridged-T Sallen-Key resonator
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_kick.pedal
+                // SPICE model: behavioral state-space equivalent (f0=129.4Hz, Q≈30).
+                //
+                // Signal: 2 ms gate trigger → 500 ms decay window.
+                // Label "trigger" matches the existing golden path convention in
+                // drums_spice.rs (golden/drums/808_kick/trigger.npy).
+                //
+                // Known failure: WDF f0 at Nyquist (engine bug, lq6.1 backlog).
+                // Thresholds set loose (20 dB) → KnownGap profile.  The point is
+                // to surface the gap on the dashboard, not to gate CI.
+                tests.insert(
+                    "808_kick".to_string(),
+                    TestCase {
+                        circuit: "drums/808_kick.pedal".to_string(),
+                        description: "TR-808 kick: bridged-T resonator, f0=129.4 Hz, Q≈30"
+                            .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            // Single-sample impulse excites the resonator.
+                            // The SPICE model and WDF engine both receive the same
+                            // impulse, so compare-goldens measures the same response.
+                            // Label "trigger" matches the golden path convention
+                            // established in drums_spice.rs (golden/drums/808_kick/trigger.npy).
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF kick is broken (f0 at Nyquist, lq6.1).
+                            // Thresholds loose enough that the test registers but
+                            // reports RED honestly on the accuracy dashboard.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        // No warmup trim — the kick is all transient; trimming the
+                        // head would discard the trigger onset and ring-up.
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        // Private circuit: bootstrap falls back to pedalkernel-pro.
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_kick.pedal".to_string(),
+                        ),
                     },
                 );
 
@@ -3470,6 +3630,7 @@ mod tests {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: None,
             pending_reference: false,
+            pro_circuit_path: None,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 10.0);
     }
@@ -3485,6 +3646,7 @@ mod tests {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: Some(5.0),
             pending_reference: false,
+            pro_circuit_path: None,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 5.0);
     }
@@ -3500,6 +3662,7 @@ mod tests {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: Some(0.0),
             pending_reference: false,
+            pro_circuit_path: None,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 0.0);
     }
@@ -3514,6 +3677,7 @@ mod tests {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: None,
             pending_reference: false,
+            pro_circuit_path: None,
         };
 
         assert_eq!(
