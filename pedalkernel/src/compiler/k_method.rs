@@ -100,11 +100,6 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
                 eprintln!(
                     "  K-table 2D: row {ic}/{steps} (ctrl={ctrl:.3}), {nan_count} NaN so far"
                 );
-                // Also print as cargo:warning so it shows in `cargo build` output
-                #[cfg(feature = "build-cache")]
-                println!(
-                    "cargo:warning=K-table 2D: row {ic}/{steps} (ctrl={ctrl:.3}), {nan_count} NaN"
-                );
             }
             for ib in 0..steps {
                 let tb = ib as f64 / (steps - 1) as f64;
@@ -125,11 +120,6 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
         }
         eprintln!(
             "  K-table 2D: done, {steps}x{steps} = {} entries, {nan_count} NaN",
-            steps * steps
-        );
-        #[cfg(feature = "build-cache")]
-        println!(
-            "cargo:warning=K-table 2D: done, {nan_count} NaN out of {}",
             steps * steps
         );
 
