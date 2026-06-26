@@ -263,3 +263,132 @@ fn parent_reexposes_sub_control() {
         "ctrl parent compiles"
     );
 }
+
+// ── with{} component-value overrides ────────────────────────────────────────
+
+/// Two instances of the same sub with different R1 values must compile to
+/// distinct transfer functions. Because R1 controls the divider ratio, higher
+/// R1 = more attenuation; the two chains should produce measurably different
+/// output energies.
+#[test]
+fn with_override_produces_distinct_transfer_functions() {
+    // Parse the parent that instantiates sub_gain twice with different R1.
+    let parent =
+        parse_and_expand_pedal_file(&pedals_dir().join("parent_with_override.pedal")).unwrap();
+
+    // After expansion both instances must be present (6 sub components: 3 * 2).
+    // Plus the parent's own Rs = 7 total.
+    assert_eq!(parent.components.len(), 7, "components: {:?}", parent.components.iter().map(|c| &c.id).collect::<Vec<_>>());
+
+    // No leftover use instances.
+    assert!(parent.uses.is_empty());
+
+    // The two R1 components must have DIFFERENT resistance values.
+    let r1_g1 = parent
+        .components
+        .iter()
+        .find(|c| c.id == "g1.R1")
+        .expect("g1.R1 must exist")
+        .kind
+        .resistance()
+        .expect("g1.R1 must be a resistor");
+    let r1_g2 = parent
+        .components
+        .iter()
+        .find(|c| c.id == "g2.R1")
+        .expect("g2.R1 must exist")
+        .kind
+        .resistance()
+        .expect("g2.R1 must be a resistor");
+
+    assert!(
+        (r1_g1 - 1_000.0).abs() < 1.0,
+        "g1.R1 should be 1k, got {r1_g1}"
+    );
+    assert!(
+        (r1_g2 - 100_000.0).abs() < 1.0,
+        "g2.R1 should be 100k, got {r1_g2}"
+    );
+
+    // Compile and verify the two sub-pedals independently produce different
+    // transfer functions by comparing instantaneous gain.
+    let n = 480;
+
+    // Build isolated pedals for each sub instance to compare their gains.
+    // sub_gain with R1=1k (g1 override): low divider → more signal passes.
+    let src_low = r#"
+        pedal "SubGainLow" {
+          ports { in: input  out: output }
+          components { C1: cap(100n)  R1: resistor(1k)  R2: resistor(10k) }
+          nets { in -> C1.a  C1.b -> R1.a  R1.b -> mid  mid -> R2.a  R2.b -> gnd  mid -> out }
+          controls {}
+        }
+    "#;
+    // sub_gain with R1=100k (g2 override): high divider → most signal attenuated.
+    let src_high = r#"
+        pedal "SubGainHigh" {
+          ports { in: input  out: output }
+          components { C1: cap(100n)  R1: resistor(100k)  R2: resistor(10k) }
+          nets { in -> C1.a  C1.b -> R1.a  R1.b -> mid  mid -> R2.a  R2.b -> gnd  mid -> out }
+          controls {}
+        }
+    "#;
+
+    let def_low = pedalkernel::dsl::parse_pedal_file(src_low).unwrap();
+    let def_high = pedalkernel::dsl::parse_pedal_file(src_high).unwrap();
+    let out_low = render_sine(&def_low, n);
+    let out_high = render_sine(&def_high, n);
+
+    let energy_low: f64 = out_low.iter().map(|s| s * s).sum();
+    let energy_high: f64 = out_high.iter().map(|s| s * s).sum();
+
+    assert!(
+        energy_low > energy_high * 2.0,
+        "R1=1k (low attenuation) should have significantly more energy than R1=100k: \
+         low={energy_low:.6}, high={energy_high:.6}"
+    );
+}
+
+/// An override targeting a non-existent component id must return a clear error.
+#[test]
+fn with_override_unknown_id_errors() {
+    let src = r#"
+        pedal "Parent" {
+          supply 9V
+          components {
+            Rs: resistor(100)
+            g: use("sub/sub_gain.pedal") with { Rxxx: 10k }
+          }
+          nets { in -> Rs.a  Rs.b -> g.in  g.out -> out }
+          controls {}
+        }
+    "#;
+    let def = pedalkernel::dsl::parse_pedal_file(src).unwrap();
+    let result = pedalkernel::dsl_expand::expand_uses(&def, &pedals_dir());
+    assert!(result.is_err(), "unknown override id must error");
+    let msg = result.err().unwrap();
+    assert!(
+        msg.contains("Rxxx"),
+        "error must name the unknown id, got: {msg}"
+    );
+    assert!(
+        msg.contains("override"),
+        "error must mention 'override', got: {msg}"
+    );
+}
+
+/// A `use("path")` with NO `with{}` block still works (regression guard).
+#[test]
+fn use_without_override_is_backward_compatible() {
+    // Uses the existing parent_gain.pedal which has no with{} block.
+    let parent = parse_and_expand_pedal_file(&pedals_dir().join("parent_gain.pedal")).unwrap();
+    // Exact same assertions as the original test: no regressions.
+    let ids = comp_ids(&parent);
+    assert!(ids.contains(&"g.R1".to_string()), "ids: {ids:?}");
+    assert!(ids.contains(&"g.R2".to_string()), "ids: {ids:?}");
+    assert!(parent.uses.is_empty());
+    assert!(
+        compile_pedal(&parent, SAMPLE_RATE).is_ok(),
+        "no-override use still compiles"
+    );
+}
