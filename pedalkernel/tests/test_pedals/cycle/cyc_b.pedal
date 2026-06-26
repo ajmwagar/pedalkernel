@@ -1,0 +1,17 @@
+# cyc_b.pedal — part of a cycle: B uses A uses B. expand_uses must error.
+pedal "CycB" {
+  ports {
+    in: input
+    out: output
+  }
+  components {
+    R1: resistor(1k)
+    a: use("cyc_a.pedal")
+  }
+  nets {
+    in -> R1.a
+    R1.b -> a.in
+    a.out -> out
+  }
+  controls {}
+}

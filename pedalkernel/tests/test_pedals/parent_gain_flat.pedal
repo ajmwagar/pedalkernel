@@ -1,0 +1,22 @@
+# parent_gain_flat.pedal — hand-written FLAT equivalent of parent_gain.pedal.
+# Uses underscore-namespaced ids (parser-friendly) for the same topology the
+# expand pass produces with dotted ids (g.C1 ~ g_C1). Same circuit => same
+# output samples.
+pedal "ParentGainFlat" {
+  components {
+    Rs: resistor(1k)
+    g_C1: cap(100n)
+    g_R1: resistor(10k)
+    g_R2: resistor(10k)
+  }
+  nets {
+    in -> Rs.a
+    Rs.b -> g_C1.a
+    g_C1.b -> g_R1.a
+    g_R1.b -> g_mid
+    g_mid -> g_R2.a
+    g_R2.b -> gnd
+    g_mid -> out
+  }
+  controls {}
+}
