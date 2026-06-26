@@ -2154,7 +2154,10 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: false,
+                        // 2026-06-25: circuit rewired to collector-base feedback bias
+                        // (was base->gnd, transistor sat off). Golden must be regenerated
+                        // from the updated .spice via ngspice; pending until then.
+                        pending_reference: true,
                         pro_circuit_path: None,
                     },
                 );
@@ -2201,7 +2204,10 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
-                        pending_reference: false,
+                        // 2026-06-25: circuit rewired to collector-base feedback bias
+                        // (was base->gnd, transistor sat off). Golden must be regenerated
+                        // from the updated .spice via ngspice; pending until then.
+                        pending_reference: true,
                         pro_circuit_path: None,
                     },
                 );

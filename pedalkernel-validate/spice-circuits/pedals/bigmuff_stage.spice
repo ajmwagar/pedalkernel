@@ -13,8 +13,8 @@ Vcc vcc 0 DC 9
 * Input coupling
 C1 v_in v_base 100n
 
-* Bias resistor
-R1 v_base 0 470k
+* Collector-base feedback bias resistor
+R1 v_coll v_base 470k
 
 * Collector load
 R2 vcc v_coll 10k

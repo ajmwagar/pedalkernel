@@ -11,7 +11,7 @@ pedal "Big Muff Stage" {
     C1: cap(100n)           # Input coupling
 
     # Bias network
-    R1: resistor(470k)      # Base bias to ground
+    R1: resistor(470k)      # Collector-base feedback bias
 
     # Transistor stage
     Q1: npn(2n5088)         # High-gain NPN
@@ -30,12 +30,12 @@ pedal "Big Muff Stage" {
   nets {
     # Input to base
     in -> C1.a
-    C1.b -> R1.a, Q1.base
-    R1.b -> gnd
+    C1.b -> Q1.base
 
-    # Collector with clipping
+    # Collector: load to vcc, collector-base feedback bias (R1), symmetric clip
     vcc -> R2.a
-    R2.b -> Q1.collector, D1.a, D2.b
+    R2.b -> Q1.collector, D1.a, D2.b, R1.a
+    R1.b -> Q1.base
     D1.b -> gnd
     D2.a -> gnd
 

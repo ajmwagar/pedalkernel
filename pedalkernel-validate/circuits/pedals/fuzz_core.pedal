@@ -11,7 +11,7 @@ pedal "Fuzz Core" {
     C1: cap(100n)           # Input coupling
 
     # Bias network
-    R1: resistor(470k)      # Base bias to ground
+    R1: resistor(470k)      # Collector-base feedback bias
     R2: resistor(10k)       # Collector load
 
     # Transistor stage
@@ -26,12 +26,12 @@ pedal "Fuzz Core" {
   nets {
     # Input to base
     in -> C1.a
-    C1.b -> R1.a, Q1.base
-    R1.b -> gnd
+    C1.b -> Q1.base
 
-    # Collector circuit
+    # Collector: load to vcc + collector-base feedback bias (R1)
     vcc -> R2.a
-    R2.b -> Q1.collector
+    R2.b -> Q1.collector, R1.a
+    R1.b -> Q1.base
 
     # Emitter circuit
     Q1.emitter -> R3.a, C2.a
