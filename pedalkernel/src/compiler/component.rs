@@ -1022,10 +1022,15 @@ pub trait Component: std::fmt::Debug {
     /// through this element's feedback, across shared passives, and reach
     /// upstream elements — creating false cycle edges.
     ///
-    /// Returns true for op-amps (VCVS). Returns false for diodes, BJTs,
-    /// tubes, etc. — their input nodes don't create false coupling paths.
+    /// Derived from [`Component::signal_terminals`]: a differential amplifier with a
+    /// separate `control` reference (op-amp neg/pos) nulls to a virtual-ground summing
+    /// junction at its `input`. Single-ended amplifiers (BJT base, tube grid, OTA — all
+    /// `control: None`) and diodes/passives are not barriers. No device-type matching.
     fn feedback_input_is_barrier(&self) -> bool {
-        false
+        matches!(
+            self.signal_terminals(),
+            SignalTerminals::Amplifier { control: Some(_), .. }
+        )
     }
 
     // ── K-method candidacy ────────────────────────────────────────────────

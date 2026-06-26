@@ -93,11 +93,9 @@ impl Component for OpAmp {
         false
     }
 
-    fn feedback_input_is_barrier(&self) -> bool {
-        // Op-amp neg node is a summing junction shared with interstage
-        // coupling. OTAs don't have this property.
-        !self.op_type.is_ota()
-    }
+    // feedback_input_is_barrier: removed — the trait default now derives it from
+    // signal_terminals() (Amplifier { control: Some } ⇒ barrier). Op-amp returns
+    // control: Some("pos"); OTA returns control: None — same result, no hardcode.
 
     fn is_nonlinear(&self) -> bool {
         self.op_type.is_ota()
