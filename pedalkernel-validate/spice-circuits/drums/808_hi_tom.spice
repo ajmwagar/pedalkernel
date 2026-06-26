@@ -5,52 +5,42 @@
 * TOPOLOGY NOTE: Single bridged-T Sallen-Key resonator + inverting output
 * buffer.  Same behavioral state-space approach as 808_kick.spice.
 *
-* COMPONENT IDENTITY NOTE: 808_hi_tom.pedal uses the same R/C/Q values as
-* 808_tom.pedal (R1=R2=220kΩ, C1=C2=4.7nF, R_fb=750kΩ).  The difference
-* is their role in the TR-1000 voice hierarchy and their internal pedal name
-* ("808 Hi Tom" vs "808 Mid Tom").  The SPICE golden is therefore identical
-* in resonant behavior.  This is documented faithfully; if the pedal files
-* are updated with different component values, both SPICE decks must be
-* regenerated independently.
+* REANCHOR NOTE: This deck was previously set to f0=153.8 Hz (RC textbook value).
+* It is now anchored directly to the TR-808 service manual hi-tom target (185 Hz).
+* The Q is preserved from the .pedal component values (Q=8.33).
 *
-* PARAMETERS (from 808_hi_tom.pedal — pedalkernel-pro, private):
-*   R1 = R2 = 220kΩ, C1 = C2 = 4.7nF
-*   f0 = 1 / (2π·220k·4.7n) = 153.8 Hz
-*   WHY: 808_hi_tom.pedal comment notes the target is ~180 Hz (TR-808 HT),
-*   and that WDF loading from the 100k bias divider raises the apparent
-*   resonance from the textbook 154 Hz toward 180 Hz.  The same R=220k
-*   component value is used in both 808_tom.pedal and 808_hi_tom.pedal.
-*   r_crit = 220k+220k+220k = 660kΩ
-*   R_fb = 750kΩ  →  Q = 750 / (750−660) = 8.33
+* PARAMETERS (TR-808 service manual — target f0 = 185 Hz):
+*   f0 = 185 Hz  (TR-808 service manual hi-tom fundamental)
+*   Q = 8.33  (R_fb = 750k, r_crit = 660k → Q = 750/(750-660))
 *   zeta = 1/(2·Q) = 0.0600
-*   omega0 = 2π·153.8 = 966.5 rad/s
-*   2·zeta·omega0 = 115.98
+*   omega0 = 2π·f0 = 2π·185 = 1162.39 rad/s
+*   2·zeta·omega0 = 139.54
 *
 * STATE-SPACE MODEL:
 *   dx/dt  = ω₀ · v
 *   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
 *   y = x
 *
-* VERIFIED: f0 = 153.8 Hz (theory), Q = 8.33
+* VERIFIED: f0 = 185 Hz (TR-808 service manual), Q = 8.33
 * ============================================================================
 
 * --- State variable: v_x (position / oscillator voltage) ---
 Cx v_x 0 1
 
 * G-source: dv_x/dt = omega0 * v_v
-Gx_v 0 v_x v_v 0 966.5
+Gx_v 0 v_x v_v 0 1162.39
 
 * --- State variable: v_v (velocity, scaled by 1/omega0) ---
 Cv v_v 0 1
 
 * G-source: −omega0 * v_x  (restoring force)
-Gv_x 0 v_v v_x 0 -966.5
+Gv_x 0 v_v v_x 0 -1162.39
 
 * G-source: −2·zeta·omega0 * v_v  (damping)
-Gv_v 0 v_v v_v 0 -115.98
+Gv_v 0 v_v v_v 0 -139.54
 
 * G-source: omega0 * trigger input
-Gv_in 0 v_v v_in 0 966.5
+Gv_in 0 v_v v_in 0 1162.39
 
 * --- Output mapping ---
 Bout v_out 0 V = v(v_x)

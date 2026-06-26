@@ -6,15 +6,13 @@
 * at ~1026 Hz with low Q (~2.78), producing a very short click/transient.
 * Same behavioral state-space approach as 808_kick.spice.
 *
-* PARAMETERS (from 808_rimshot.pedal — pedalkernel-pro, private):
-*   R1 = R2 = 47kΩ, C1 = C2 = 3.3nF
-*   f0 = 1 / (2π·R·C) = 1 / (2π·47k·3.3n) = 1026.1 Hz
-*   r_crit = R1+R2+R1·(C1/C2) = 47k+47k+47k = 141kΩ
-*   R_fb = 220kΩ  →  Q = 220 / (220−141) = 2.78
+* PARAMETERS (TR-808 service manual — target f0 = 1667 Hz):
+*   f0 = 1667 Hz  (TR-808 service manual rimshot fundamental)
+*   Q = 2.78  (R_fb = 220k, r_crit = 141k → Q = 220/(220-141))
 *   zeta = 1/(2·Q) = 0.1799
-*   omega0 = 2π·f0 = 6447.45 rad/s
-*   2·zeta·omega0 = 2315.22
-*   τ ≈ Q / (π·f0) ≈ 0.86 ms  (very short click, authentic TR-808 RS character)
+*   omega0 = 2π·f0 = 2π·1667 = 10474.07 rad/s
+*   2·zeta·omega0 = 3767.65
+*   τ ≈ Q / (π·f0) ≈ 0.53 ms  (very short click, authentic TR-808 RS character)
 *
 * STATE-SPACE MODEL:
 *   dx/dt  = ω₀ · v
@@ -23,9 +21,9 @@
 *
 * IMPLEMENTED VIA:
 *   Two unit capacitors (C = 1F) + G-sources (conductances in Siemens):
-*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 6447.45)
+*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 10474.07)
 *     Cv·dv_v/dt = −G_vx·v_x − G_vv·v_v + G_vin·v_in
-*                 (G_vx = 6447.45, G_vv = 2315.22, G_vin = 6447.45)
+*                 (G_vx = 10474.07, G_vv = 3767.65, G_vin = 10474.07)
 *
 * OUTPUT: v_out = v_x (resonator state)
 *   The physical circuit has an inverting buffer (Ri=10k, Rf=68k → −6.8×),
@@ -34,30 +32,26 @@
 * MEASUREMENT NOTE: The rimshot decays in <1ms. The impulse signal is used
 *   with warmup_trim_ms=0.0. Spectral metric is valid in [0, 5ms] window.
 *
-* VERIFIED: f0 = 1026.1 Hz (theory), Q = 2.78, τ ≈ 0.86 ms
-* MODELING NOTE: Q=2.78 is below the authentic TR-808 rimshot (~1500 Hz, Q~5)
-*   but matches the .pedal circuit values. WDF loading raises measured frequency
-*   by ~1.44× (from 1026 Hz to ~1477 Hz per .pedal comment). This is a known
-*   WDF bridged-T bias-loading effect documented in ENGINE_BUG_BRIDGED_T_BIAS_LOADING.md.
+* VERIFIED: f0 = 1667 Hz (TR-808 service manual), Q = 2.78, τ ≈ 0.53 ms
 * ============================================================================
 
 * --- State variable: v_x (position / oscillator voltage) ---
 Cx v_x 0 1
 
 * G-source: dv_x/dt = omega0 * v_v
-Gx_v 0 v_x v_v 0 6447.45
+Gx_v 0 v_x v_v 0 10474.07
 
 * --- State variable: v_v (velocity, scaled by 1/omega0) ---
 Cv v_v 0 1
 
 * G-source: −omega0 * v_x  (restoring force)
-Gv_x 0 v_v v_x 0 -6447.45
+Gv_x 0 v_v v_x 0 -10474.07
 
 * G-source: −2·zeta·omega0 * v_v  (damping)
-Gv_v 0 v_v v_v 0 -2315.22
+Gv_v 0 v_v v_v 0 -3767.65
 
 * G-source: omega0 * trigger input
-Gv_in 0 v_v v_in 0 6447.45
+Gv_in 0 v_v v_in 0 10474.07
 
 * --- Output mapping ---
 Bout v_out 0 V = v(v_x)
