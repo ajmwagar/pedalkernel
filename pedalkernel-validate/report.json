@@ -1,0 +1,553 @@
+{
+  "timestamp": "1782375210",
+  "git_commit": "d663adc",
+  "sample_rate": 96000,
+  "oversample": 4,
+  "suites": {
+    "drums": {
+      "description": "TR-808/909 drum voice resonator validation (SPICE vs WDF)",
+      "passed": 1,
+      "failed": 19,
+      "pending": 0,
+      "tests": {
+        "606_snare": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 62.39110583894532,
+                "peak_error_db": 47.66784064603104,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_clap": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 26.88367402837153,
+                "peak_error_db": 41.15763464977508,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_claves": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 23.224656661405486,
+                "peak_error_db": 38.04733909817981,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_closed_hat": {
+          "profile": "known_gap",
+          "passed": true,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": true,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 8.314685211273412,
+                "peak_error_db": 18.140179180245713,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_cowbell": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 60.07457202009079,
+                "peak_error_db": 39.13975609640593,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_hi_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 37.685577426581816,
+                "peak_error_db": 62.31379369157309,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_kick": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 35.17948360109496,
+                "peak_error_db": 63.25184358600971,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_maracas": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 10.11185385099169,
+                "peak_error_db": 26.76905046877597,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_mid_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 38.18350681127719,
+                "peak_error_db": 64.03159138475797,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_open_hat": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 17.183996093578006,
+                "peak_error_db": 28.3333621699995,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_rimshot": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 32.37453448766197,
+                "peak_error_db": 47.22664117967298,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_snare": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 65.12850065263385,
+                "peak_error_db": 50.12240755900849,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "808_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 37.685577426581816,
+                "peak_error_db": 62.31379369157309,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "909_clap": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 26.883403706731844,
+                "peak_error_db": 41.159490727096646,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "909_hi_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 39.28133950410368,
+                "peak_error_db": 61.08272699346422,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "909_kick": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 47.085114899849685,
+                "peak_error_db": 72.73449798631978,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "909_lo_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 44.43497142623164,
+                "peak_error_db": 68.53092914930623,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "909_mid_tom": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 40.684660920762596,
+                "peak_error_db": 64.53281555141001,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "909_rim": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 32.268339911062576,
+                "peak_error_db": 53.981158045503534,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        },
+        "909_snare": {
+          "profile": "known_gap",
+          "passed": false,
+          "pending": false,
+          "error": null,
+          "signals": [
+            {
+              "label": "trigger",
+              "passed": false,
+              "pending": false,
+              "comparison": {
+                "normalized_rms_error_db": 60.89564012034999,
+                "peak_error_db": 44.83755731066735,
+                "thd_error_db": null,
+                "thd_plus_n_error_db": null,
+                "harmonic_mag_error_db": null,
+                "even_odd_ratio_error_db": null,
+                "spectral_error_db": 0.0,
+                "spectral_error_full_db": 0.0,
+                "even_odd_ratio_db": null,
+                "dc_drift_mv": 0.0
+              },
+              "error": null
+            }
+          ]
+        }
+      }
+    }
+  },
+  "summary": {
+    "total_tests": 20,
+    "passed": 1,
+    "failed": 19,
+    "skipped": 0,
+    "pending": 0,
+    "pass_rate": 0.05,
+    "profiles": {
+      "known_gap": {
+        "total_tests": 20,
+        "passed": 1,
+        "failed": 19,
+        "pending": 0,
+        "pass_rate": 0.05
+      }
+    }
+  }
+}

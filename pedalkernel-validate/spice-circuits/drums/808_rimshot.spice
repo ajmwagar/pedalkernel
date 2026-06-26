@@ -1,0 +1,58 @@
+* ============================================================================
+* 808 Rimshot — Single Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The 808 rimshot uses a single bridged-T Sallen-Key resonator
+* at ~1026 Hz with low Q (~2.78), producing a very short click/transient.
+* Same behavioral state-space approach as 808_kick.spice.
+*
+* PARAMETERS (TR-808 service manual — target f0 = 1667 Hz):
+*   f0 = 1667 Hz  (TR-808 service manual rimshot fundamental)
+*   Q = 2.78  (R_fb = 220k, r_crit = 141k → Q = 220/(220-141))
+*   zeta = 1/(2·Q) = 0.1799
+*   omega0 = 2π·f0 = 2π·1667 = 10474.07 rad/s
+*   2·zeta·omega0 = 3767.65
+*   τ ≈ Q / (π·f0) ≈ 0.53 ms  (very short click, authentic TR-808 RS character)
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* IMPLEMENTED VIA:
+*   Two unit capacitors (C = 1F) + G-sources (conductances in Siemens):
+*     Cx·dv_x/dt = G_xv · v_v      (G_xv = ω₀ = 10474.07)
+*     Cv·dv_v/dt = −G_vx·v_x − G_vv·v_v + G_vin·v_in
+*                 (G_vx = 10474.07, G_vv = 3767.65, G_vin = 10474.07)
+*
+* OUTPUT: v_out = v_x (resonator state)
+*   The physical circuit has an inverting buffer (Ri=10k, Rf=68k → −6.8×),
+*   but for WDF-vs-SPICE comparison we compare the resonant waveform shape.
+*
+* MEASUREMENT NOTE: The rimshot decays in <1ms. The impulse signal is used
+*   with warmup_trim_ms=0.0. Spectral metric is valid in [0, 5ms] window.
+*
+* VERIFIED: f0 = 1667 Hz (TR-808 service manual), Q = 2.78, τ ≈ 0.53 ms
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 10474.07
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -10474.07
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -3767.65
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 10474.07
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

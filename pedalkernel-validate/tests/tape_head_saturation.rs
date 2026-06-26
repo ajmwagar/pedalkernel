@@ -148,6 +148,7 @@ fn pending_test_config() -> ValidationConfig {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: None,
             pending_reference: true,
+            pro_circuit_path: None,
         },
     );
     tests.insert(
@@ -160,6 +161,7 @@ fn pending_test_config() -> ValidationConfig {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: None,
             pending_reference: false,
+            pro_circuit_path: None,
         },
     );
 

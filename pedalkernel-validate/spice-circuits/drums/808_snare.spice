@@ -1,0 +1,89 @@
+* ============================================================================
+* 808 Snare — Dual Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The 808 snare body uses TWO bridged-T Sallen-Key resonators
+* (lo-body ~154 Hz + hi-body ~339 Hz) summed through an inverting mixer.
+* Full ngspice simulation of the opamp feedback loops faces convergence
+* challenges in the high-Q resonant regime.  This deck implements each
+* resonator as a closed-loop state-space model using G-sources (same
+* approach as 808_kick.spice), which converges reliably.
+*
+* PARAMETERS (TR-808 service manual — lo: 238 Hz, hi: 476 Hz):
+*
+*   Lo-body oscillator:
+*     f0_lo = 238 Hz  (TR-808 service manual snare lo-body fundamental)
+*     Q_lo = 2.5  (R_fb_lo = 1100k, r_crit = 660k → Q = 1100/(1100-660))
+*     zeta_lo = 1/(2·Q) = 0.200
+*     omega0_lo = 2π·238 = 1495.40 rad/s
+*     2·zeta_lo·omega0_lo = 598.16
+*
+*   Hi-body oscillator:
+*     f0_hi = 476 Hz  (TR-808 service manual snare hi-body fundamental)
+*     Q_hi = 5.0  (R_fb_hi = 375k, r_crit = 300k → Q = 375/(375-300))
+*     zeta_hi = 1/(2·Q) = 0.100
+*     omega0_hi = 2π·476 = 2990.80 rad/s
+*     2·zeta_hi·omega0_hi = 598.16
+*
+* NOISE GAP: The real TR-808 snare mixes a noise burst (transistor noise
+* source through a bandpass filter) with the tonal bodies.  This SPICE deck
+* models ONLY the tonal resonators.  The noise component is a documented gap.
+* The WDF model is also tonal-only, so WDF-vs-SPICE comparison is valid for
+* the resonant body; a separate noise-path SPICE deck would be needed for
+* full snare character validation.
+*
+* STATE-SPACE MODEL (per resonator):
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* OUTPUT: sum of lo and hi resonator states (v_x_lo + v_x_hi), normalized.
+*
+* VERIFIED: f0_lo = 238 Hz, f0_hi = 476 Hz (TR-808 service manual)
+* ============================================================================
+
+* ── Lo-body resonator ────────────────────────────────────────────────────────
+
+* State variable: v_x_lo (position / oscillator voltage)
+Cx_lo v_x_lo 0 1
+
+* dv_x_lo/dt = omega0_lo * v_v_lo
+Gx_lo_v 0 v_x_lo v_v_lo 0 1495.40
+
+* State variable: v_v_lo (velocity, scaled by 1/omega0)
+Cv_lo v_v_lo 0 1
+
+* −omega0_lo * v_x_lo  (restoring force)
+Gv_lo_x 0 v_v_lo v_x_lo 0 -1495.40
+
+* −2·zeta_lo·omega0_lo * v_v_lo  (damping)
+Gv_lo_v 0 v_v_lo v_v_lo 0 -598.16
+
+* omega0_lo * trigger input
+Gv_lo_in 0 v_v_lo v_in 0 1495.40
+
+* ── Hi-body resonator ────────────────────────────────────────────────────────
+
+* State variable: v_x_hi (position / oscillator voltage)
+Cx_hi v_x_hi 0 1
+
+* dv_x_hi/dt = omega0_hi * v_v_hi
+Gx_hi_v 0 v_x_hi v_v_hi 0 2990.80
+
+* State variable: v_v_hi (velocity, scaled by 1/omega0)
+Cv_hi v_v_hi 0 1
+
+* −omega0_hi * v_x_hi  (restoring force)
+Gv_hi_x 0 v_v_hi v_x_hi 0 -2990.80
+
+* −2·zeta_hi·omega0_hi * v_v_hi  (damping)
+Gv_hi_v 0 v_v_hi v_v_hi 0 -598.16
+
+* omega0_hi * trigger input
+Gv_hi_in 0 v_v_hi v_in 0 2990.80
+
+* ── Output: sum of both resonator states ─────────────────────────────────────
+* The physical mixer sums both bodies (inverting, but polarity is irrelevant
+* for RMS/spectral comparison).  Output = v_x_lo + v_x_hi.
+Bout v_out 0 V = v(v_x_lo) + v(v_x_hi)
+Rload_out v_out 0 100k

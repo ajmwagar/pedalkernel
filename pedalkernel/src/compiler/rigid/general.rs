@@ -1,8 +1,10 @@
 //! General rigid stage building.
 //!
-//! Two public builders:
-//! - `build_opamp_nl_feedback()` — Op-amp gain + NL root (TS/RAT/Klon)
-//! - `build_general_mna()` / `build_general_mna_from_edges()` — Full MNA + NR
+//! Public builder:
+//! - `build_general_mna()` / `build_general_mna_from_edges()` — Full MNA + NR.
+//!   Co-solves op-amp VCVS + in-loop NL (TS/SD-1 diode-across-feedback) and
+//!   passive/BJT/tube groups in one grouped-NR system. (Retired the
+//!   build_opamp_nl_feedback shortcut — pedalkernel-9xu1.)
 //!
 //! The MNA path is decomposed into focused helpers:
 //! 1. `collect_mna_nodes()` — unique circuit nodes (skipping GND/supply)
@@ -15,20 +17,17 @@
 
 use std::collections::HashSet;
 
-use super::super::build::create_root;
 use super::super::classify::NonlinearKind;
 use super::super::component::EdgeKind;
 use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use super::super::helpers::{gummel_poon_model, pentode_model, triode_model, vari_mu_model};
-use super::super::signal_flow::FlowGroup;
 use super::super::stage::{
     MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
-    ScatteringRecomputeData, WdfStage, NR_ITERATION_BUDGET,
+    ScatteringRecomputeData, NR_ITERATION_BUDGET,
 };
-use super::super::wdf_leaf::{LeafKind, WdfVoltageSource};
-use super::opamp_root::{extract_opamp_config, make_opamp_root};
-use super::{is_inverting_topology, StageStats};
+use super::super::wdf_leaf::LeafKind;
+use super::StageStats;
 use crate::elements::*;
 use crate::oversampling::{Oversampler, OversamplingFactor};
 use crate::tree::{MnaSystem, RTypeAdaptor, WdfPort};
@@ -38,155 +37,6 @@ use pedalkernel_rt::boundary_math::{
 };
 use pedalkernel_rt::wdf_leaf::WdfLeaf;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Op-amp + NL root (TS/RAT/Klon pattern)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Build a stage with op-amp gain driving a nonlinear root.
-///
-/// Uses classified FlowGroup: Rf from feedback_edges, Ri from
-/// pendant_edges, NL root from active_edges.
-pub(in crate::compiler) fn build_opamp_nl_feedback(
-    group: &FlowGroup,
-    stats: &StageStats,
-    graph: &CircuitGraph,
-    sample_rate: f64,
-    supply_voltage: f64,
-    bias_v_max: Option<(f64, f64)>,
-) -> Result<WdfStage, String> {
-    let inverting = is_inverting_topology(stats, graph);
-    let config = extract_opamp_config(group, inverting, graph)?;
-    let mut opamp = make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
-
-    // Collect ALL NL active edges
-    let nl_edge_indices: Vec<usize> = group
-        .active_edges
-        .iter()
-        .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
-        .copied()
-        .collect();
-
-    if nl_edge_indices.is_empty() {
-        return Err("General stage has no NL edge".to_string());
-    }
-
-    // Classify all NL edges
-    let mut nl_kinds: Vec<(NonlinearKind, usize)> = Vec::new(); // (kind, edge_idx)
-    for &eidx in &nl_edge_indices {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-        if let Some((kind, _)) = comp.kind.classify_nonlinear(
-            &comp.id,
-            e.node_a,
-            e.node_b,
-            graph.gnd_node,
-            &graph.node_names,
-        ) {
-            nl_kinds.push((kind, eidx));
-        }
-    }
-
-    // Detect antiparallel diode pairs from separate diode components.
-    // Two SingleDiode edges between the same pair of nodes (with swapped polarity)
-    // form an antiparallel pair → synthesize a DiodePair root using the first diode's model.
-    let (root, base_diode_model) = if nl_kinds.len() >= 2 {
-        let mut synthesized = false;
-        let mut result_root = None;
-        let mut result_model = None;
-
-        // Check each pair of diode edges for antiparallel topology
-        for i in 0..nl_kinds.len() {
-            for j in (i + 1)..nl_kinds.len() {
-                if let (
-                    (NonlinearKind::SingleDiode(dt_a), eidx_a),
-                    (NonlinearKind::SingleDiode(dt_b), eidx_b),
-                ) = (&nl_kinds[i], &nl_kinds[j])
-                {
-                    let ea = &graph.edges[*eidx_a];
-                    let eb = &graph.edges[*eidx_b];
-                    // Antiparallel: node_a↔node_b swapped (same two nodes, opposite polarity)
-                    let antiparallel = (ea.node_a == eb.node_b && ea.node_b == eb.node_a)
-                        || (ea.node_a == eb.node_a && ea.node_b == eb.node_b);
-                    if antiparallel {
-                        // Use the higher-Vf diode's model for the pair.
-                        // For asymmetric pairs (SD-1: silicon + germanium), this gives
-                        // approximately correct symmetric clipping at the silicon threshold.
-                        // TODO: implement AsymmetricDiodePairRoot for exact behavior.
-                        use crate::dsl::DiodeType;
-                        let dt = if dt_a == dt_b {
-                            *dt_a
-                        } else {
-                            // Pick silicon (higher Vf) for now
-                            match (dt_a, dt_b) {
-                                (DiodeType::Silicon, _) | (_, DiodeType::Silicon) => {
-                                    DiodeType::Silicon
-                                }
-                                _ => *dt_a,
-                            }
-                        };
-                        let model = super::super::helpers::diode_model(dt);
-                        result_root = Some(super::super::stage::RootKind::ExplicitDiodePair(
-                            ExplicitDiodePairRoot::new(model),
-                        ));
-                        result_model = Some(model);
-                        synthesized = true;
-                        break;
-                    }
-                }
-            }
-            if synthesized {
-                break;
-            }
-        }
-
-        if synthesized {
-            (result_root.unwrap(), result_model)
-        } else {
-            // Multiple NL edges but not antiparallel — use the first one
-            create_root(&nl_kinds[0].0, false)
-        }
-    } else {
-        create_root(&nl_kinds[0].0, false)
-    };
-
-    // VS with op-amp output impedance as source resistance.
-    //
-    // No pendant tree. The pendant edges (input coupling: Cin, R_b1, etc.)
-    // are either in their own SPQR passive stage or provide DC bias handled
-    // by bias_analysis. They don't affect the diode clipping — the diode
-    // sees the op-amp's output impedance, not the input coupling impedance.
-    //
-    // The gain is already computed from Rf/Ri by extract_opamp_config and
-    // applied by OpAmpRoot.compute_vs_voltage(). The VS output IS the
-    // op-amp output voltage. The diode clips it.
-    let tree = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
-        voltage: 0.0,
-        rp: config.model.output_impedance,
-        is_cathode_bias: false,
-        port_name: None,
-    }));
-
-    let oversampler = Oversampler::new(OversamplingFactor::X2);
-    let mut stage = WdfStage::new(tree, root, oversampler);
-
-    // Find feedback pot
-    let feedback_pot = super::find_feedback_pot(group, graph);
-    if let Some((pot_id, pot_leaf, fixed_r, _parallel_r)) = feedback_pot {
-        let ri = if config.ri.is_finite() && config.ri > 0.0 {
-            config.ri
-        } else {
-            stage.tree.port_resistance()
-        };
-        stage.feedback_pot_id = Some(pot_id);
-        stage.feedback_series_r = fixed_r;
-        stage.feedback_ri = ri;
-        stage.opamp_children.push(pot_leaf);
-    }
-
-    stage.feedback_opamp = Some(opamp);
-    stage.base_diode_model = base_diode_model;
-    Ok(stage)
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // General MNA + NR solver
@@ -254,6 +104,29 @@ fn build_general_mna_from_edges_inner(
         node_set.push(graph.vcc_node);
     }
 
+    // Op-amp nullor (VCVS) support (pedalkernel-9xu1): an in-loop NL device
+    // (TS/SD-1/RAT diode across the feedback) must co-solve against the op-amp's
+    // CLOSED-LOOP impedance, not its output impedance. To do that the op-amp
+    // VCVS must be a row in this MNA system. Ensure each in-stage nullor's
+    // pos/neg/out nodes are in node_set (the `pos` bias node may be touched by
+    // no other edge in this group, e.g. opamp_diode_clipper's U1.pos).
+    for rec in &graph.nullor_pins {
+        let in_stage = all_edges
+            .iter()
+            .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx);
+        if in_stage {
+            for node in [rec.pos_node, rec.neg_node, rec.out_node] {
+                if node != graph.gnd_node
+                    && node != graph.vcc_node
+                    && !graph.supply_nodes.contains(&node)
+                    && !node_set.contains(&node)
+                {
+                    node_set.push(node);
+                }
+            }
+        }
+    }
+
     let num_mna_nodes = node_set.len();
     let mut num_vsources = 0usize;
     let vcc_vs_idx = if needs_vcc_port {
@@ -263,6 +136,27 @@ fn build_general_mna_from_edges_inner(
     } else {
         None
     };
+
+    // Allocate one vsource per VCVS (op-amp nullor) component in this stage.
+    // comp_vsrc_base maps comp_idx -> its vsource base index for stamp_mna_multi.
+    let mut vcvs_vsrc_base: Vec<(usize, usize)> = Vec::new();
+    {
+        let mut seen_vcvs: HashSet<usize> = HashSet::new();
+        for &eidx in all_edges {
+            if graph.effective_edge_kind(eidx) != EdgeKind::Vcvs {
+                continue;
+            }
+            let comp_idx = graph.edges[eidx].comp_idx;
+            if !seen_vcvs.insert(comp_idx) {
+                continue;
+            }
+            let count = graph.components[comp_idx].kind.mna_vsource_count();
+            if count > 0 {
+                vcvs_vsrc_base.push((comp_idx, num_vsources));
+                num_vsources += count;
+            }
+        }
+    }
 
     let node_to_mna = |node: NodeId| -> Option<usize> {
         if node == graph.gnd_node || graph.supply_nodes.contains(&node) {
@@ -289,6 +183,7 @@ fn build_general_mna_from_edges_inner(
         num_vsources,
         effective_rate,
         vcc_vs_idx,
+        &vcvs_vsrc_base,
     );
 
     // Step 4: Build WDF ports
@@ -302,9 +197,32 @@ fn build_general_mna_from_edges_inner(
         effective_rate,
     );
     let n_passive = passive_children.len();
-    let extract_output_nodes = find_output_extract_node(all_edges, &node_set, graph)
+    let extract_output_node_id = find_output_extract_node(all_edges, &node_set, graph);
+    let extract_output_nodes = extract_output_node_id
         .and_then(node_to_mna)
         .map(WdfPortTerminals::single_ended);
+
+    if std::env::var("PK9XU1_DEBUG").is_ok() {
+        let node_names: std::collections::HashMap<NodeId, &String> =
+            graph.node_names.iter().map(|(k, v)| (*v, k)).collect();
+        let nm = |n: NodeId| node_names.get(&n).map(|s| s.as_str()).unwrap_or("?");
+        eprintln!("[PK9XU1] === build_general_mna_from_edges_inner ===");
+        eprintln!("[PK9XU1] num_mna_nodes={} num_vsources={} n_nl={}", num_mna_nodes, num_vsources, n_nl);
+        eprintln!("[PK9XU1] vcvs_vsrc_base={:?}", vcvs_vsrc_base);
+        for (i, &n) in node_set.iter().enumerate() {
+            eprintln!("[PK9XU1]   mna node[{}] = graph {} ({})", i, n, nm(n));
+        }
+        eprintln!("[PK9XU1] in_node={} ({})  out_node={} ({})", graph.in_node, nm(graph.in_node), graph.out_node, nm(graph.out_node));
+        eprintln!("[PK9XU1] extract_output_node={:?} ({})", extract_output_node_id, extract_output_node_id.map(nm).unwrap_or("none"));
+        eprintln!("[PK9XU1] injection (in_node mna)={:?}", node_to_mna(graph.in_node));
+        for rec in &graph.nullor_pins {
+            let in_stage = all_edges.iter().any(|&e| graph.edges[e].comp_idx == rec.comp_idx);
+            if in_stage {
+                eprintln!("[PK9XU1] nullor pos={}({}) neg={}({}) out={}({})",
+                    rec.pos_node, nm(rec.pos_node), rec.neg_node, nm(rec.neg_node), rec.out_node, nm(rec.out_node));
+            }
+        }
+    }
 
     // Step 5: Derive scattering matrix + Thevenin adaptation
     let (scattering, vcc_injection_vec) =
@@ -400,7 +318,7 @@ fn find_output_extract_node(
     }
 
     let edge_set: HashSet<usize> = all_edges.iter().copied().collect();
-    graph.edges.iter().enumerate().find_map(|(eidx, edge)| {
+    let neighbor = graph.edges.iter().enumerate().find_map(|(eidx, edge)| {
         if edge_set.contains(&eidx) {
             return None;
         }
@@ -411,7 +329,24 @@ fn find_output_extract_node(
         } else {
             None
         }
-    })
+    });
+    if neighbor.is_some() {
+        return neighbor;
+    }
+
+    // Op-amp feedback stage with the global `out` in a downstream stage: the
+    // stage's true output is the op-amp's nullor output node (U1.out), where the
+    // closed-loop signal appears. (pedalkernel-9xu1)
+    graph
+        .nullor_pins
+        .iter()
+        .find(|rec| {
+            all_edges
+                .iter()
+                .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+        })
+        .map(|rec| rec.out_node)
+        .filter(|n| node_set.contains(n))
 }
 
 fn differential_diode_ladder_component_filter(
@@ -626,6 +561,7 @@ fn stamp_passive_edges(
     num_vsources: usize,
     effective_rate: f64,
     vcc_vs_idx: Option<usize>,
+    vcvs_vsrc_base: &[(usize, usize)],
 ) -> (
     MnaSystem,
     Vec<(usize, OnePortKind)>,
@@ -634,6 +570,7 @@ fn stamp_passive_edges(
     let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
     let mut reactive_edges: Vec<(usize, OnePortKind)> = Vec::new();
     let mut variable_resistor_candidates: Vec<VariableResistorCandidate> = Vec::new();
+    let mut stamped_vcvs: HashSet<usize> = HashSet::new();
 
     for &eidx in all_edges {
         if nl_edge_set.contains(&eidx) {
@@ -643,6 +580,33 @@ fn stamp_passive_edges(
         let comp = &graph.components[e.comp_idx];
         let n1 = node_to_mna(e.node_a);
         let n2 = node_to_mna(e.node_b);
+
+        // Op-amp nullor (VCVS): stamp the closed-loop constraint into the MNA so
+        // an in-loop NL device (diode across the feedback) co-solves against the
+        // op-amp's closed-loop impedance (pedalkernel-9xu1). Stamped once per
+        // component via stamp_mna_multi (resolves pos/neg/out by pin name).
+        if graph.effective_edge_kind(eidx) == EdgeKind::Vcvs {
+            if let Some(&(_, vsrc_base)) =
+                vcvs_vsrc_base.iter().find(|&&(ci, _)| ci == e.comp_idx)
+            {
+                if stamped_vcvs.insert(e.comp_idx) {
+                    let pin_fn = |pin: &str| -> Option<usize> {
+                        let key = format!("{}.{}", comp.id, pin);
+                        let node = graph.node_names.get(&key)?;
+                        node_to_mna(*node)
+                    };
+                    let mut ctx = super::super::component::StampContext {
+                        pin_to_mna: &pin_fn,
+                        vsrc_base,
+                        internal_node_base: 0,
+                        sample_rate: effective_rate,
+                        reactive_one_ports: None,
+                    };
+                    comp.kind.stamp_mna_multi(&comp.id, &mut ctx, &mut mna);
+                }
+            }
+            continue;
+        }
 
         if comp.kind.is_pot() {
             // Pots: stamp initial resistance into MNA AND create a WDF leaf
@@ -1183,6 +1147,18 @@ fn assemble_multi_nl_stage(
         let (out_pos, out_neg) = out.as_tuple();
         mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
     });
+
+    if std::env::var("PK9XU1_DEBUG").is_ok() {
+        eprintln!("[PK9XU1] assemble: n_nl={} n_passive={} n_total_ports={} r_adapted={}",
+            n_nl, n_passive, ports.len(), r_adapted);
+        eprintln!("[PK9XU1] port resistances: {:?}", port_resistances);
+        eprintln!("[PK9XU1] extract_output_nodes={:?}", extract_output_nodes);
+        eprintln!("[PK9XU1] extract_coeffs={:?}", extract_coeffs);
+        eprintln!("[PK9XU1] s_nl={:?}", scattering_blocks.s_nl);
+        eprintln!("[PK9XU1] s_nl_passive={:?}", scattering_blocks.s_nl_passive);
+        eprintln!("[PK9XU1] s_nl_adapted={:?}", scattering_blocks.s_nl_adapted);
+        eprintln!("[PK9XU1] dc_bias={:?}", dc_bias);
+    }
 
     // Output port: last CE port for BJTs, first NL port otherwise
     let output_port = if let Some(ref dg) = device_groups {

@@ -1,0 +1,70 @@
+* ============================================================================
+* 808 Closed Hi-Hat — Damped High-Freq Resonator (Behavioral State-Space Approx)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The authentic TR-808 closed hat uses SIX square-wave oscillators
+* at non-harmonic frequencies (~205, 304, 369, 522, 540, 800 Hz) summed and fed
+* through a high-pass filter (~7 kHz). The six-oscillator metallic intermodulation
+* is the primary sonic character. This SPICE deck implements a SIMPLIFIED
+* state-space resonator approximation.
+*
+* SIMPLIFICATION (documented gap):
+*   The .pedal uses a single bridged-T resonator at ~7 kHz (R=150k, C=150p)
+*   as a high-frequency bandpass filter / click generator. This is the same
+*   simplification used by ACB-based clones (treat the hat filter as the model).
+*   The six-oscillator metallic source is NOT modeled. The deck captures the
+*   behavioral output of the .pedal circuit, not the authentic hardware circuit.
+*   A faithful six-oscillator SPICE model would require 6 square-wave voltage
+*   sources + summing network + bandpass filter — that is tracked as a future gap.
+*
+* PARAMETERS (from 808_closed_hat.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 150kΩ, C1 = C2 = 150pF
+*   f0 = 1 / (2π·150k·150p) = 7073.6 Hz
+*   omega0 = 2π·f0 = 44444.44 rad/s
+*   r_crit = 150k+150k+150k = 450kΩ
+*   R_fb = 47kΩ  →  R_fb < r_crit: SUB-CRITICAL FEEDBACK (highly damped, no oscillation)
+*   Effective Q_eff ≈ 5 (approximation — see note below)
+*   2·zeta·omega0 = omega0 / Q_eff = 44444.44 / 5 = 8888.89
+*
+* Q_EFF APPROXIMATION NOTE:
+*   With R_fb=47k well below r_crit=450k, the bridged-T circuit does NOT sustain
+*   oscillation — it is a heavily damped resonator producing a very short click.
+*   Q_eff=5 is an engineering approximation giving τ = 2*Q/ω₀ ≈ 0.22 ms, consistent
+*   with the "closed hat snap" sonic character and the default Decay pot position (0.5).
+*   The exact Q from WDF simulation is not available (WDF engine has lq6.1 resonator
+*   bug). This is a known modeling approximation; the gap vs authentic TR-808 metallic
+*   source is documented above.
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* VERIFIED: f0 = 7073.6 Hz (theory)
+* KNOWN GAPS:
+*   1. Six-oscillator metallic source not modeled (resonator approximation only).
+*   2. Closed hat Q_eff is an approximation (R_fb < r_crit, no closed-form Q).
+*   3. WDF engine lq6.1 bug: actual WDF output is at Nyquist, not 7073 Hz.
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 44444.44
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -44444.44
+
+* G-source: −2·zeta·omega0 * v_v  (damping; Q_eff=5 approximation)
+Gv_v 0 v_v v_v 0 -8888.89
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 44444.44
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

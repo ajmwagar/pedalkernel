@@ -1,0 +1,98 @@
+* ============================================================================
+* 808 Cowbell — Dual Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The 808 cowbell uses TWO bridged-T Sallen-Key resonators at
+* different frequencies (~720 Hz lo / ~1026 Hz hi) summed through an inverting
+* mixer. The authentic TR-808 cowbell uses two square-wave oscillators at
+* ~560 Hz and ~845 Hz — the .pedal approximates these with state-space
+* resonators due to WDF bridged-T bias-loading (see below).
+*
+* SIMPLIFICATION: The authentic TR-808 uses square-wave oscillators (rich in
+* odd harmonics) fed through a bandpass filter. This deck models BOTH oscillators
+* as state-space resonators (sinusoidal, not square). This is the same
+* simplification used in the .pedal file and accepted in ACB-based clones.
+* Harmonic content of the square waves is NOT captured — this is a documented gap.
+*
+* REANCHOR NOTE: This deck was previously set to f0_lo=720.5 Hz / f0_hi=1026.1 Hz
+* (RC textbook values). It is now anchored to the TR-808 service manual targets
+* (lo 540 Hz / hi 800 Hz). Q values are preserved from the .pedal component ratios.
+*
+* PARAMETERS (TR-808 service manual — lo: 540 Hz, hi: 800 Hz):
+*
+*   Lo oscillator:
+*     f0_lo = 540 Hz  (TR-808 service manual cowbell lo-oscillator)
+*     Q_lo = 2.09  (R_lo_fb = 270k, r_crit = 141k → Q = 270/(270-141))
+*     zeta_lo = 1/(2·Q) = 0.239
+*     omega0_lo = 2π·540 = 3392.92 rad/s
+*     2·zeta_lo·omega0_lo = 1623.41
+*
+*   Hi oscillator:
+*     f0_hi = 800 Hz  (TR-808 service manual cowbell hi-oscillator)
+*     Q_hi = 1.98  (R_hi_fb = 200k, r_crit = 99k → Q = 200/(200-99))
+*     zeta_hi = 1/(2·Q) = 0.253
+*     omega0_hi = 2π·800 = 5026.55 rad/s
+*     2·zeta_hi·omega0_hi = 2538.66
+*
+* STATE-SPACE MODEL (per resonator):
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* OUTPUT: v_out = v_x_lo + v_x_hi (summed resonator states)
+*   The physical mixer is inverting but polarity is irrelevant for
+*   RMS/spectral comparison.
+*
+* GAP: Square-wave harmonic content (odd harmonics of 560/845 Hz) not modeled.
+*   The WDF .pedal also uses sinusoidal resonators, so WDF-vs-SPICE comparison
+*   is valid for the resonant body; the spectral gap vs authentic hardware is
+*   a separate known gap not tracked here.
+*
+* VERIFIED: f0_lo = 540 Hz, f0_hi = 800 Hz (TR-808 service manual)
+* ============================================================================
+
+* ── Lo-frequency resonator ───────────────────────────────────────────────────
+
+* State variable: v_x_lo (position / oscillator voltage)
+Cx_lo v_x_lo 0 1
+
+* dv_x_lo/dt = omega0_lo * v_v_lo
+Gx_lo_v 0 v_x_lo v_v_lo 0 3392.92
+
+* State variable: v_v_lo (velocity, scaled by 1/omega0)
+Cv_lo v_v_lo 0 1
+
+* −omega0_lo * v_x_lo  (restoring force)
+Gv_lo_x 0 v_v_lo v_x_lo 0 -3392.92
+
+* −2·zeta_lo·omega0_lo * v_v_lo  (damping)
+Gv_lo_v 0 v_v_lo v_v_lo 0 -1623.41
+
+* omega0_lo * trigger input
+Gv_lo_in 0 v_v_lo v_in 0 3392.92
+
+* ── Hi-frequency resonator ───────────────────────────────────────────────────
+
+* State variable: v_x_hi (position / oscillator voltage)
+Cx_hi v_x_hi 0 1
+
+* dv_x_hi/dt = omega0_hi * v_v_hi
+Gx_hi_v 0 v_x_hi v_v_hi 0 5026.55
+
+* State variable: v_v_hi (velocity, scaled by 1/omega0)
+Cv_hi v_v_hi 0 1
+
+* −omega0_hi * v_x_hi  (restoring force)
+Gv_hi_x 0 v_v_hi v_x_hi 0 -5026.55
+
+* −2·zeta_hi·omega0_hi * v_v_hi  (damping)
+Gv_hi_v 0 v_v_hi v_v_hi 0 -2538.66
+
+* omega0_hi * trigger input
+Gv_hi_in 0 v_v_hi v_in 0 5026.55
+
+* ── Output: sum of both resonator states ─────────────────────────────────────
+* The physical mixer sums both oscillators through equal-value resistors.
+* Polarity is irrelevant for RMS/spectral comparison.
+Bout v_out 0 V = v(v_x_lo) + v(v_x_hi)
+Rload_out v_out 0 100k

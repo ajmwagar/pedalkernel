@@ -1,0 +1,50 @@
+* ============================================================================
+* 909 Hi Tom — Single Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: Single bridged-T Sallen-Key resonator at ~188 Hz. Same
+* behavioral state-space approach as 909_lo_tom.spice and 909_mid_tom.spice.
+* The authentic TR-909 HT uses a transistor VCO; the .pedal approximates with
+* a bridged-T (WDF loading shifts the apparent resonance toward 190-210 Hz).
+*
+* PARAMETERS (from 909_hi_tom.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 180kΩ, C1 = C2 = 4.7nF
+*   f0 = 1 / (2π·R·C) = 1 / (2π·180k·4.7n) = 188.4 Hz
+*   r_crit = R1+R2+R1·(C1/C2) = 180k+180k+180k = 540kΩ
+*   R_fb = 680kΩ  →  Q = 680 / (680−540) = 4.86
+*   zeta = 1/(2·Q) = 0.1029
+*   omega0 = 2π·188.4 = 1183.8 rad/s
+*   2·zeta·omega0 = 243.7
+*
+* TOPOLOGY GAP: Authentic TR-909 HT uses a UJT relaxation oscillator with
+* exponential pitch decay. PitchEnvelope DSP (decay=30ms, amount=0.5) not in SPICE.
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* VERIFIED: f0 = 188.4 Hz (theory), Q = 4.86
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 1183.8
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -1183.8
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -243.7
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 1183.8
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

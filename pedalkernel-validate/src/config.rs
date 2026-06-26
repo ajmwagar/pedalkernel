@@ -125,7 +125,7 @@ pub struct TestSuite {
 }
 
 /// A single test case.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TestCase {
     /// Path to the circuit file (.pedal for WDF, .spice for reference)
     pub circuit: String,
@@ -148,6 +148,18 @@ pub struct TestCase {
     /// loudly, so accidental golden deletion is caught.
     #[serde(default)]
     pub pending_reference: bool,
+    /// Path to the WDF `.pedal` source relative to the pedalkernel-pro repo root.
+    ///
+    /// Set this for circuits whose `.pedal` files are proprietary (live in
+    /// `pedalkernel-pro`, never committed to the public engine repo).  When
+    /// the public `circuit` path is not found in `--circuits`, the bootstrap
+    /// command falls back to probing ancestor directories for
+    /// `pedalkernel-pro/<pro_circuit_path>` via the same sibling-directory
+    /// search used by `pro_pedal::load_pro_pedal_sub`.
+    ///
+    /// `None` means no private fallback: the circuit must exist at `circuit`.
+    #[serde(default)]
+    pub pro_circuit_path: Option<String>,
 }
 
 /// Signal configuration.
@@ -552,6 +564,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -588,6 +601,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -622,6 +636,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -644,6 +659,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -691,6 +707,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -734,6 +751,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -794,6 +812,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
                 // Zener diode clipper (back-to-back 5.1V zeners)
@@ -838,6 +857,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -891,6 +911,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
                 tests
@@ -933,6 +954,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -980,6 +1002,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1010,6 +1033,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1053,6 +1077,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1079,6 +1104,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1105,6 +1131,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1132,6 +1159,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1167,6 +1195,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1202,6 +1231,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1246,6 +1276,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: true,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1299,6 +1330,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: true,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1339,6 +1371,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: true,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1383,6 +1416,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: true,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1414,6 +1448,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
                 tests
@@ -1461,6 +1496,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1485,6 +1521,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1510,6 +1547,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1551,6 +1589,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1589,6 +1628,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1615,6 +1655,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1641,6 +1682,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1667,6 +1709,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1692,6 +1735,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1720,6 +1764,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1772,6 +1817,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1804,6 +1850,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1826,6 +1873,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1870,6 +1918,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1910,6 +1959,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -1952,6 +2002,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2010,6 +2061,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2055,6 +2107,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2102,6 +2155,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2148,6 +2202,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2198,6 +2253,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2235,6 +2291,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2273,6 +2330,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2311,6 +2369,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2345,6 +2404,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2400,6 +2460,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2456,6 +2517,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2511,6 +2573,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2590,6 +2653,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         // Golden generated from ngspice (2026-06-15). Active in the
                         // gate; not hidden behind pending_reference.
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -2624,6 +2688,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_flat.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, flat (all controls off)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2661,6 +2726,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_lf_boost.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, LF boost on (LF_Boost=1.0)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2698,6 +2764,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_lf_trick.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, LF trick (Boost+Atten=1.0)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2736,6 +2803,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_hf_boost.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, HF boost on (HF_Boost=1.0, f0≈3.1kHz)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2773,6 +2841,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     TestCase {
                         circuit: "eq/pultec_eqp1a_passive_hf_atten.pedal".to_string(),
                         pending_reference: false,
+                        pro_circuit_path: None,
                         description: "Pultec EQP-1A passive, HF atten on (HF_Atten=1.0)".to_string(),
                         signals: vec![
                             SignalConfig::Sine {
@@ -2838,6 +2907,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "fet_leveler_level_sweep".to_string(),
                     TestCase {
                         pending_reference: false,
+                        pro_circuit_path: None,
                         circuit: "compressor/fet_leveler.pedal".to_string(),
                         description:
                             "FET Leveler 1176-style: static gain curve (-40..0 dBVU, 9 levels)"
@@ -2874,6 +2944,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "fet_leveler_tone_burst".to_string(),
                     TestCase {
                         pending_reference: false,
+                        pro_circuit_path: None,
                         circuit: "compressor/fet_leveler.pedal".to_string(),
                         description:
                             "FET Leveler 1176-style: attack/release timing via tone burst"
@@ -2910,6 +2981,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "dyna_comp_level_sweep".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/dyna_comp.pedal".to_string(),
                         description:
                             "Dyna Comp (CA3080 OTA): static gain curve (-40..0 dBVU, 9 levels)"
@@ -2938,6 +3010,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "dyna_comp_tone_burst".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/dyna_comp.pedal".to_string(),
                         description:
                             "Dyna Comp (CA3080 OTA): attack/release timing via tone burst"
@@ -2967,6 +3040,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "vca_bus_comp_level_sweep".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/vca_bus_comp.pedal".to_string(),
                         description:
                             "VCA Bus Comp (SSM2164): static gain curve (-40..0 dBVU, 9 levels)"
@@ -2995,6 +3069,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "vca_bus_comp_tone_burst".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/vca_bus_comp.pedal".to_string(),
                         description:
                             "VCA Bus Comp (SSM2164): attack/release timing via tone burst"
@@ -3027,6 +3102,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "la2a_level_sweep".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/la2a.pedal".to_string(),
                         description:
                             "LA-2A T4B opto leveler: static gain curve (-40..0 dBVU, 9 levels)"
@@ -3055,6 +3131,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "la2a_tone_burst".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/la2a.pedal".to_string(),
                         description:
                             "LA-2A T4B opto leveler: attack/release timing via tone burst"
@@ -3086,6 +3163,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "opto_leveler_level_sweep".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/opto_leveler.pedal".to_string(),
                         description:
                             "Opto Leveler (T4B, single 12AX7): static gain curve (-40..0 dBVU, 9 levels)"
@@ -3114,6 +3192,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "opto_leveler_tone_burst".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/opto_leveler.pedal".to_string(),
                         description:
                             "Opto Leveler (T4B, single 12AX7): attack/release timing via tone burst"
@@ -3155,6 +3234,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     "fet_leveler_hot".to_string(),
                     TestCase {
                         pending_reference: true,
+                        pro_circuit_path: None,
                         circuit: "compressor/fet_leveler.pedal".to_string(),
                         description:
                             "FET Leveler 1176-style driven hot — 2.0V sine, deep compression region"
@@ -3258,6 +3338,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3299,6 +3380,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3340,6 +3422,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3373,6 +3456,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3406,6 +3490,7 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: None,
                         pending_reference: false,
+                        pro_circuit_path: None,
                     },
                 );
 
@@ -3438,6 +3523,796 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         },
                         warmup_trim_ms: Some(150.0),
                         pending_reference: false,
+                        pro_circuit_path: None,
+                    },
+                );
+
+                tests
+            },
+        },
+    );
+
+    // Drums suite — TR-808/909 voice validation
+    //
+    // WDF circuit: loaded from pedalkernel-pro at bootstrap/run time via the
+    // `circuit` path (bootstrap skips gracefully if the pro repo is absent; the
+    // validate runner's load path similarly skips).  The .pedal files are
+    // proprietary and must never be committed to this public repo.
+    //
+    // SPICE golden: spice-circuits/drums/<name>.spice (already committed).
+    // Generate with: cargo run -p pedalkernel-validate -- generate-spice --suite drums
+    //
+    // Profile: `KnownGap` — the WDF 808 kick is known-broken per lq6.1
+    // (f0 appears at Nyquist, no pitch sweep in the WDF layer).  Thresholds
+    // are intentionally loose (20 dB) so the gate correctly reports RED and
+    // the gap is visible on the accuracy dashboard without blocking CI.
+    suites.insert(
+        "drums".to_string(),
+        TestSuite {
+            description: "TR-808/909 drum voice resonator validation (SPICE vs WDF)".to_string(),
+            tests: {
+                let mut tests = BTreeMap::new();
+
+                // 808 kick — bridged-T Sallen-Key resonator
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_kick.pedal
+                // SPICE model: behavioral state-space equivalent (f0=56 Hz, Q≈30 — TR-808 manual).
+                //
+                // Signal: 2 ms gate trigger → 500 ms decay window.
+                // Label "trigger" matches the existing golden path convention in
+                // drums_spice.rs (golden/drums/808_kick/trigger.npy).
+                //
+                // Known failure: WDF f0 at Nyquist (engine bug, lq6.1 backlog).
+                // Thresholds set loose (20 dB) → KnownGap profile.  The point is
+                // to surface the gap on the dashboard, not to gate CI.
+                tests.insert(
+                    "808_kick".to_string(),
+                    TestCase {
+                        circuit: "drums/808_kick.pedal".to_string(),
+                        description: "TR-808 kick: bridged-T resonator, f0=56 Hz (manual), Q≈30"
+                            .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            // Single-sample impulse excites the resonator.
+                            // The SPICE model and WDF engine both receive the same
+                            // impulse, so compare-goldens measures the same response.
+                            // Label "trigger" matches the golden path convention
+                            // established in drums_spice.rs (golden/drums/808_kick/trigger.npy).
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF kick is broken (f0 at Nyquist, lq6.1).
+                            // Thresholds loose enough that the test registers but
+                            // reports RED honestly on the accuracy dashboard.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        // No warmup trim — the kick is all transient; trimming the
+                        // head would discard the trigger onset and ring-up.
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        // Private circuit: bootstrap falls back to pedalkernel-pro.
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_kick.pedal".to_string(),
+                        ),
+                    },
+                );
+
+                // 808 snare — dual bridged-T resonator (lo ~154 Hz + hi ~339 Hz)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_snare.pedal
+                // SPICE model: two state-space resonators summed; noise burst NOT modeled
+                //   (tonal-body-only gap is documented in 808_snare.spice header).
+                //
+                // Lo body: f0=238 Hz (TR-808 manual), Q=2.5
+                // Hi body: f0=476 Hz (TR-808 manual), Q=5.0
+                //
+                // Known failure: same WDF resonator bug as kick (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "808_snare".to_string(),
+                    TestCase {
+                        circuit: "drums/808_snare.pedal".to_string(),
+                        description:
+                            "TR-808 snare: dual bridged-T (lo 238 Hz Q=2.5 + hi 476 Hz Q=5.0 — manual), tonal bodies only"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_snare.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 tom (lo-tom) — single bridged-T resonator
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_tom.pedal
+                // SPICE model: state-space resonator, f0=90 Hz (TR-808 manual), Q=8.33
+                //
+                // NOTE: 808_tom.pedal is internally labelled "808 Mid Tom" but is the
+                // lo-tom voice in the three-voice hierarchy.  See 808_tom.spice header.
+                //
+                // Known failure: same WDF resonator bug as kick (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "808_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/808_tom.pedal".to_string(),
+                        description:
+                            "TR-808 tom (lo-tom): bridged-T resonator, f0=90 Hz (manual), Q=8.33"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_tom.pedal".to_string(),
+                        ),
+                    },
+                );
+
+                // 808 mid tom — single bridged-T resonator
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_mid_tom.pedal
+                // SPICE model: state-space resonator, f0=135 Hz (TR-808 manual), Q=9.1
+                //
+                // Known failure: same WDF resonator bug as kick (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "808_mid_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/808_mid_tom.pedal".to_string(),
+                        description:
+                            "TR-808 mid tom: bridged-T resonator, f0=135 Hz (manual), Q=9.1".to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_mid_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 hi tom — single bridged-T resonator
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_hi_tom.pedal
+                // SPICE model: state-space resonator, f0=185 Hz (TR-808 manual), Q=8.33
+                //
+                // REANCHOR: Previously f0=153.8 Hz (RC textbook). Now anchored to TR-808
+                // service manual hi-tom target (185 Hz). Q preserved from .pedal component values.
+                //
+                // Known failure: same WDF resonator bug as kick (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "808_hi_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/808_hi_tom.pedal".to_string(),
+                        description:
+                            "TR-808 hi tom: bridged-T resonator, f0=185 Hz (manual), Q=8.33".to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_hi_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 claves — single high-Q bridged-T resonator (~2.25 kHz, Q≈23.5)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_claves.pedal
+                // SPICE model: state-space resonator, f0=2500 Hz (TR-808 manual), Q=23.5
+                //
+                // Short percussive click with brief ring. Same WDF resonator bug as other voices (lq6.1).
+                tests.insert(
+                    "808_claves".to_string(),
+                    TestCase {
+                        circuit: "drums/808_claves.pedal".to_string(),
+                        description:
+                            "TR-808 claves: single bridged-T resonator, f0=2500 Hz (manual), Q=23.5"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator is broken (f0 at Nyquist, lq6.1).
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_claves.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 rimshot — single low-Q bridged-T resonator (1667 Hz, Q≈2.78)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_rimshot.pedal
+                // SPICE model: state-space resonator, f0=1667 Hz (TR-808 manual), Q=2.78
+                //
+                // Very short click (τ≈0.53ms). Same WDF resonator bug as other voices (lq6.1).
+                tests.insert(
+                    "808_rimshot".to_string(),
+                    TestCase {
+                        circuit: "drums/808_rimshot.pedal".to_string(),
+                        description:
+                            "TR-808 rimshot: single bridged-T resonator, f0=1667 Hz (manual), Q=2.78, τ≈0.53ms"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + WDF loading shifts f0.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_rimshot.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 cowbell — dual bridged-T resonator (lo 540 Hz + hi 800 Hz) summed
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_cowbell.pedal
+                // SPICE model: two state-space resonators summed (sinusoidal approximation).
+                //
+                // Authentic TR-808 uses two square-wave oscillators (~560/845 Hz). SPICE deck
+                // anchored to TR-808 service manual targets (540/800 Hz). Q preserved from
+                // .pedal component ratios (lo Q=2.09, hi Q=1.98).
+                // Square-wave harmonic content is a documented gap.
+                tests.insert(
+                    "808_cowbell".to_string(),
+                    TestCase {
+                        circuit: "drums/808_cowbell.pedal".to_string(),
+                        description:
+                            "TR-808 cowbell: dual bridged-T (lo 540 Hz Q=2.09 + hi 800 Hz Q=1.98 — manual), sinusoidal approx"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + square-wave harmonic gap.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_cowbell.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 maracas — high-freq bridged-T click resonator (~4823 Hz, Q=34)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_maracas.pedal
+                // SPICE model: state-space resonator, f0=4822.9Hz, Q=34
+                //
+                // The .pedal provides a brief click at attack; the actual maracas character
+                // is DSP noise (VoiceNoise at ~6 kHz bandpass) outside the WDF model.
+                // SPICE deck captures tonal body only; noise component is a documented gap.
+                tests.insert(
+                    "808_maracas".to_string(),
+                    TestCase {
+                        circuit: "drums/808_maracas.pedal".to_string(),
+                        description:
+                            "TR-808 maracas: high-freq bridged-T click, f0=4822.9 Hz, Q=34; noise component not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + noise component not modeled.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_maracas.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 clap — bandpass body resonator (~1539 Hz, Q=1.43); burst envelope not modeled
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_clap.pedal
+                // SPICE model: state-space resonator, f0=1539.2Hz, Q=1.43
+                //
+                // The authentic 808 clap has 3-4 retriggered noise bursts (reverb effect).
+                // The multi-burst envelope is a DSP block (ClapEnvelope in drummerboy-core);
+                // the .pedal provides only the bandpass resonator body. Two documented gaps:
+                // (1) multi-burst envelope not in WDF path; (2) noise source not modeled.
+                tests.insert(
+                    "808_clap".to_string(),
+                    TestCase {
+                        circuit: "drums/808_clap.pedal".to_string(),
+                        description:
+                            "TR-808 clap body: bridged-T resonator, f0=1539.2 Hz, Q=1.43; multi-burst envelope + noise not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + multi-burst envelope gap
+                            // + noise source gap. Three stacked modeling limitations.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_clap.pedal".to_string(),
+                        ),
+                    },
+                );
+
+                // 808 closed hat — damped high-freq resonator (~7074 Hz, Q_eff≈5 approx)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_closed_hat.pedal
+                // SPICE model: state-space resonator, f0=7073.6Hz, Q_eff=5 (approximation).
+                //
+                // Authentic TR-808: 6 square-wave oscillators (~205–800 Hz) + 7kHz HPF.
+                // The .pedal approximates this as a single 7kHz bridged-T with sub-critical
+                // feedback (R_fb=47k < r_crit=450k → highly damped, very short ring).
+                // Q_eff=5 is an approximation; the exact Q is not derivable from the
+                // sub-critical R_fb formula. Two documented gaps: 6-osc metallic source +
+                // sub-critical Q approximation.
+                tests.insert(
+                    "808_closed_hat".to_string(),
+                    TestCase {
+                        circuit: "drums/808_closed_hat.pedal".to_string(),
+                        description:
+                            "TR-808 closed hat: 7074 Hz resonator approx (Q_eff=5); 6-osc metallic source not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + 6-osc metallic gap
+                            // + Q_eff approximation (R_fb < r_crit, sub-critical feedback).
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_closed_hat.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 808 open hat — high-Q high-freq resonator (~7074 Hz, Q=23.5)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/808_open_hat.pedal
+                // SPICE model: state-space resonator, f0=7073.6Hz, Q=23.5
+                //
+                // Same resonator body as closed hat (identical R/C values) but with
+                // R_fb=470k > r_crit=450k → above critical: longer ring than closed hat.
+                // Same 6-osc metallic source gap as closed hat. Authentic decay (~300ms)
+                // is not achievable with this single-resonator .pedal topology.
+                tests.insert(
+                    "808_open_hat".to_string(),
+                    TestCase {
+                        circuit: "drums/808_open_hat.pedal".to_string(),
+                        description:
+                            "TR-808 open hat: 7074 Hz resonator (Q=23.5); 6-osc metallic source not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + 6-osc metallic gap.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/808_open_hat.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // ── B3 voices: 909 analog + 606 snare ────────────────────────────────────
+
+                // 606 snare — dual bridged-T resonator (lo ~282 Hz + hi ~339 Hz)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/606_snare.pedal
+                // SPICE model: two state-space resonators summed; noise burst NOT modeled
+                //   (tonal-body-only gap documented in 606_snare.spice header).
+                //
+                // Lo body: R=120k, C=4.7n → f0=282.3Hz, Q=4.27 (R_fb=470k)
+                // Hi body: R=100k, C=4.7n → f0=338.6Hz, Q=5.62 (R_fb=365k)
+                //
+                // NOTE: Hi-body R_fb was raised 330k→365k to balance oscillator energy
+                // (fixes prior bug where hi-body was 10× louder than lo-body).
+                //
+                // Known failure: same WDF resonator bug as 808 voices (lq6.1).
+                // Thresholds loose (20 dB) → KnownGap profile.
+                tests.insert(
+                    "606_snare".to_string(),
+                    TestCase {
+                        circuit: "drums/606_snare.pedal".to_string(),
+                        description:
+                            "TR-606 snare: dual bridged-T (lo 282 Hz Q=4.27 + hi 339 Hz Q=5.62), tonal bodies only"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/606_snare.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 lo tom — single bridged-T resonator (~80 Hz, Q=5.0)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_lo_tom.pedal
+                // SPICE model: state-space resonator, f0=79.6Hz, Q=5.0
+                //
+                // Authentic TR-909 LT uses a UJT relaxation oscillator (~65 Hz target).
+                // .pedal approximates with bridged-T + PitchEnvelope. SPICE models
+                // the static body resonance; PitchEnvelope sweep not modeled in SPICE.
+                //
+                // Known failure: same WDF resonator bug as 808 voices (lq6.1).
+                tests.insert(
+                    "909_lo_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/909_lo_tom.pedal".to_string(),
+                        description:
+                            "TR-909 lo tom: bridged-T resonator, f0=79.6 Hz, Q=5.0; PitchEnvelope sweep not in SPICE"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_lo_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 mid tom — single bridged-T resonator (~125 Hz, Q=5.26)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_mid_tom.pedal
+                // SPICE model: state-space resonator, f0=125.3Hz, Q=5.26
+                //
+                // Authentic TR-909 MT uses a UJT relaxation oscillator (~110-120 Hz target).
+                // .pedal approximates with bridged-T + PitchEnvelope. SPICE models static body.
+                tests.insert(
+                    "909_mid_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/909_mid_tom.pedal".to_string(),
+                        description:
+                            "TR-909 mid tom: bridged-T resonator, f0=125.3 Hz, Q=5.26; PitchEnvelope sweep not in SPICE"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_mid_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 hi tom — single bridged-T resonator (~188 Hz, Q=4.86)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_hi_tom.pedal
+                // SPICE model: state-space resonator, f0=188.4Hz, Q=4.86
+                //
+                // Authentic TR-909 HT uses a UJT relaxation oscillator (~140-160 Hz target).
+                // .pedal approximates with bridged-T (WDF loading shifts peak to 190-210 Hz).
+                // PitchEnvelope sweep not modeled in SPICE.
+                tests.insert(
+                    "909_hi_tom".to_string(),
+                    TestCase {
+                        circuit: "drums/909_hi_tom.pedal".to_string(),
+                        description:
+                            "TR-909 hi tom: bridged-T resonator, f0=188.4 Hz, Q=4.86; PitchEnvelope sweep not in SPICE"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_hi_tom.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 rim — single bridged-T resonator (~412 Hz, Q=5.56)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_rim.pedal
+                // SPICE model: state-space resonator, f0=412.3Hz, Q=5.56 (unloaded, Decay=1.0)
+                //
+                // Default Decay=0.3 shunts the midpoint, reducing effective Q significantly.
+                // SPICE models the unloaded Q=5.56 (Decay=1.0 position); WDF engine applies
+                // pot damping internally. Same pitch range as 808 rimshot; character
+                // differentiation comes from shorter decay (Decay=0.3 default), not pitch.
+                //
+                // Same WDF resonator bug as 808 voices (lq6.1). Also expects WDF
+                // bias-loading shift (similar to 808 rimshot, see ENGINE_BUG_BRIDGED_T_BIAS_LOADING.md).
+                tests.insert(
+                    "909_rim".to_string(),
+                    TestCase {
+                        circuit: "drums/909_rim.pedal".to_string(),
+                        description:
+                            "TR-909 rim shot: bridged-T resonator, f0=412.3 Hz, Q=5.56 (unloaded); short click at Decay=0.3"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + WDF bias-loading shift.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_rim.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 snare — dual bridged-T resonator (lo ~339 Hz + hi ~452 Hz)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_snare.pedal
+                // SPICE model: two state-space resonators summed; noise burst NOT modeled.
+                //
+                // Lo body: R=100k, C=4.7n → f0=338.6Hz, Q=5.0
+                // Hi body: R=75k, C=4.7n  → f0=451.4Hz, Q=6.0
+                //
+                // Higher-pitched than 808 snare (~154+339 Hz) — characteristic 909 brightness.
+                // Noise gap: VoiceNoise (6kHz, Q=2.5, decay=60ms, amount=0.7) not modeled.
+                // Same WDF resonator bug as 808 voices (lq6.1).
+                tests.insert(
+                    "909_snare".to_string(),
+                    TestCase {
+                        circuit: "drums/909_snare.pedal".to_string(),
+                        description:
+                            "TR-909 snare: dual bridged-T (lo 339 Hz Q=5.0 + hi 452 Hz Q=6.0), tonal bodies only"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_snare.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 kick — bridged-T resonator body (~48 Hz, Q=5.71)
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_kick.pedal
+                // SPICE model: state-space resonator, f0=48.2Hz, Q=5.71 (body resonance only)
+                //
+                // DOCUMENTED GAPS (three stacked):
+                //   1. BJT oscillator topology: authentic TR-909 kick uses a 2SC1583 dual-NPN
+                //      transistor multivibrator. This SPICE deck models the equivalent
+                //      bridged-T state-space body from the .pedal approximation — NOT the
+                //      transistor oscillator circuit. BJT transient convergence in the
+                //      multivibrator topology is too stiff for the standard SPICE harness.
+                //   2. PitchEnvelope sweep (190→45 Hz over 80ms, amount=3.2) not in SPICE.
+                //   3. VoiceNoise (4kHz, Q=1.5, decay=8ms) + VoiceClick (decay=3ms) DSP
+                //      layers not modeled (outside WDF path).
+                //
+                // Same WDF resonator bug as 808 voices (lq6.1).
+                tests.insert(
+                    "909_kick".to_string(),
+                    TestCase {
+                        circuit: "drums/909_kick.pedal".to_string(),
+                        description:
+                            "TR-909 kick: bridged-T body approx, f0=48.2 Hz, Q=5.71; BJT oscillator + pitch sweep + noise not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + BJT oscillator gap
+                            // + PitchEnvelope sweep gap + noise/click DSP gaps.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_kick.pedal"
+                                .to_string(),
+                        ),
+                    },
+                );
+
+                // 909 clap — bandpass body resonator (~1539 Hz, Q=1.43); 4-burst envelope not modeled
+                //
+                // Circuit (private): crates/drummerboy/drummerboy-core/pedals/909_clap.pedal
+                // SPICE model: state-space resonator, f0=1538.5Hz, Q=1.43
+                //
+                // Same bandpass resonator as 808 clap (R=22k, C=4.7n, R_fb=220k).
+                // The distinction between 808 and 909 clap is in the DSP burst pattern:
+                //   808: 3 bursts (ClapEnvelope), 909: 4 bursts (ClapEnvelope909).
+                // Both body resonators are identical in spectral character.
+                //
+                // DOCUMENTED GAPS (same as 808 clap):
+                //   1. Multi-burst comb envelope (ClapEnvelope909 DSP block) not in WDF path.
+                //   2. Noise source not modeled.
+                //   3. SPICE models deterministic resonant body response only.
+                //
+                // Same WDF resonator bug as 808 voices (lq6.1).
+                tests.insert(
+                    "909_clap".to_string(),
+                    TestCase {
+                        circuit: "drums/909_clap.pedal".to_string(),
+                        description:
+                            "TR-909 clap body: bridged-T resonator, f0=1538.5 Hz, Q=1.43; 4-burst envelope + noise not modeled"
+                                .to_string(),
+                        signals: vec![SignalConfig::Impulse {
+                            amplitude: 1.0,
+                            label: Some("trigger".to_string()),
+                        }],
+                        metrics: vec![MetricConfig::TimeDomain, MetricConfig::Spectral],
+                        pass_criteria: PassCriteria {
+                            // KnownGap: WDF resonator bug (lq6.1) + 4-burst envelope gap
+                            // + noise source gap.
+                            normalized_rms_error_db: Some(20.0),
+                            peak_error_db: Some(20.0),
+                            spectral_error_db: Some(20.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: Some(0.0),
+                        pending_reference: false,
+                        pro_circuit_path: Some(
+                            "crates/drummerboy/drummerboy-core/pedals/909_clap.pedal"
+                                .to_string(),
+                        ),
                     },
                 );
 
@@ -3470,6 +4345,7 @@ mod tests {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: None,
             pending_reference: false,
+            pro_circuit_path: None,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 10.0);
     }
@@ -3485,6 +4361,7 @@ mod tests {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: Some(5.0),
             pending_reference: false,
+            pro_circuit_path: None,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 5.0);
     }
@@ -3500,6 +4377,7 @@ mod tests {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: Some(0.0),
             pending_reference: false,
+            pro_circuit_path: None,
         };
         assert_eq!(tc.effective_warmup_trim_ms(&global), 0.0);
     }
@@ -3514,6 +4392,7 @@ mod tests {
             pass_criteria: PassCriteria::default(),
             warmup_trim_ms: None,
             pending_reference: false,
+            pro_circuit_path: None,
         };
 
         assert_eq!(
