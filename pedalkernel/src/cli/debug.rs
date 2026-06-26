@@ -125,17 +125,26 @@ fn print_operating_point(report: &OperatingPoint, supply: f64) {
     for dev in &report.devices {
         let Some(root) = &dev.root else { continue };
         any_root = true;
+        // A MultiNl co-solve has no separate compile-time seed record — its
+        // operating point IS the runtime-solved state — so print the seed block
+        // only for genuine WDF NL roots, and label Vbe directly for the co-solve.
+        let is_cosolve = root.kind.contains("co-solve");
         println!("  {} [{} root]", dev.id, root.kind);
-        let resolved = if root.seed_resolved {
-            "Some (DC Q-point resolved)"
+        if is_cosolve {
+            println!("    solved Vbe       {}", fmt_v(root.vbe_bias));
+            println!("    solved Vce       {}", fmt_v(root.solved_vce));
         } else {
-            "None (UNRESOLVED -> root left at cutoff, vbe_bias=0)"
-        };
-        println!("    seed             {resolved}");
-        println!("    seeded Vbe       {}", fmt_v(root.seeded_vbe));
-        println!("    seeded Vce       {}", fmt_v(root.seeded_vce));
-        println!("    vbe_bias (held)  {}", fmt_v(root.vbe_bias));
-        println!("    solved Vce       {}", fmt_v(root.solved_vce));
+            let resolved = if root.seed_resolved {
+                "Some (DC Q-point resolved)"
+            } else {
+                "None (UNRESOLVED -> root left at cutoff, vbe_bias=0)"
+            };
+            println!("    seed             {resolved}");
+            println!("    seeded Vbe       {}", fmt_v(root.seeded_vbe));
+            println!("    seeded Vce       {}", fmt_v(root.seeded_vce));
+            println!("    vbe_bias (held)  {}", fmt_v(root.vbe_bias));
+            println!("    solved Vce       {}", fmt_v(root.solved_vce));
+        }
         match root.solved_ic {
             Some(i) => println!("    solved Ic        {:+8.4} mA", i * 1e3),
             None => println!("    solved Ic        {:>10}", "n/a"),

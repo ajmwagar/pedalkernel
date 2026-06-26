@@ -4369,6 +4369,13 @@ impl NlDeviceGroupKind {
 pub struct MultiNlDeviceGroups {
     pub groups: Vec<NlDeviceGroupKind>,
     pub offsets: Vec<usize>,
+    /// Component id of each group (parallel to `groups`/`offsets`).
+    ///
+    /// Populated at compile time so a diagnostic (e.g. `debug --op`) can map a
+    /// co-solved BJT group back to its circuit component id. Empty strings are
+    /// used for any group whose label is unknown — never load-bearing for audio.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub comp_labels: Vec<String>,
 }
 
 /// Data needed to recompute the scattering matrix when pot values change.
@@ -5902,6 +5909,59 @@ pub struct LinearizedOtaData {
 }
 
 impl MultiNlStage {
+    /// Read the co-solved DC operating point of every `BjtTwoPort` group.
+    ///
+    /// Returns `(comp_id, vbe, vce, ic)` per BJT 2-port group, read from the
+    /// last-solved port voltages (`v_prev` at the group offset: `[Vbe, Vce]`)
+    /// and the Gummel-Poon transport equations. Values are in the device's
+    /// positive-forward convention with PNP sign restored (so a PNP reports a
+    /// negative Vbe/Vce/Ic, matching its physical orientation).
+    ///
+    /// Diagnostic-only: reads already-solved state, performs no solve, and does
+    /// not touch audio. `comp_id` is empty for a group with no recorded label.
+    pub fn bjt_two_port_qpoints(&self) -> Vec<(String, f64, f64, f64)> {
+        let mut out = Vec::new();
+        let Some(ref dg) = self.device_groups else {
+            return out;
+        };
+        for (g, group) in dg.groups.iter().enumerate() {
+            let NlDeviceGroupKind::BjtTwoPort(bjt) = group else {
+                continue;
+            };
+            let off = dg.offsets[g];
+            if off + 1 >= self.v_prev.len() {
+                continue;
+            }
+            // v_prev stores the solver's positive-forward port voltages; for a
+            // PNP these are sign-flipped from the physical Vbe/Vce, so flip back.
+            let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+            let vbe_solver = self.v_prev[off] as f64;
+            let vce_solver = self.v_prev[off + 1] as f64;
+            // currents() expects (vbe, vbc) in the device's positive-forward
+            // convention: vbc = vbe - vce, with the SAME Vbc clamp the solver's
+            // `eval()` applies (BjtTwoPort caps Vbc at 0.4 V to avoid the BC
+            // junction's exponential blow-up). Without it a railed/saturated Vce
+            // yields an absurd >1 A Ic that is a clamp artefact, not a real read.
+            const VBC_MAX: f64 = 0.4;
+            let vbc_solver = (vbe_solver - vce_solver).min(VBC_MAX);
+            let (ic_solver, _ib) = bjt
+                .model
+                .currents(vbe_solver as crate::Wave, vbc_solver as crate::Wave);
+            let comp_id = dg
+                .comp_labels
+                .get(g)
+                .cloned()
+                .unwrap_or_default();
+            out.push((
+                comp_id,
+                sign * vbe_solver,
+                sign * vce_solver,
+                sign * ic_solver as f64,
+            ));
+        }
+        out
+    }
+
     /// Process one sample through the multi-NL stage.
     ///
     /// 1. Set control voltages (Vbe/Vgk) on each NL device

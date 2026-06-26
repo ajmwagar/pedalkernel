@@ -132,14 +132,30 @@ fn accumulate_root_qpoints(
     root_avg: &mut HashMap<String, (f64, f64, u64)>,
 ) {
     for stage in &compiled.stages {
-        let Stage::Wdf(wdf) = stage else { continue };
-        if let RootKind::Bjt(bjt) = &wdf.root {
-            let entry = root_avg
-                .entry(wdf.root_comp_id.clone())
-                .or_insert((0.0, 0.0, 0));
-            entry.0 += bjt.solved_vce() as f64;
-            entry.1 += bjt.solved_ic() as f64;
-            entry.2 += 1;
+        match stage {
+            Stage::Wdf(wdf) => {
+                if let RootKind::Bjt(bjt) = &wdf.root {
+                    let entry = root_avg
+                        .entry(wdf.root_comp_id.clone())
+                        .or_insert((0.0, 0.0, 0));
+                    entry.0 += bjt.solved_vce() as f64;
+                    entry.1 += bjt.solved_ic() as f64;
+                    entry.2 += 1;
+                }
+            }
+            // BJTs co-solved inside a MultiNl stage (feedback/self-bias cores).
+            Stage::MultiNl(multi) => {
+                for (id, _vbe, vce, ic) in multi.bjt_two_port_qpoints() {
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let entry = root_avg.entry(id).or_insert((0.0, 0.0, 0));
+                    entry.0 += vce;
+                    entry.1 += ic;
+                    entry.2 += 1;
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -419,6 +435,39 @@ fn root_op_for(
                 seeded_vbe: seed.and_then(|s| s.seeded_vbe.map(|v| v as f64)),
                 seeded_vce: seed.and_then(|s| s.seeded_vce.map(|v| v as f64)),
                 vbe_bias: Some(bjt.vbe_bias() as f64),
+                solved_vce: Some(solved_vce),
+                solved_ic: Some(solved_ic),
+            });
+        }
+    }
+
+    // A BJT in a feedback/self-bias circuit does NOT compile to a WDF BjtRoot —
+    // it is co-solved inside a MultiNl stage as a `BjtTwoPort`. Read the real
+    // co-solved Q-point (Vbe/Vce/Ic) from the settled stage. Prefer the
+    // final-cycle AVERAGE collected during settle (mirrors the WDF-root path);
+    // fall back to the instantaneous read if no samples were averaged.
+    for stage in &compiled.stages {
+        let Stage::MultiNl(multi) = stage else {
+            continue;
+        };
+        for (id, vbe, vce, ic) in multi.bjt_two_port_qpoints() {
+            if id != comp_id {
+                continue;
+            }
+            let (solved_vce, solved_ic) = match root_avg.get(comp_id) {
+                Some(&(sum_vce, sum_ic, count)) if count > 0 => {
+                    (sum_vce / count as f64, sum_ic / count as f64)
+                }
+                _ => (vce, ic),
+            };
+            return Some(RootOp {
+                kind: "Bjt 2-port (MultiNl co-solve)".into(),
+                // The co-solve carries no separate compile-time seed record;
+                // the operating point IS the runtime-solved state.
+                seed_resolved: true,
+                seeded_vbe: None,
+                seeded_vce: None,
+                vbe_bias: Some(vbe),
                 solved_vce: Some(solved_vce),
                 solved_ic: Some(solved_ic),
             });

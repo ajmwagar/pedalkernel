@@ -239,7 +239,8 @@ fn build_general_mna_from_edges_inner(
     );
 
     // Step 7: Create NL device groups
-    let (nl_devices, device_groups) = create_nl_devices(&nl_kinds, supply_voltage)?;
+    let (nl_devices, device_groups) =
+        create_nl_devices(&nl_kinds, &nl_comp_labels, supply_voltage)?;
 
     // Step 8: Assemble stage
     let mut stage = assemble_multi_nl_stage(
@@ -976,6 +977,7 @@ fn is_diode_connected_bjt(kind: &NonlinearKind) -> bool {
 /// the first Newton-Raphson iteration.
 fn create_nl_devices(
     nl_kinds: &[NonlinearKind],
+    nl_comp_labels: &[String],
     supply_voltage: f64,
 ) -> Result<(Vec<NlDeviceKind>, Option<MultiNlDeviceGroups>), String> {
     // Check if all NL devices are tubes (triodes or pentodes) with a connected grid node.
@@ -1008,12 +1010,17 @@ fn create_nl_devices(
         ) && !is_diode_connected_bjt(k)
     });
 
+    // Helper: label for the group built from `nl_kinds[i]` (parallel Vecs).
+    let label_at = |i: usize| nl_comp_labels.get(i).cloned().unwrap_or_default();
+
     if all_tube_with_grid {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
+        let mut comp_labels = Vec::new();
         let mut offset = 0usize;
-        for kind in nl_kinds {
+        for (i, kind) in nl_kinds.iter().enumerate() {
             offsets.push(offset);
+            comp_labels.push(label_at(i));
             match kind {
                 NonlinearKind::Triode {
                     model_name,
@@ -1049,13 +1056,22 @@ fn create_nl_devices(
                 _ => unreachable!(),
             }
         }
-        Ok((Vec::new(), Some(MultiNlDeviceGroups { groups, offsets })))
+        Ok((
+            Vec::new(),
+            Some(MultiNlDeviceGroups {
+                groups,
+                offsets,
+                comp_labels,
+            }),
+        ))
     } else if all_bjt && any_bjt_two_port {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
+        let mut comp_labels = Vec::new();
         let mut offset = 0usize;
-        for kind in nl_kinds {
+        for (i, kind) in nl_kinds.iter().enumerate() {
             offsets.push(offset);
+            comp_labels.push(label_at(i));
             match kind {
                 NonlinearKind::BjtNpn { model_name, .. } if !is_diode_connected_bjt(kind) => {
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(
@@ -1079,7 +1095,14 @@ fn create_nl_devices(
                 _ => unreachable!(),
             }
         }
-        Ok((Vec::new(), Some(MultiNlDeviceGroups { groups, offsets })))
+        Ok((
+            Vec::new(),
+            Some(MultiNlDeviceGroups {
+                groups,
+                offsets,
+                comp_labels,
+            }),
+        ))
     } else {
         let mut devices = Vec::new();
         for kind in nl_kinds {
