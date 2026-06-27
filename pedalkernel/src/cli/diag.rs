@@ -11,11 +11,12 @@
 //! The diagnostics path only runs when this subcommand is invoked — the audio
 //! engine and `process`/`tui` paths are untouched (Rule 3, additive).
 
-use pedalkernel::compiler::compile_pedal;
+use pedalkernel::compiler::{compile_pedal, CompiledPedal};
 use pedalkernel::diag_ipc;
 use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::PedalProcessor;
 use pedalkernel_rt::diag::{DiagSnapshot, MnaStageSnapshot};
+use pedalkernel_rt::diag_ring::RuntimeFrame;
 use std::path::Path;
 use std::process;
 
@@ -55,8 +56,12 @@ pub fn run(file: Option<&str>, ipc: Option<&str>, knobs: &[String]) {
     }
 }
 
-/// Parse + (expand) + compile a `.pedal`, apply knobs, return its snapshot.
-fn compile_and_capture(file_path: &str, knobs: &[String]) -> DiagSnapshot {
+/// Sample rate used by the diag compile path.
+const DIAG_SR: f64 = 48000.0;
+
+/// Parse + (expand) + compile a `.pedal`, apply knobs; return the compiled pedal
+/// and its name (for snapshot labelling).
+fn compile_pedal_for_diag(file_path: &str, knobs: &[String]) -> (CompiledPedal, String) {
     let source = std::fs::read_to_string(file_path).unwrap_or_else(|e| {
         eprintln!("Error reading {file_path}: {e}");
         process::exit(1);
@@ -78,7 +83,7 @@ fn compile_and_capture(file_path: &str, knobs: &[String]) -> DiagSnapshot {
         });
     }
 
-    let mut compiled = compile_pedal(&pedal, 48000.0).unwrap_or_else(|e| {
+    let mut compiled = compile_pedal(&pedal, DIAG_SR).unwrap_or_else(|e| {
         eprintln!("Compile error: {e}");
         process::exit(1);
     });
@@ -95,7 +100,13 @@ fn compile_and_capture(file_path: &str, knobs: &[String]) -> DiagSnapshot {
         }
     }
 
-    compiled.diag_snapshot(&pedal.name, file_path)
+    (compiled, pedal.name)
+}
+
+/// Parse + (expand) + compile a `.pedal`, apply knobs, return its snapshot.
+fn compile_and_capture(file_path: &str, knobs: &[String]) -> DiagSnapshot {
+    let (compiled, name) = compile_pedal_for_diag(file_path, knobs);
+    compiled.diag_snapshot(&name, file_path)
 }
 
 /// Pretty-print a diagnostics snapshot to stdout.
@@ -245,5 +256,177 @@ fn fmt_ohms_short(r: f64) -> String {
         format!("{:.2}k", r / 1e3)
     } else {
         format!("{r:.1}")
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Phase B — live runtime ring tail
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Block size used when driving the engine for the tail.
+const TAIL_BLOCK: usize = 128;
+
+/// Live-tail the runtime diagnostics ring.
+///
+/// * With a `.pedal` file: compile, enable metering, write an IPC file with an
+///   appended runtime ring, attach it, drive a test sine for `blocks` blocks,
+///   and print each per-block frame as it is produced.
+/// * With only `--ipc <file>`: poll an existing file's ring and print new frames
+///   as another process produces them.
+pub fn run_tail(
+    file: Option<&str>,
+    ipc: Option<&str>,
+    knobs: &[String],
+    freq: f64,
+    amp: f64,
+    blocks: usize,
+) {
+    match (file, ipc) {
+        // ── Drive the engine and tail in-process. ────────────────────────────
+        (Some(file_path), ipc_opt) => {
+            let (mut compiled, name) = compile_pedal_for_diag(file_path, knobs);
+            let snapshot = compiled.diag_snapshot(&name, file_path);
+
+            // Need an IPC file to back the ring; default to a temp path.
+            let ipc_path = ipc_opt.map(|s| s.to_string()).unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join(format!("{name}.pkdiag"))
+                    .to_string_lossy()
+                    .into_owned()
+            });
+
+            let writer = diag_ipc::write_snapshot_with_ring(
+                Path::new(&ipc_path),
+                &snapshot,
+                blocks.next_power_of_two().max(16),
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Error creating IPC file {ipc_path}: {e}");
+                process::exit(1);
+            });
+            eprintln!("wrote diagnostics IPC (with runtime ring) → {ipc_path}");
+
+            compiled.enable_metering(TAIL_BLOCK);
+            // Safety: `writer` owns the mmap region for the rest of this scope,
+            // and `compiled` is the sole producer.
+            unsafe { compiled.attach_diag_ring(writer.ring_ptr(), writer.ring_capacity()) };
+
+            print_tail_header(&name, file_path, freq, amp);
+
+            // Open a reader over the same file to print published frames.
+            let reader = diag_ipc::RuntimeRingReader::open(Path::new(&ipc_path))
+                .ok()
+                .flatten();
+
+            let sr = DIAG_SR;
+            let total_samples = blocks * TAIL_BLOCK + TAIL_BLOCK; // +1 block warmup
+            let mut last_printed: u64 = 0;
+            for n in 0..total_samples {
+                let x = amp * (2.0 * std::f64::consts::PI * freq * n as f64 / sr).sin();
+                let _ = compiled.process(x);
+                if let Some(ref r) = reader {
+                    let written = r.frames_written();
+                    while last_printed < written {
+                        print_frame(&r.frame_at(last_printed));
+                        last_printed += 1;
+                    }
+                }
+            }
+            let _ = writer.flush();
+            eprintln!("\ncaptured {last_printed} block frame(s) → {ipc_path}");
+        }
+
+        // ── Poll an existing file produced by another process. ───────────────
+        (None, Some(ipc_path)) => {
+            let reader = match diag_ipc::RuntimeRingReader::open(Path::new(ipc_path)) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    eprintln!("{ipc_path} has no runtime ring (Phase-A file). Re-run the producer with --tail.");
+                    process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Error opening {ipc_path}: {e}");
+                    process::exit(1);
+                }
+            };
+            eprintln!("tailing runtime ring in {ipc_path} (capacity {} frames). Ctrl-C to stop.", reader.capacity());
+            print_frame_table_header();
+            let mut last: u64 = 0;
+            let mut idle = 0u32;
+            loop {
+                let written = reader.frames_written();
+                while last < written {
+                    // Skip frames already overwritten (slow reader).
+                    let oldest = written.saturating_sub(reader.capacity() as u64);
+                    if last < oldest {
+                        last = oldest;
+                    }
+                    print_frame(&reader.frame_at(last));
+                    last += 1;
+                    idle = 0;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                idle += 1;
+                // Exit after ~5 s with no new frames (producer finished/absent).
+                if idle > 100 {
+                    eprintln!("(no new frames for 5s — exiting)");
+                    break;
+                }
+            }
+        }
+
+        (None, None) => {
+            eprintln!("error: `diag --tail` needs a <file.pedal> or --ipc <file>");
+            process::exit(2);
+        }
+    }
+}
+
+fn print_tail_header(name: &str, source: &str, freq: f64, amp: f64) {
+    eprintln!("════════════════════════════════════════════════════════════════════");
+    eprintln!("Live runtime ring (IPC Phase B) — {name}");
+    eprintln!("source : {source}");
+    eprintln!("drive  : {freq} Hz sine, amplitude {amp} (linear)");
+    eprintln!("════════════════════════════════════════════════════════════════════");
+    print_frame_table_header();
+}
+
+fn print_frame_table_header() {
+    eprintln!(
+        "{:>6} {:>7} {:>8} {:>11} {:>11} {:>11}  per-BJT: stage/grp  Vbe     Vce      Ic        Ib        gm",
+        "block", "solves", "max_it", "max_resid", "in_rms", "out_rms"
+    );
+}
+
+/// Print one runtime frame: the block's NR aggregate + the chain gain + each
+/// device's Vbe/Vce/Ic/Ib/gm (the BA283 transconductance question).
+fn print_frame(f: &RuntimeFrame) {
+    let gain = if f.input_rms > 1e-20 {
+        f.output_rms / f.input_rms
+    } else {
+        0.0
+    };
+    let gain_db = if gain > 0.0 {
+        20.0 * gain.log10()
+    } else {
+        f32::NEG_INFINITY
+    };
+    eprintln!(
+        "{:>6} {:>7} {:>8} {:>11.3e} {:>11.3e} {:>11.3e}  gain={:.4}x ({:+.2} dB)",
+        f.block_counter,
+        f.nr_solves,
+        f.nr_max_iterations,
+        f.nr_max_residual,
+        f.input_rms,
+        f.output_rms,
+        gain,
+        gain_db,
+    );
+    let n = (f.n_op_records as usize).min(f.op_records.len());
+    for r in &f.op_records[..n] {
+        eprintln!(
+            "         s{:<2}/g{:<2}  Vbe={:+.4} Vce={:+.4} Ic={:+.4e} Ib={:+.4e} gm={:.5} g_ce={:.3e}",
+            r.stage_index, r.group_index, r.v_be, r.v_ce, r.i_c, r.i_b, r.gm, r.g_ce
+        );
     }
 }

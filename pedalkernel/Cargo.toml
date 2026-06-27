@@ -17,7 +17,7 @@ serde = ["pedalkernel-rt/serde"]
 # Diagnostics IPC channel: memory-mapped compile-time MNA/scattering snapshot
 # (`pedalkernel diag`). Additive; the diagnostics path only runs when the
 # subcommand is invoked, so runtime/audio behavior is unchanged.
-diag = ["serde", "dep:serde", "dep:serde_json", "dep:memmap2"]
+diag = ["serde", "dep:serde", "dep:serde_json", "dep:memmap2", "pedalkernel-rt/diag"]
 biquad-table = ["pedalkernel-rt/biquad-table"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
