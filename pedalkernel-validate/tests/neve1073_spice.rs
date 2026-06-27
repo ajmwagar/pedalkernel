@@ -158,6 +158,98 @@ fn ba283_wdf_vs_spice() {
     // (house style: measure, then gate at measured + ~3 dB margin).
 }
 
+/// DIAGNOSTIC (pedalkernel-685e): localize the BA283 -49.5 dB level loss by
+/// measuring the per-stage signal level through the chain
+/// (input -> Wdf Cin -> MultiNl -> Wdf Cout -> output).
+///
+/// Drives the BA283 with the golden's input sine, then dumps the env-gated
+/// per-boundary level table (set `BA283_LEVELS=1` to enable the probe):
+///
+/// ```
+/// BA283_LEVELS=1 cargo test -p pedalkernel-validate \
+///   --test neve1073_spice ba283_stage_levels -- --nocapture
+/// ```
+///
+/// Verdict logic:
+///   - if in -> stage0/stage1(MultiNl) is already ~300x down  => boundary scaling
+///     (hypothesis a, hardcoded ~1000-ohm input-port impedance);
+///   - if the MultiNl's own in->out gain is ~300x below the designed BA283
+///     closed-loop gain  => in-matrix deficit (hypothesis b);
+///   - if the loss is at the output stage  => output coupling.
+#[test]
+fn ba283_stage_levels() {
+    if !pedalkernel_rt::processor::ba283_levels::enabled() {
+        eprintln!(
+            "  SKIP ba283_stage_levels: set BA283_LEVELS=1 to run the per-stage probe"
+        );
+        return;
+    }
+    let source = skip_if_missing!(load_pro_pedal_sub(PRO_PATH), PRO_PATH);
+
+    let golden_path = golden_dir(GOLDEN).join("sine_1k.npy");
+    let golden = if golden_path.exists() {
+        Some(npy::read_f64(&golden_path).expect("read golden"))
+    } else {
+        eprintln!("  NOTE: golden not found at {golden_path:?}; running probe without golden compare");
+        None
+    };
+
+    let def = parse_pedal_file(&source).unwrap_or_else(|e| panic!("parse {PRO_PATH}: {e}"));
+    let mut proc = compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile {PRO_PATH}: {e}"));
+    proc.set_control("Gain", 0.5);
+
+    // Stage labels (for the table). Print the full compiled stage dump too so the
+    // chain topology (Cin / MultiNl / Cout) is on the record.
+    eprintln!("  --- compiled BA283 stage dump ---\n{}", proc.debug_dump());
+
+    let n = golden.as_ref().map(|g| g.len()).unwrap_or((SINE_DURATION * SR) as usize);
+
+    // Warm up half a buffer (DC-block / coupling-cap settling) WITHOUT recording.
+    let warmup = n / 2;
+    for i in 0..warmup {
+        proc.process(SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / SR).sin());
+    }
+
+    // Settled measurement window: reset the probe, then drive n samples.
+    pedalkernel_rt::processor::ba283_levels::reset();
+    let wdf_output: Vec<f64> = (0..n)
+        .map(|i| proc.process(SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / SR).sin()))
+        .collect();
+
+    eprintln!("  --- BA283 per-stage level table ---");
+    let chain_gain = pedalkernel_rt::processor::ba283_levels::dump(&[]);
+
+    let in_rms = SINE_AMP / 2f64.sqrt(); // RMS of the drive sine
+    let out_rms = rms(&wdf_output);
+    eprintln!("  drive sine RMS (in)   : {in_rms:.6e} V");
+    eprintln!("  WDF output RMS (out)  : {out_rms:.6e} V");
+    eprintln!(
+        "  realized chain gain   : {:.4e} ({:+.2} dB)",
+        out_rms / in_rms,
+        20.0 * (out_rms / in_rms).log10()
+    );
+
+    if let Some(golden) = golden {
+        let trim = (0.01 * SR) as usize;
+        let g_rms = rms(&golden[trim.min(golden.len())..]);
+        eprintln!("  ngspice golden RMS    : {g_rms:.6e} V");
+        eprintln!(
+            "  golden chain gain     : {:.4e} ({:+.2} dB)",
+            g_rms / in_rms,
+            20.0 * (g_rms / in_rms).log10()
+        );
+        if g_rms > 1e-12 {
+            eprintln!(
+                "  WDF-vs-golden gap     : {:.2} dB (negative = WDF colder)",
+                20.0 * (out_rms / g_rms).log10()
+            );
+        }
+    }
+
+    let _ = chain_gain;
+    assert!(out_rms > 1e-9, "BA283 WDF output is silence");
+}
+
 /// Prove the skip mechanism works when the pro repo is absent.
 #[test]
 fn ba283_skip_when_pro_absent() {

@@ -24,6 +24,154 @@ use crate::stage::{
     SerialDelayedFeedbackStage, SidechainProcessor, StateSpaceStage, SubcircuitProcessor, WdfStage,
 };
 
+/// ─────────────────────────────────────────────────────────────────────────
+/// Env-gated per-stage signal-level probe (`BA283_LEVELS=1`).
+///
+/// Reusable diagnostic that captures the per-sample signal level at each chain
+/// boundary — chain input, each stage's output, and chain output — accumulating
+/// running peak-abs and RMS across all processed samples. Off by default (the
+/// env var is read once and cached); zero cost in production. Mirrors the
+/// `PK9XU1_DEBUG`/`GAPF_DEBUG` env-gate convention in the `pedalkernel` crate.
+///
+/// Per-stage INPUT is the serial-chain value entering a stage: for stage 0 it is
+/// the chain input; for stage i>0 it is stage (i-1)'s recorded output. The probe
+/// therefore localizes a level loss to a specific boundary (in→stage0, the
+/// in→out of each stage, or stage→output).
+///
+/// Read the table from a test via [`ba283_levels_dump`] after driving a settled
+/// window of samples; it prints a per-stage peak/RMS table to stderr.
+#[cfg(feature = "std")]
+pub mod ba283_levels {
+    use std::cell::RefCell;
+    use std::sync::OnceLock;
+    use std::vec::Vec;
+    use std::{eprintln, format, thread_local};
+
+    /// Per-boundary running accumulator (peak-abs + sum-of-squares + count).
+    #[derive(Default, Clone)]
+    struct Acc {
+        peak: f64,
+        sumsq: f64,
+        count: u64,
+    }
+    impl Acc {
+        fn record(&mut self, v: f64) {
+            let a = v.abs();
+            if a > self.peak {
+                self.peak = a;
+            }
+            self.sumsq += v * v;
+            self.count += 1;
+        }
+        fn rms(&self) -> f64 {
+            if self.count == 0 {
+                0.0
+            } else {
+                (self.sumsq / self.count as f64).sqrt()
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct Capture {
+        input: Acc,
+        stages: Vec<Acc>,
+        output: Acc,
+    }
+
+    thread_local! {
+        static CAP: RefCell<Capture> = RefCell::new(Capture::default());
+    }
+
+    /// Cached one-shot read of `BA283_LEVELS` (any non-empty value enables).
+    pub fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var("BA283_LEVELS")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false)
+        })
+    }
+
+    /// Reset the accumulators (call before the settled measurement window).
+    pub fn reset() {
+        CAP.with(|c| *c.borrow_mut() = Capture::default());
+    }
+
+    pub fn record_input(v: f64) {
+        if !enabled() {
+            return;
+        }
+        CAP.with(|c| c.borrow_mut().input.record(v));
+    }
+
+    pub fn record_stage(idx: usize, v: f64) {
+        if !enabled() {
+            return;
+        }
+        CAP.with(|c| {
+            let mut cap = c.borrow_mut();
+            if cap.stages.len() <= idx {
+                cap.stages.resize(idx + 1, Acc::default());
+            }
+            cap.stages[idx].record(v);
+        });
+    }
+
+    pub fn record_output(v: f64) {
+        if !enabled() {
+            return;
+        }
+        CAP.with(|c| c.borrow_mut().output.record(v));
+    }
+
+    /// Print the per-stage level table to stderr. `labels` (optional) names each
+    /// stage; missing labels print as `stage{idx}`. Returns the realized chain
+    /// gain (output RMS / input RMS) for the caller to assert/log.
+    pub fn dump(labels: &[&str]) -> f64 {
+        CAP.with(|c| {
+            let cap = c.borrow();
+            let in_rms = cap.input.rms();
+            let out_rms = cap.output.rms();
+            eprintln!("[BA283_LEVELS] per-boundary signal levels (peak-abs / RMS over {} samples):", cap.input.count);
+            eprintln!(
+                "[BA283_LEVELS]   {:<22} peak={:.6e}  rms={:.6e}",
+                "input", cap.input.peak, in_rms
+            );
+            let mut prev_rms = in_rms;
+            for (i, a) in cap.stages.iter().enumerate() {
+                let label = labels.get(i).copied().unwrap_or("");
+                let name = if label.is_empty() {
+                    format!("stage{i}")
+                } else {
+                    format!("stage{i} [{label}]")
+                };
+                let g = if prev_rms > 1e-30 {
+                    20.0 * (a.rms() / prev_rms).log10()
+                } else {
+                    f64::NEG_INFINITY
+                };
+                eprintln!(
+                    "[BA283_LEVELS]   {:<22} peak={:.6e}  rms={:.6e}  in->out={:+.2} dB",
+                    name, a.peak, a.rms(), g
+                );
+                prev_rms = a.rms();
+            }
+            eprintln!(
+                "[BA283_LEVELS]   {:<22} peak={:.6e}  rms={:.6e}",
+                "output", cap.output.peak, out_rms
+            );
+            let chain_gain = if in_rms > 1e-30 { out_rms / in_rms } else { 0.0 };
+            eprintln!(
+                "[BA283_LEVELS]   realized chain gain (out/in) = {:.4e}  ({:+.2} dB)",
+                chain_gain,
+                if chain_gain > 0.0 { 20.0 * chain_gain.log10() } else { f64::NEG_INFINITY }
+            );
+            chain_gain
+        })
+    }
+}
+
 /// A single processing stage in the compiled pedal.
 ///
 /// Owns its data directly — no index indirection. The `stages` vec
@@ -3589,6 +3737,10 @@ impl PedalProcessor for CompiledPedal {
         // first processing stage.
         let mut signal = input * self.pre_gain;
 
+        // Env-gated per-stage level probe (BA283_LEVELS=1) — chain input.
+        #[cfg(feature = "std")]
+        crate::processor::ba283_levels::record_input(input as f64);
+
         #[cfg(feature = "debug-trace")]
         let trace_on = if input.abs() > 1e-10 {
             let n = TRACE_COUNT_PIPELINE.fetch_add(1, Ordering::Relaxed);
@@ -4406,6 +4558,17 @@ impl PedalProcessor for CompiledPedal {
             signal = 0.0;
         }
         let output = signal * self.output_gain;
+
+        // Env-gated per-stage level probe (BA283_LEVELS=1) — per-stage outputs +
+        // chain output. stage_levels[i] holds stage i's serial-chain output; the
+        // probe derives each stage's in->out gain from the previous boundary.
+        #[cfg(feature = "std")]
+        if crate::processor::ba283_levels::enabled() {
+            for i in 0..num_stages.min(crate::metering::MAX_STAGES) {
+                crate::processor::ba283_levels::record_stage(i, stage_levels[i] as f64);
+            }
+            crate::processor::ba283_levels::record_output(output as f64);
+        }
 
         #[cfg(feature = "debug-trace")]
         if trace_on {
