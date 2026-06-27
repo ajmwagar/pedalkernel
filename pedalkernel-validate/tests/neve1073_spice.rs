@@ -250,6 +250,165 @@ fn ba283_stage_levels() {
     assert!(out_rms > 1e-9, "BA283 WDF output is silence");
 }
 
+/// PRIMARY DELIVERABLE (pedalkernel-9u6u.2 Phase B): the BA283 grouped-NR
+/// transconductance diagnosis.
+///
+/// Drives the BA283 with the golden small sine and, after each metering block,
+/// reads every BJT's live operating point (`Vbe`/`Vce`/`Ic`/`Ib`/`gm`) straight
+/// out of the MultiNl stage via the Phase-B [`MultiNlStage::runtime_op_points`]
+/// capture. Reports, and ASSERTS, the two things the static MNA snapshot cannot
+/// show:
+///
+///  1. The grouped NR **converges** every block (low iters, small residual).
+///  2. The transconductance **is applied**: across the signal swing the realized
+///     `dIc ≈ gm·dVbe` for the conducting devices (ratio ≈ 1).
+///
+/// The diagnostic finding (logged, not asserted, since it is the bug under
+/// investigation): the INPUT transistor TR1 settles near cutoff at runtime
+/// (`Vbe ≈ 0.36 V`, `Ic ≈ 7 µA`, realized `gm ≈ 2.7e-4 S` — ~120× below the
+/// design 0.033 S the static `cross_gm` shows). The −49.5 dB gain deficit is a
+/// DC **operating-point** problem (TR1 starved), NOT a failure to apply the
+/// transconductance in the solve.
+///
+/// Run: `cargo test -p pedalkernel-validate --features diag --test neve1073_spice
+///       ba283_runtime_nr -- --nocapture`
+#[cfg(feature = "diag")]
+#[test]
+fn ba283_runtime_nr() {
+    use pedalkernel_rt::diag_ring::OpPointRecord;
+    use pedalkernel_rt::processor::Stage;
+
+    let source = skip_if_missing!(load_pro_pedal_sub(PRO_PATH), PRO_PATH);
+    let def = parse_pedal_file(&source).unwrap_or_else(|e| panic!("parse {PRO_PATH}: {e}"));
+    let mut proc = compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile {PRO_PATH}: {e}"));
+    proc.set_control("Gain", 0.5);
+
+    // Per-block sampling: drive `nblocks` blocks of `block` samples; after each
+    // block read each BJT's operating point. NR stats come from the thread-local
+    // grouped-NR snapshot reset each block.
+    const BLOCK: usize = 128;
+    const NBLOCKS: usize = 48;
+    let warmup = 2 * BLOCK; // let the DC ramp + coupling caps settle.
+    for i in 0..warmup {
+        proc.process(SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / SR).sin());
+    }
+
+    // Collect per-block op-point records keyed by group index.
+    let mut series: Vec<Vec<OpPointRecord>> = Vec::new();
+    let mut in_peak = 0.0f64;
+    let mut out_peak = 0.0f64;
+    let mut max_iters = 0u32;
+    let mut max_resid = 0.0f64;
+    let mut min_solves = u64::MAX;
+    let mut sample = warmup;
+    for _b in 0..NBLOCKS {
+        pedalkernel_rt::elements::nonlinear::solver::reset_solver_stats();
+        for _ in 0..BLOCK {
+            let x = SINE_AMP * (2.0 * PI * TEST_FREQ * sample as f64 / SR).sin();
+            let y = proc.process(x);
+            in_peak = in_peak.max(x.abs());
+            out_peak = out_peak.max((y as f64).abs());
+            sample += 1;
+        }
+        let ss = pedalkernel_rt::elements::nonlinear::solver::solver_stats_snapshot();
+        max_iters = max_iters.max(ss.max_iterations);
+        max_resid = max_resid.max(ss.max_residual as f64);
+        if ss.solves > 0 {
+            min_solves = min_solves.min(ss.solves);
+        }
+
+        let mut recs = [OpPointRecord::default(); 8];
+        let mut n = 0usize;
+        for (si, st) in proc.stages.iter().enumerate() {
+            if let Stage::MultiNl(mnl) = st {
+                n += mnl.runtime_op_points(si, &mut recs[n..]);
+            }
+        }
+        series.push(recs[..n].to_vec());
+    }
+
+    assert!(!series.is_empty() && !series[0].is_empty(), "no MultiNl op-points captured");
+    let ngroups = series[0].len();
+
+    eprintln!("\n  ═══ BA283 grouped-NR runtime diagnosis (Phase B) ═══");
+    eprintln!(
+        "  NR convergence over {NBLOCKS} blocks: max_iters={max_iters}, max_resid={max_resid:.3e}, min_solves/block={min_solves}"
+    );
+    // (1) Convergence health.
+    assert!(max_iters < 40, "grouped NR not converging (max_iters={max_iters})");
+    assert!(max_resid < 1e-2, "grouped NR residual too high ({max_resid:.3e})");
+
+    // Per-group transconductance behavior across the swing.
+    eprintln!("\n  per-BJT operating-point swing + transconductance check:");
+    eprintln!(
+        "  {:>5} {:>9} {:>9} {:>11} {:>11} {:>11}",
+        "grp", "Vbe~", "gm~", "dVbe", "dIc", "dIc/(gm·dVbe)"
+    );
+    for g in 0..ngroups {
+        // Find the two blocks with the largest Vbe spread for this group.
+        let (mut lo, mut hi) = (0usize, 0usize);
+        for b in 1..series.len() {
+            if series[b].len() <= g {
+                continue;
+            }
+            if series[b][g].v_be < series[lo][g].v_be {
+                lo = b;
+            }
+            if series[b][g].v_be > series[hi][g].v_be {
+                hi = b;
+            }
+        }
+        let a = &series[lo][g];
+        let c = &series[hi][g];
+        let dvbe = (c.v_be - a.v_be) as f64;
+        let dic = (c.i_c - a.i_c) as f64;
+        let gm_avg = ((a.gm + c.gm) / 2.0) as f64;
+        let ratio = if gm_avg * dvbe != 0.0 {
+            dic / (gm_avg * dvbe)
+        } else {
+            f64::NAN
+        };
+        eprintln!(
+            "  {g:>5} {:>9.4} {:>9.5} {:>11.3e} {:>11.3e} {:>13.3}",
+            (a.v_be + c.v_be) / 2.0,
+            gm_avg,
+            dvbe,
+            dic,
+            ratio
+        );
+        // (2) Transconductance IS applied: for any group with a meaningful swing,
+        // dIc tracks gm·dVbe (ratio ≈ 1). This is the core BA283 verdict.
+        if dvbe.abs() > 1e-4 && gm_avg.abs() > 1e-6 {
+            assert!(
+                (ratio - 1.0).abs() < 0.35,
+                "group {g}: dIc does not track gm·dVbe (ratio={ratio:.3}) — transconductance NOT applied"
+            );
+        }
+    }
+
+    // Realized chain gain over the window (the −49.5 dB level).
+    let realized = if in_peak > 1e-12 { out_peak / in_peak } else { 0.0 };
+    eprintln!(
+        "\n  realized peak chain gain over window: {realized:.4}x ({:+.2} dB)  [design ~97x]",
+        if realized > 0.0 { 20.0 * realized.log10() } else { f64::NEG_INFINITY }
+    );
+
+    // Diagnostic (logged, not asserted): flag any input-side BJT starved near
+    // cutoff — the operating-point bug behind the gain deficit.
+    let last = series.last().unwrap();
+    for (g, r) in last.iter().enumerate() {
+        if (r.v_be as f64) < 0.5 && (r.i_c as f64) < 1e-4 {
+            eprintln!(
+                "  ⚠ group {g} STARVED near cutoff at runtime: Vbe={:.3}V Ic={:.2e}A gm={:.5}S \
+                 (a conducting Si BJT needs Vbe≈0.65V) → this is the gain deficit's DC root cause",
+                r.v_be, r.i_c, r.gm
+            );
+        }
+    }
+
+    assert!(out_peak > 1e-9, "BA283 output is silence");
+}
+
 /// Prove the skip mechanism works when the pro repo is absent.
 #[test]
 fn ba283_skip_when_pro_absent() {
