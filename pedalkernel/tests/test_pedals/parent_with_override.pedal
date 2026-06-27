@@ -1,0 +1,19 @@
+# parent_with_override.pedal — instantiates sub_gain twice with different R1 values.
+# g1 uses R1=1k (low attenuation), g2 uses R1=100k (high attenuation).
+# Both instances use the same sub file; their different R1 overrides yield
+# distinct transfer functions.
+pedal "ParentWithOverride" {
+  supply 9V
+  components {
+    Rs: resistor(100)
+    g1: use("sub/sub_gain.pedal") with { R1: 1k }
+    g2: use("sub/sub_gain.pedal") with { R1: 100k }
+  }
+  nets {
+    in -> Rs.a
+    Rs.b -> g1.in
+    g1.out -> g2.in
+    g2.out -> out
+  }
+  controls {}
+}

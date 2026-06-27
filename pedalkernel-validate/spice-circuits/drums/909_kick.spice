@@ -1,0 +1,66 @@
+* ============================================================================
+* 909 Kick — Bridged-T Resonator + Behavioral Pitch Sweep Approximation
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The authentic TR-909 kick uses a 2SC1583 dual-NPN transistor
+* multivibrator (BJT relaxation oscillator) with a pitch sweep from ~190 Hz
+* to ~45 Hz. The WDF .pedal approximates this with a bridged-T Sallen-Key
+* resonator body + a DSP PitchEnvelope layer (decay=80ms, amount=3.2).
+*
+* BJT OSCILLATOR GAP: Full BJT transient multivibrator simulation in ngspice
+* requires the transistor to cycle through saturation/cutoff states — this is
+* numerically stiff and convergence-hard with the SPICE harness's standard
+* transient solver. A behavioral state-space approximation of the resonant body
+* is used instead, matching the .pedal's bridged-T topology.
+*
+* PITCH SWEEP GAP: The DSP PitchEnvelope (190→45 Hz sweep over 80ms) is NOT
+* modeled in this SPICE deck. The deck models the static body resonance at
+* the nominal f0. The WDF engine applies the sweep on top of the WDF output;
+* the SPICE reference is the unswepped resonant body. This is a documented
+* comparison limitation — WDF-vs-SPICE compares the body resonator only.
+*
+* PARAMETERS (from 909_kick.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 330kΩ, C1 = C2 = 10nF
+*   f0 = 1 / (2π·R·C) = 1 / (2π·330k·10n) = 48.2 Hz
+*   r_crit = R1+R2+R1·(C1/C2) = 330k+330k+330k = 990kΩ
+*   R_fb = 1200kΩ  →  Q = 1200 / (1200−990) = 5.71
+*   zeta = 1/(2·Q) = 0.0876
+*   omega0 = 2π·48.2 = 302.9 rad/s
+*   2·zeta·omega0 = 53.0
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* VERIFIED: f0 = 48.2 Hz (theory), Q = 5.71
+* MODELING NOTES:
+*   1. BJT multivibrator oscillator topology → bridged-T state-space approximation
+*      (SPICE stiffness gap; see header above).
+*   2. PitchEnvelope sweep (190→45 Hz) not modeled in SPICE reference.
+*   3. VoiceNoise attack burst (4kHz, Q=1.5, decay=8ms, amount=0.3) not modeled.
+*   4. VoiceClick (decay=3ms, amount=0.20) not modeled.
+*   Both 3 and 4 are DSP-only layers outside the WDF path.
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 302.9
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -302.9
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -53.0
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 302.9
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

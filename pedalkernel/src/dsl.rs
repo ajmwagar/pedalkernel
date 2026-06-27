@@ -219,12 +219,23 @@ pub struct PedalDef {
 ///
 /// Declared inside the `components { ... }` block. The instance `id` namespaces
 /// every component/node of the instantiated sub when flattened into the parent.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// An optional `with { }` block overrides specific component values before
+/// flattening:
+///
+/// ```text
+/// g1: use("sub/sub_gain.pedal") with { R1: 348k, C1: 8.2n }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
 pub struct UseInstance {
     /// Instance identifier (e.g. `micamp`). Used as the namespace prefix.
     pub id: String,
     /// Path to the sub `.pedal` file, relative to the parent file's directory.
     pub path: String,
+    /// Optional component-value overrides: `(component_id, new_value)`.
+    /// Applied to the sub's matching `ComponentDef` before namespacing/merge.
+    /// An error is returned if any id has no matching component in the sub.
+    pub overrides: Vec<(String, f64)>,
 }
 
 /// Named port declaration from the .pedal DSL.
@@ -2519,9 +2530,68 @@ enum ComponentEntry {
     Use(UseInstance),
 }
 
+/// Parse one `ident: eng_value` entry inside a `with { }` override block.
+fn override_entry(input: &str) -> IResult<&str, (String, f64)> {
+    let (input, _) = ws_comments(input)?;
+    let (input, comp_id) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, val) = eng_value(input)?;
+    Ok((input, (comp_id.to_string(), val)))
+}
+
+/// Parse an optional trailing `with { R1: 10k, C1: 22n }` override block.
+/// Returns an empty Vec when the block is absent (backward compatible).
+fn with_overrides(input: &str) -> IResult<&str, Vec<(String, f64)>> {
+    let (input, _) = ws_comments(input)?;
+    // Optional: if there is no `with` keyword, return empty overrides.
+    if let Ok((input2, _)) = tag::<&str, &str, nom::error::Error<&str>>("with")(input) {
+        let (input2, _) = ws_comments(input2)?;
+        let (input2, _) = char('{')(input2)?;
+        // Parse comma- or whitespace-separated `id: value` entries.
+        let mut overrides = Vec::new();
+        let mut input2 = input2;
+        loop {
+            let (rest, _) = ws_comments(input2)?;
+            // Try to consume an optional comma separator.
+            let rest = if let Ok((r, _)) =
+                char::<&str, nom::error::Error<&str>>(',')(rest)
+            {
+                r
+            } else {
+                rest
+            };
+            let (rest, _) = ws_comments(rest)?;
+            // Stop at closing brace.
+            if rest.starts_with('}') {
+                input2 = rest;
+                break;
+            }
+            match override_entry(rest) {
+                Ok((r, entry)) => {
+                    overrides.push(entry);
+                    input2 = r;
+                }
+                Err(_) => {
+                    input2 = rest;
+                    break;
+                }
+            }
+        }
+        let (input2, _) = ws_comments(input2)?;
+        let (input2, _) = char('}')(input2)?;
+        Ok((input2, overrides))
+    } else {
+        Ok((input, Vec::new()))
+    }
+}
+
 /// Parse a `use(...)` subcircuit instance line: `id: use("path string")`.
 /// Tried BEFORE `component_def` so the `use(...)` form is recognized; falls
 /// through to a normal component otherwise (backward compatible).
+///
+/// An optional `with { R1: 10k, C1: 22n }` block may follow the closing `)`.
 fn use_instance(input: &str) -> IResult<&str, UseInstance> {
     let (input, _) = ws_comments(input)?;
     let (input, id) = identifier(input)?;
@@ -2535,11 +2605,13 @@ fn use_instance(input: &str) -> IResult<&str, UseInstance> {
     let (input, path) = quoted_string(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char(')')(input)?;
+    let (input, overrides) = with_overrides(input)?;
     Ok((
         input,
         UseInstance {
             id: id.to_string(),
             path: path.to_string(),
+            overrides,
         },
     ))
 }

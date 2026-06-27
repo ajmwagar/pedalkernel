@@ -1,0 +1,53 @@
+* ============================================================================
+* 909 Lo Tom — Single Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: The 909 lo tom body uses a single bridged-T Sallen-Key
+* resonator at ~80 Hz. The authentic TR-909 LT uses a transistor VCO relaxation
+* oscillator; the .pedal approximates this with a bridged-T + PitchEnvelope DSP.
+* This SPICE deck models the bridged-T resonant body only (same state-space
+* approach as 808_kick.spice).
+*
+* PARAMETERS (from 909_lo_tom.pedal — pedalkernel-pro, private):
+*   R1 = R2 = 200kΩ, C1 = C2 = 10nF
+*   f0 = 1 / (2π·R·C) = 1 / (2π·200k·10n) = 79.6 Hz
+*   r_crit = R1+R2+R1·(C1/C2) = 200k+200k+200k = 600kΩ
+*   R_fb = 750kΩ  →  Q = 750 / (750−600) = 5.0
+*   zeta = 1/(2·Q) = 0.100
+*   omega0 = 2π·79.6 = 500.1 rad/s
+*   2·zeta·omega0 = 100.0
+*
+* TOPOLOGY GAP: The authentic TR-909 lo tom uses a UJT (unijunction transistor)
+* relaxation oscillator with exponential pitch decay. This state-space model
+* captures only the bridged-T resonant body of the .pedal approximation.
+* The PitchEnvelope DSP sweep (decay=30ms, amount=0.5) is not modeled in SPICE.
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* VERIFIED: f0 = 79.6 Hz (theory), Q = 5.0
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 500.1
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -500.1
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -100.0
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 500.1
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

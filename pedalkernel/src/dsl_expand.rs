@@ -30,6 +30,7 @@
 //! A sub control on component `C` becomes a control on `id.C`. A parent control
 //! referencing `id.<subctrl>` re-targets/renames the namespaced sub control.
 
+use crate::compiler::components::{Capacitor, Inductor, Potentiometer, Resistor};
 use crate::dsl::{ControlDef, NetDef, PedalDef, Pin, UseInstance};
 use std::path::{Path, PathBuf};
 
@@ -89,7 +90,11 @@ fn merge_instance(
     base_dir: &Path,
     visited: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
-    let UseInstance { id, path } = inst;
+    let UseInstance {
+        id,
+        path,
+        overrides: _,
+    } = inst;
 
     // ---- Resolve + cycle check ---------------------------------------------
     let resolved = base_dir.join(path);
@@ -118,8 +123,46 @@ fn merge_instance(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     visited.push(canonical.clone());
-    let sub = expand_inner(&sub_raw, &sub_dir, visited)?;
+    let mut sub = expand_inner(&sub_raw, &sub_dir, visited)?;
     visited.pop();
+
+    // ---- Apply component-value overrides -----------------------------------
+    // Each `(comp_id, new_value)` from the `with { }` block is applied to the
+    // matching sub ComponentDef before namespacing. Error loudly if any id has
+    // no matching component (Rule 12 — do not silently ignore).
+    for (ov_id, ov_val) in &inst.overrides {
+        // Collect available ids before the mutable borrow so the error message
+        // can list them without conflicting borrows.
+        let available: Vec<String> = sub.components.iter().map(|c| c.id.clone()).collect();
+
+        let comp = sub
+            .components
+            .iter_mut()
+            .find(|c| c.id == *ov_id)
+            .ok_or_else(|| {
+                format!(
+                    "subcircuit `{id}` (`{path}`): override `{ov_id}` does not match any \
+                     component in the sub (available: {})",
+                    available.join(", ")
+                )
+            })?;
+
+        let kind = comp.kind.as_mut();
+        if let Some(r) = kind.as_any_mut().downcast_mut::<Resistor>() {
+            r.value = *ov_val;
+        } else if let Some(c) = kind.as_any_mut().downcast_mut::<Capacitor>() {
+            c.config.value = *ov_val;
+        } else if let Some(l) = kind.as_any_mut().downcast_mut::<Inductor>() {
+            l.value = *ov_val;
+        } else if let Some(p) = kind.as_any_mut().downcast_mut::<Potentiometer>() {
+            p.max_r = *ov_val;
+        } else {
+            return Err(format!(
+                "subcircuit `{id}` (`{path}`): override `{ov_id}` targets a component type \
+                 that does not support value overrides (only resistor, cap, inductor, pot)"
+            ));
+        }
+    }
 
     // ---- Classify the sub's reserved node names ----------------------------
     // Declared ports: from `ports { }` plus implicit in/out.

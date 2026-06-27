@@ -1,0 +1,52 @@
+* ============================================================================
+* 808 Tom (Lo-Tom / "808 Tom") — Bridged-T Resonator (Behavioral State-Space)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: Single bridged-T Sallen-Key resonator + inverting output
+* buffer (U2: Ri_out=10k / Rf_out=270k → gain ≈ −27×).  Same behavioral
+* state-space approach as 808_kick.spice — G-source second-order system.
+*
+* FILE NOTE: 808_tom.pedal is internally labelled "808 Mid Tom" but occupies
+* the lo-tom slot in the three-voice hierarchy (tom < mid_tom < hi_tom by
+* filename). This deck targets the TR-808 service manual lo-tom fundamental.
+*
+* PARAMETERS (TR-808 service manual — target f0 = 90 Hz):
+*   f0 = 90 Hz  (TR-808 service manual lo-tom fundamental)
+*   Q = 8.33  (R_fb = 750k, r_crit = 660k → Q = 750/(750-660))
+*   zeta = 1/(2·Q) = 0.0600
+*   omega0 = 2π·f0 = 2π·90 = 565.49 rad/s
+*   2·zeta·omega0 = 67.89
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* OUTPUT: v_x (resonator position state), normalized.
+*   The physical circuit has an inverting buffer (×27) after the resonator,
+*   but for WDF-vs-SPICE comparison we compare the resonant waveform shape.
+*
+* VERIFIED: f0 = 90 Hz (TR-808 service manual), Q = 8.33
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 565.49
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -565.49
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -67.89
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 565.49
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

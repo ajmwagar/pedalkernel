@@ -37,9 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install libjack-dev
-        if: matrix.jack
-        run: sudo apt-get update && sudo apt-get install -y libjack-dev
+      - name: Install audio system deps (ALSA always; JACK harmless when unused)
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev libasound2-dev
       - uses: Swatinem/rust-cache@v2
       - name: Run characterization suite (--include-ignored)
         run: |

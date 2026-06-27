@@ -1,0 +1,47 @@
+* ============================================================================
+* 808 Hi Tom — Bridged-T Resonator (Behavioral State-Space Equivalent)
+* PedalKernel SPICE Golden Reference
+*
+* TOPOLOGY NOTE: Single bridged-T Sallen-Key resonator + inverting output
+* buffer.  Same behavioral state-space approach as 808_kick.spice.
+*
+* REANCHOR NOTE: This deck was previously set to f0=153.8 Hz (RC textbook value).
+* It is now anchored directly to the TR-808 service manual hi-tom target (185 Hz).
+* The Q is preserved from the .pedal component values (Q=8.33).
+*
+* PARAMETERS (TR-808 service manual — target f0 = 185 Hz):
+*   f0 = 185 Hz  (TR-808 service manual hi-tom fundamental)
+*   Q = 8.33  (R_fb = 750k, r_crit = 660k → Q = 750/(750-660))
+*   zeta = 1/(2·Q) = 0.0600
+*   omega0 = 2π·f0 = 2π·185 = 1162.39 rad/s
+*   2·zeta·omega0 = 139.54
+*
+* STATE-SPACE MODEL:
+*   dx/dt  = ω₀ · v
+*   dv/dt  = −ω₀·x − 2ζω₀·v + ω₀·u(t)
+*   y = x
+*
+* VERIFIED: f0 = 185 Hz (TR-808 service manual), Q = 8.33
+* ============================================================================
+
+* --- State variable: v_x (position / oscillator voltage) ---
+Cx v_x 0 1
+
+* G-source: dv_x/dt = omega0 * v_v
+Gx_v 0 v_x v_v 0 1162.39
+
+* --- State variable: v_v (velocity, scaled by 1/omega0) ---
+Cv v_v 0 1
+
+* G-source: −omega0 * v_x  (restoring force)
+Gv_x 0 v_v v_x 0 -1162.39
+
+* G-source: −2·zeta·omega0 * v_v  (damping)
+Gv_v 0 v_v v_v 0 -139.54
+
+* G-source: omega0 * trigger input
+Gv_in 0 v_v v_in 0 1162.39
+
+* --- Output mapping ---
+Bout v_out 0 V = v(v_x)
+Rload_out v_out 0 100k

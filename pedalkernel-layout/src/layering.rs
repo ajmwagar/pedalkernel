@@ -364,6 +364,7 @@ mod tests {
             subcircuits: vec![],
             ports: vec![],
             init_hints: vec![],
+            uses: vec![],
         };
 
         let graph = LayoutGraph::from_pedal(&pedal);
