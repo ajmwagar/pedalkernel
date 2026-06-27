@@ -719,4 +719,109 @@ mod tests {
             "port VS should affect scattering: with={b_with_cv:.4}, without={b_without_cv:.4}"
         );
     }
+
+    /// Verify that a second declared input port whose node sits inside a
+    /// PassiveRType (all-passive) stage actually drives the circuit.
+    ///
+    /// Circuit: audio_in → R_main(10k) → node_m → C_noise(100n) → noise_in
+    ///                                              node_m → D1 (silicon) → gnd
+    ///                                              node_m → audio_out
+    ///
+    /// The cap C_noise forces `node_m` to be compiled as a reactive WDF leaf
+    /// rather than stamped purely in the G-matrix, so the passive group becomes
+    /// a PassiveRType stage with children.  `noise_in` connects to `node_m` via
+    /// C_noise; injecting 5 V there must visibly change the output.
+    ///
+    /// Two assertions:
+    /// 1. `max_diff > 1e-6` — noise_in=5 V shifts the output.
+    /// 2. backward-compat diff < 1e-12 — noise_in=0 is byte-identical to
+    ///    single-port `process()`.
+    #[test]
+    fn second_input_port_drives_circuit_via_process_ports() {
+        use crate::PedalProcessor;
+
+        let src = r#"pedal "TwoPortNoise" {
+    ports {
+        audio_in:  input
+        noise_in:  input
+        audio_out: output
+    }
+    components {
+        R_main:  resistor(10k)
+        C_noise: cap(100n)
+        D1:      diode_pair(silicon)
+    }
+    nets {
+        audio_in  -> R_main.a
+        R_main.b  -> C_noise.a
+        C_noise.b -> noise_in
+        R_main.b  -> D1.a
+        D1.b      -> gnd
+        R_main.b  -> audio_out
+    }
+    controls {}
+}"#;
+        let pedal = parse_pedal_file(src).unwrap();
+        let mut compiled = compile_pedal(&pedal, 48000.0).unwrap();
+
+        let in_idx = compiled.resolve_port("audio_in").unwrap();
+        let noise_idx = compiled.resolve_port("noise_in").unwrap();
+        let out_idx = compiled.resolve_port("audio_out").unwrap();
+
+        // --- run 1: noise_in = 5 V DC + 440 Hz audio ---
+        let n_samples = 2048usize;
+        let mut ports = vec![0.0f64; compiled.port_count()];
+        let mut out_with_noise = vec![0.0f64; n_samples];
+        for i in 0..n_samples {
+            let sig = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            ports[in_idx] = sig;
+            ports[noise_idx] = 5.0;
+            compiled.process_ports(&mut ports);
+            out_with_noise[i] = ports[out_idx];
+        }
+
+        // --- run 2: noise_in = 0 (multi-port call) ---
+        compiled.reset();
+        let mut out_no_noise = vec![0.0f64; n_samples];
+        for i in 0..n_samples {
+            let sig = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            ports[in_idx] = sig;
+            ports[noise_idx] = 0.0;
+            compiled.process_ports(&mut ports);
+            out_no_noise[i] = ports[out_idx];
+        }
+
+        // --- run 3: single-port process() for backward-compat check ---
+        compiled.reset();
+        let mut out_single = vec![0.0f64; n_samples];
+        for i in 0..n_samples {
+            let sig = (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48000.0).sin();
+            out_single[i] = compiled.process(sig);
+        }
+
+        let max_diff: f64 = out_with_noise
+            .iter()
+            .zip(&out_no_noise)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+
+        let compat_diff: f64 = out_no_noise
+            .iter()
+            .zip(&out_single)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+
+        eprintln!(
+            "  second_port: max_diff={max_diff:e} (want >1e-6), compat_diff={compat_diff:e} (want <1e-12)"
+        );
+
+        assert!(
+            max_diff > 1e-6,
+            "noise_in=5V must visibly change output vs noise_in=0: max_diff={max_diff:e}"
+        );
+        assert!(
+            compat_diff < 1e-12,
+            "process_ports(noise=0) must be byte-identical to process(): compat_diff={compat_diff:e}"
+        );
+    }
 }

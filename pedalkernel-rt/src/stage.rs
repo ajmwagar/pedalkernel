@@ -967,6 +967,28 @@ pub enum RootKind {
         /// Precomputed interpolation table for single-pot stages.
         /// When Some, pot changes use table lookup instead of MNA re-inversion.
         interp_table: Option<ScatteringInterpolationTable>,
+        /// Circuit node ID → MNA node index mapping for this stage.
+        ///
+        /// `mna_node_map[mna_index] = circuit_node_id`.  Used at compile time by
+        /// `register_port_vs_injection` to convert a circuit node_id to the MNA
+        /// node index needed for VS stamping.
+        #[cfg_attr(feature = "serde", serde(default))]
+        mna_node_map: Vec<usize>,
+        /// Per-port VS injection data for secondary (non-main) input ports.
+        ///
+        /// Each entry is `(port_name, injection_vector, extraction_vs_coeff, current_voltage)`:
+        /// - `injection_vector`: `n_ports` elements — the MNA X⁻¹ column contribution for
+        ///   this port's VS branch (same derivation as `vs_injection` but for VS index > 0).
+        ///   Applied as: a[i] += injection_vector[i] * current_voltage
+        /// - `extraction_vs_coeff`: scalar used in the extraction-path output formula.
+        ///   Applied as: out += extraction_vs_coeff * current_voltage
+        /// - `current_voltage`: updated each sample by `set_port_voltage`, consumed by
+        ///   the process function.
+        ///
+        /// Empty for single-input circuits — zero-cost path, byte-identical to the
+        /// unextended single-VS scattering.
+        #[cfg_attr(feature = "serde", serde(default))]
+        port_vs_injections: Vec<(alloc::string::String, Vec<crate::Wave>, crate::Wave, crate::Wave)>,
     },
 }
 
@@ -1809,6 +1831,7 @@ impl WdfStage {
 
     /// Set a named port's voltage source via cached pointer.
     /// Falls back to tree walk if pointer not cached.
+    /// For PassiveRType stages, also updates the secondary VS injection slot.
     #[inline(always)]
     pub fn set_port_voltage(&mut self, port_name: &str, v: crate::Wave) {
         for (name, ptr) in &self.port_vs_ptrs {
@@ -1818,6 +1841,22 @@ impl WdfStage {
                     ptr.set(v);
                 }
                 return;
+            }
+        }
+        // PassiveRType stages hold secondary port VS injections separately:
+        // reactive/pot children don't have named VS leaves in the tree, so
+        // the cached-pointer path above finds nothing.  Update the voltage
+        // slot directly so the process() superposition applies it this sample.
+        if let RootKind::PassiveRType {
+            ref mut port_vs_injections,
+            ..
+        } = self.root
+        {
+            for (_name, _inj, _ext_coeff, voltage) in port_vs_injections.iter_mut() {
+                if _name == port_name {
+                    *voltage = v;
+                    return;
+                }
             }
         }
         // Fallback: tree walk (shouldn't happen if cache_vs_pointers was called)
@@ -2414,6 +2453,7 @@ impl WdfStage {
                         output_port,
                         extraction_coeffs,
                         extraction_vs,
+                        port_vs_injections,
                         ..
                     } => {
                         let vs_voltage = sample * compensation;
@@ -2424,12 +2464,24 @@ impl WdfStage {
                             .zip(child_runtime_states.iter_mut())
                             .map(|(child, state)| child.reflected_with_state(state))
                             .collect();
-                        // 2. Compute incident waves: a[i] = Σ_j S[i][j]·b[j] + k[i]·V_in
+                        // 2. Compute incident waves:
+                        //   a[i] = Σ_j S[i][j]·b[j] + k_main[i]·V_main
+                        //         + Σ_p k_port_p[i]·V_port_p
+                        //
+                        // The secondary-port terms are additive superposition.
+                        // For single-input circuits port_vs_injections is empty,
+                        // so this is zero-cost and byte-identical to the original.
                         let mut a_children = vec![0.0; n];
                         for i in 0..n {
                             let mut a_i = vs_injection[i] * vs_voltage;
                             for j in 0..n {
                                 a_i += scattering[i * n + j] * b_children[j];
+                            }
+                            // Secondary input-port superposition.
+                            for (_name, inj, _ext_coeff, v_port) in port_vs_injections.iter() {
+                                if i < inj.len() {
+                                    a_i += inj[i] * *v_port;
+                                }
                             }
                             a_children[i] = a_i;
                         }
@@ -2444,12 +2496,21 @@ impl WdfStage {
                         // 4. Output voltage at probe port
                         if !extraction_coeffs.is_empty() {
                             let mut out = *extraction_vs * vs_voltage;
+                            // Add secondary-port VS contributions to extracted output.
+                            for (_name, _inj, ext_coeff, v_port) in port_vs_injections.iter() {
+                                out += ext_coeff * v_port;
+                            }
                             for i in 0..n {
                                 out += extraction_coeffs[i] * b_children[i];
                             }
                             return out;
                         } else if n == 0 || *extraction_vs != 0.0 {
-                            return *extraction_vs * vs_voltage;
+                            // Resistive-only: add secondary-port contributions.
+                            let mut out = *extraction_vs * vs_voltage;
+                            for (_name, _inj, ext_coeff, v_port) in port_vs_injections.iter() {
+                                out += ext_coeff * v_port;
+                            }
+                            return out;
                         } else {
                             let a_out = a_children[*output_port];
                             let b_out = b_children[*output_port];
@@ -2787,6 +2848,103 @@ impl WdfStage {
         } else {
             false
         }
+    }
+
+    /// Register a secondary input-port VS injection for a PassiveRType stage.
+    ///
+    /// Extends the stored MNA system with one extra voltage-source branch at
+    /// `circuit_node_id` (relative to GND), derives the resulting WDF
+    /// incident-wave injection vector and output extraction coefficient via
+    /// superposition, and stores them in `port_vs_injections`.
+    ///
+    /// Returns `true` if the port was registered, `false` if this stage is not
+    /// a PassiveRType or `circuit_node_id` is not in the MNA node map.
+    ///
+    /// # Panics
+    /// Never panics; failures are signalled via the bool return.
+    pub fn register_port_vs_injection(
+        &mut self,
+        port_name: &str,
+        circuit_node_id: usize,
+    ) -> bool {
+        let RootKind::PassiveRType {
+            ref recompute_mna,
+            ref recompute_ports,
+            extraction_output_pos,
+            extraction_output_neg,
+            ref mna_node_map,
+            ref mut port_vs_injections,
+            ..
+        } = self.root
+        else {
+            return false;
+        };
+
+        // Find which MNA node index corresponds to the circuit node.
+        let Some(port_mna_node) = mna_node_map.iter().position(|&nid| nid == circuit_node_id)
+        else {
+            return false;
+        };
+
+        let (Some(mna_orig), Some(ports)) =
+            (recompute_mna.as_ref(), recompute_ports.as_ref())
+        else {
+            return false;
+        };
+
+        let n_nodes = mna_orig.num_nodes;
+        let n_vs_old = mna_orig.num_vsources;
+        let n_vs_new = n_vs_old + 1;
+        let new_vs_idx = n_vs_old;
+
+        // Build an extended copy of the MNA with one additional VS column.
+        let mut ext = crate::tree::MnaSystem {
+            num_nodes: n_nodes,
+            num_vsources: n_vs_new,
+            g_matrix: mna_orig.g_matrix.clone(),
+            b_matrix: vec![0.0; n_nodes * n_vs_new],
+            c_matrix: vec![0.0; n_vs_new * n_nodes],
+            d_matrix: vec![0.0; n_vs_new * n_vs_new],
+        };
+
+        // Copy existing VS sub-blocks.
+        for row in 0..n_nodes {
+            for col in 0..n_vs_old {
+                ext.b_matrix[row * n_vs_new + col] =
+                    mna_orig.b_matrix[row * n_vs_old + col];
+            }
+        }
+        for row in 0..n_vs_old {
+            for col in 0..n_nodes {
+                ext.c_matrix[row * n_nodes + col] =
+                    mna_orig.c_matrix[row * n_nodes + col];
+            }
+        }
+        for row in 0..n_vs_old {
+            for col in 0..n_vs_old {
+                ext.d_matrix[row * n_vs_new + col] =
+                    mna_orig.d_matrix[row * n_vs_old + col];
+            }
+        }
+
+        // Stamp the new VS: positive terminal = port_mna_node, negative = GND.
+        ext.stamp_voltage_source(Some(port_mna_node), None, new_vs_idx);
+
+        let (_s, inj) = ext.derive_scattering_and_vs_injection(ports, new_vs_idx);
+        let (_ext_coeffs, ext_vs) = ext.derive_extraction_coeffs(
+            ports,
+            new_vs_idx,
+            extraction_output_pos,
+            extraction_output_neg,
+        );
+
+        port_vs_injections.push((
+            alloc::string::String::from(port_name),
+            inj,
+            ext_vs,
+            0.0,
+        ));
+        true
     }
 
     /// Apply thermal drift to temperature-sensitive root elements.
