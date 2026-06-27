@@ -1677,6 +1677,16 @@ pub struct CompiledPedal {
     /// and the ring buffer is a runtime-only construct (not needed on M7 firmware).
     #[cfg_attr(feature = "serde", serde(skip))]
     pub metrics_buffer: Option<Arc<MetricsRingBuffer>>,
+    /// Live runtime diagnostics ring (IPC Phase B, `diag` feature).
+    ///
+    /// When attached via [`CompiledPedal::attach_diag_ring`], the processor
+    /// builds one [`crate::diag_ring::RuntimeFrame`] per metering block — NR
+    /// convergence aggregate, per-BJT operating points (`Vbe`/`Vce`/`Ic`/`Ib`/
+    /// `gm`), and per-stage levels — and pushes it lock-free into a ring laid
+    /// over the mmap'd IPC file. Off by default; only built when attached.
+    #[cfg(feature = "diag")]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub diag_ring: Option<crate::diag_ring::RuntimeRing>,
     /// Input loading model — models source impedance interaction at circuit input.
     /// Applies DC attenuation and frequency-dependent rolloff based on the
     /// source (e.g., guitar pickup, upstream pedal) driving this circuit.
@@ -2357,6 +2367,24 @@ impl CompiledPedal {
     /// Returns `None` if metering is not enabled.
     pub fn metrics_buffer(&self) -> Option<Arc<MetricsRingBuffer>> {
         self.metrics_buffer.clone()
+    }
+
+    /// Attach a live runtime diagnostics ring (IPC Phase B) over a caller-owned
+    /// byte region (the runtime-ring section of an mmap'd IPC file).
+    ///
+    /// The processor will, once per metering block, build a
+    /// [`crate::diag_ring::RuntimeFrame`] (NR convergence + per-BJT op-points +
+    /// per-stage levels) and push it lock-free into the ring. Requires metering
+    /// to be enabled (the per-block cadence + level accumulators come from it).
+    ///
+    /// # Safety
+    /// `ptr` must be valid and writable for [`crate::diag_ring::region_len`]`
+    /// (capacity)` bytes for as long as this processor processes audio, and must
+    /// not be aliased by any other writer. The std host (`diag_ipc`) holds the
+    /// mmap that owns this region's lifetime.
+    #[cfg(feature = "diag")]
+    pub unsafe fn attach_diag_ring(&mut self, ptr: *mut u8, capacity: usize) {
+        self.diag_ring = Some(crate::diag_ring::RuntimeRing::init(ptr, capacity));
     }
 
     /// Read the latest metrics (convenience method for the UI thread).
@@ -3782,6 +3810,10 @@ impl PedalProcessor for CompiledPedal {
         let mut prev_was_clipping = false;
         let num_stages = self.stages.len();
         let mut stage_levels = [0.0 as crate::Wave; crate::metering::MAX_STAGES];
+        // Phase-B diag: reduced metrics stashed at block-complete, consumed after
+        // the metering accumulator borrow ends to build the runtime-ring frame.
+        #[cfg(feature = "diag")]
+        let mut diag_block_metrics: Option<UiMetrics> = None;
         let mut stage_solver_iterations = [0u32; crate::metering::MAX_STAGES];
         let mut stage_solver_residual = [0.0 as crate::Wave; crate::metering::MAX_STAGES];
         let mut stage_solver_converged = [true; crate::metering::MAX_STAGES];
@@ -4647,7 +4679,72 @@ impl PedalProcessor for CompiledPedal {
                 if let Some(ref buffer) = self.metrics_buffer {
                     buffer.write(metrics);
                 }
+                // Stash the reduced metrics for the Phase-B diag frame, built
+                // after the `acc` borrow ends (needs &self.stages + &mut ring).
+                #[cfg(feature = "diag")]
+                {
+                    diag_block_metrics = Some(metrics);
+                }
             }
+        }
+
+        // ── Diagnostics runtime ring (IPC Phase B, `diag` feature) ───────────
+        // When a block completed AND a ring is attached, build one RuntimeFrame
+        // (NR convergence from the grouped-NR SolverStats snapshot + per-BJT
+        // operating points + per-stage levels) and push it lock-free.
+        #[cfg(feature = "diag")]
+        if let (Some(metrics), Some(ring)) =
+            (diag_block_metrics, self.diag_ring.as_mut())
+        {
+            let mut frame = crate::diag_ring::RuntimeFrame {
+                block_counter: metrics.block_counter as u64,
+                ..Default::default()
+            };
+
+            // NR convergence: prefer the thread-local grouped-NR SolverStats
+            // (the MultiNl path); fall back to the metering aggregate.
+            let ss = crate::elements::nonlinear::solver::solver_stats_snapshot();
+            if ss.solves > 0 {
+                frame.nr_solves = ss.solves;
+                frame.nr_total_iterations = ss.total_iterations;
+                frame.nr_max_iterations = ss.max_iterations;
+                frame.nr_iter_cap_hits = ss.iter_cap_hits as u32;
+                frame.nr_max_residual = ss.max_residual as f32;
+            } else {
+                frame.nr_solves = metrics.nr_solve_count as u64;
+                frame.nr_total_iterations = metrics.nr_total_iterations as u64;
+                frame.nr_max_iterations = metrics.nr_max_iterations as u32;
+                frame.nr_iter_cap_hits = metrics.nr_nonconverged_count as u32;
+                frame.nr_max_residual = metrics.nr_max_residual;
+            }
+            crate::elements::nonlinear::solver::reset_solver_stats();
+
+            // Levels: dB → linear RMS (input/output) + per-stage absolute level.
+            let db2lin = |db: f32| if db <= -200.0 { 0.0 } else { 10f32.powf(db / 20.0) };
+            frame.input_rms = db2lin(metrics.input_rms_db);
+            frame.output_rms = db2lin(metrics.output_rms_db);
+            let n_lvl = num_stages.min(crate::diag_ring::MAX_STAGE_LEVELS);
+            for (dst, src) in frame.stage_levels[..n_lvl]
+                .iter_mut()
+                .zip(stage_levels[..n_lvl].iter())
+            {
+                *dst = *src as f32;
+            }
+            frame.n_stage_levels = n_lvl as u32;
+
+            // Per-BJT/NL operating points from every MultiNl stage.
+            let mut n_op = 0usize;
+            for (si, stage) in self.stages.iter().enumerate() {
+                if n_op >= crate::diag_ring::MAX_OP_RECORDS {
+                    break;
+                }
+                if let Stage::MultiNl(mnl) = stage {
+                    n_op += mnl.runtime_op_points(si, &mut frame.op_records[n_op..]);
+                }
+            }
+            frame.n_op_records = n_op as u32;
+
+            ring.push(&frame);
         }
 
         // Extract output port values from the processed signal.

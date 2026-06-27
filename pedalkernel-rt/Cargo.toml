@@ -17,6 +17,11 @@ serde = ["dep:serde"]
 biquad-table = []
 debug-trace = ["std"]
 fault-injection = ["std"]
+# Live runtime diagnostics ring (IPC Phase B). Adds the per-block op-point/NR
+# capture + lock-free ring write hook in the processor. Off by default; the
+# `pedalkernel` crate's `diag` feature turns it on. Needs `std` for the
+# thread-local SolverStats aggregate it samples.
+diag = ["std"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
