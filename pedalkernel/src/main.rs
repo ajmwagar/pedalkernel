@@ -50,6 +50,25 @@ enum Command {
         /// Path to the .pedal file.
         file: String,
     },
+    /// Diagnostics — compile-time MNA/scattering snapshot over a memory-mapped
+    /// IPC file (Phase A of the diagnostics IPC channel).
+    ///
+    /// Examples:
+    ///   pedalkernel diag my.pedal                       # compile + print
+    ///   pedalkernel diag my.pedal --ipc out.pkdiag      # also write IPC file
+    ///   pedalkernel diag --ipc out.pkdiag               # read + print IPC file
+    ///   pedalkernel diag my.pedal --knob Gain=0.5       # apply a knob first
+    #[cfg(feature = "diag")]
+    Diag {
+        /// Path to the .pedal file to compile (omit to read --ipc only).
+        file: Option<String>,
+        /// IPC file: written (with a pedal) or read (without).
+        #[arg(long)]
+        ipc: Option<String>,
+        /// Control overrides applied before capture (e.g. --knob Gain=0.5).
+        #[arg(long = "knob")]
+        knobs: Vec<String>,
+    },
     /// Validate .pedal files — check for common errors and warnings.
     ///
     /// Accepts files, directories (recursive), or glob patterns.
@@ -122,6 +141,10 @@ fn main() {
             &knobs,
         ),
         Command::Debug { file } => cli::debug::run(&file),
+        #[cfg(feature = "diag")]
+        Command::Diag { file, ipc, knobs } => {
+            cli::diag::run(file.as_deref(), ipc.as_deref(), &knobs)
+        }
         Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
         Command::Models {
             model_type,

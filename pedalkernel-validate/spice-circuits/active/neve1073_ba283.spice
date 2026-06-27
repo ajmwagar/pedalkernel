@@ -1,0 +1,48 @@
+* ============================================================================
+* Neve BA283 — discrete Class-A gain block (BA183AM, DC-coupled feedback)
+* PedalKernel Validation Circuit
+* ============================================================================
+* Mirrors pedalkernel-pro/pedals/500/1073/sub/ba283.pedal.
+* TR1 (BC184) common-emitter input -> TR2 (BC184) + TR3 (2N3055) Darlington.
+* DC-COUPLED shunt feedback: out -> R7 47 -> RV1 -> bus; TR2 emitter -> R6 18k
+* -> bus; bus -> R2 56k -> TR1 base (R2 DC-biases the base — no blocking cap).
+*
+* This replaces the prior build whose feedback DC-block floated the base.
+* Pot RV1 = pot(4.7k) linear, GAIN 0.5 -> 2350 Ohm. +24 V rail.
+* ============================================================================
+VCC   vcc   0     DC 24
+
+* ── Input → TR1 base; R2 (Rfb) DC-biases base from the feedback bus ───────────
+Cin   v_in  ni    10u
+Rin   ni    nb1   2.2k
+Rfb   nfb   nb1   56k
+Cfb   nfb   nb1   4.7n
+Cmil  nb1   n1    220p
+
+* ── TR1 common-emitter ───────────────────────────────────────────────────────
+R3    vcc   n1    68k
+Q3    n1    nb1   ne1   QBC184C
+R4    ne1   0     1.2k
+Rcmp  n1    nrc   3.3k
+Ccmp  nrc   ne1   330p
+
+* ── TR2 / TR3 Darlington output ──────────────────────────────────────────────
+Q1    vcc   n1    ne2   QBC184C
+R6    ne2   nfb   18k
+Q2    vcc   ne2   nd    Q2N3055
+
+* ── DC-coupled feedback: out → R7 → RV1 → bus ────────────────────────────────
+R7    nd    nrv   47
+Rru   nrv   nfb   2350
+
+* ── Output coupling + load ───────────────────────────────────────────────────
+Cout  nd    v_out 10u
+RL    v_out 0     10k
+
+* ── Models ───────────────────────────────────────────────────────────────────
+.MODEL QBC184C NPN(IS=14.8f BF=500 BR=10 NF=1.0 NR=1.0 VAF=50 VAR=15
++ IKF=100m IKR=200m ISE=10p NE=1.5 ISC=0 NC=2.0 RB=500 RE=0.5 RC=1
++ CJE=15p VJE=0.65 MJE=0.33 CJC=5p VJC=0.5 MJC=0.33 TF=0.5n TR=10n)
+.MODEL Q2N3055 NPN(IS=4.66p BF=360 BR=2.0 NF=1.0 NR=1.0 VAF=100 IKF=250m
++ ISE=33.39p NE=1.5 ISC=5n NC=2.0 RB=3 RE=0 RC=0.04 CJE=580.2p VJE=1.2
++ MJE=0.45 CJC=212.1p VJC=0.75 MJC=0.4 TF=80n TR=2.55u)

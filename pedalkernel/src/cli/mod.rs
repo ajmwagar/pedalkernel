@@ -1,4 +1,6 @@
 pub mod debug;
+#[cfg(feature = "diag")]
+pub mod diag;
 pub mod models;
 pub mod process;
 pub mod validate;

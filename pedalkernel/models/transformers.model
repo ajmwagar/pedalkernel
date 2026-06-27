@@ -16,3 +16,11 @@
 # Gapped single-ended output-transformer demo from the Phase-2 J-A prototype.
 # The magnetic parameters are behavioral test data, not a verified product fit.
 .TRANSFORMER OT-DEMO-SE LP=10 K=0.997 RP=270 RS=0.5 LLP=30m LLS=1.2u LM=9.97 CP=200p N1=2000 N2=76.923076923 AE=2e-4 LE=0.10 GAP=1e-3 IDC=45m MS=1.6e6 A=1100 ALPHA=1.6e-3 JA_K=400 JA_C=0.2
+
+# Neve 1073 iron (Marinair / Carnhill LO1166-class). REPRESENTATIVE specs for the
+# 500-series 1073 build-to reference (pedalkernel-pro/pedals/500/1073) — correct
+# class and ratios, NOT yet reconciled against a measured LO1166 datasheet. Lock
+# these before product (see that README §"Path to 1:1"). Mic input is step-up
+# (1:8 ≈ +18 dB), output is step-down (2:1) to drive 600 Ω line.
+.TRANSFORMER NEVE-1073-INPUT  LP=0.2 K=0.9995 RP=30  RS=2k   LLP=0.3m LLS=19.2m LM=0.2  RC=200k CP=220p N1=1 N2=8
+.TRANSFORMER NEVE-1073-OUTPUT LP=2   K=0.999  RP=120 RS=30   LLP=20m  LLS=5m    LM=1.98 RC=500k CP=180p N1=2 N2=1
