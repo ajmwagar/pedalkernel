@@ -4601,6 +4601,27 @@ pub struct MultiNlStage {
     /// A large delta indicates a transient, allowing the NR tolerance to be
     /// loosened via `adaptive_nr_tolerance()` to reduce iteration count.
     pub prev_input: crate::Wave,
+    /// Optional **nonlinear DC operating-point** per NL port (`v* = V(pos) − V(neg)`),
+    /// solved by the compiler's grouped-BJT DC Q-point pass (ko5g g725.2).
+    ///
+    /// When present, the runtime derives `dc_bias[i]` from this target via the
+    /// WDF residual inversion
+    /// `dc_bias[i] = v_i + R_i·i_i(v) − Σ_j S[i][j]·(v_j − R_j·i_j(v))`
+    /// instead of the linear VCC-injection superposition — both at build time and
+    /// (critically) after every `recompute_scattering` (e.g. a feedback-pot move),
+    /// which would otherwise re-extract the linear `dc_bias` and erase the seed.
+    /// `None` (the default) leaves the legacy VCC-injection path untouched, so
+    /// triode/non-BJT/feedforward stages are byte-identical.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_qpoint_v: Option<Vec<crate::Wave>>,
+    /// DC steady-state reflected wave of each passive port (`b_passive[k]`), used
+    /// alongside `dc_qpoint_v` to subtract the passive coupling contribution from
+    /// the target incident wave: at DC the caps settle to their node voltages, so
+    /// `known_a_i` includes `Σ_k s_nl_passive[i][k]·b_passive_DC[k]` which must be
+    /// removed from `dc_bias[i]`.  Same length as the passive-port count; empty
+    /// when no seed is present.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_qpoint_passive_b: Vec<crate::Wave>,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -6085,7 +6106,7 @@ impl MultiNlStage {
                     let groups: Vec<&dyn NlDeviceGroupIv> =
                         dg.groups.iter().map(|g| g.as_group_iv()).collect();
 
-                    multi_port_nr_solve_grouped_into(
+multi_port_nr_solve_grouped_into(
                         n_nl,
                         &self.scattering.s_nl,
                         known_a,
@@ -6343,6 +6364,25 @@ impl MultiNlStage {
         self.iteration_budget_remaining = NR_ITERATION_BUDGET;
         if let Some(ref mut opamp) = self.feedback_opamp {
             opamp.reset();
+        }
+
+        // ko5g g725.2: a nonlinear DC Q-point seed pre-charges the coupling caps
+        // to their DC voltages so the grouped-BJT NR starts in the active basin
+        // (not the cutoff fixed point).  `wdf_reset` above just zeroed those caps,
+        // so re-apply the pre-charge (and re-derive dc_bias) here.  No-op when no
+        // seed is present, so non-BJT stages are unaffected.
+        if self.dc_qpoint_v.is_some() && !self.dc_qpoint_passive_b.is_empty() {
+            let n_pre = self
+                .passive_one_ports
+                .len()
+                .min(self.dc_qpoint_passive_b.len());
+            for k in 0..n_pre {
+                let bk = self.dc_qpoint_passive_b[k];
+                let one_port = self.passive_one_ports[k];
+                // Seed the reflected wave directly (see compiler apply_bjt_dc_qpoint).
+                one_port.wdf_set_incident(bk, &mut self.passive_runtime_state);
+            }
+            self.apply_dc_qpoint_seed();
         }
     }
 
@@ -7167,6 +7207,86 @@ impl MultiNlStage {
                     );
                     self.extract_vs = 0.0;
                 }
+            }
+        }
+
+        // A recompute just re-extracted the LINEAR vcc-injection `dc_bias`.  If a
+        // nonlinear DC Q-point seed is present (ko5g g725.2), re-derive `dc_bias`
+        // from it against the freshly-recomputed scattering so the feedback-servo
+        // operating point is preserved across pot moves.
+        self.apply_dc_qpoint_seed();
+    }
+
+    /// Re-derive `dc_bias` (and `vcc_bias_all`) from the nonlinear DC Q-point seed
+    /// `dc_qpoint_v` via the WDF residual inversion, using the CURRENT scattering
+    /// and port resistances.  No-op when no seed is present.
+    ///
+    /// The runtime grouped-NR residual at a port is
+    /// `F_i = known_a_i − v_i − R_i·i_i(v) + Σ_j S[i][j]·(v_j − R_j·i_j(v))`, and
+    /// at DC steady state `known_a_i = dc_bias[i]`.  Solving for the incident-wave
+    /// DC term that makes the NR settle at the seeded operating point `v*` gives
+    /// `dc_bias[i] = v_i* + R_i·i_i(v*) − Σ_j S[i][j]·(v_j* − R_j·i_j(v*))`.
+    pub fn apply_dc_qpoint_seed(&mut self) {
+        let v_star = match self.dc_qpoint_v.clone() {
+            Some(v) => v,
+            None => return,
+        };
+        let n_nl = self.dc_bias.len();
+        if v_star.len() != n_nl || n_nl == 0 {
+            return;
+        }
+        let dg = match self.device_groups {
+            Some(ref dg) => dg,
+            None => return,
+        };
+
+        // Device port currents i_i(v*) using the same grouped models the NR uses.
+        let mut i_op = vec![0.0 as crate::Wave; n_nl];
+        let mut cur = [0.0 as crate::Wave; 3];
+        let mut jac = [0.0 as crate::Wave; 9];
+        for (g, group) in dg.groups.iter().enumerate() {
+            let np = group.n_ports().min(3);
+            let off = dg.offsets.get(g).copied().unwrap_or(0);
+            if off + np > n_nl {
+                continue;
+            }
+            group
+                .as_group_iv()
+                .eval(&v_star[off..off + np], &mut cur[..np], &mut jac[..np * np]);
+            for p in 0..np {
+                i_op[off + p] = cur[p];
+            }
+        }
+
+        let r = &self.nl_port_resistances;
+        let s = &self.scattering.s_nl;
+        let has_s = s.len() == n_nl * n_nl;
+        // Passive-port DC contribution: at DC steady state `b_passive[k]` settles
+        // to the cap node voltage, contributing `Σ_k s_nl_passive[i][k]·b[k]` to
+        // `known_a_i`.  Subtract it so `dc_bias[i]` is the residual DC source term.
+        let n_passive = self.dc_qpoint_passive_b.len();
+        let s_pass = &self.scattering.s_nl_passive;
+        let has_pass = n_passive > 0 && s_pass.len() >= n_nl * n_passive;
+        for i in 0..n_nl {
+            let ri = r.get(i).copied().unwrap_or(1.0);
+            let mut bias = v_star[i] + ri * i_op[i];
+            if has_s {
+                for j in 0..n_nl {
+                    let rj = r.get(j).copied().unwrap_or(1.0);
+                    bias -= s[i * n_nl + j] * (v_star[j] - rj * i_op[j]);
+                }
+            }
+            if has_pass {
+                for k in 0..n_passive {
+                    bias -= s_pass[i * n_passive + k] * self.dc_qpoint_passive_b[k];
+                }
+            }
+            if !bias.is_finite() {
+                continue;
+            }
+            self.dc_bias[i] = bias;
+            if i < self.vcc_bias_all.len() {
+                self.vcc_bias_all[i] = bias;
             }
         }
     }
