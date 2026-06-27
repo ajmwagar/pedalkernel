@@ -8,6 +8,7 @@
 //! 5. Chaining everything into a cascaded `PedalProcessor`
 
 mod bbd_lowering;
+mod bias;
 mod bias_analysis;
 mod bind;
 mod blockwise;
