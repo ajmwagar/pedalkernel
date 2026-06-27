@@ -191,6 +191,8 @@
 pub mod analysis;
 pub mod board;
 pub mod compiler;
+#[cfg(feature = "diag")]
+pub mod diag_ipc;
 pub mod dsl;
 pub mod dsl_expand;
 pub mod elements;

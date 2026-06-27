@@ -14,6 +14,10 @@ rust-version = "1.80"
 default = ["std", "jack-rt", "tui", "cli", "gummel-poon", "build-cache"]
 std = []
 serde = ["pedalkernel-rt/serde"]
+# Diagnostics IPC channel: memory-mapped compile-time MNA/scattering snapshot
+# (`pedalkernel diag`). Additive; the diagnostics path only runs when the
+# subcommand is invoked, so runtime/audio behavior is unchanged.
+diag = ["serde", "dep:serde", "dep:serde_json", "dep:memmap2"]
 biquad-table = ["pedalkernel-rt/biquad-table"]
 jack-rt = ["jack"]
 tui = ["dep:ratatui", "dep:crossterm"]
@@ -64,6 +68,11 @@ num-complex = "0.4"
 
 # Serialization (optional, for build-cache feature)
 postcard = { version = "1", features = ["alloc"], optional = true }
+
+# Diagnostics IPC (optional, `diag` feature): JSON snapshot + mmap'd IPC file.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+memmap2 = { version = "0.9", optional = true }
 
 # Collections
 hashbrown = "0.15"
