@@ -102,6 +102,10 @@ pub mod processor;
 // ── Diagnostics: compile-time MNA/scattering snapshot (IPC Phase A) ───
 pub mod diag;
 
+// ── Diagnostics: live runtime ring (IPC Phase B, `diag` feature) ──────
+#[cfg(feature = "diag")]
+pub mod diag_ring;
+
 // ── Audio processor trait ────────────────────────────────────────────
 
 use alloc::{string::String, vec::Vec};

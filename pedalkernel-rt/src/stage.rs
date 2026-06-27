@@ -6557,6 +6557,75 @@ impl MultiNlStage {
         out
     }
 
+    /// Live runtime operating-point capture for the diagnostics ring (Phase B).
+    ///
+    /// Evaluates each grouped 2-port device at its **current** NR operating point
+    /// (`v_prev` after this sample's solve) to read out, per device:
+    /// `Vbe = v_prev[be]`, `Vce = v_prev[ce]`, the device currents
+    /// `Ib = currents[0]`, `Ic = currents[1]`, the transconductance
+    /// `gm = ∂Ic/∂Vbe = jac[2]`, and the output conductance `∂Ic/∂Vce = jac[3]`.
+    ///
+    /// This is the per-sample analogue of [`Self::nl_linearizations`] — it is the
+    /// only place that reads the **dynamic** Vbe→Ic relationship the static MNA
+    /// snapshot cannot show (the whole BA283 −49.5 dB question). Triode/pentode
+    /// groups map `gk`→`v_be`/`i_b` slot, `pk`→`v_ce`/`i_c` slot so the same
+    /// record carries grid/plate state. `records.len()` bounds the output.
+    #[cfg(feature = "diag")]
+    pub fn runtime_op_points(
+        &self,
+        stage_index: usize,
+        records: &mut [crate::diag_ring::OpPointRecord],
+    ) -> usize {
+        use crate::diag_ring::OpPointRecord;
+        let dg = match self.device_groups {
+            Some(ref dg) => dg,
+            None => return 0,
+        };
+        let mut v_buf = [0.0 as crate::Wave; 3];
+        let mut i_buf = [0.0 as crate::Wave; 3];
+        let mut jac = [0.0 as crate::Wave; 9];
+        let mut n = 0usize;
+        for (g, group) in dg.groups.iter().enumerate() {
+            if n >= records.len() {
+                break;
+            }
+            let np = group.n_ports().min(3);
+            let off = dg.offsets.get(g).copied().unwrap_or(0);
+            for (p, slot) in v_buf.iter_mut().enumerate().take(np) {
+                *slot = self.v_prev.get(off + p).copied().unwrap_or(0.0);
+            }
+            group
+                .as_group_iv()
+                .eval(&v_buf[..np], &mut i_buf[..np], &mut jac[..np * np]);
+            // 2-port devices: row 1 = CE/plate; jac[1*np+0] = ∂Ic/∂Vbe (gm),
+            // jac[1*np+1] = ∂Ic/∂Vce. 1-port devices fold into the BE slot.
+            let (v_be, v_ce, i_b, i_c, gm, g_ce) = if np >= 2 {
+                (
+                    v_buf[0] as f32,
+                    v_buf[1] as f32,
+                    i_buf[0] as f32,
+                    i_buf[1] as f32,
+                    jac[np] as f32,         // jac[1*np + 0] = ∂i_ce/∂v_be
+                    jac[np + 1] as f32,     // jac[1*np + 1] = ∂i_ce/∂v_ce
+                )
+            } else {
+                (v_buf[0] as f32, 0.0, i_buf[0] as f32, 0.0, jac[0] as f32, 0.0)
+            };
+            records[n] = OpPointRecord {
+                stage_index: stage_index as u32,
+                group_index: g as u32,
+                v_be,
+                v_ce,
+                i_c,
+                i_b,
+                gm,
+                g_ce,
+            };
+            n += 1;
+        }
+        n
+    }
+
     /// Debug dump: print multi-NL stage structure.
     pub fn debug_dump(&self) -> String {
         let n_passive = self.passive_one_ports.len();
