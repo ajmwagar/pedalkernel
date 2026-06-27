@@ -99,6 +99,9 @@ pub mod glide;
 // ── Compiled pedal processor (audio pipeline) ────────────────────────
 pub mod processor;
 
+// ── Diagnostics: compile-time MNA/scattering snapshot (IPC Phase A) ───
+pub mod diag;
+
 // ── Audio processor trait ────────────────────────────────────────────
 
 use alloc::{string::String, vec::Vec};

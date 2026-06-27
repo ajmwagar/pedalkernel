@@ -6346,6 +6346,217 @@ impl MultiNlStage {
         }
     }
 
+    /// Build a read-only compile-time MNA/scattering diagnostics snapshot.
+    ///
+    /// Captures the full **standard** scattering matrix `S` (reconstructed from
+    /// the adaptor's power-normalized form), every NL port's operating-point
+    /// linearization (`gm`/companion), the adapted `nl_port_resistances`, the
+    /// node-voltage `extraction_coeffs`, and the VS injection vector — plus port
+    /// labels so the matrix is interpretable. Derived on demand; no per-sample
+    /// cost and no behavior change.
+    ///
+    /// `stage_index` is the caller-supplied position of this stage in
+    /// `CompiledPedal::stages` (used only to label the snapshot).
+    pub fn mna_snapshot(&self, stage_index: usize) -> crate::diag::MnaStageSnapshot {
+        use alloc::format;
+        use alloc::string::String;
+        use alloc::vec::Vec;
+
+        let n_nl = self.n_nl;
+        let n_passive = self.passive_one_ports.len();
+
+        // ── Full standard scattering matrix from the adaptor ─────────────────
+        // The adaptor stores S̄ (power-normalized); reconstruct standard S via
+        // S[i][j] = S̄[i][j] · √(R_i / R_j).
+        let n_total = self.adaptor.num_ports();
+        let s_bar = self.adaptor.power_scattering();
+        let port_r = self.adaptor.port_resistances();
+        let mut s_full = Vec::with_capacity(n_total * n_total);
+        if s_bar.len() == n_total * n_total && port_r.len() == n_total {
+            for i in 0..n_total {
+                for j in 0..n_total {
+                    let scale = crate::math::sqrt(port_r[i] / port_r[j]);
+                    s_full.push(s_bar[i * n_total + j] * scale);
+                }
+            }
+        }
+
+        // ── Port labels (adaptor order: NL, passive, extras, adapted) ────────
+        let mut port_labels: Vec<String> = Vec::with_capacity(n_total);
+        let nl_labels = self.nl_port_labels();
+        for lbl in &nl_labels {
+            port_labels.push(lbl.clone());
+        }
+        for k in 0..n_passive {
+            port_labels.push(format!("passive[{k}]:{}", self.passive_one_ports[k].type_tag()));
+        }
+        // Remaining ports (vcc / adapted parent) — label by position.
+        while port_labels.len() < n_total {
+            let idx = port_labels.len();
+            if idx + 1 == n_total {
+                port_labels.push(String::from("adapted"));
+            } else {
+                port_labels.push(format!("extra[{idx}]"));
+            }
+        }
+
+        // ── Per-NL-port operating-point linearization (gm / companion) ───────
+        let nl_linearization = self.nl_linearizations(&nl_labels);
+
+        // ── Extraction + VS injection ────────────────────────────────────────
+        let extraction_coeffs = self.extract_coeffs.as_ref().map(|c| c.to_vec());
+        let vs_injection = self.vs_injection.as_ref().map(|c| c.to_vec());
+
+        let label = {
+            #[cfg(debug_assertions)]
+            {
+                self.debug_label.clone()
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                String::new()
+            }
+        };
+
+        crate::diag::MnaStageSnapshot {
+            stage_index,
+            label,
+            n_nl,
+            n_passive,
+            n_ports_total: n_total,
+            port_labels,
+            port_resistances: port_r,
+            s_full,
+            s_dim: n_total,
+            nl_linearization,
+            nl_port_resistances: self.nl_port_resistances.clone(),
+            extraction_coeffs,
+            extraction_vs: self.extract_vs,
+            vs_injection,
+            output_port: self.output_port,
+            compensation: self.compensation,
+            supply_voltage: self.supply_voltage,
+            bypass_serial: self.bypass_serial,
+        }
+    }
+
+    /// Build human-readable labels for each NL port (length `n_nl`).
+    ///
+    /// Grouped devices (BJT/triode) emit two ports — base-emitter (`.be`) and
+    /// collector-emitter (`.ce`) for BJTs, grid (`.g`) and plate (`.p`) for
+    /// triodes/pentodes. Independent devices emit one port labelled by family.
+    fn nl_port_labels(&self) -> alloc::vec::Vec<alloc::string::String> {
+        use alloc::format;
+        use alloc::string::String;
+        use alloc::vec::Vec;
+        let mut labels: Vec<String> = Vec::with_capacity(self.n_nl);
+        if let Some(ref dg) = self.device_groups {
+            for (g, group) in dg.groups.iter().enumerate() {
+                let name = group.debug_name();
+                let np = group.n_ports();
+                let suffixes: &[&str] = match group {
+                    NlDeviceGroupKind::BjtTwoPort(_) | NlDeviceGroupKind::EbersMollTwoPort(_) => {
+                        &["be", "ce"]
+                    }
+                    NlDeviceGroupKind::VariMuThreePort(_)
+                    | NlDeviceGroupKind::TriodeThreePort(_)
+                    | NlDeviceGroupKind::PentodeThreePort(_) => &["gk", "pk"],
+                    NlDeviceGroupKind::SinglePort(_) => &["p0"],
+                };
+                for p in 0..np {
+                    let suf = suffixes.get(p).copied().unwrap_or("p");
+                    labels.push(format!("G{g}:{name}.{suf}"));
+                }
+            }
+        } else {
+            for (i, device) in self.nl_devices.iter().enumerate() {
+                labels.push(format!("NL{i}:{}", device.debug_name()));
+            }
+        }
+        // Pad/truncate defensively to n_nl.
+        while labels.len() < self.n_nl {
+            let i = labels.len();
+            labels.push(format!("NL{i}"));
+        }
+        labels.truncate(self.n_nl);
+        labels
+    }
+
+    /// Evaluate each NL port's operating-point companion linearization.
+    ///
+    /// For grouped multi-port devices, `eval` is called once per group at the
+    /// group's `v_prev` slice; the diagonal Jacobian term is the port's `gm`
+    /// and the off-diagonal `∂i/∂(other v)` is reported as `cross_gm`. For
+    /// independent devices, `iv(v_prev)` gives `(i, di)` where `di == gm`.
+    fn nl_linearizations(
+        &self,
+        nl_labels: &[alloc::string::String],
+    ) -> alloc::vec::Vec<crate::diag::NlPortLinearization> {
+        use alloc::vec::Vec;
+        let mut out: Vec<crate::diag::NlPortLinearization> = Vec::with_capacity(self.n_nl);
+        let v_prev = &self.v_prev;
+        let recip = |g: crate::Wave| -> f64 {
+            if g.abs() > 1e-30 {
+                1.0 / g
+            } else {
+                f64::INFINITY
+            }
+        };
+
+        if let Some(ref dg) = self.device_groups {
+            // Pre-allocate the largest group's workspace.
+            let max_ports = dg.groups.iter().map(|g| g.n_ports()).max().unwrap_or(1);
+            let mut v_buf = alloc::vec![0.0 as crate::Wave; max_ports];
+            let mut i_buf = alloc::vec![0.0 as crate::Wave; max_ports];
+            let mut jac = alloc::vec![0.0 as crate::Wave; max_ports * max_ports];
+            for (g, group) in dg.groups.iter().enumerate() {
+                let np = group.n_ports();
+                let off = dg.offsets[g];
+                for (p, slot) in v_buf.iter_mut().enumerate().take(np) {
+                    *slot = v_prev.get(off + p).copied().unwrap_or(0.0);
+                }
+                group
+                    .as_group_iv()
+                    .eval(&v_buf[..np], &mut i_buf[..np], &mut jac[..np * np]);
+                for p in 0..np {
+                    let self_g = jac[p * np + p];
+                    // Cross term: the strongest off-diagonal Jacobian entry in
+                    // this row (∂i_p/∂v_other). For a BJT CE row this is gm.
+                    let cross = (0..np)
+                        .filter(|&q| q != p)
+                        .map(|q| jac[p * np + q])
+                        .max_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap())
+                        .filter(|c| c.abs() > 0.0);
+                    let idx = off + p;
+                    out.push(crate::diag::NlPortLinearization {
+                        label: nl_labels.get(idx).cloned().unwrap_or_default(),
+                        device: alloc::string::String::from(group.debug_name()),
+                        v_op: v_buf[p],
+                        gm: self_g,
+                        r_companion: recip(self_g),
+                        cross_gm: cross,
+                        port_resistance: self.nl_port_resistances.get(idx).copied().unwrap_or(0.0),
+                    });
+                }
+            }
+        } else {
+            for (i, device) in self.nl_devices.iter().enumerate() {
+                let v = v_prev.get(i).copied().unwrap_or(0.0);
+                let (_i_op, di) = device.as_nl_device_iv().iv(v);
+                out.push(crate::diag::NlPortLinearization {
+                    label: nl_labels.get(i).cloned().unwrap_or_default(),
+                    device: alloc::string::String::from(device.debug_name()),
+                    v_op: v,
+                    gm: di,
+                    r_companion: recip(di),
+                    cross_gm: None,
+                    port_resistance: self.nl_port_resistances.get(i).copied().unwrap_or(0.0),
+                });
+            }
+        }
+        out
+    }
+
     /// Debug dump: print multi-NL stage structure.
     pub fn debug_dump(&self) -> String {
         let n_passive = self.passive_one_ports.len();

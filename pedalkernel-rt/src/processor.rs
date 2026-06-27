@@ -2833,6 +2833,52 @@ impl CompiledPedal {
     }
 
     /// Shows gain structure, all WDF stages with their trees, and control bindings.
+    /// Build a read-only compile-time diagnostics snapshot of every `MultiNl`
+    /// stage (MNA scattering matrix, per-NL-port `gm`/companion, adapted port
+    /// resistances, extraction coefficients, VS injection) plus a coarse stage
+    /// listing. Derived on demand; behavior-preserving.
+    ///
+    /// `pedal_name`/`source_path` are set by the caller (the std host knows the
+    /// source path; the rt crate does not).
+    pub fn diag_snapshot(&self, pedal_name: &str, source_path: &str) -> crate::diag::DiagSnapshot {
+        let stage_kinds: Vec<String> = self
+            .stages
+            .iter()
+            .map(|stage| {
+                match stage {
+                    Stage::Wdf(_) => "Wdf",
+                    Stage::MultiNl(_) => "MultiNl",
+                    Stage::Iir(_) => "Iir",
+                    Stage::StateSpace(_) => "StateSpace",
+                    Stage::BlackFeedback(_) => "BlackFeedback",
+                    Stage::Blockwise(_) => "Blockwise",
+                    Stage::KMethod { .. } => "KMethod",
+                    Stage::SerialDelayedFeedback(_) => "SerialDelayedFeedback",
+                }
+                .to_string()
+            })
+            .collect();
+
+        let multinl: Vec<crate::diag::MnaStageSnapshot> = self
+            .stages
+            .iter()
+            .enumerate()
+            .filter_map(|(i, stage)| match stage {
+                Stage::MultiNl(mnl) => Some(mnl.mna_snapshot(i)),
+                _ => None,
+            })
+            .collect();
+
+        crate::diag::DiagSnapshot {
+            pedal_name: pedal_name.to_string(),
+            source_path: source_path.to_string(),
+            sample_rate: self.sample_rate,
+            stage_count: self.stages.len(),
+            stage_kinds,
+            multinl,
+        }
+    }
+
     pub fn debug_dump(&self) -> String {
         let mut s = String::new();
         s.push_str("═══════════════════════════════════════════════════════════════════════════\n");
