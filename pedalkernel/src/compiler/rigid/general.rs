@@ -1459,6 +1459,16 @@ fn assemble_multi_nl_stage(
         prev_input: 0.0,
         dc_qpoint_v: None,
         dc_qpoint_passive_b: Vec::new(),
+        // DC servo: off by default. `apply_bjt_dc_qpoint` enables and configures
+        // it (physics-derived τ → bandwidth) only for the multi-BJT feedback
+        // servo it seeds, leaving every other stage byte-identical.
+        dc_servo_active: false,
+        dc_servo_alpha: 0.0,
+        dc_servo_gain: 0.0,
+        dc_servo_tau: 0.0,
+        dc_servo_v_lp: Vec::new(),
+        dc_servo_corr: Vec::new(),
+        dc_servo_mask: Vec::new(),
     })
 }
 
@@ -1602,6 +1612,10 @@ fn apply_bjt_dc_qpoint(
     // We also need the absolute DC voltage at *both* terminals of a port to know
     // whether the port is a BJT port at all; only BJT be/ce ports are remapped.
     let mut is_bjt_port = vec![false; n_nl];
+    // Mask of the controlling base-emitter ports (first of each BJT pair) — the
+    // only ports the DC servo pins.  The collector-emitter (load-line) ports are
+    // left free so the natural AC swing is not over-constrained.
+    let mut be_port_mask = vec![false; n_nl];
 
     // Mark BJT ports (be, ce) in port order, mirroring `classify_nl_devices`.
     {
@@ -1621,6 +1635,7 @@ fn apply_bjt_dc_qpoint(
                     if port_idx + 1 < n_nl {
                         is_bjt_port[port_idx] = true;
                         is_bjt_port[port_idx + 1] = true;
+                        be_port_mask[port_idx] = true; // base-emitter port
                     }
                     port_idx += 2;
                 }
@@ -1792,10 +1807,181 @@ fn apply_bjt_dc_qpoint(
     stage.dc_qpoint_passive_b = passive_b;
     stage.apply_dc_qpoint_seed();
 
+    // 2d. PHYSICS-DERIVED DC SERVO — GATED OFF BY DEFAULT (opt-in: PK_SERVO_ENABLE).
+    //
+    //     The seeded conducting operating point is an exact single-step NR fixed
+    //     point but is DYNAMICALLY UNSTABLE in the per-sample cap-coupled dynamics
+    //     — the runtime slides to the starved (cutoff) fixed point.  This is a
+    //     slow, proportional DC-restoring servo on the controlling (Vbe) ports,
+    //     run at the bias network's natural bandwidth `f_c ≈ 1/(2π·τ)` with
+    //     `τ = max_k (R_thévenin · C)` over the circuit's reactive elements (see
+    //     `dominant_bias_tau`).  The rate FALLS OUT of the circuit's R/C — it is
+    //     NOT a hardcoded constant.  The LP coefficient `α = dt/τ` rejects the
+    //     audio swing so the servo senses only the slow DC drift; the proportional
+    //     gain `k_p` restores the op-point without the windup / limit-cycle a pure
+    //     integrator suffers around the unstable fixed point.
+    //
+    //     STATUS (pedalkernel-oz1z): the servo PROVABLY works in a narrow regime —
+    //     with the LOCAL feedback-cap τ (Cfb·R ≈ 26 µs) and k_p ≈ 20 it re-conducts
+    //     the BA283 Darlington (TR2 from cutoff → Vbe≈0.66, all three BJTs in the
+    //     active region) and holds it STABLY over a multi-second buffer, lifting
+    //     the level from −31 dB to ≈−13 dB.  BUT the conducting fixed point's basin
+    //     is KNIFE-EDGE: only k_p ≈ 20–22 lands it; k_p ≤ 18 or ≥ 40 collapse to a
+    //     different (single-BJT-cutoff) wrong fixed point.  No fixed, circuit-
+    //     derived gain robustly closes it to ~0 dB across amplitude / fs / circuit,
+    //     so a per-port Vbe proportional servo is NOT shippable as a default
+    //     (it would regress robustness on the very topology it targets).  Gated
+    //     OFF so all goldens stay byte-identical; the machinery is preserved for
+    //     the next iteration (the deeper fix is the engine-adapted-input-port /
+    //     685e loop-gain layer, not a bias servo).  See bd pedalkernel-oz1z.
+    let mut tau = dominant_bias_tau(reactive_edges, node_dc, graph);
+    if let Ok(s) = std::env::var("PK_SERVO_TAU") {
+        if let Ok(v) = s.parse::<f64>() {
+            tau = v;
+        }
+    }
+    let servo_enabled = std::env::var("PK_SERVO_ENABLE").is_ok();
+    if servo_enabled && tau > 0.0 {
+        let fs = stage.passive_sample_rate.max(1.0) as f64;
+        // Low-pass coefficient α = dt/τ for the slow op-point DC estimate.
+        let alpha = (1.0 / (tau * fs)).clamp(1e-7, 0.5);
+        // Proportional DC-restoring gain.  The default (≈20) is the value that
+        // lands the BA283 conducting-Darlington basin at the local Cfb τ; it is a
+        // research default (the basin is knife-edge — see the STATUS note above),
+        // overridable via PK_SERVO_KP.
+        let mut k_p = 20.0_f64;
+        if let Ok(s) = std::env::var("PK_SERVO_KP") {
+            if let Ok(v) = s.parse::<f64>() {
+                k_p = v;
+            }
+        }
+        stage.dc_servo_active = true;
+        stage.dc_servo_alpha = alpha as pedalkernel_rt::Wave;
+        stage.dc_servo_gain = k_p as pedalkernel_rt::Wave;
+        stage.dc_servo_tau = tau as pedalkernel_rt::Wave;
+        let seed = stage.dc_qpoint_v.clone().unwrap_or_default();
+        stage.dc_servo_v_lp = seed.clone();
+        stage.dc_servo_corr = vec![0.0; stage.dc_bias.len()];
+        // Only servo a base-emitter port whose SEED is a CONDUCTING Si junction
+        // (|Vbe| ∈ [0.3, 0.9] V).  A port whose seed is non-conducting (e.g. the
+        // BA283 Darlington driver TR2, whose model-driven seed sits at cutoff) is
+        // left FREE: pinning it at its own cutoff seed would starve the forward
+        // chain.  The free port then finds conduction from the coupled solve once
+        // the conducting ports are held.
+        let mut mask = be_port_mask.clone();
+        for (i, m) in mask.iter_mut().enumerate() {
+            if *m {
+                let vb = seed.get(i).copied().unwrap_or(0.0) as f64;
+                if !(0.3..=0.9).contains(&vb.abs()) {
+                    *m = false;
+                }
+            }
+        }
+        stage.dc_servo_mask = mask;
+        if std::env::var("PK_SERVO_TRACE").is_ok() {
+            eprintln!(
+                "[PK_SERVO] dominant τ={tau:.6e}s  f_c={:.3}Hz  α={alpha:.3e}  k_p={k_p:.3}  fs={fs:.0}  n_nl={}  v_seed={:?}  servo_mask={:?}",
+                1.0 / (2.0 * std::f64::consts::PI * tau),
+                stage.dc_bias.len(),
+                seed,
+                stage.dc_servo_mask,
+            );
+        }
+    }
+
     // Skip the DC ramp: the operating point is already seeded into v_prev and
     // dc_bias, so ramping dc_bias up from 0 would pull the NR back through the
     // cold/cutoff basin (the BA283 servo has both a cutoff and an active fixed
     // point — the warm-start must keep it in the active basin from sample 0).
     stage.dc_ramp = 256;
     stage.initial_dc_ramp = 256;
+}
+
+/// Dominant bias-network time constant `τ = max_k (C_k · R_thévenin_k)` over the
+/// reactive elements of a DC-coupled feedback-servo group.
+///
+/// `R_thévenin` at a cap's terminal is the DC resistance looking back into the
+/// resistor network (rails — gnd/vcc/supply — are AC-grounded), estimated as the
+/// reciprocal of the total resistor conductance incident on that node.  For a cap
+/// spanning nodes (a, b) the series RC pole sees `R_a + R_b`.  This is the
+/// bias network's natural bandwidth — the rate at which the operating point can
+/// physically move — and it differs per circuit because it is built from the
+/// circuit's own R·C.
+fn dominant_bias_tau(
+    reactive_edges: &[(usize, OnePortKind)],
+    node_dc: &std::collections::HashMap<NodeId, f64>,
+    graph: &CircuitGraph,
+) -> f64 {
+    use std::collections::HashMap;
+    // Sum of resistor conductances incident on each interior node.  Rails
+    // (gnd/vcc/supply) and pots/JFETs/photocouplers all act as a finite
+    // resistance to AC ground, so they add to the node's conductance just like a
+    // grounded resistor — that is exactly what sets the Thévenin R the cap sees.
+    let mut g_node: HashMap<NodeId, f64> = HashMap::new();
+    let is_rail = |n: NodeId| -> bool {
+        n == graph.gnd_node
+            || n == graph.vcc_node
+            || graph.supply_nodes.contains(&n)
+            || graph.ac_ground_nodes.contains(&n)
+    };
+    for e in &graph.edges {
+        let comp = &graph.components[e.comp_idx];
+        let r = match comp.kind.resistance() {
+            Some(r) if r.is_finite() && r > 0.0 => r,
+            _ => continue,
+        };
+        let g = 1.0 / r;
+        for n in [e.node_a, e.node_b] {
+            if !is_rail(n) {
+                *g_node.entry(n).or_insert(0.0) += g;
+            }
+        }
+    }
+    // Thévenin resistance at a node: 1/Σg.  A rail node is AC ground → R≈0.
+    let r_thev = |n: NodeId| -> f64 {
+        if is_rail(n) {
+            0.0
+        } else {
+            match g_node.get(&n) {
+                Some(&g) if g > 0.0 => 1.0 / g,
+                _ => 0.0,
+            }
+        }
+    };
+
+    let _ = node_dc; // reserved for future per-node DC weighting
+
+    // The servo's natural bandwidth is set by the DOMINANT (largest) `R·C` over
+    // the FEEDBACK-SERVO GROUP's OWN reactive elements — i.e. this MultiNl stage's
+    // `reactive_edges` (BA283: Cmil 220p, Cfb 4.7n, Ccmp 330p).  Cfb·R dominates
+    // at ≈26 µs — that is the DC-coupled negative-feedback cap that physically
+    // sets how fast the bias servo loop moves, and empirically the τ at which the
+    // servo can re-pin the conducting Darlington.  (The big DC-blocking coupling
+    // caps Cin/Cout, tens of µF, live in ADJACENT coupling groups and govern AC
+    // coupling, not the in-loop bias servo, so they are deliberately excluded.)
+    let mut tau_max = 0.0_f64;
+    let trace = std::env::var("PK_SERVO_TRACE").is_ok();
+    for (eidx, kind) in reactive_edges {
+        let c = match kind {
+            OnePortKind::Capacitor(c) if c.is_finite() && *c > 0.0 => *c,
+            // Inductors are a short at DC → don't set the bias bandwidth; skip.
+            _ => continue,
+        };
+        let e = &graph.edges[*eidx];
+        let r_series = r_thev(e.node_a) + r_thev(e.node_b);
+        let tau = c * r_series;
+        if trace {
+            let comp = &graph.components[e.comp_idx];
+            eprintln!(
+                "[PK_SERVO]   cap {:<6} C={c:.3e}F  Rthev(a)={:.1} Rthev(b)={:.1}  τ={tau:.4e}s",
+                comp.id,
+                r_thev(e.node_a),
+                r_thev(e.node_b)
+            );
+        }
+        if tau.is_finite() && tau > tau_max {
+            tau_max = tau;
+        }
+    }
+    tau_max
 }
