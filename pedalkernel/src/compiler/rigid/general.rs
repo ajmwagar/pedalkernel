@@ -316,6 +316,7 @@ fn build_general_mna_from_edges_inner(
     // committed for the stabilisation follow-up.
     if std::env::var("PK_BJT_DCQPOINT").as_deref() == Ok("1")
         || std::env::var("PK_JOINTDC").as_deref() == Ok("1")
+        || std::env::var("PK_FORCE_OPPOINT").is_ok()
     {
         if let Some(node_dc) = compute_bjt_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage) {
             apply_bjt_dc_qpoint(
@@ -2132,6 +2133,48 @@ fn apply_bjt_dc_qpoint(
         }
     }
 
+    // ── CONTROLLED EXPERIMENT (bead pedalkernel-ej0v) ─────────────────────────
+    // FORCED OP-POINT MODE (default off; gated by `PK_FORCE_OPPOINT`).
+    //
+    // The decisive question: is the BA283 −31 dB *entirely* the DC operating
+    // point, or is there a second (scattering/formulation) deficit?  This mode
+    // bypasses BOTH the linear-superposition bias AND the `solve_joint_dc_qpoint`
+    // fixed-point (which converges to the wrong, TR1-starved answer Vbe≈0.402) by
+    // OVERRIDING the per-port operating point `v_star` with an externally-supplied,
+    // SPICE/published-authoritative op-point, then letting the EXACT wave-domain
+    // inversion (`apply_dc_qpoint_seed`) hold it as an NR fixed point.
+    //
+    // Format: comma-separated per-NL-port voltages, in build/port order
+    //   (for the BA283: TR1_Vbe,TR1_Vce, TR2_Vbe,TR2_Vce, TR3_Vbe,TR3_Vce).
+    // A value of `nan` (or `_`) leaves that port at its solved value.  This lets
+    // us force just TR1, or the whole chain, without recompiling.
+    let forced = std::env::var("PK_FORCE_OPPOINT").ok();
+    if let Some(ref spec) = forced {
+        let vals: Vec<Option<f64>> = spec
+            .split(',')
+            .map(|t| {
+                let t = t.trim();
+                if t.is_empty() || t == "_" || t.eq_ignore_ascii_case("nan") {
+                    None
+                } else {
+                    t.parse::<f64>().ok()
+                }
+            })
+            .collect();
+        for (i, slot) in v_star.iter_mut().enumerate().take(n_nl) {
+            if let Some(Some(v)) = vals.get(i) {
+                *slot = Some(*v);
+            }
+        }
+        if std::env::var("PK_BJTDC_DEBUG").is_ok() || std::env::var("PK_FORCE_OPPOINT_DEBUG").is_ok()
+        {
+            eprintln!(
+                "[PK_FORCE_OPPOINT] spec={spec:?} → forced v_star={:?} (n_nl={n_nl})",
+                v_star
+            );
+        }
+    }
+
     if std::env::var("PK_BJTDC_DEBUG").is_ok() {
         eprintln!(
             "[PK_BJTDC] apply: n_nl={n_nl} nl_terminals.len()={} is_bjt_port={:?} v_star={:?}",
@@ -2179,7 +2222,10 @@ fn apply_bjt_dc_qpoint(
     // through the stage's OWN runtime DC step to a JOINT NL+reactive fixed point.
     // This is the same solver/scattering the audio loop iterates, so the seed is
     // a consistent fixed point → stable.  Opt-in via PK_JOINTDC=1 while validating.
-    if std::env::var("PK_JOINTDC").as_deref() == Ok("1") {
+    // FORCED OP-POINT (ej0v): skip the joint solve entirely — we WANT the exact
+    // wave-domain inversion below to hold the externally-supplied `v_seed`, not
+    // to re-derive a (wrong) fixed point.
+    if forced.is_none() && std::env::var("PK_JOINTDC").as_deref() == Ok("1") {
         match stage.solve_joint_dc_qpoint(&v_seed) {
             Some(activity) => {
                 if std::env::var("PK_BJTDC_DEBUG").is_ok() || std::env::var("PK_JOINTDC_DEBUG").is_ok() {

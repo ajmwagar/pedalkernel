@@ -317,6 +317,155 @@ fn ba283_runtime_nr() {
     assert!(out_peak > 1e-9, "BA283 output is silence");
 }
 
+/// CONTROLLED EXPERIMENT (bead pedalkernel-ej0v): force the BA283 BJTs to the
+/// SPICE/published DC operating point and measure whether the gain closes.
+///
+/// Decouples "is the op-point sufficient?" from "how do we compute it?".  The
+/// `PK_FORCE_OPPOINT` build flag (default off) bypasses both the linear bias and
+/// `solve_joint_dc_qpoint` (which converges to the WRONG, TR1-starved Vbe≈0.402)
+/// and feeds `apply_dc_qpoint_seed` an externally-supplied per-port op-point.
+///
+/// Op-point source (ngspice `.op` on `neve1073_ba283.spice`, authoritative):
+///   nodes: n1=1.0764 nb1=0.9365 ne1=0.3256 ne2=3.3301 nd=2.8786 vcc=24
+///   TR1(Q3, grp0): Vbe = nb1−ne1 = 0.6109,  Vce = n1−ne1  = 0.7508
+///   TR2(Q1, grp1): Vbe = n1−ne2  = −2.254,  Vce = vcc−ne2 = 20.67
+///   TR3(Q2, grp2): Vbe = ne2−nd  = 0.4515,  Vce = vcc−nd  = 21.12
+/// The SPICE Darlington (TR2) runs model-driven (negative Vbe — the .pedal header
+/// flags it ~2 V high); the *published* Neve unit gives physical junctions, so we
+/// also run a PUBLISHED variant (TR1 0.5/3.2, TR2 0.5/19.5, TR3 0.6/20.1).  The
+/// decisive transistor is TR1 (grp0): target Vbe≈0.64, gm≈0.033 (bead).
+///
+/// Port order (build order, per `classify_nl_devices`):
+///   [TR1_Vbe, TR1_Vce, TR2_Vbe, TR2_Vce, TR3_Vbe, TR3_Vce]
+///
+/// Run: `cargo test -p pedalkernel-validate --features diag --test neve1073_spice
+///       ba283_forced_oppoint -- --nocapture --test-threads=1`
+#[cfg(feature = "diag")]
+#[test]
+fn ba283_forced_oppoint() {
+    use pedalkernel_rt::diag_ring::OpPointRecord;
+    use pedalkernel_rt::processor::Stage;
+
+    let source = skip_if_missing!(load_pro_pedal_sub(PRO_PATH), PRO_PATH);
+
+    // Golden RMS (ngspice) for the dB-vs-golden verdict.
+    let golden_path = golden_dir(GOLDEN).join("sine_1k.npy");
+    let golden_rms = if golden_path.exists() {
+        let g = npy::read_f64(&golden_path).expect("read golden");
+        let trim = (0.01 * SR) as usize;
+        rms(&g[trim.min(g.len())..])
+    } else {
+        eprintln!("  (golden absent — dB-vs-golden will use design 97x reference)");
+        f64::NAN
+    };
+
+    // The forced op-points (per-NL-port voltage vectors, build order).
+    // "spice"     — straight from the ngspice .op (Darlington model-driven).
+    // "spice_tr1" — force ONLY TR1 (the starved input device), leave TR2/TR3 free.
+    // "published" — published Neve DC voltages (physical junctions).
+    let cases: &[(&str, &str)] = &[
+        ("baseline (no force)", ""),
+        ("spice_tr1_only", "0.6109,0.7508,_,_,_,_"),
+        ("spice_full", "0.6109,0.7508,-2.254,20.67,0.4515,21.12"),
+        ("published", "0.5,3.2,0.5,19.5,0.6,20.1"),
+    ];
+
+    eprintln!("\n  ═══ BA283 FORCED-OP-POINT experiment (bead ej0v) ═══");
+    if golden_rms.is_finite() {
+        eprintln!("  golden (ngspice) RMS = {golden_rms:.4} V  [design chain gain ~97x]");
+    }
+
+    for (label, spec) in cases {
+        // SAFETY: single-threaded test (--test-threads=1); env set before compile.
+        if spec.is_empty() {
+            std::env::remove_var("PK_FORCE_OPPOINT");
+        } else {
+            std::env::set_var("PK_FORCE_OPPOINT", spec);
+        }
+
+        let def = parse_pedal_file(&source).unwrap_or_else(|e| panic!("parse {PRO_PATH}: {e}"));
+        let mut proc =
+            compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile {PRO_PATH}: {e}"));
+        proc.set_control("Gain", 0.5);
+
+        const BLOCK: usize = 128;
+        const NBLOCKS: usize = 48;
+        let warmup = 2 * BLOCK;
+        for i in 0..warmup {
+            proc.process(SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / SR).sin());
+        }
+
+        let mut in_peak = 0.0f64;
+        let mut out_peak = 0.0f64;
+        let mut sum_sq = 0.0f64;
+        let mut nsamp = 0usize;
+        let mut last_recs: Vec<OpPointRecord> = Vec::new();
+        let mut sample = warmup;
+        for _b in 0..NBLOCKS {
+            for _ in 0..BLOCK {
+                let x = SINE_AMP * (2.0 * PI * TEST_FREQ * sample as f64 / SR).sin();
+                let y = proc.process(x) as f64;
+                in_peak = in_peak.max(x.abs());
+                out_peak = out_peak.max(y.abs());
+                sum_sq += y * y;
+                nsamp += 1;
+                sample += 1;
+            }
+            let mut recs = [OpPointRecord::default(); 8];
+            let mut n = 0usize;
+            for (si, st) in proc.stages.iter().enumerate() {
+                if let Stage::MultiNl(mnl) = st {
+                    n += mnl.runtime_op_points(si, &mut recs[n..]);
+                }
+            }
+            last_recs = recs[..n].to_vec();
+        }
+
+        let realized = if in_peak > 1e-12 { out_peak / in_peak } else { 0.0 };
+        let realized_db = if realized > 0.0 {
+            20.0 * realized.log10()
+        } else {
+            f64::NEG_INFINITY
+        };
+        let out_rms = if nsamp > 0 {
+            (sum_sq / nsamp as f64).sqrt()
+        } else {
+            0.0
+        };
+        let ba283_db_vs_golden = if golden_rms.is_finite() && out_rms > 1e-12 {
+            20.0 * (out_rms / golden_rms).log10()
+        } else {
+            f64::NAN
+        };
+
+        eprintln!("\n  ── case: {label}  (spec={spec:?}) ──");
+        eprintln!("    held op-points (diag ring, last block):");
+        for (g, r) in last_recs.iter().enumerate() {
+            let tag = match g {
+                0 => "TR1",
+                1 => "TR2",
+                2 => "TR3",
+                _ => "??",
+            };
+            eprintln!(
+                "      grp{g} {tag}: Vbe={:.4}V Vce={:+.3}V Ic={:.3e}A gm={:.5}S",
+                r.v_be, r.v_ce, r.i_c, r.gm
+            );
+        }
+        eprintln!(
+            "    realized chain gain: {realized:.4}x ({realized_db:+.2} dB)  out_rms={out_rms:.4}V",
+        );
+        if golden_rms.is_finite() {
+            eprintln!(
+                "    BA283 vs golden: {ba283_db_vs_golden:+.2} dB  (0 dB = closed; design ~97x)"
+            );
+        }
+    }
+
+    std::env::remove_var("PK_FORCE_OPPOINT");
+    eprintln!("\n  ═══ end forced-op-point experiment ═══\n");
+}
+
 /// Prove the skip mechanism works when the pro repo is absent.
 #[test]
 fn ba283_skip_when_pro_absent() {
