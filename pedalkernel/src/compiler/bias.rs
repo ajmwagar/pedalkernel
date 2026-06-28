@@ -53,7 +53,10 @@ use hashbrown::HashMap;
 use std::collections::{HashSet, VecDeque};
 
 use super::classify::NonlinearKind;
+use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
+use super::helpers::{gummel_poon_model, triode_model, vari_mu_model};
+use crate::elements::{GummelPoonModel, TriodeRoot, VariMuTriodeRoot};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Error types
@@ -152,10 +155,7 @@ impl std::fmt::Display for TopologyTerm {
             Self::PlateResistor => write!(f, "R_plate (resistor from plate to VCC)"),
             Self::CathodeResistor => write!(f, "R_cathode (resistor from cathode to GND)"),
             Self::GridNode => write!(f, "grid node in netlist"),
-            Self::BaseDivider => write!(
-                f,
-                "base-bias divider (R_b1: base→VCC and R_b2: base→GND)"
-            ),
+            Self::BaseDivider => write!(f, "base-bias divider (R_b1: base→VCC and R_b2: base→GND)"),
             Self::EmitterResistor => write!(f, "R_emitter (resistor from emitter to GND)"),
             Self::GateNode => write!(f, "gate node in netlist"),
             Self::DrainResistor => write!(f, "R_drain (resistor from drain to supply rail)"),
@@ -327,8 +327,11 @@ pub(super) fn solve_network_bias(
 
     let node_list: Vec<NodeId> = interior_set.into_iter().collect();
     let n = node_list.len();
-    let node_idx: HashMap<NodeId, usize> =
-        node_list.iter().enumerate().map(|(i, &nd)| (nd, i)).collect();
+    let node_idx: HashMap<NodeId, usize> = node_list
+        .iter()
+        .enumerate()
+        .map(|(i, &nd)| (nd, i))
+        .collect();
 
     let rail_v = |node: NodeId| -> f64 {
         if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
@@ -674,15 +677,14 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
             })?;
 
         // Find R_cathode: resistor between cathode_node and gnd_node (BFS or direct).
-        let r_cathode =
-            find_load_resistor_bfs(cathode_node, graph.gnd_node, edge_indices, graph)
-                .or_else(|| {
-                    find_load_resistor_direct(cathode_node, graph.gnd_node, edge_indices, graph)
-                })
-                .ok_or_else(|| BiasError::UndeterminableTriode {
-                    label: self.label.clone(),
-                    missing: TopologyTerm::CathodeResistor,
-                })?;
+        let r_cathode = find_load_resistor_bfs(cathode_node, graph.gnd_node, edge_indices, graph)
+            .or_else(|| {
+                find_load_resistor_direct(cathode_node, graph.gnd_node, edge_indices, graph)
+            })
+            .ok_or_else(|| BiasError::UndeterminableTriode {
+                label: self.label.clone(),
+                missing: TopologyTerm::CathodeResistor,
+            })?;
 
         Ok(BiasTopology {
             r_load: r_plate,
@@ -797,22 +799,16 @@ impl<'a> BiasSeed for BjtNpnSeed<'a> {
             })?;
 
         // Emitter resistor RE: emitter→gnd.
-        let re =
-            find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
-                .or_else(|| {
-                    find_load_resistor_bfs(emitter_node, graph.gnd_node, edge_indices, graph)
-                })
-                .ok_or_else(|| BiasError::UndeterminableBjt {
-                    label: self.label.clone(),
-                    missing: TopologyTerm::EmitterResistor,
-                })?;
+        let re = find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
+            .or_else(|| find_load_resistor_bfs(emitter_node, graph.gnd_node, edge_indices, graph))
+            .ok_or_else(|| BiasError::UndeterminableBjt {
+                label: self.label.clone(),
+                missing: TopologyTerm::EmitterResistor,
+            })?;
 
         // Collector resistor RC: collector→vcc.
-        let _rc =
-            find_load_resistor_direct(collector_node, graph.vcc_node, &all_edges, graph)
-                .or_else(|| {
-                    find_load_resistor_bfs(collector_node, graph.vcc_node, &all_edges, graph)
-                });
+        let _rc = find_load_resistor_direct(collector_node, graph.vcc_node, &all_edges, graph)
+            .or_else(|| find_load_resistor_bfs(collector_node, graph.vcc_node, &all_edges, graph));
 
         // Thévenin base voltage: prefer StaticBias map, fall back to resistor divider.
         let vth = network_bias
@@ -1031,6 +1027,545 @@ fn build_rail_set(graph: &CircuitGraph) -> HashSet<NodeId> {
         rails.insert(n);
     }
     rails
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Consolidated nodal DC operating-point solvers
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// These are the single DC-bias COMPUTATION for the runtime grouped-NL stages.
+// They replace the per-type forks that previously lived in `rigid/general.rs`
+// (`compute_triode_dc_qpoint`, `compute_bjt_dc_qpoint`) and the wave-domain
+// `solve_joint_dc_qpoint` in `pedalkernel-rt/stage.rs`.  bias.rs knows nothing
+// about WDF waves / scattering: it returns the CONDUCTING nodal operating point;
+// the runtime (`apply_triode_dc_qpoint` / `apply_bjt_dc_qpoint`) consumes it.
+
+/// DC operating-point data for a single common-cathode triode stage.
+///
+/// Moved verbatim from `rigid/general.rs` (was `TriodeDcQpoint`) so the triode
+/// DC computation lives alongside the BJT one in this single file.
+#[derive(Debug, Clone)]
+pub(super) struct TriodeDcQpoint {
+    /// Grid-cathode bias voltage (negative for self-biased stages, e.g. -1.1V).
+    pub(super) vgk: f64,
+    /// Plate-cathode voltage at the Q-point (e.g. 120V for a 12AX7 @ 250V supply).
+    pub(super) vpk: f64,
+    /// Cathode voltage = -vgk = Ia × R_cathode.
+    pub(super) v_cathode: f64,
+    /// Plate current at Q-point (A).
+    #[allow(dead_code)]
+    pub(super) ia: f64,
+}
+
+/// Compute the DC operating point for a triode-with-grid stage.
+///
+/// Uses the load-line equations:
+///   Vgk = -Ia × R_cathode    (cathode self-bias)
+///   Vpk = VCC - Ia × R_plate (plate load line)
+///   Ia = Triode.plate_current(Vgk, Vpk)
+///
+/// Solves with a simple Newton-Raphson iteration on the 1-D residual in Ia.
+/// Returns `None` if the circuit doesn't have exactly one triode-with-grid or
+/// if R_plate/R_cathode cannot be found.
+pub(super) fn solve_triode_dc_qpoint(
+    nl_kinds: &[NonlinearKind],
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<TriodeDcQpoint> {
+    // Only handle single-triode-with-grid stages.
+    if nl_kinds.len() != 1 {
+        return None;
+    }
+    let (model_name, plate_node, cathode_node, parallel_count, is_vari_mu) = match &nl_kinds[0] {
+        NonlinearKind::Triode {
+            model_name,
+            plate_node,
+            cathode_node,
+            grid_node: Some(_),
+            parallel_count,
+            is_vari_mu,
+            ..
+        } => (
+            model_name.as_str(),
+            *plate_node,
+            *cathode_node,
+            *parallel_count,
+            *is_vari_mu,
+        ),
+        _ => return None,
+    };
+
+    // Find R_plate: linear resistor between vcc_node and plate_node.
+    let r_plate = all_edges.iter().find_map(|&eidx| {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+            return None;
+        }
+        let (a, b) = (e.node_a, e.node_b);
+        if (a == graph.vcc_node && b == plate_node) || (b == graph.vcc_node && a == plate_node) {
+            comp.kind.resistance()
+        } else {
+            None
+        }
+    })?;
+
+    // Find R_cathode: linear resistor between cathode_node and gnd_node.
+    let r_cathode = all_edges.iter().find_map(|&eidx| {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+            return None;
+        }
+        let (a, b) = (e.node_a, e.node_b);
+        if (a == cathode_node && b == graph.gnd_node) || (b == cathode_node && a == graph.gnd_node)
+        {
+            comp.kind.resistance()
+        } else {
+            None
+        }
+    })?;
+
+    if is_vari_mu {
+        // Variable-mu fixtures are fixed-bias devices: the grid control voltage
+        // establishes Vgk directly, rather than via cathode self-bias. Use the
+        // model's default bias (6386: -2 V) and solve the plate load line with
+        // the Raffensperger model, not the Koren triode model.
+        let model = vari_mu_model(model_name);
+        let mut triode = VariMuTriodeRoot::new_with_v_max(model, supply_voltage)
+            .with_parallel_count(parallel_count);
+        let vgk = triode.vgk_bias();
+        triode.set_vgk(vgk);
+
+        let max_ia = (supply_voltage / r_plate.max(1.0)).max(1e-9);
+        let mut lo = 0.0_f64;
+        let mut hi = max_ia;
+        let residual = |ia: f64, triode: &mut VariMuTriodeRoot| -> f64 {
+            let vpk = (supply_voltage - ia * r_plate).max(0.0);
+            ia - triode.plate_current(vpk)
+        };
+
+        let mut flo = residual(lo, &mut triode);
+        let fhi = residual(hi, &mut triode);
+        if !flo.is_finite() || !fhi.is_finite() || flo.signum() == fhi.signum() {
+            return None;
+        }
+        for _ in 0..80 {
+            let mid = 0.5 * (lo + hi);
+            let fmid = residual(mid, &mut triode);
+            if !fmid.is_finite() {
+                return None;
+            }
+            if fmid.abs() < 1e-10 {
+                lo = mid;
+                hi = mid;
+                break;
+            }
+            if flo.signum() == fmid.signum() {
+                lo = mid;
+                flo = fmid;
+            } else {
+                hi = mid;
+            }
+        }
+
+        let ia = 0.5 * (lo + hi);
+        let vpk = (supply_voltage - ia * r_plate).max(0.0);
+        let v_cathode = ia * r_cathode;
+        if vgk >= 0.0 || vpk <= 0.0 || !vgk.is_finite() || !vpk.is_finite() {
+            return None;
+        }
+        return Some(TriodeDcQpoint {
+            vgk,
+            vpk,
+            v_cathode,
+            ia,
+        });
+    }
+
+    // Newton-Raphson on F(Ia) = Ia - plate_current(Vgk(Ia), Vpk(Ia)) = 0.
+    let model = triode_model(model_name);
+    let mut triode =
+        TriodeRoot::new_with_v_max(model, supply_voltage).with_parallel_count(parallel_count);
+
+    let mut ia = 1e-4_f64; // initial guess: 0.1mA
+    for _iter in 0..50 {
+        let vgk = -ia * r_cathode;
+        let vpk = (supply_voltage - ia * r_plate).max(0.0);
+        triode.set_vgk(vgk);
+        let ia_model = triode.plate_current(vpk);
+        let f = ia - ia_model;
+        // Numerical Jacobian dF/dIa ≈ 1 (since dIa_model/dIa is small)
+        // Refine with secant step if needed; simple relaxation converges here.
+        ia = (ia - f * 0.5).max(0.0);
+        if f.abs() < 1e-9 {
+            break;
+        }
+    }
+
+    let vgk = -ia * r_cathode;
+    let vpk = (supply_voltage - ia * r_plate).max(0.0);
+    let v_cathode = ia * r_cathode;
+
+    // Sanity: Q-point should have negative Vgk and positive Vpk.
+    if vgk >= 0.0 || vpk <= 0.0 || !vgk.is_finite() || !vpk.is_finite() {
+        return None;
+    }
+
+    Some(TriodeDcQpoint {
+        vgk,
+        vpk,
+        v_cathode,
+        ia,
+    })
+}
+
+/// Solve the **nonlinear** DC operating point of every BJT in the group.
+///
+/// This is the BJT analogue of [`solve_triode_dc_qpoint`].  Where the triode
+/// path solves a single 1-D load line, a BJT group may contain a DC-coupled
+/// feedback servo (BA283: TR1's base is biased through R2 from the NFB bus whose
+/// level is set by the conducting Darlington), so the operating point of all
+/// devices is mutually coupled and must be **co-solved**.
+///
+/// Method: full-network nodal Newton-Raphson over the group's interior
+/// (non-rail) nodes, wrapped in a **source-stepping homotopy** (the SPICE
+/// technique): the rail voltages are ramped from a small fraction up to full
+/// supply over several continuation steps, each step warm-started from the
+/// previous converged point.  This drives the solve onto the CONDUCTING fixed
+/// point (BA283 TR1 → Vbe≈0.61 V) rather than the spurious cutoff fixed point a
+/// cold ½-supply start lands at.  Linear resistors contribute conductances;
+/// every BJT is stamped via its Gummel-Poon `currents(Vbe, Vbc)` and a numerical
+/// 3×3 device Jacobian.  Caps/inductors are open at DC and ignored.  Rails are
+/// held at their (scaled) known voltages.
+///
+/// Returns a map of **DC node voltage** for every solved interior node (rails
+/// excluded but the BJT-terminal rails are included so the caller can resolve
+/// ports), or `None` if the group has no BJTs, the system is singular, the solve
+/// fails to converge, or the result is non-physical.
+pub(super) fn solve_bjt_group_dc_qpoint(
+    nl_kinds: &[NonlinearKind],
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<std::collections::HashMap<NodeId, f64>> {
+    // Gather the BJTs (skip diode-connected: those are handled as 1-port diodes).
+    struct BjtRef<'a> {
+        model_name: &'a str,
+        is_npn: bool,
+        base: NodeId,
+        collector: NodeId,
+        emitter: NodeId,
+    }
+    let mut bjts: Vec<BjtRef> = Vec::new();
+    for kind in nl_kinds {
+        match kind {
+            NonlinearKind::BjtNpn {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } if base_node != collector_node => bjts.push(BjtRef {
+                model_name,
+                is_npn: true,
+                base: *base_node,
+                collector: *collector_node,
+                emitter: *emitter_node,
+            }),
+            NonlinearKind::BjtPnp {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } if base_node != collector_node => bjts.push(BjtRef {
+                model_name,
+                is_npn: false,
+                base: *base_node,
+                collector: *collector_node,
+                emitter: *emitter_node,
+            }),
+            _ => {}
+        }
+    }
+    if bjts.is_empty() {
+        return None;
+    }
+
+    // Full (unscaled) rail voltage, or None for an interior (solved) node.
+    let full_rail_v = |node: NodeId| -> Option<f64> {
+        if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
+            Some(0.0)
+        } else if node == graph.vcc_node {
+            Some(
+                graph
+                    .supply_voltages
+                    .get(&graph.vcc_node)
+                    .copied()
+                    .unwrap_or(supply_voltage),
+            )
+        } else if let Some(&v) = graph.supply_voltages.get(&node) {
+            Some(v)
+        } else if graph.supply_nodes.contains(&node) {
+            Some(supply_voltage)
+        } else {
+            None
+        }
+    };
+
+    // Resistor list (linear conductances): (node_a, node_b, g).
+    let mut resistors: Vec<(NodeId, NodeId, f64)> = Vec::new();
+    for &eidx in all_edges {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
+            if r > 0.0 {
+                resistors.push((e.node_a, e.node_b, 1.0 / r));
+            }
+        }
+    }
+
+    // Only nodes with a real DC path participate: those incident to a resistor or
+    // that are a BJT terminal.  Cap/inductor-only nodes (input coupling cap, output
+    // tap behind Cout) are open at DC → excluded, else they produce zero-conductance
+    // rows that make the Newton system singular.
+    let mut dc_path: HashSet<NodeId> = HashSet::new();
+    for &(na, nb, _) in &resistors {
+        dc_path.insert(na);
+        dc_path.insert(nb);
+    }
+    for b in &bjts {
+        dc_path.insert(b.base);
+        dc_path.insert(b.collector);
+        dc_path.insert(b.emitter);
+    }
+
+    // Collect interior (non-rail) nodes from that DC-connected set.
+    let mut interior: Vec<NodeId> = Vec::new();
+    for &node in &dc_path {
+        if full_rail_v(node).is_none() && !interior.contains(&node) {
+            interior.push(node);
+        }
+    }
+    interior.sort_unstable();
+    let n = interior.len();
+    if n == 0 {
+        return None;
+    }
+    let idx: HashMap<NodeId, usize> = interior
+        .iter()
+        .enumerate()
+        .map(|(i, &nd)| (nd, i))
+        .collect();
+
+    // Pre-fetch device models.
+    let models: Vec<GummelPoonModel> = bjts
+        .iter()
+        .map(|b| gummel_poon_model(b.model_name))
+        .collect();
+
+    // Small node-to-ground shunt conductance (SPICE `gmin`) regularizes the
+    // Jacobian so the off-state cold start (all junctions at Vbe≈0, ~zero gm)
+    // never produces a singular / wildly ill-scaled Newton system.
+    let gmin = 1e-9_f64;
+
+    // ── Source-stepping homotopy ─────────────────────────────────────────────
+    // Ramp the rails from `lambda·V_rail` (lambda small) to full supply.  At low
+    // lambda every junction is gently forward-biased from a low-voltage start, so
+    // the Newton lands the conducting branch; raising lambda then *tracks* that
+    // branch up to the full operating point instead of jumping to the cutoff
+    // fixed point a cold full-supply start would settle into.
+    let lambdas: [f64; 8] = [0.05, 0.1, 0.2, 0.35, 0.55, 0.75, 0.9, 1.0];
+
+    // Interior-node state, carried across continuation steps.  Start every node
+    // at a mild forward bias relative to the first (smallest) rail scale.
+    let mut v = vec![0.5 * lambdas[0] * supply_voltage; n];
+
+    for &lambda in &lambdas {
+        let rail_v = |node: NodeId| -> Option<f64> { full_rail_v(node).map(|rv| rv * lambda) };
+        let node_voltage = |node: NodeId, v: &[f64]| -> f64 {
+            if let Some(rv) = rail_v(node) {
+                rv
+            } else {
+                v[idx[&node]]
+            }
+        };
+
+        let mut converged = false;
+        for _iter in 0..200 {
+            let mut j = vec![0.0_f64; n * n];
+            let mut f = vec![0.0_f64; n];
+
+            // gmin shunt: every interior node leaks `gmin·V` to ground.
+            for k in 0..n {
+                f[k] += gmin * v[k];
+                j[k * n + k] += gmin;
+            }
+
+            // Resistor stamps (KCL: current leaving node via R).
+            for &(na, nb, g) in &resistors {
+                let va = node_voltage(na, &v);
+                let vb = node_voltage(nb, &v);
+                let ia = idx.get(&na).copied();
+                let ib = idx.get(&nb).copied();
+                let i_ab = (va - vb) * g; // current a→b
+                if let Some(a) = ia {
+                    f[a] += i_ab;
+                    j[a * n + a] += g;
+                    if let Some(b) = ib {
+                        j[a * n + b] -= g;
+                    }
+                }
+                if let Some(b) = ib {
+                    f[b] -= i_ab;
+                    j[b * n + b] += g;
+                    if let Some(a) = ia {
+                        j[b * n + a] -= g;
+                    }
+                }
+            }
+
+            // BJT stamps.
+            let h = 1e-6_f64;
+            for (b, model) in bjts.iter().zip(models.iter()) {
+                let vb_ = node_voltage(b.base, &v);
+                let vc_ = node_voltage(b.collector, &v);
+                let ve_ = node_voltage(b.emitter, &v);
+                let sign = if b.is_npn { 1.0 } else { -1.0 };
+                let vbe = sign * (vb_ - ve_);
+                let vbc = sign * (vb_ - vc_);
+
+                let (ic, ib_) =
+                    model.currents(vbe as pedalkernel_rt::Wave, vbc as pedalkernel_rt::Wave);
+                let (ic, ib_) = (sign * ic as f64, sign * ib_ as f64);
+                // Terminal currents flowing INTO the device (leaving the node):
+                //   base: +Ib, collector: +Ic, emitter: -(Ib+Ic)
+                let term = [(b.base, ib_), (b.collector, ic), (b.emitter, -(ib_ + ic))];
+                for &(node, i_term) in &term {
+                    if let Some(&row) = idx.get(&node) {
+                        f[row] += i_term;
+                    }
+                }
+
+                // Numerical 3×3 Jacobian: ∂(terminal current)/∂(terminal V).
+                let ctrl_nodes = [b.base, b.collector, b.emitter];
+                for (k, &cn) in ctrl_nodes.iter().enumerate() {
+                    // Only interior columns matter (rails are fixed).
+                    let col = match idx.get(&cn) {
+                        Some(&c) => c,
+                        None => continue,
+                    };
+                    // Perturb terminal k's voltage.
+                    let mut vbn = vb_;
+                    let mut vcn = vc_;
+                    let mut ven = ve_;
+                    match k {
+                        0 => vbn += h,
+                        1 => vcn += h,
+                        _ => ven += h,
+                    }
+                    let vbe_p = sign * (vbn - ven);
+                    let vbc_p = sign * (vbn - vcn);
+                    let (icp, ibp) = model
+                        .currents(vbe_p as pedalkernel_rt::Wave, vbc_p as pedalkernel_rt::Wave);
+                    let (icp, ibp) = (sign * icp as f64, sign * ibp as f64);
+                    let dterm = [
+                        (b.base, (ibp - ib_) / h),
+                        (b.collector, (icp - ic) / h),
+                        (b.emitter, (-(ibp + icp) - -(ib_ + ic)) / h),
+                    ];
+                    for &(node, d) in &dterm {
+                        if let Some(&row) = idx.get(&node) {
+                            j[row * n + col] += d;
+                        }
+                    }
+                }
+            }
+
+            // Converge on the current residual (KCL must balance to a tiny
+            // current at every node).
+            let max_f = f.iter().fold(0.0_f64, |m, &x| m.max(x.abs()));
+            if max_f < 1e-9 {
+                converged = true;
+                break;
+            }
+
+            // Solve J·Δ = -f.
+            let mut neg_f: Vec<f64> = f.iter().map(|x| -x).collect();
+            let delta = solve_linear_system(&mut j, &mut neg_f, n)?;
+
+            // Damped update: limit any single node move to 0.25 V so junction
+            // exponentials never blow up between iterations.
+            let max_raw = delta.iter().fold(0.0_f64, |m, &x| m.max(x.abs()));
+            let scale = if max_raw > 0.25 { 0.25 / max_raw } else { 1.0 };
+            for k in 0..n {
+                v[k] += delta[k] * scale;
+            }
+            if !v.iter().all(|x| x.is_finite()) {
+                return None;
+            }
+        }
+        if !converged {
+            return None;
+        }
+    }
+
+    // Final converged state is at lambda = 1.0 (full supply).
+    let rail_v = |node: NodeId| -> Option<f64> { full_rail_v(node) };
+    let node_voltage = |node: NodeId, v: &[f64]| -> f64 {
+        if let Some(rv) = rail_v(node) {
+            rv
+        } else {
+            v[idx[&node]]
+        }
+    };
+
+    // Physicality check + assemble the solved node-voltage map.
+    let vcc_ceiling = rail_v(graph.vcc_node)
+        .unwrap_or(supply_voltage)
+        .max(supply_voltage);
+    let mut any_active = false;
+    for b in &bjts {
+        let vb_ = node_voltage(b.base, &v);
+        let vc_ = node_voltage(b.collector, &v);
+        let ve_ = node_voltage(b.emitter, &v);
+        let sign = if b.is_npn { 1.0 } else { -1.0 };
+        let vbe = sign * (vb_ - ve_);
+        let vce = sign * (vc_ - ve_);
+        if !vbe.is_finite() || !vce.is_finite() {
+            return None;
+        }
+        // Reject clearly non-physical points; a slightly-saturated output
+        // Darlington is acceptable (its Vce can be small), but a junction biased
+        // well past turn-on or reverse-biased Vce is a failed solve.
+        if vbe > 1.2 || vce < -0.5 || vce > vcc_ceiling + 1.0 {
+            return None;
+        }
+        if (0.3..=1.0).contains(&vbe) && vce > 0.05 {
+            any_active = true;
+        }
+    }
+    if !any_active {
+        return None;
+    }
+
+    // Return the solved DC node voltages, including the rail nodes that BJT
+    // terminals touch so the caller can resolve a port like (collector=vcc,
+    // emitter=interior) to a true Vce.
+    let mut node_dc: std::collections::HashMap<NodeId, f64> = std::collections::HashMap::new();
+    for (i, &nd) in interior.iter().enumerate() {
+        node_dc.insert(nd, v[i]);
+    }
+    for b in &bjts {
+        for &nd in &[b.base, b.collector, b.emitter] {
+            if let Some(rv) = rail_v(nd) {
+                node_dc.insert(nd, rv);
+            }
+        }
+    }
+    Some(node_dc)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1406,8 +1941,7 @@ mod tests {
                 (legacy_vbe + h) as pedalkernel_rt::Wave,
                 vbc_active as pedalkernel_rt::Wave,
             );
-            let df =
-                -((ib2 - ib) as f64 / h) * rth - 1.0 - ((ic2 + ib2 - ic - ib) as f64 / h) * re;
+            let df = -((ib2 - ib) as f64 / h) * rth - 1.0 - ((ic2 + ib2 - ic - ib) as f64 / h) * re;
             if df.abs() < 1e-18 {
                 break;
             }

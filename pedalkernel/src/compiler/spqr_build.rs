@@ -2991,7 +2991,7 @@ pub(super) fn build_spqr_stage_with_options(
             }
             // Seed the TriodeRoot with the DC Q-point from load-line analysis.
             //
-            // compute_triode_dc_qpoint runs a 1-D Newton-Raphson on the
+            // bias::solve_triode_dc_qpoint runs a 1-D Newton-Raphson on the
             // load-line equations (Vgk = -Ia*Rk, Vpk = VCC - Ia*Rp) using
             // edge_indices to locate R_plate and R_cathode.  Returns None when
             // the triode lacks a grid node (strapped triode) or when the plate/

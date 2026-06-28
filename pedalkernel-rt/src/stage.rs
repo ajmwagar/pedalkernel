@@ -4832,13 +4832,6 @@ pub struct MultiNlStage {
     /// when no seed is present.
     #[cfg_attr(feature = "serde", serde(default))]
     pub dc_qpoint_passive_b: Vec<crate::Wave>,
-    /// When true (bead b2ps generic joint path), `dc_bias` has ALREADY been
-    /// inverted to a consistent joint NL+reactive DC fixed point by
-    /// `solve_joint_dc_qpoint`; `reset()` must re-charge the caps and restore the
-    /// warm-start but must NOT call `apply_dc_qpoint_seed` (which would re-derive a
-    /// DIFFERENT `dc_bias` and clobber the consistent one + corrupt `vcc_bias_all`).
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub dc_qpoint_joint: bool,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -6599,12 +6592,9 @@ multi_port_nr_solve_grouped_into(
                 // Seed the reflected wave directly (see compiler apply_bjt_dc_qpoint).
                 one_port.wdf_set_incident(bk, &mut self.passive_runtime_state);
             }
-            // Generic joint path (b2ps): dc_bias is already the consistent joint
-            // inversion — do NOT re-derive it (would clobber vcc_bias_all).  The
-            // cap pre-charge + the v_prev restore above suffice.
-            if !self.dc_qpoint_joint {
-                self.apply_dc_qpoint_seed();
-            }
+            // Re-derive `dc_bias` from the seeded operating point via the exact
+            // wave-domain inversion (`apply_dc_qpoint_seed`).
+            self.apply_dc_qpoint_seed();
         }
     }
 
@@ -6650,7 +6640,10 @@ multi_port_nr_solve_grouped_into(
             port_labels.push(lbl.clone());
         }
         for k in 0..n_passive {
-            port_labels.push(format!("passive[{k}]:{}", self.passive_one_ports[k].type_tag()));
+            port_labels.push(format!(
+                "passive[{k}]:{}",
+                self.passive_one_ports[k].type_tag()
+            ));
         }
         // Remaining ports (vcc / adapted parent) — label by position.
         while port_labels.len() < n_total {
@@ -6867,11 +6860,18 @@ multi_port_nr_solve_grouped_into(
                     v_buf[1] as f32,
                     i_buf[0] as f32,
                     i_buf[1] as f32,
-                    jac[np] as f32,         // jac[1*np + 0] = ∂i_ce/∂v_be
-                    jac[np + 1] as f32,     // jac[1*np + 1] = ∂i_ce/∂v_ce
+                    jac[np] as f32,     // jac[1*np + 0] = ∂i_ce/∂v_be
+                    jac[np + 1] as f32, // jac[1*np + 1] = ∂i_ce/∂v_ce
                 )
             } else {
-                (v_buf[0] as f32, 0.0, i_buf[0] as f32, 0.0, jac[0] as f32, 0.0)
+                (
+                    v_buf[0] as f32,
+                    0.0,
+                    i_buf[0] as f32,
+                    0.0,
+                    jac[0] as f32,
+                    0.0,
+                )
             };
             records[n] = OpPointRecord {
                 stage_index: stage_index as u32,
@@ -7434,22 +7434,9 @@ multi_port_nr_solve_grouped_into(
 
         // A recompute just re-extracted the LINEAR vcc-injection `dc_bias` AND
         // `vcc_bias_all` against the freshly-recomputed scattering.  Re-establish
-        // the nonlinear DC Q-point seed so the feedback-servo operating point is
-        // preserved across pot moves.
-        if self.dc_qpoint_joint {
-            // Generic joint path (bead b2ps): the scattering changed, so the cap
-            // fixed point AND the inverted dc_bias must be recomputed against the
-            // NEW scattering.  Re-run the full joint solve from the (scattering-
-            // invariant) nodal operating point v*.
-            if let Some(v_seed) = self.dc_qpoint_v.clone() {
-                // Reset the joint flag so the re-solve starts from the freshly
-                // rebuilt linear dc_bias/vcc_bias_all, then re-derives consistently.
-                self.dc_qpoint_joint = false;
-                let _ = self.solve_joint_dc_qpoint(&v_seed);
-            }
-        } else {
-            self.apply_dc_qpoint_seed();
-        }
+        // the nonlinear DC Q-point seed (via the exact wave-domain inversion) so
+        // the feedback-servo operating point is preserved across pot moves.
+        self.apply_dc_qpoint_seed();
     }
 
     /// Re-derive `dc_bias` (and `vcc_bias_all`) from the nonlinear DC Q-point seed
@@ -7524,326 +7511,6 @@ multi_port_nr_solve_grouped_into(
                 self.vcc_bias_all[i] = bias;
             }
         }
-    }
-
-    /// Generic joint NL-port + reactive-port DC equilibrium solver (bead b2ps).
-    ///
-    /// Runs the **stage's own runtime DC step** (`input = 0`, `dc_scale = 1`) to a
-    /// joint fixed point of (a) the grouped Newton on the NL ports and (b) the
-    /// reactive (capacitor/inductor) ports' steady state, using the exact same
-    /// scattering / port-resistances / `dc_bias` / `vcc_bias_all` / `scatter_all`
-    /// the audio loop uses.  This is device-agnostic: it iterates over the group's
-    /// `&dyn NlDeviceGroupIv` (triode, BJT, FET, …) through the runtime solver, so
-    /// the seed it produces is a fixed point of the *exact* system the runtime
-    /// iterates — stable by construction (no separate Newton that the runtime then
-    /// drifts away from).
-    ///
-    /// `v_seed` is an initial warm-start at the active operating point (e.g. from
-    /// the nonlinear nodal DC solve).  The method:
-    ///   1. iterates the full DC step until both `v` and the reactive reflected
-    ///      waves `b_passive` stop changing (the joint fixed point), and
-    ///   2. on success, writes the converged `v` into the NR warm-start
-    ///      (`v_prev` / `v_prev_2` / `initial_v_prev`) and pre-charges every
-    ///      reactive one-port to its fixed-point incident wave so the very first
-    ///      audio sample starts *at* the equilibrium and stays there.
-    ///
-    /// Returns `Some(realized_dc_gain_proxy)` if a stable joint fixed point was
-    /// found, else `None` (caller leaves the linear baseline untouched).  The
-    /// reactive fixed point uses each cap's unit-delay relation `b[n] = a[n-1]`:
-    /// at DC steady state `b_passive[k] = a_passive[k]`, which the relaxation
-    /// drives to consistency under the stage's *own* scattering — the deep-WDF
-    /// piece, solved once here for any device family.
-    pub fn solve_joint_dc_qpoint(&mut self, v_seed: &[crate::Wave]) -> Option<crate::Wave> {
-        let n_nl = self.dc_bias.len();
-        if n_nl == 0 || v_seed.len() != n_nl {
-            return None;
-        }
-        let dg_present = self.device_groups.is_some();
-        if !dg_present {
-            return None;
-        }
-        let n_passive = self.passive_one_ports.len();
-        let use_vs_injection = self.vs_injection.is_some();
-        let n_total = n_nl + n_passive + if use_vs_injection { 0 } else { 1 };
-        let s_nl = &self.scattering.s_nl;
-        if s_nl.len() != n_nl * n_nl {
-            return None;
-        }
-        let has_pass = n_passive > 0 && self.scattering.s_nl_passive.len() >= n_nl * n_passive;
-
-        // Debug instrumentation is std-only (env + eprintln); always off in no_std.
-        #[cfg(feature = "std")]
-        let debug = std::env::var("PK_JOINTDC_DEBUG").is_ok();
-        #[cfg(not(feature = "std"))]
-        let _debug_unused_in_no_std = ();
-
-        // The operating point v* (from the nonlinear nodal DC solve) is HELD
-        // FIXED — it is the physically correct Q-point.  We solve for the two DC
-        // source terms that make v* a self-consistent fixed point of the runtime
-        // step *together with* the reactive ports:
-        //   • the reactive reflected waves `b_passive[k]` (the cap DC charge), via
-        //     the cap steady-state fixed point `b_passive = a_passive` under the
-        //     stage's OWN scattering (with b_nl held at v*), and
-        //   • `dc_bias[i]`, re-inverted each iteration so the grouped NR keeps v*
-        //     as its root given the *current* `b_passive` coupling.
-        // Because both the NR source and the cap charge are derived from the SAME
-        // scattering the audio loop uses, the seed is a true joint fixed point of
-        // the runtime step → no drift.  Holding v* fixed (rather than letting the
-        // wave-domain NR relax freely) is essential: the linear `dc_bias`/`vcc`
-        // superposition admits a *spurious* wave-domain fixed point away from the
-        // true nodal Q-point, which is the decaying mode the free relaxation found.
-        let v = v_seed.to_vec();
-
-        // Device port currents i_i(v*) (v-only; independent of the DC sources).
-        let mut i_op = vec![0.0 as crate::Wave; n_nl];
-        {
-            let dg = self.device_groups.as_ref().unwrap();
-            let mut cur = [0.0 as crate::Wave; 3];
-            let mut jac = [0.0 as crate::Wave; 9];
-            for (g, group) in dg.groups.iter().enumerate() {
-                let np = group.n_ports().min(3);
-                let off = dg.offsets.get(g).copied().unwrap_or(0);
-                if off + np > n_nl {
-                    continue;
-                }
-                group
-                    .as_group_iv()
-                    .eval(&v[off..off + np], &mut cur[..np], &mut jac[..np * np]);
-                for p in 0..np {
-                    i_op[off + p] = cur[p];
-                }
-            }
-        }
-        // Device b-wave at v*: b_nl[i] = v[i] - R_i·i_i(v*)  …  PLUS the part of
-        // the WDF reflection that comes from the incident a.  In a WDF port,
-        // b = 2v - a and i = (a - b)/(2R) ⇒ b = a - 2R·i and v = (a+b)/2.  With v
-        // and i fixed, b = v - R·i + (v - R·i) - … — eliminate a: b = v - R·i is
-        // the *device-determined* half; the incident-dependent half is folded into
-        // the scatter below since a_nl = scatter(...)[i] depends on b_passive.  For
-        // the cap fixed point we need b_nl as a function of v* only, which is the
-        // companion form b_nl[i] = v[i] - R_i·i_i(v*) (the reflected wave a port
-        // with a fixed v,i presents to the adaptor).
-        let mut b_nl = vec![0.0 as crate::Wave; n_nl];
-        for i in 0..n_nl {
-            let ri = self.nl_port_resistances.get(i).copied().unwrap_or(1.0);
-            b_nl[i] = v[i] - ri * i_op[i];
-        }
-
-        let mut b_passive = vec![0.0 as crate::Wave; n_passive];
-        let mut b_all = vec![0.0 as crate::Wave; n_total];
-        let mut a_all = vec![0.0 as crate::Wave; n_total];
-
-        // Cap fixed-point relaxation: b_passive = a_passive (cap unit-delay at DC).
-        // a_passive = scatter([b_nl, b_passive, 0])[n_nl+k] + vcc_bias_all[n_nl+k].
-        // The passive↔passive scattering sub-block is a contraction (passive net),
-        // so the simple iteration converges; under-relax for robustness.
-        let relax: crate::Wave = 0.7;
-        let tol: crate::Wave = 1e-10;
-        let max_outer = 20000usize;
-        let mut converged = n_passive == 0;
-        let mut prev_metric = crate::Wave::INFINITY;
-        for outer in 0..max_outer {
-            if n_passive == 0 {
-                converged = true;
-                break;
-            }
-            b_all[..n_nl].copy_from_slice(&b_nl);
-            b_all[n_nl..n_nl + n_passive].copy_from_slice(&b_passive);
-            if !use_vs_injection {
-                b_all[n_nl + n_passive] = 0.0;
-            }
-            self.adaptor.scatter_all_into(&b_all, &mut a_all);
-            if !self.vcc_bias_all.is_empty() {
-                for i in 0..a_all.len().min(self.vcc_bias_all.len()) {
-                    a_all[i] += self.vcc_bias_all[i];
-                }
-            }
-            let mut max_db = 0.0 as crate::Wave;
-            for k in 0..n_passive {
-                let target = a_all[n_nl + k];
-                let nb = b_passive[k] + relax * (target - b_passive[k]);
-                max_db = max_db.max((nb - b_passive[k]).abs());
-                b_passive[k] = nb;
-            }
-            #[cfg(feature = "std")]
-            if debug && (outer < 4 || outer % 1024 == 0) {
-                std::eprintln!(
-                    "[PK_JOINTDC] cap-relax outer={outer} max_db={max_db:.3e} b_passive={:?}",
-                    &b_passive
-                );
-            }
-            if max_db < tol {
-                converged = true;
-                break;
-            }
-            if !max_db.is_finite() || (outer > 64 && max_db > prev_metric * 4.0 + 1.0) {
-                break;
-            }
-            prev_metric = max_db;
-        }
-
-        if !converged || !b_passive.iter().all(|x| x.is_finite()) {
-            #[cfg(feature = "std")]
-            if debug {
-                std::eprintln!("[PK_JOINTDC] cap fixed point NOT converged");
-            }
-            return None;
-        }
-
-        // Now invert dc_bias so the grouped NR holds v* given this cap charge:
-        //   dc_bias[i] = v*[i] + R_i·i_i(v*) − Σ_j S[i][j]·(v*[j] − R_j·i_j(v*))
-        //                − Σ_k S_passive[i][k]·b_passive[k]
-        // (the runtime NR residual is zero at v* with known_a = this dc_bias plus
-        //  the passive coupling Σ_k S_passive[i][k]·b_passive[k]).
-        let mut new_dc_bias = vec![0.0 as crate::Wave; n_nl];
-        for i in 0..n_nl {
-            let ri = self.nl_port_resistances.get(i).copied().unwrap_or(1.0);
-            let mut bias = v[i] + ri * i_op[i];
-            for j in 0..n_nl {
-                let rj = self.nl_port_resistances.get(j).copied().unwrap_or(1.0);
-                bias -= s_nl[i * n_nl + j] * (v[j] - rj * i_op[j]);
-            }
-            if has_pass {
-                let row = &self.scattering.s_nl_passive[i * n_passive..i * n_passive + n_passive];
-                for (k, &s) in row.iter().enumerate() {
-                    bias -= s * b_passive[k];
-                }
-            }
-            if !bias.is_finite() {
-                return None;
-            }
-            new_dc_bias[i] = bias;
-        }
-        // Commit the inverted NR source.  Leave `vcc_bias_all` for the NL ports
-        // untouched (those entries only feed output extraction, not the loop); the
-        // passive-port `vcc_bias_all` entries are the DC rail injection the cap
-        // fixed point already accounts for, so they stay as built.
-        for i in 0..n_nl {
-            self.dc_bias[i] = new_dc_bias[i];
-        }
-
-        #[cfg(feature = "std")]
-        if debug {
-            std::eprintln!(
-                "[PK_JOINTDC] CONVERGED (v* held) v={:?} b_passive={:?} dc_bias={:?}",
-                &v, &b_passive, &new_dc_bias
-            );
-        }
-
-        // ── Commit the joint fixed point as the runtime seed. ────────────────
-        // 1. NR warm-start at the converged operating point.
-        for i in 0..n_nl {
-            let w = v[i];
-            if i < self.v_prev.len() {
-                self.v_prev[i] = w;
-            }
-            if i < self.initial_v_prev.len() {
-                self.initial_v_prev[i] = w;
-            }
-            if i < self.v_prev_2.len() {
-                self.v_prev_2[i] = w;
-            }
-        }
-        // 2. Pre-charge each reactive one-port to its fixed-point incident wave so
-        //    the first sample's `wdf_reflected` returns exactly b_passive[k] and the
-        //    cap does not drift.  `wdf_set_incident` stores wave_state = incident and
-        //    `wdf_reflected` returns wave_state ⇒ first sample sees b_passive[k].
-        for (k, &one_port) in self.passive_one_ports.iter().enumerate() {
-            if let Some(&bk) = b_passive.get(k) {
-                one_port.wdf_set_incident(bk, &mut self.passive_runtime_state);
-            }
-        }
-        // 3. Record the seed so reset() can re-charge the caps + restore the
-        //    warm-start.  `dc_qpoint_joint` tells reset() that `dc_bias` is ALREADY
-        //    the consistent joint inversion — it must NOT call apply_dc_qpoint_seed
-        //    (which would re-derive a different dc_bias and clobber vcc_bias_all).
-        self.dc_qpoint_v = Some(v.clone());
-        self.dc_qpoint_passive_b = b_passive.clone();
-        self.dc_qpoint_joint = true;
-
-        // Skip the DC ramp — the operating point is already at equilibrium.
-        self.dc_ramp = 256;
-        self.initial_dc_ramp = 256;
-
-        // Self-check: run ONE runtime-style grouped NR from v* with the inverted
-        // dc_bias + the cap charge, exactly as sample 0 will, and report the
-        // residual + where it lands.  If it stays at v*, the seed is a true fixed
-        // point of the per-sample solver; if it walks off, the per-sample NR (with
-        // its iteration budget + step clamp) cannot hold v* → the loop is unstable.
-        #[cfg(feature = "std")]
-        if debug {
-            let mut v_chk = v.clone();
-            let mut known_a = vec![0.0 as crate::Wave; n_nl];
-            for i in 0..n_nl {
-                let mut a_i = self.dc_bias[i];
-                if has_pass {
-                    let row =
-                        &self.scattering.s_nl_passive[i * n_passive..i * n_passive + n_passive];
-                    for (k, &s) in row.iter().enumerate() {
-                        a_i += s * b_passive[k];
-                    }
-                }
-                known_a[i] = a_i;
-            }
-            let dg = self.device_groups.as_ref().unwrap();
-            let mgp = dg.groups.iter().map(|g| g.n_ports()).max().unwrap_or(1);
-            let mut ws_chk =
-                crate::elements::nonlinear::solver::NrWorkspace::new_grouped(n_nl, mgp);
-            let groups: alloc::vec::Vec<&dyn NlDeviceGroupIv> =
-                dg.groups.iter().map(|g| g.as_group_iv()).collect();
-            crate::elements::nonlinear::solver::multi_port_nr_solve_grouped_into(
-                n_nl,
-                s_nl,
-                &known_a,
-                &self.nl_port_resistances,
-                &groups,
-                &dg.offsets,
-                &mut v_chk,
-                64,
-                1e-12,
-                &mut ws_chk,
-            );
-            let mut walk = 0.0 as crate::Wave;
-            for i in 0..n_nl {
-                walk = walk.max((v_chk[i] - v[i]).abs());
-            }
-            std::eprintln!(
-                "[PK_JOINTDC] self-check: per-sample NR from v* landed at {:?} (max walk-off={walk:.3e})",
-                &v_chk
-            );
-            // Cap-consistency check: build b_all from the RUNTIME b_nl (ws_chk.b_nl
-            // at v*) and verify scatter+vcc gives back b_passive at the cap ports.
-            let mut bchk = vec![0.0 as crate::Wave; n_total];
-            let mut achk = vec![0.0 as crate::Wave; n_total];
-            bchk[..n_nl].copy_from_slice(&ws_chk.b_nl[..n_nl]);
-            bchk[n_nl..n_nl + n_passive].copy_from_slice(&b_passive);
-            if !use_vs_injection {
-                bchk[n_nl + n_passive] = 0.0;
-            }
-            self.adaptor.scatter_all_into(&bchk, &mut achk);
-            if let Some(ref kvec) = self.vs_injection {
-                for i in 0..achk.len().min(kvec.len()) {
-                    achk[i] += kvec[i] * 0.0;
-                }
-            }
-            if !self.vcc_bias_all.is_empty() {
-                for i in 0..achk.len().min(self.vcc_bias_all.len()) {
-                    achk[i] += self.vcc_bias_all[i];
-                }
-            }
-            let mut cap_err = 0.0 as crate::Wave;
-            for k in 0..n_passive {
-                cap_err = cap_err.max((achk[n_nl + k] - b_passive[k]).abs());
-            }
-            std::eprintln!(
-                "[PK_JOINTDC] cap-consistency (runtime b_nl): a_passive={:?} vs b_passive={:?} max_err={cap_err:.3e}; my_b_nl={:?} runtime_b_nl={:?}",
-                &achk[n_nl..n_nl + n_passive], &b_passive, &b_nl, &ws_chk.b_nl[..n_nl]
-            );
-        }
-
-        // Proxy for "did it land active": sum |b_nl| as a coarse activity metric.
-        let activity: crate::Wave = b_nl.iter().map(|x| x.abs()).sum();
-        Some(activity)
     }
 
     // ── Precompute accessors ─────────────────────────────────────────────
