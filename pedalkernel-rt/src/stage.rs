@@ -7413,7 +7413,11 @@ multi_port_nr_solve_grouped_into(
         }
         let has_pass = n_passive > 0 && self.scattering.s_nl_passive.len() >= n_nl * n_passive;
 
+        // Debug instrumentation is std-only (env + eprintln); always off in no_std.
+        #[cfg(feature = "std")]
         let debug = std::env::var("PK_JOINTDC_DEBUG").is_ok();
+        #[cfg(not(feature = "std"))]
+        let _debug_unused_in_no_std = ();
 
         // The operating point v* (from the nonlinear nodal DC solve) is HELD
         // FIXED — it is the physically correct Q-point.  We solve for the two DC
@@ -7503,6 +7507,7 @@ multi_port_nr_solve_grouped_into(
                 max_db = max_db.max((nb - b_passive[k]).abs());
                 b_passive[k] = nb;
             }
+            #[cfg(feature = "std")]
             if debug && (outer < 4 || outer % 1024 == 0) {
                 std::eprintln!(
                     "[PK_JOINTDC] cap-relax outer={outer} max_db={max_db:.3e} b_passive={:?}",
@@ -7520,6 +7525,7 @@ multi_port_nr_solve_grouped_into(
         }
 
         if !converged || !b_passive.iter().all(|x| x.is_finite()) {
+            #[cfg(feature = "std")]
             if debug {
                 std::eprintln!("[PK_JOINTDC] cap fixed point NOT converged");
             }
@@ -7558,6 +7564,7 @@ multi_port_nr_solve_grouped_into(
             self.dc_bias[i] = new_dc_bias[i];
         }
 
+        #[cfg(feature = "std")]
         if debug {
             std::eprintln!(
                 "[PK_JOINTDC] CONVERGED (v* held) v={:?} b_passive={:?} dc_bias={:?}",
@@ -7605,6 +7612,7 @@ multi_port_nr_solve_grouped_into(
         // residual + where it lands.  If it stays at v*, the seed is a true fixed
         // point of the per-sample solver; if it walks off, the per-sample NR (with
         // its iteration budget + step clamp) cannot hold v* → the loop is unstable.
+        #[cfg(feature = "std")]
         if debug {
             let mut v_chk = v.clone();
             let mut known_a = vec![0.0 as crate::Wave; n_nl];
