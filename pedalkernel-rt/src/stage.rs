@@ -6093,20 +6093,6 @@ impl MultiNlStage {
                 *ka = a_i;
             }
 
-            #[cfg(feature = "std")]
-            {
-                static JDC_FS: core::sync::atomic::AtomicU64 =
-                    core::sync::atomic::AtomicU64::new(0);
-                if std::env::var("PK_JOINTDC_FIRSTSAMPLE").is_ok()
-                    && JDC_FS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3
-                {
-                    std::eprintln!(
-                        "[PK_JDC_FS] sample={sample:.4e} dc_scale={dc_scale} comp={compensation} known_a={:?} b_passive={:?} v_prev={:?} dc_bias={:?}",
-                        known_a, &b_passive[..n_passive], &self.v_prev, &self.dc_bias
-                    );
-                }
-            }
-
             #[cfg(feature = "debug-trace")]
             {
                 static NR_TRACE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -6209,21 +6195,6 @@ multi_port_nr_solve_grouped_into(
             }
 
             // 5. Set incident waves on passive children
-            #[cfg(feature = "std")]
-            {
-                static JDC_CAP: core::sync::atomic::AtomicU64 =
-                    core::sync::atomic::AtomicU64::new(0);
-                if std::env::var("PK_JOINTDC_FIRSTSAMPLE").is_ok()
-                    && JDC_CAP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 3
-                {
-                    std::eprintln!(
-                        "[PK_JDC_CAP] b_nl={:?} b_passive_in={:?} a_passive_out={:?} b_adapted={b_adapted:.4e}",
-                        &b_nl[..n_nl],
-                        &b_passive[..n_passive],
-                        &a_all[n_nl..n_nl + n_passive]
-                    );
-                }
-            }
             for (k, one_port) in self.passive_one_ports.iter().enumerate() {
                 one_port.wdf_set_incident(a_all[n_nl + k], &mut self.passive_runtime_state);
             }
