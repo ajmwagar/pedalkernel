@@ -2,7 +2,13 @@ use pedalkernel::compiler::compile_pedal;
 use pedalkernel::dsl::parse_pedal_file;
 use std::process;
 
-pub fn run(file_path: &str) {
+/// Debug a `.pedal` file.
+///
+/// When `json` is false (default) this prints the prose stage/structure dump.
+/// When `json` is true it prints ONLY a structured JSON `StageGraph` (no prose
+/// preamble) so the output is machine-parseable by tooling such as the
+/// schematic-trace IDE.
+pub fn run(file_path: &str, json: bool) {
     // Parse the .pedal file
     let source = std::fs::read_to_string(file_path).unwrap_or_else(|e| {
         eprintln!("Error reading {file_path}: {e}");
@@ -25,15 +31,17 @@ pub fn run(file_path: &str) {
         });
     }
 
-    // Print parsed component summary
-    println!("file: {file_path}");
-    println!("name: {}", pedal.name);
-    if let Some(ref sub) = pedal.subtitle {
-        println!("subtitle: {sub}");
+    if !json {
+        // Print parsed component summary (prose mode only).
+        println!("file: {file_path}");
+        println!("name: {}", pedal.name);
+        if let Some(ref sub) = pedal.subtitle {
+            println!("subtitle: {sub}");
+        }
+        println!("components: {}", pedal.components.len());
+        println!("nets: {}", pedal.nets.len());
+        println!();
     }
-    println!("components: {}", pedal.components.len());
-    println!("nets: {}", pedal.nets.len());
-    println!();
 
     // Compile
     let compiled = match compile_pedal(&pedal, 48000.0) {
@@ -44,6 +52,11 @@ pub fn run(file_path: &str) {
         }
     };
 
-    // Print the debug dump
-    print!("{}", compiled.debug_dump());
+    if json {
+        // Structured StageGraph — additive, machine-readable.
+        print!("{}", compiled.stage_graph_json());
+    } else {
+        // Prose debug dump (unchanged behavior).
+        print!("{}", compiled.debug_dump());
+    }
 }
