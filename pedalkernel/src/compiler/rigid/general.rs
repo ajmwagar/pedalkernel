@@ -283,6 +283,52 @@ fn build_general_mna_from_edges_inner(
         apply_triode_dc_qpoint(&mut stage, &dc, &nl_kinds, &reactive_edges, graph);
     }
 
+    // Step 10: DC Q-point override for grouped-BJT stages (ko5g g725.2).
+    //
+    // Problem (BA283 trace y2wj / 685e): the runtime grouped-NR seeds each port's
+    // DC from `dc_bias[i]`, built by `compute_dc_bias` as a LINEAR vcc-injection
+    // superposition. That linear solve cannot model a nonlinear DC-coupled
+    // feedback servo: the BA283 TR1 base is biased through R2 56k from the NFB
+    // bus, whose DC level is established by the conducting output Darlington, so
+    // the linear solve lands TR1's be-source at -2.43 V → the NR drives TR1 to
+    // cutoff (Vbe≈0.36 V vs the validated 0.64 V) → ~120× low gain → -49.5 dB.
+    //
+    // Fix (mirrors the triode pair above): `compute_bjt_dc_qpoint` solves the
+    // NONLINEAR DC operating point of the whole BJT group (Gummel-Poon junctions
+    // co-solved against the group's resistor network, rails fixed) and
+    // `apply_bjt_dc_qpoint` OVERRIDES `dc_bias[be]`/`dc_bias[ce]` (via an exact
+    // wave-domain inversion against the stage's own scattering) plus the
+    // warm-start `v_prev` with the device's true Q-point.
+    //
+    // STATUS (g725.2): the DC solve and the inversion are VERIFIED correct — the
+    // BA283 TR1 lands at Vbe=0.608 V / base=0.996 V (matching the validated
+    // 0.94/0.64) and `v*` is an exact fixed point of the runtime NR
+    // (max|F(v*)| ≈ 9e-16).  HOWEVER seeding it makes the *grouped NR + reactive
+    // ports* a JOINT equilibrium that the static seed does not yet stabilise:
+    // the DC-coupled feedback caps drift off `passive_b`, the grouped NR stops
+    // converging (residual ~27, budget-exhausted) and BA283 goes unstable.  That
+    // is the banked deep-WDF reactive-feedback DC-equilibrium fix
+    // (engine-adapted-input-port / cosolve family), not this bead's surface.
+    //
+    // To NOT regress every BJT circuit (HARD CONSTRAINT), the override is OFF by
+    // default and opt-in via `PK_BJT_DCQPOINT=1`.  When off, the engine is
+    // byte-identical to baseline; the solver + inversion + the BA283 RCA are
+    // committed for the stabilisation follow-up.
+    if std::env::var("PK_BJT_DCQPOINT").as_deref() == Ok("1")
+        || std::env::var("PK_JOINTDC").as_deref() == Ok("1")
+    {
+        if let Some(node_dc) = compute_bjt_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage) {
+            apply_bjt_dc_qpoint(
+                &mut stage,
+                &node_dc,
+                &nl_terminals,
+                &nl_kinds,
+                &reactive_edges,
+                graph,
+            );
+        }
+    }
+
     Ok(stage)
 }
 
@@ -1346,6 +1392,9 @@ fn assemble_multi_nl_stage(
         subsample_counter: 0,
         iteration_budget_remaining: NR_ITERATION_BUDGET,
         prev_input: 0.0,
+        dc_qpoint_v: None,
+        dc_qpoint_passive_b: Vec::new(),
+        dc_qpoint_joint: false,
     })
 }
 
@@ -1612,5 +1661,677 @@ fn apply_triode_dc_qpoint(
                 &mut stage.passive_runtime_state,
             );
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BJT DC Q-point (ko5g g725.2) — nonlinear nodal DC solve for grouped BJTs
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Solve the **nonlinear** DC operating point of every BJT in the group.
+///
+/// This is the BJT analogue of [`compute_triode_dc_qpoint`].  Where the triode
+/// path solves a single 1-D load line, a BJT group may contain a DC-coupled
+/// feedback servo (BA283: TR1's base is biased through R2 from the NFB bus whose
+/// level is set by the conducting Darlington), so the operating point of all
+/// devices is mutually coupled and must be **co-solved**.
+///
+/// Method: full-network nodal Newton-Raphson over the group's interior
+/// (non-rail) nodes.  Linear resistors contribute conductances; every BJT is
+/// stamped via its Gummel-Poon `currents(Vbe, Vbc)` and a numerical 3×3 device
+/// Jacobian.  Caps/inductors are open at DC and ignored.  Rails (GND / VCC /
+/// other supplies) are held at their known voltages.
+///
+/// Returns a map of **DC node voltage** for every solved interior node (rails
+/// excluded), or `None` if the group has no BJTs, the system is singular, the
+/// solve fails to converge, or the result is non-physical (so non-BJT and
+/// degenerate stages keep their existing linear `dc_bias` and stay
+/// byte-identical to before).  The caller turns these node voltages into the
+/// per-port DC operating point.
+fn compute_bjt_dc_qpoint(
+    nl_kinds: &[NonlinearKind],
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<std::collections::HashMap<NodeId, f64>> {
+    // Gather the BJTs (skip diode-connected: those are handled as 1-port diodes).
+    struct BjtRef<'a> {
+        model_name: &'a str,
+        is_npn: bool,
+        base: NodeId,
+        collector: NodeId,
+        emitter: NodeId,
+    }
+    let mut bjts: Vec<BjtRef> = Vec::new();
+    for kind in nl_kinds {
+        match kind {
+            NonlinearKind::BjtNpn {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } if base_node != collector_node => bjts.push(BjtRef {
+                model_name,
+                is_npn: true,
+                base: *base_node,
+                collector: *collector_node,
+                emitter: *emitter_node,
+            }),
+            NonlinearKind::BjtPnp {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } if base_node != collector_node => bjts.push(BjtRef {
+                model_name,
+                is_npn: false,
+                base: *base_node,
+                collector: *collector_node,
+                emitter: *emitter_node,
+            }),
+            _ => {}
+        }
+    }
+    if bjts.is_empty() {
+        return None;
+    }
+
+    // Known rail voltage, or None for an interior (solved) node.
+    let rail_v = |node: NodeId| -> Option<f64> {
+        if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
+            Some(0.0)
+        } else if node == graph.vcc_node {
+            Some(
+                graph
+                    .supply_voltages
+                    .get(&graph.vcc_node)
+                    .copied()
+                    .unwrap_or(supply_voltage),
+            )
+        } else if let Some(&v) = graph.supply_voltages.get(&node) {
+            Some(v)
+        } else if graph.supply_nodes.contains(&node) {
+            Some(supply_voltage)
+        } else {
+            None
+        }
+    };
+
+    // Resistor list (linear conductances): (node_a, node_b, g).
+    let mut resistors: Vec<(NodeId, NodeId, f64)> = Vec::new();
+    for &eidx in all_edges {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
+            if r > 0.0 {
+                resistors.push((e.node_a, e.node_b, 1.0 / r));
+            }
+        }
+    }
+
+    // Only nodes with a real DC path participate: those incident to a resistor or
+    // that are a BJT terminal.  Cap/inductor-only nodes (input coupling cap, output
+    // tap behind Cout) are open at DC → excluded, else they produce zero-conductance
+    // rows that make the Newton system singular.
+    let mut dc_path: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for &(na, nb, _) in &resistors {
+        dc_path.insert(na);
+        dc_path.insert(nb);
+    }
+    for b in &bjts {
+        dc_path.insert(b.base);
+        dc_path.insert(b.collector);
+        dc_path.insert(b.emitter);
+    }
+
+    // Collect interior (non-rail) nodes from that DC-connected set.
+    let mut interior: Vec<NodeId> = Vec::new();
+    for &node in &dc_path {
+        if rail_v(node).is_none() && !interior.contains(&node) {
+            interior.push(node);
+        }
+    }
+    interior.sort_unstable();
+    let n = interior.len();
+    if n == 0 {
+        return None;
+    }
+    let idx: std::collections::HashMap<NodeId, usize> =
+        interior.iter().enumerate().map(|(i, &nd)| (nd, i)).collect();
+
+    // Pre-fetch device models.
+    let models: Vec<GummelPoonModel> =
+        bjts.iter().map(|b| gummel_poon_model(b.model_name)).collect();
+
+    // Newton-Raphson on the interior node voltages.
+    // Start interior nodes at a mild bias (½ supply) so junctions are near-on.
+    let mut v = vec![supply_voltage * 0.5; n];
+
+    // Helper: voltage at a node (rail or solved).
+    let node_voltage = |node: NodeId, v: &[f64]| -> f64 {
+        if let Some(rv) = rail_v(node) {
+            rv
+        } else {
+            v[idx[&node]]
+        }
+    };
+
+    // Stamp one BJT's currents into the KCL residual `f` and 3×3 Jacobian into
+    // the system matrix `j`.  Signs: for an NPN, conventional current flows INTO
+    // the collector and base, OUT of the emitter; KCL residual at a node is the
+    // net current leaving the node, so a current flowing INTO a terminal is
+    // subtracted from that node's residual.  For a PNP the device currents are
+    // mirrored (Vbe/Vbc negated, currents reversed).
+    // Small node-to-ground shunt conductance (SPICE `gmin`) regularizes the
+    // Jacobian so the off-state cold start (all junctions at Vbe≈0, ~zero gm)
+    // never produces a singular / wildly ill-scaled Newton system.
+    let gmin = 1e-9_f64;
+
+    let converged = {
+        let mut converged = false;
+        for _iter in 0..200 {
+            let mut j = vec![0.0_f64; n * n];
+            let mut f = vec![0.0_f64; n];
+
+            // gmin shunt: every interior node leaks `gmin·V` to ground.
+            for k in 0..n {
+                f[k] += gmin * v[k];
+                j[k * n + k] += gmin;
+            }
+
+            // Resistor stamps (KCL: current leaving node via R).
+            for &(na, nb, g) in &resistors {
+                let va = node_voltage(na, &v);
+                let vb = node_voltage(nb, &v);
+                let ia = idx.get(&na).copied();
+                let ib = idx.get(&nb).copied();
+                let i_ab = (va - vb) * g; // current a→b
+                if let Some(a) = ia {
+                    f[a] += i_ab;
+                    j[a * n + a] += g;
+                    if let Some(b) = ib {
+                        j[a * n + b] -= g;
+                    }
+                }
+                if let Some(b) = ib {
+                    f[b] -= i_ab;
+                    j[b * n + b] += g;
+                    if let Some(a) = ia {
+                        j[b * n + a] -= g;
+                    }
+                }
+            }
+
+            // BJT stamps.
+            let h = 1e-6_f64;
+            for (b, model) in bjts.iter().zip(models.iter()) {
+                let vb_ = node_voltage(b.base, &v);
+                let vc_ = node_voltage(b.collector, &v);
+                let ve_ = node_voltage(b.emitter, &v);
+                let sign = if b.is_npn { 1.0 } else { -1.0 };
+                let vbe = sign * (vb_ - ve_);
+                let vbc = sign * (vb_ - vc_);
+
+                let (ic, ib_) = model.currents(vbe as pedalkernel_rt::Wave, vbc as pedalkernel_rt::Wave);
+                let (ic, ib_) = (sign * ic as f64, sign * ib_ as f64);
+                // Terminal currents flowing INTO the device (leaving the node):
+                //   base: +Ib, collector: +Ic, emitter: -(Ib+Ic)
+                let term = [
+                    (b.base, ib_),
+                    (b.collector, ic),
+                    (b.emitter, -(ib_ + ic)),
+                ];
+                for &(node, i_term) in &term {
+                    if let Some(&row) = idx.get(&node) {
+                        f[row] += i_term;
+                    }
+                }
+
+                // Numerical 3×3 Jacobian: ∂(terminal current)/∂(terminal V).
+                let ctrl_nodes = [b.base, b.collector, b.emitter];
+                for (k, &cn) in ctrl_nodes.iter().enumerate() {
+                    // Only interior columns matter (rails are fixed).
+                    let col = match idx.get(&cn) {
+                        Some(&c) => c,
+                        None => continue,
+                    };
+                    // Perturb terminal k's voltage.
+                    let mut vbn = vb_;
+                    let mut vcn = vc_;
+                    let mut ven = ve_;
+                    match k {
+                        0 => vbn += h,
+                        1 => vcn += h,
+                        _ => ven += h,
+                    }
+                    let vbe_p = sign * (vbn - ven);
+                    let vbc_p = sign * (vbn - vcn);
+                    let (icp, ibp) =
+                        model.currents(vbe_p as pedalkernel_rt::Wave, vbc_p as pedalkernel_rt::Wave);
+                    let (icp, ibp) = (sign * icp as f64, sign * ibp as f64);
+                    let dterm = [
+                        (b.base, (ibp - ib_) / h),
+                        (b.collector, (icp - ic) / h),
+                        (b.emitter, (-(ibp + icp) - -(ib_ + ic)) / h),
+                    ];
+                    for &(node, d) in &dterm {
+                        if let Some(&row) = idx.get(&node) {
+                            j[row * n + col] += d;
+                        }
+                    }
+                }
+            }
+
+            // Converge on the current residual (KCL must balance to a tiny
+            // current at every node).  This is robust to ill-scaling where a
+            // small residual still implies a large raw Newton step.
+            let max_f = f.iter().fold(0.0_f64, |m, &x| m.max(x.abs()));
+            if max_f < 1e-9 {
+                converged = true;
+                if std::env::var("PK_BJTDC_DEBUG").is_ok() {
+                    eprintln!("[PK_BJTDC]   converged at iter {_iter} (max|f|={max_f:.3e})");
+                }
+                break;
+            }
+
+            // Solve J·Δ = -f.
+            let mut neg_f: Vec<f64> = f.iter().map(|x| -x).collect();
+            let delta = match solve_dense_linear(&mut j, &mut neg_f, n) {
+                Some(d) => d,
+                None => return None,
+            };
+
+            // Damped update: limit any single node move to 0.25 V so junction
+            // exponentials never blow up between iterations (SPICE-style voltage
+            // limiting).  Scale the whole step by one factor to preserve direction.
+            let max_raw = delta.iter().fold(0.0_f64, |m, &x| m.max(x.abs()));
+            let scale = if max_raw > 0.25 { 0.25 / max_raw } else { 1.0 };
+            for k in 0..n {
+                v[k] += delta[k] * scale;
+            }
+            if !v.iter().all(|x| x.is_finite()) {
+                return None;
+            }
+        }
+        converged
+    };
+    if !converged {
+        if std::env::var("PK_BJTDC_DEBUG").is_ok() {
+            eprintln!("[PK_BJTDC] no-converge interior_n={n} n_resistors={}", resistors.len());
+        }
+        return None;
+    }
+
+    // Physicality check + assemble the solved node-voltage map.  Reject if any
+    // BJT lands non-physical (Vbe outside a plausible silicon window or Vce
+    // saturated/negative) so we never seed a worse point than the linear
+    // fallback.  Ceiling from the ACTUAL solved VCC rail (the `supply_voltage`
+    // param is the builder's inner default, e.g. 9 V, which need not match the
+    // graph's rail — BA283 runs on +24 V via `supply 24V`).
+    let vcc_ceiling = rail_v(graph.vcc_node)
+        .unwrap_or(supply_voltage)
+        .max(supply_voltage);
+    let mut any_active = false;
+    for b in &bjts {
+        let vb_ = node_voltage(b.base, &v);
+        let vc_ = node_voltage(b.collector, &v);
+        let ve_ = node_voltage(b.emitter, &v);
+        let sign = if b.is_npn { 1.0 } else { -1.0 };
+        let vbe = sign * (vb_ - ve_);
+        let vce = sign * (vc_ - ve_);
+        if std::env::var("PK_BJTDC_DEBUG").is_ok() {
+            eprintln!(
+                "[PK_BJTDC]   {} npn={} Vbe={vbe:.4} Vce={vce:.4} (V b={vb_:.4} c={vc_:.4} e={ve_:.4})",
+                b.model_name, b.is_npn
+            );
+        }
+        if !vbe.is_finite() || !vce.is_finite() {
+            return None;
+        }
+        // Reject clearly non-physical points; a slightly-saturated output
+        // Darlington is acceptable (its Vce can be small), but a junction biased
+        // well past turn-on or reverse-biased Vce is a failed solve.
+        if vbe > 1.2 || vce < -0.5 || vce > vcc_ceiling + 1.0 {
+            return None;
+        }
+        if (0.3..=1.0).contains(&vbe) && vce > 0.05 {
+            any_active = true;
+        }
+    }
+    if !any_active {
+        return None;
+    }
+
+    // Return the solved DC node voltages.  Include the rail nodes that BJT
+    // terminals touch (VCC / GND / supplies) so the caller can resolve a port
+    // like (collector=vcc, emitter=interior) to a true Vce.
+    let mut node_dc: std::collections::HashMap<NodeId, f64> = std::collections::HashMap::new();
+    for (i, &nd) in interior.iter().enumerate() {
+        node_dc.insert(nd, v[i]);
+    }
+    for b in &bjts {
+        for &nd in &[b.base, b.collector, b.emitter] {
+            if let Some(rv) = rail_v(nd) {
+                node_dc.insert(nd, rv);
+            }
+        }
+    }
+    Some(node_dc)
+}
+
+/// Apply the solved BJT DC operating point to a just-built grouped-BJT
+/// `MultiNlStage`.
+///
+/// Two things are seeded so the runtime NR HOLDS the nonlinear Q-point instead
+/// of the linear vcc-injection set-point:
+///
+/// 1. **NR warm-start** — `v_prev` / `initial_v_prev` / `v_prev_2` at each port
+///    are set to the solved port voltage `v* = V(pos) − V(neg)` (from the DC
+///    node-voltage map), so the first sample starts at the operating point.
+///
+/// 2. **DC source term** — `dc_bias[i]` is the DC component of the port's
+///    *incident wave*, NOT the port voltage.  The runtime NR residual is
+///    `F_i = known_a_i − v_i − R_i·i_i(v) + Σ_j S[i][j]·(v_j − R_j·i_j(v))`, and
+///    at DC steady state `known_a_i = dc_bias[i]` (the AC drive and the open-at-DC
+///    coupling caps contribute nothing).  Inverting at the solved operating point
+///    `v*` gives the exact incident wave that makes the NR settle there:
+///    `dc_bias[i] = v_i* + R_i·i_i(v*) − Σ_j S[i][j]·(v_j* − R_j·i_j(v*))`.
+///    This is coupling-aware (uses the stage's own `s_nl` + `nl_port_resistances`
+///    + the grouped device currents), so it reproduces the feedback-servo bias
+///    that the linear superposition could not.
+///
+/// Port voltages are read from `nl_terminals` (built in port order alongside
+/// `dc_bias`), so this is robust to the device-group ordering.  Ports whose
+/// terminal nodes are not in the solved DC map (e.g. behind a coupling cap) are
+/// left at their existing linear values.
+fn apply_bjt_dc_qpoint(
+    stage: &mut MultiNlStage,
+    node_dc: &std::collections::HashMap<NodeId, f64>,
+    nl_terminals: &[(NodeId, NodeId)],
+    nl_kinds: &[NonlinearKind],
+    reactive_edges: &[(usize, OnePortKind)],
+    graph: &CircuitGraph,
+) {
+    let n_nl = stage.dc_bias.len();
+    if n_nl == 0 || nl_terminals.len() < n_nl {
+        return;
+    }
+
+    // Voltage at a node: solved DC map first, else fall back to the runtime
+    // stage's recorded supply / ground rails via the graph-independent map.
+    // `node_dc` already excludes rails, so a missing node is a rail (or floating);
+    // we resolve rails from the values stamped on the BJT terminals during the
+    // solve by reusing the map plus a 0-default for ground-like nodes.
+    let solved = |node: NodeId| -> Option<f64> { node_dc.get(&node).copied() };
+
+    // Target port voltage v* for every NL port that has a fully-solved terminal
+    // pair.  `None` => leave that port's linear dc_bias untouched.
+    let mut v_star: Vec<Option<f64>> = vec![None; n_nl];
+    // We also need the absolute DC voltage at *both* terminals of a port to know
+    // whether the port is a BJT port at all; only BJT be/ce ports are remapped.
+    let mut is_bjt_port = vec![false; n_nl];
+
+    // Mark BJT ports (be, ce) in port order, mirroring `classify_nl_devices`.
+    {
+        let mut port_idx = 0usize;
+        for kind in nl_kinds {
+            match kind {
+                NonlinearKind::BjtNpn {
+                    base_node,
+                    collector_node,
+                    ..
+                }
+                | NonlinearKind::BjtPnp {
+                    base_node,
+                    collector_node,
+                    ..
+                } if base_node != collector_node => {
+                    if port_idx + 1 < n_nl {
+                        is_bjt_port[port_idx] = true;
+                        is_bjt_port[port_idx + 1] = true;
+                    }
+                    port_idx += 2;
+                }
+                NonlinearKind::Triode {
+                    grid_node: Some(_),
+                    ..
+                }
+                | NonlinearKind::Pentode {
+                    grid_node: Some(_),
+                    ..
+                } => {
+                    port_idx += 2;
+                }
+                _ => {
+                    port_idx += 1;
+                }
+            }
+        }
+    }
+
+    for i in 0..n_nl {
+        if !is_bjt_port[i] {
+            continue;
+        }
+        let (pos, neg) = nl_terminals[i];
+        // Resolve each terminal: solved interior node, or a rail (gnd→0,
+        // vcc/supply → solved value isn't stored, so treat as the port's existing
+        // behaviour by requiring at least one solved terminal and using the map
+        // delta).  We only remap when BOTH terminals resolve to a DC voltage.
+        let vp = solved(pos);
+        let vn = solved(neg);
+        if let (Some(vp), Some(vn)) = (vp, vn) {
+            v_star[i] = Some(vp - vn);
+        } else if let Some(vp) = vp {
+            // neg is a rail not in the map (gnd ⇒ 0).  Approximate with vp − 0.
+            v_star[i] = Some(vp);
+        } else if let Some(vn) = vn {
+            v_star[i] = Some(-vn);
+        }
+    }
+
+    if std::env::var("PK_BJTDC_DEBUG").is_ok() {
+        eprintln!(
+            "[PK_BJTDC] apply: n_nl={n_nl} nl_terminals.len()={} is_bjt_port={:?} v_star={:?}",
+            nl_terminals.len(),
+            is_bjt_port,
+            v_star
+        );
+    }
+    // The DC-bias seed (`dc_qpoint_v`) is a FULL per-port vector consumed by the
+    // runtime inversion, which re-derives EVERY port.  To stay byte-identical on
+    // mixed stages, only engage the seed when every NL port resolved a target
+    // (true for an all-BJT group like the BA283); otherwise fall back to a
+    // build-time-only override of just the BJT ports.
+    let all_resolved = v_star.iter().all(|o| o.is_some());
+    if !all_resolved {
+        if v_star.iter().all(|o| o.is_none()) {
+            return;
+        }
+        // Partial: write each resolved BJT port's warm-start; leave dc_bias as the
+        // linear term (the safe pre-existing behaviour for unsupported mixes).
+        for i in 0..n_nl {
+            if let Some(v) = v_star[i] {
+                let w = v as pedalkernel_rt::Wave;
+                if i < stage.v_prev.len() {
+                    stage.v_prev[i] = w;
+                }
+                if i < stage.initial_v_prev.len() {
+                    stage.initial_v_prev[i] = w;
+                }
+                if i < stage.v_prev_2.len() {
+                    stage.v_prev_2[i] = w;
+                }
+            }
+        }
+        return;
+    }
+
+    // 1. Warm-start the NR at the solved operating point.
+    let v_seed: Vec<pedalkernel_rt::Wave> =
+        v_star.iter().map(|o| o.unwrap() as pedalkernel_rt::Wave).collect();
+
+    // GENERIC JOINT DC PATH (bead b2ps): instead of the per-type wave-domain
+    // dc_bias inversion below (which seeds a fixed point of the NR SUB-problem
+    // only — the reactive caps then drift), route the active operating-point seed
+    // through the stage's OWN runtime DC step to a JOINT NL+reactive fixed point.
+    // This is the same solver/scattering the audio loop iterates, so the seed is
+    // a consistent fixed point → stable.  Opt-in via PK_JOINTDC=1 while validating.
+    if std::env::var("PK_JOINTDC").as_deref() == Ok("1") {
+        match stage.solve_joint_dc_qpoint(&v_seed) {
+            Some(activity) => {
+                if std::env::var("PK_BJTDC_DEBUG").is_ok() || std::env::var("PK_JOINTDC_DEBUG").is_ok() {
+                    eprintln!("[PK_JOINTDC] joint DC qpoint converged (activity={activity:.4e}); seed committed");
+                }
+                return;
+            }
+            None => {
+                if std::env::var("PK_BJTDC_DEBUG").is_ok() || std::env::var("PK_JOINTDC_DEBUG").is_ok() {
+                    eprintln!("[PK_JOINTDC] joint DC qpoint did NOT converge; leaving linear baseline");
+                }
+                return;
+            }
+        }
+    }
+
+    for i in 0..n_nl {
+        let w = v_seed[i];
+        if i < stage.v_prev.len() {
+            stage.v_prev[i] = w;
+        }
+        if i < stage.initial_v_prev.len() {
+            stage.initial_v_prev[i] = w;
+        }
+        if i < stage.v_prev_2.len() {
+            stage.v_prev_2[i] = w;
+        }
+    }
+
+    // 2a. Passive-port DC reflected waves: at DC each coupling cap settles to its
+    //     node-voltage difference (rails resolved: gnd→0, vcc/supply→rail).  A cap
+    //     whose terminal is a floating signal node (behind another coupling cap,
+    //     e.g. the input/output) has no DC current and contributes 0.  These feed
+    //     the runtime inversion's passive-subtraction term so the seeded dc_bias
+    //     is exact.  `reactive_edges[k]` ↔ passive port k (build order).
+    let resolve = |node: NodeId| -> Option<f64> {
+        if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
+            Some(0.0)
+        } else if node == graph.vcc_node {
+            graph
+                .supply_voltages
+                .get(&graph.vcc_node)
+                .copied()
+                .or(Some(0.0))
+        } else if let Some(&v) = graph.supply_voltages.get(&node) {
+            Some(v)
+        } else if graph.supply_nodes.contains(&node) {
+            None // unknown supply value here; treat as no DC contribution
+        } else {
+            node_dc.get(&node).copied()
+        }
+    };
+    let mut passive_b: Vec<pedalkernel_rt::Wave> = Vec::with_capacity(reactive_edges.len());
+    for (eidx, _) in reactive_edges {
+        let e = &graph.edges[*eidx];
+        let v = match (resolve(e.node_a), resolve(e.node_b)) {
+            (Some(va), Some(vb)) => va - vb,
+            // A terminal with no resolved DC voltage (floating) ⇒ cap carries no
+            // DC ⇒ zero reflected-wave contribution.
+            _ => 0.0,
+        };
+        passive_b.push(v as pedalkernel_rt::Wave);
+    }
+
+    // 2b. Pre-charge each coupling cap to its DC voltage so `b_passive[k]` starts
+    //     at the value the inversion assumed (passive_b[k]).  Without this the caps
+    //     start at 0 V, the first-sample `known_a` is wrong, and the NR falls into
+    //     the cutoff fixed point before the caps can charge — exactly what the
+    //     triode path does for the cathode bypass cap.  `reactive_edges[k]` ↔
+    //     `passive_one_ports[k]` (same build order).
+    for (k, _) in reactive_edges.iter().enumerate() {
+        if let (Some(&one_port), Some(&bk)) =
+            (stage.passive_one_ports.get(k), passive_b.get(k))
+        {
+            // Seed the cap's *reflected wave* directly to `passive_b[k]` (the DC
+            // steady-state value the inversion assumed).  `wdf_set_incident` sets
+            // `wave_state = incident`, and `wdf_reflected` returns `wave_state`, so
+            // the first sample sees b_passive[k] = passive_b[k] exactly.  (The
+            // `CapacitorVoltage` setter instead yields 2·v on a fresh cap, which
+            // over-drives the first known_a and kicks the NR out of the active
+            // basin.)
+            one_port.wdf_set_incident(bk, &mut stage.passive_runtime_state);
+        }
+    }
+
+    // 2c. Store the seed and derive dc_bias from it (coupling-aware inversion).
+    //     The runtime re-runs the SAME derivation after any scattering recompute
+    //     (e.g. a feedback-pot move), so the servo bias survives pot changes.
+    stage.dc_qpoint_v = Some(v_seed);
+    stage.dc_qpoint_passive_b = passive_b;
+    stage.apply_dc_qpoint_seed();
+
+    // Skip the DC ramp: the operating point is already seeded into v_prev and
+    // dc_bias, so ramping dc_bias up from 0 would pull the NR back through the
+    // cold/cutoff basin (the BA283 servo has both a cutoff and an active fixed
+    // point — the warm-start must keep it in the active basin from sample 0).
+    stage.dc_ramp = 256;
+    stage.initial_dc_ramp = 256;
+
+    if std::env::var("PK_BJTDC_DEBUG").is_ok() {
+        eprintln!("[PK_BJTDC] v_star={v_star:?}");
+        eprintln!("[PK_BJTDC] dc_bias after seed = {:?}", stage.dc_bias);
+    }
+}
+
+/// Dense Gaussian elimination with partial pivoting (row-major `a`, in-place).
+/// Returns the solution to `a·x = b`, or `None` if singular.
+fn solve_dense_linear(a: &mut [f64], b: &mut [f64], n: usize) -> Option<Vec<f64>> {
+    for col in 0..n {
+        // Partial pivot.
+        let mut pivot = col;
+        let mut best = a[col * n + col].abs();
+        for row in (col + 1)..n {
+            let val = a[row * n + col].abs();
+            if val > best {
+                best = val;
+                pivot = row;
+            }
+        }
+        if best < 1e-18 {
+            return None;
+        }
+        if pivot != col {
+            for k in 0..n {
+                a.swap(col * n + k, pivot * n + k);
+            }
+            b.swap(col, pivot);
+        }
+        let diag = a[col * n + col];
+        for row in (col + 1)..n {
+            let factor = a[row * n + col] / diag;
+            if factor == 0.0 {
+                continue;
+            }
+            for k in col..n {
+                a[row * n + k] -= factor * a[col * n + k];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    // Back-substitution.
+    let mut x = vec![0.0_f64; n];
+    for row in (0..n).rev() {
+        let mut sum = b[row];
+        for k in (row + 1)..n {
+            sum -= a[row * n + k] * x[k];
+        }
+        x[row] = sum / a[row * n + row];
+    }
+    if x.iter().all(|v| v.is_finite()) {
+        Some(x)
+    } else {
+        None
     }
 }
