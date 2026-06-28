@@ -1001,6 +1001,58 @@ impl RootKind {
         )
     }
 
+    /// Short stable name for the root kind (diagnostic / stage-graph use).
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            RootKind::DiodePair(_) => "DiodePair",
+            RootKind::SingleDiode(_) => "SingleDiode",
+            RootKind::ExplicitDiodePair(_) => "ExplicitDiodePair",
+            RootKind::ExplicitSingleDiode(_) => "ExplicitSingleDiode",
+            RootKind::Zener(_) => "Zener",
+            RootKind::ZenerPair(_) => "ZenerPair",
+            RootKind::Jfet(_) => "Jfet",
+            RootKind::JfetVr(_) => "JfetVr",
+            RootKind::Triode(_) => "Triode",
+            RootKind::VariMu(_) => "VariMu",
+            RootKind::Pentode(_) => "Pentode",
+            RootKind::Mosfet(_) => "Mosfet",
+            RootKind::Bjt(_) => "Bjt",
+            RootKind::DiffPair(_) => "DiffPair",
+            RootKind::Ota(_) => "Ota",
+            RootKind::OpAmp(_) => "OpAmp",
+            RootKind::Passthrough => "Passthrough",
+            RootKind::ShortCircuit => "ShortCircuit",
+            RootKind::VoltageSourceDriver => "VoltageSourceDriver",
+            RootKind::CapacitorRoot { .. } => "CapacitorRoot",
+            RootKind::InductorRoot { .. } => "InductorRoot",
+            RootKind::ResistiveTermination => "ResistiveTermination",
+            RootKind::PassiveRType { .. } => "PassiveRType",
+        }
+    }
+
+    /// Whether this root requires a per-sample nonlinear (Newton-Raphson /
+    /// Wright-Omega) solve. Passive/linear terminations return `false`.
+    pub fn is_nonlinear(&self) -> bool {
+        matches!(
+            self,
+            RootKind::DiodePair(_)
+                | RootKind::SingleDiode(_)
+                | RootKind::ExplicitDiodePair(_)
+                | RootKind::ExplicitSingleDiode(_)
+                | RootKind::Zener(_)
+                | RootKind::ZenerPair(_)
+                | RootKind::Jfet(_)
+                | RootKind::Triode(_)
+                | RootKind::VariMu(_)
+                | RootKind::Pentode(_)
+                | RootKind::Mosfet(_)
+                | RootKind::Bjt(_)
+                | RootKind::DiffPair(_)
+                | RootKind::Ota(_)
+                | RootKind::OpAmp(_)
+        )
+    }
+
     /// K-method eligibility: (is_eligible, port_dimensions).
     /// Mirrors Component::k_method_candidacy() for the runtime root type.
     pub fn k_method_candidacy(&self) -> (bool, usize) {

@@ -210,147 +210,24 @@ fn interior_reaches_signal(
 /// elimination on the conductance matrix.
 fn compute_dc_voltages(
     group: &FlowGroup,
-    interior_nodes: &HashSet<NodeId>,
-    rail_set: &HashSet<NodeId>,
+    _interior_nodes: &HashSet<NodeId>,
+    _rail_set: &HashSet<NodeId>,
     graph: &CircuitGraph,
 ) -> HashMap<NodeId, f64> {
-    // Map interior nodes to matrix indices
-    let node_list: Vec<NodeId> = interior_nodes.iter().copied().collect();
-    let n = node_list.len();
-    if n == 0 {
-        return HashMap::new();
-    }
-    let node_idx: HashMap<NodeId, usize> =
-        node_list.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-
-    // Known rail voltages
-    let rail_voltage = |node: NodeId| -> f64 {
-        if node == graph.gnd_node {
-            0.0
-        } else if node == graph.vcc_node {
-            // Use the supply voltage from the graph
-            graph
-                .supply_voltages
-                .get(&graph.vcc_node)
-                .copied()
-                .unwrap_or(9.0)
-        } else if let Some(&v) = graph.supply_voltages.get(&node) {
-            v
-        } else if graph.ac_ground_nodes.contains(&node) {
-            0.0
-        } else {
-            0.0
-        }
-    };
-
-    // Build conductance matrix G and current vector I for KCL: G·V = I
-    // For each resistor edge: G[a][a] += 1/R, G[b][b] += 1/R,
-    //                         G[a][b] -= 1/R, G[b][a] -= 1/R
-    // If one terminal is a rail: I[other] += V_rail / R
-    let mut g_matrix = vec![0.0f64; n * n]; // Row-major
-    let mut i_vector = vec![0.0f64; n];
-
-    for &eidx in group.all_edges().iter() {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-
-        // Only resistors contribute at DC. Caps are open-circuit.
-        let r = match comp.kind.resistance() {
-            Some(r) if r > 0.0 => r,
-            _ => continue,
-        };
-        let g = 1.0 / r; // conductance
-
-        let a_interior = node_idx.get(&e.node_a);
-        let b_interior = node_idx.get(&e.node_b);
-        let a_rail = rail_set.contains(&e.node_a);
-        let b_rail = rail_set.contains(&e.node_b);
-
-        match (a_interior, b_interior) {
-            (Some(&ia), Some(&ib)) => {
-                // Both interior: stamp mutual conductance
-                g_matrix[ia * n + ia] += g;
-                g_matrix[ib * n + ib] += g;
-                g_matrix[ia * n + ib] -= g;
-                g_matrix[ib * n + ia] -= g;
-            }
-            (Some(&ia), None) if b_rail => {
-                // b is a rail with known voltage
-                g_matrix[ia * n + ia] += g;
-                i_vector[ia] += g * rail_voltage(e.node_b);
-            }
-            (None, Some(&ib)) if a_rail => {
-                // a is a rail with known voltage
-                g_matrix[ib * n + ib] += g;
-                i_vector[ib] += g * rail_voltage(e.node_a);
-            }
-            _ => {
-                // Both rails or both external — skip
-            }
-        }
-    }
-
-    // Solve G·V = I via Gaussian elimination (small system, n ≤ ~5)
-    let voltages = solve_linear_system(&mut g_matrix, &mut i_vector, n);
-
-    // Map back to node IDs
-    let mut result = HashMap::new();
-    if let Some(v) = voltages {
-        for (i, &node) in node_list.iter().enumerate() {
-            result.insert(node, v[i]);
-        }
-    }
-    result
-}
-
-/// Solve a small linear system Ax = b via Gaussian elimination with
-/// partial pivoting. Returns None if the system is singular.
-fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Option<Vec<f64>> {
-    // Forward elimination with partial pivoting
-    for col in 0..n {
-        // Find pivot
-        let mut max_row = col;
-        let mut max_val = a[col * n + col].abs();
-        for row in (col + 1)..n {
-            let val = a[row * n + col].abs();
-            if val > max_val {
-                max_val = val;
-                max_row = row;
-            }
-        }
-
-        if max_val < 1e-15 {
-            return None; // Singular
-        }
-
-        // Swap rows
-        if max_row != col {
-            for j in 0..n {
-                a.swap(col * n + j, max_row * n + j);
-            }
-            b.swap(col, max_row);
-        }
-
-        // Eliminate
-        let pivot = a[col * n + col];
-        for row in (col + 1)..n {
-            let factor = a[row * n + col] / pivot;
-            for j in col..n {
-                a[row * n + j] -= factor * a[col * n + j];
-            }
-            b[row] -= factor * b[col];
-        }
-    }
-
-    // Back substitution
-    let mut x = vec![0.0; n];
-    for col in (0..n).rev() {
-        let mut sum = b[col];
-        for j in (col + 1)..n {
-            sum -= a[col * n + j] * x[j];
-        }
-        x[col] = sum / a[col * n + col];
-    }
-
-    Some(x)
+    // ko5g.3 (pedalkernel-n07s): the resistor-divider DC solve is now the unified
+    // `bias::solve_network_bias`.  It performs the same conductance-MNA Gaussian
+    // elimination this function used to do, but additionally runs a rail-BFS to
+    // restrict the solved node set to interior nodes that have a DC path back to a
+    // rail through resistors.  That extra guard skips floating signal-path nodes
+    // (cap-isolated junctions) that previously produced zero-conductance rows and
+    // a singular matrix → an empty result.  For genuine resistor dividers (the
+    // StaticBias case this function is only ever reached for) the two solvers are
+    // numerically identical; the BFS only ever *removes* nodes the old code would
+    // have failed on, so the StaticBias voltages this returns are unchanged.
+    let supply_voltage = graph
+        .supply_voltages
+        .get(&graph.vcc_node)
+        .copied()
+        .unwrap_or(9.0);
+    super::bias::solve_network_bias(&group.all_edges(), graph, supply_voltage).dc_voltages
 }

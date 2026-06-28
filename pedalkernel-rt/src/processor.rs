@@ -246,6 +246,142 @@ impl Stage {
         }
     }
 
+    // ── Stage-graph diagnostic accessors ──────────────────────────────────
+    //
+    // These surface the compiled stage structure for machine-readable export
+    // (see `CompiledPedal::stage_graph_json`). They are read-only and do not
+    // affect processing.
+
+    /// Stable variant name used as the stage-graph node `kind`.
+    pub fn graph_kind(&self) -> &'static str {
+        match self {
+            Stage::Wdf(_) => "Wdf",
+            Stage::MultiNl(_) => "MultiNl",
+            Stage::Iir(_) => "Iir",
+            Stage::StateSpace(_) => "StateSpace",
+            Stage::BlackFeedback(_) => "BlackFeedback",
+            Stage::Blockwise(_) => "Blockwise",
+            Stage::KMethod { .. } => "KMethod",
+            Stage::SerialDelayedFeedback(_) => "SerialDelayedFeedback",
+        }
+    }
+
+    /// Human-readable label describing the stage's contents.
+    ///
+    /// For WDF/MultiNl stages this surfaces the per-stage `debug_label`
+    /// (component names) in debug builds; in release builds it falls back to
+    /// a structural descriptor (root kind, NL device names) so the label is
+    /// always populated.
+    pub fn graph_label(&self) -> alloc::string::String {
+        use alloc::string::ToString;
+        match self {
+            Stage::Wdf(wdf) => {
+                #[cfg(debug_assertions)]
+                if !wdf.debug_label.is_empty() {
+                    return wdf.debug_label.clone();
+                }
+                format!("WDF root={}", wdf.root.kind_name())
+            }
+            Stage::MultiNl(mnl) => {
+                #[cfg(debug_assertions)]
+                if !mnl.debug_label.is_empty() {
+                    return mnl.debug_label.clone();
+                }
+                let mut names = alloc::vec::Vec::new();
+                if let Some(ref dg) = mnl.device_groups {
+                    for g in &dg.groups {
+                        names.push(g.debug_name());
+                    }
+                } else {
+                    for d in &mnl.nl_devices {
+                        names.push(d.debug_name());
+                    }
+                }
+                format!("MultiNL [{}]", names.join(","))
+            }
+            Stage::Iir(_) => "IIR biquad".to_string(),
+            Stage::StateSpace(_) => "StateSpace LTI".to_string(),
+            Stage::BlackFeedback(_) => "BlackFeedback".to_string(),
+            Stage::Blockwise(k) => k.debug_label(),
+            Stage::KMethod { .. } => "KMethod child".to_string(),
+            Stage::SerialDelayedFeedback(s) => {
+                format!("SerialDelayedFeedback ({} rungs)", s.stages.len())
+            }
+        }
+    }
+
+    /// Signal-flow distance (BFS distance from input) used to order stages.
+    /// Returns `None` for stages that do not carry a flow distance.
+    pub fn flow_order(&self) -> Option<usize> {
+        match self {
+            Stage::Wdf(w) => Some(w.signal_flow_distance),
+            Stage::MultiNl(m) => Some(m.signal_flow_distance),
+            Stage::Iir(i) => Some(i.signal_flow_distance),
+            Stage::StateSpace(s) => Some(s.signal_flow_distance),
+            Stage::BlackFeedback(b) => Some(b.signal_flow_distance),
+            Stage::Blockwise(k) => Some(k.signal_flow_distance),
+            Stage::SerialDelayedFeedback(s) => Some(s.signal_flow_distance),
+            Stage::KMethod { .. } => None,
+        }
+    }
+
+    /// Number of feedback ports this stage exposes.
+    ///
+    /// - Blockwise: explicit internal feedback drives (`feedback_port_map`).
+    /// - MultiNl: 1 when an in-loop feedback op-amp is present.
+    /// - Wdf: 1 when a paired op-amp / all-pass feedback path is present.
+    /// - SerialDelayedFeedback: 1 (inherently a delayed feedback loop).
+    pub fn feedback_port_count(&self) -> usize {
+        match self {
+            Stage::Blockwise(k) => k.feedback_port_map.len(),
+            Stage::MultiNl(m) => usize::from(m.feedback_opamp.is_some()),
+            Stage::Wdf(w) => usize::from(
+                w.paired_opamp.is_some()
+                    || w.allpass_feedback.is_some()
+                    || w.allpass_direct.is_some(),
+            ),
+            Stage::SerialDelayedFeedback(_) => 1,
+            _ => 0,
+        }
+    }
+
+    /// Number of nonlinear roots/devices co-solved in this stage.
+    ///
+    /// - Wdf: 1 when the WDF root is nonlinear, else 0.
+    /// - MultiNl: number of co-solved NL *devices* — the cross-coupled device
+    ///   groups when grouped (e.g. 3 BJTs → 3), else the raw NL port count
+    ///   (`n_nl`). This is the key signal for whether N transistors are fused
+    ///   into one stage or split across stages.
+    /// - Blockwise: number of NL sub-stage blocks.
+    pub fn nl_root_count(&self) -> usize {
+        match self {
+            Stage::Wdf(w) => usize::from(w.root.is_nonlinear()),
+            Stage::MultiNl(m) => match &m.device_groups {
+                Some(dg) => dg.groups.len(),
+                None => m.n_nl,
+            },
+            Stage::Blockwise(k) => k.sub_stages.len(),
+            Stage::SerialDelayedFeedback(s) => s.stages.len(),
+            _ => 0,
+        }
+    }
+
+    /// Raw nonlinear *port* count (pre-grouping).
+    ///
+    /// For MultiNl this is `n_nl` (e.g. 6 for three 2-port BJTs); for grouped
+    /// stages it differs from [`nl_root_count`](Self::nl_root_count), which
+    /// counts physical devices. Surfaced separately so diagnostics can see both
+    /// the device count and the solver's port dimension.
+    pub fn nl_port_count(&self) -> usize {
+        match self {
+            Stage::Wdf(w) => usize::from(w.root.is_nonlinear()),
+            Stage::MultiNl(m) => m.n_nl,
+            Stage::Blockwise(k) => k.sub_stages.len(),
+            Stage::SerialDelayedFeedback(s) => s.stages.len(),
+            _ => 0,
+        }
+    }
+
     pub fn owned_port_ids(&self) -> Vec<usize> {
         let mut ids = Vec::new();
         for (_, binding) in self.k_method_ports() {
@@ -507,7 +643,13 @@ pub type StageRef = Stage;
 
 /// Return type for [`CompiledPedal::multi_nl_debug_info`]:
 /// `(stage_index, n_nl, scattering_flat, adapted_resistance, dc_bias)`.
-pub type MultiNlDebugInfo = (usize, usize, Vec<crate::Wave>, crate::Wave, Vec<crate::Wave>);
+pub type MultiNlDebugInfo = (
+    usize,
+    usize,
+    Vec<crate::Wave>,
+    crate::Wave,
+    Vec<crate::Wave>,
+);
 
 #[cfg(test)]
 mod tests {
@@ -811,9 +953,7 @@ mod tests {
             let mut work = alloc::vec![0.0; n_states];
             let mut peak = 0.0 as crate::Wave;
             for i in 0..n {
-                let u = crate::math::sin(
-                    2.0 * crate::math::PI * freq * i as crate::Wave / fs,
-                );
+                let u = crate::math::sin(2.0 * crate::math::PI * freq * i as crate::Wave / fs);
                 for r in 0..n_states {
                     let mut v = b_d[r] * u;
                     for cc in 0..n_states {
@@ -1102,9 +1242,7 @@ pub enum ControlTarget {
     /// re-stamps so the divided wiper voltage actually reaches the load. The
     /// matching [`WiperDivider`] entry (keyed by component id) carries the
     /// live position; this target marks that a divider exists for the control.
-    WiperDivider {
-        after_stage_idx: usize,
-    },
+    WiperDivider { after_stage_idx: usize },
     /// Modify the feedback pot in a BlackFeedback stage (recomputes Rf → gain).
     PotInBlackFeedbackStage(usize),
     /// Forward a control change to a sidechain sub-circuit.
@@ -3216,6 +3354,119 @@ impl CompiledPedal {
 
         s
     }
+
+    /// Machine-readable structured dump of the compiled stage structure.
+    ///
+    /// This is the structured counterpart to [`debug_dump`](Self::debug_dump):
+    /// instead of prose it emits a JSON `StageGraph` so tooling (the tracing
+    /// IDE, structure diagnostics) can reason about the compiled pipeline.
+    ///
+    /// Schema:
+    /// ```json
+    /// {
+    ///   "schema": "pedalkernel.stage_graph/1",
+    ///   "sample_rate": 48000.0,
+    ///   "supply_voltage": 12.0,
+    ///   "stage_count": 3,
+    ///   "nodes": [
+    ///     { "id": 0, "kind": "MultiNl", "label": "...",
+    ///       "flow_order": 1, "feedback_ports": 0, "nl_root_count": 3,
+    ///       "nl_port_count": 6, "bypass_serial": false }
+    ///   ],
+    ///   "edges": [
+    ///     { "from": 0, "to": 1, "kind": "Flow" }
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// Edges (Phase 1b) are inter-stage `Flow` edges derived from the
+    /// flow-distance ordering of audio-path (non-`bypass_serial`) stages.
+    pub fn stage_graph_json(&self) -> alloc::string::String {
+        use alloc::string::String;
+
+        // ── nodes ────────────────────────────────────────────────────────
+        let mut nodes = String::new();
+        for (i, stage) in self.stages.iter().enumerate() {
+            if i > 0 {
+                nodes.push(',');
+            }
+            let flow = match stage.flow_order() {
+                Some(d) => format!("{d}"),
+                None => String::from("null"),
+            };
+            nodes.push_str(&format!(
+                "\n    {{\"id\": {}, \"kind\": \"{}\", \"label\": \"{}\", \
+                 \"flow_order\": {}, \"feedback_ports\": {}, \"nl_root_count\": {}, \
+                 \"nl_port_count\": {}, \"bypass_serial\": {}}}",
+                i,
+                stage.graph_kind(),
+                json_escape(&stage.graph_label()),
+                flow,
+                stage.feedback_port_count(),
+                stage.nl_root_count(),
+                stage.nl_port_count(),
+                stage.bypass_serial(),
+            ));
+        }
+
+        // ── edges (Phase 1b: inter-stage Flow from flow-distance order) ────
+        //
+        // Order the audio-path stages (skip bypass_serial bias networks and
+        // KMethod children, which have no flow distance) by flow_order, then
+        // connect consecutive stages. Ties keep compiled (vector) order.
+        let mut audio: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+        for (i, stage) in self.stages.iter().enumerate() {
+            if stage.bypass_serial() {
+                continue;
+            }
+            if let Some(d) = stage.flow_order() {
+                audio.push((d, i));
+            }
+        }
+        audio.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        let mut edges = String::new();
+        for w in audio.windows(2) {
+            if !edges.is_empty() {
+                edges.push(',');
+            }
+            edges.push_str(&format!(
+                "\n    {{\"from\": {}, \"to\": {}, \"kind\": \"Flow\"}}",
+                w[0].1, w[1].1
+            ));
+        }
+
+        format!(
+            "{{\n  \"schema\": \"pedalkernel.stage_graph/1\",\n  \
+             \"sample_rate\": {},\n  \"supply_voltage\": {},\n  \
+             \"stage_count\": {},\n  \"nodes\": [{}\n  ],\n  \
+             \"edges\": [{}\n  ]\n}}\n",
+            self.sample_rate,
+            self.supply_voltage,
+            self.stages.len(),
+            nodes,
+            edges,
+        )
+    }
+}
+
+/// Escape a string for embedding in a JSON string literal.
+fn json_escape(input: &str) -> alloc::string::String {
+    let mut out = alloc::string::String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 impl CompiledPedal {
@@ -4772,12 +5023,7 @@ impl PedalProcessor for CompiledPedal {
         if !self.internal_ports.is_empty() {
             for idx in 0..self.internal_ports.len() {
                 let src = self.internal_ports[idx].source_node_id;
-                if let Some(&(_, v)) = self
-                    .node_signals
-                    .iter()
-                    .rev()
-                    .find(|(nid, _)| *nid == src)
-                {
+                if let Some(&(_, v)) = self.node_signals.iter().rev().find(|(nid, _)| *nid == src) {
                     self.internal_ports[idx].prev_value = v;
                 }
             }

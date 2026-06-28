@@ -49,6 +49,9 @@ enum Command {
     Debug {
         /// Path to the .pedal file.
         file: String,
+        /// Emit a structured JSON StageGraph instead of the prose dump.
+        #[arg(long)]
+        json: bool,
     },
     /// Diagnostics — compile-time MNA/scattering snapshot over a memory-mapped
     /// IPC file (Phase A of the diagnostics IPC channel).
@@ -157,7 +160,7 @@ fn main() {
             },
             &knobs,
         ),
-        Command::Debug { file } => cli::debug::run(&file),
+        Command::Debug { file, json } => cli::debug::run(&file, json),
         #[cfg(feature = "diag")]
         Command::Diag {
             file,
