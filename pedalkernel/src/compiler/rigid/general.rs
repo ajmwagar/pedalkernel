@@ -314,7 +314,9 @@ fn build_general_mna_from_edges_inner(
     // default and opt-in via `PK_BJT_DCQPOINT=1`.  When off, the engine is
     // byte-identical to baseline; the solver + inversion + the BA283 RCA are
     // committed for the stabilisation follow-up.
-    if std::env::var("PK_BJT_DCQPOINT").as_deref() == Ok("1") {
+    if std::env::var("PK_BJT_DCQPOINT").as_deref() == Ok("1")
+        || std::env::var("PK_JOINTDC").as_deref() == Ok("1")
+    {
         if let Some(node_dc) = compute_bjt_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage) {
             apply_bjt_dc_qpoint(
                 &mut stage,
@@ -1392,6 +1394,7 @@ fn assemble_multi_nl_stage(
         prev_input: 0.0,
         dc_qpoint_v: None,
         dc_qpoint_passive_b: Vec::new(),
+        dc_qpoint_joint: false,
     })
 }
 
@@ -2169,6 +2172,30 @@ fn apply_bjt_dc_qpoint(
     // 1. Warm-start the NR at the solved operating point.
     let v_seed: Vec<pedalkernel_rt::Wave> =
         v_star.iter().map(|o| o.unwrap() as pedalkernel_rt::Wave).collect();
+
+    // GENERIC JOINT DC PATH (bead b2ps): instead of the per-type wave-domain
+    // dc_bias inversion below (which seeds a fixed point of the NR SUB-problem
+    // only — the reactive caps then drift), route the active operating-point seed
+    // through the stage's OWN runtime DC step to a JOINT NL+reactive fixed point.
+    // This is the same solver/scattering the audio loop iterates, so the seed is
+    // a consistent fixed point → stable.  Opt-in via PK_JOINTDC=1 while validating.
+    if std::env::var("PK_JOINTDC").as_deref() == Ok("1") {
+        match stage.solve_joint_dc_qpoint(&v_seed) {
+            Some(activity) => {
+                if std::env::var("PK_BJTDC_DEBUG").is_ok() || std::env::var("PK_JOINTDC_DEBUG").is_ok() {
+                    eprintln!("[PK_JOINTDC] joint DC qpoint converged (activity={activity:.4e}); seed committed");
+                }
+                return;
+            }
+            None => {
+                if std::env::var("PK_BJTDC_DEBUG").is_ok() || std::env::var("PK_JOINTDC_DEBUG").is_ok() {
+                    eprintln!("[PK_JOINTDC] joint DC qpoint did NOT converge; leaving linear baseline");
+                }
+                return;
+            }
+        }
+    }
+
     for i in 0..n_nl {
         let w = v_seed[i];
         if i < stage.v_prev.len() {
