@@ -330,6 +330,8 @@ fn compile_subcircuit_equipment(
         power_supply: None,
         metrics_accumulator: None,
         metrics_buffer: None,
+        #[cfg(feature = "diag")]
+        diag_ring: None,
         input_loading: None,
         output_loading: None,
         output_dc_block: None,

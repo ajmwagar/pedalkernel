@@ -61,6 +61,8 @@ enum Command {
     ///   pedalkernel diag my.pedal --ipc out.pkdiag      # also write IPC file
     ///   pedalkernel diag --ipc out.pkdiag               # read + print IPC file
     ///   pedalkernel diag my.pedal --knob Gain=0.5       # apply a knob first
+    ///   pedalkernel diag my.pedal --ipc out.pkdiag --tail   # Phase B: live ring
+    ///   pedalkernel diag --ipc out.pkdiag --tail            # tail an existing file
     #[cfg(feature = "diag")]
     Diag {
         /// Path to the .pedal file to compile (omit to read --ipc only).
@@ -71,6 +73,21 @@ enum Command {
         /// Control overrides applied before capture (e.g. --knob Gain=0.5).
         #[arg(long = "knob")]
         knobs: Vec<String>,
+        /// Phase B: drive the pedal and live-tail the runtime ring (per-block
+        /// NR convergence + per-BJT op-points + per-stage levels). With a
+        /// `.pedal` file it runs the engine; with only `--ipc` it tails an
+        /// existing file written by another process.
+        #[arg(long)]
+        tail: bool,
+        /// Tail: test-sine frequency (Hz). Default 1000.
+        #[arg(long, default_value_t = 1000.0)]
+        tail_freq: f64,
+        /// Tail: test-sine amplitude (linear). Default 0.1.
+        #[arg(long, default_value_t = 0.1)]
+        tail_amp: f64,
+        /// Tail: number of blocks to capture before exiting. Default 64.
+        #[arg(long, default_value_t = 64)]
+        tail_blocks: usize,
     },
     /// Validate .pedal files — check for common errors and warnings.
     ///
@@ -145,8 +162,27 @@ fn main() {
         ),
         Command::Debug { file, json } => cli::debug::run(&file, json),
         #[cfg(feature = "diag")]
-        Command::Diag { file, ipc, knobs } => {
-            cli::diag::run(file.as_deref(), ipc.as_deref(), &knobs)
+        Command::Diag {
+            file,
+            ipc,
+            knobs,
+            tail,
+            tail_freq,
+            tail_amp,
+            tail_blocks,
+        } => {
+            if tail {
+                cli::diag::run_tail(
+                    file.as_deref(),
+                    ipc.as_deref(),
+                    &knobs,
+                    tail_freq,
+                    tail_amp,
+                    tail_blocks,
+                );
+            } else {
+                cli::diag::run(file.as_deref(), ipc.as_deref(), &knobs);
+            }
         }
         Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
         Command::Models {
