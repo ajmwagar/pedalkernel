@@ -393,7 +393,7 @@ fn print_tail_header(name: &str, source: &str, freq: f64, amp: f64) {
 
 fn print_frame_table_header() {
     eprintln!(
-        "{:>6} {:>7} {:>8} {:>11} {:>11} {:>11}  per-BJT: stage/grp  Vbe     Vce      Ic        Ib        gm",
+        "{:>6} {:>7} {:>8} {:>11} {:>11} {:>11}  per-device: ref/type  Vbe     Vce      Ic        Ib        gm",
         "block", "solves", "max_it", "max_resid", "in_rms", "out_rms"
     );
 }
@@ -424,9 +424,17 @@ fn print_frame(f: &RuntimeFrame) {
     );
     let n = (f.n_op_records as usize).min(f.op_records.len());
     for r in &f.op_records[..n] {
+        // Identity threaded from the compiler: report the physical component
+        // (ref + model type), NOT a guessed port index. Fall back to s{}/g{}
+        // only when identity is absent (older/non-BJT-non-tube paths).
+        let ident = if r.ref_str().is_empty() {
+            format!("s{}/g{}", r.stage_index, r.group_index)
+        } else {
+            format!("{}/{}", r.ref_str(), r.type_str())
+        };
         eprintln!(
-            "         s{:<2}/g{:<2}  Vbe={:+.4} Vce={:+.4} Ic={:+.4e} Ib={:+.4e} gm={:.5} g_ce={:.3e}",
-            r.stage_index, r.group_index, r.v_be, r.v_ce, r.i_c, r.i_b, r.gm, r.g_ce
+            "    {:<14}  Vbe={:+.4} Vce={:+.4} Ic={:+.4e} Ib={:+.4e} gm={:.5} g_ce={:.3e}",
+            ident, r.v_be, r.v_ce, r.i_c, r.i_b, r.gm, r.g_ce
         );
     }
 }

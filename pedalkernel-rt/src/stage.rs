@@ -4543,14 +4543,34 @@ impl NlDeviceGroupKind {
     }
 }
 
+/// Identity of one grouped NL device, threaded from the compiler.
+///
+/// The grouped Newton-Raphson solver only knows *port indices*; this carries the
+/// physical-component identity alongside each group so the runtime op-point
+/// readout can report `Q3 / 2N3055` instead of a guessed `grp0`. `ref_name` is
+/// the `.pedal` element id; `device_type` is the model name (e.g. `2N3055`).
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Clone, Debug, Default)]
+pub struct DeviceIdentity {
+    /// Component reference (the `.pedal` element id, e.g. `Q3` / `TR1`).
+    pub ref_name: String,
+    /// Device type / model name (e.g. `2N3055` / `BC184C` / `12AX7`).
+    pub device_type: String,
+}
+
 /// Grouped device configuration for MultiNlStage.
 ///
 /// When present, the multi-port NR solver uses cross-coupled device Jacobians
-/// instead of treating each port independently.
+/// instead of treating each port independently. `identities[g]` (when present)
+/// names `groups[g]`'s physical component — same length/order as `groups`.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiNlDeviceGroups {
     pub groups: Vec<NlDeviceGroupKind>,
     pub offsets: Vec<usize>,
+    /// Per-group physical-component identity (1:1 with `groups`). Empty when the
+    /// compiler did not supply identities (older paths / non-BJT-non-tube).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub identities: Vec<DeviceIdentity>,
 }
 
 /// Data needed to recompute the scattering matrix when pot values change.
@@ -6873,6 +6893,19 @@ multi_port_nr_solve_grouped_into(
                     0.0,
                 )
             };
+            // Attribute the op-point to the physical component (ref + model
+            // type) instead of a guessed port index. `identities` is 1:1 with
+            // `groups`; empty when the compiler did not supply identity.
+            let (ref_name, device_type) = match dg.identities.get(g) {
+                Some(id) => (
+                    OpPointRecord::pack_name(&id.ref_name),
+                    OpPointRecord::pack_name(&id.device_type),
+                ),
+                None => (
+                    [0u8; OpPointRecord::NAME_LEN],
+                    [0u8; OpPointRecord::NAME_LEN],
+                ),
+            };
             records[n] = OpPointRecord {
                 stage_index: stage_index as u32,
                 group_index: g as u32,
@@ -6882,6 +6915,8 @@ multi_port_nr_solve_grouped_into(
                 i_b,
                 gm,
                 g_ce,
+                ref_name,
+                device_type,
             };
             n += 1;
         }

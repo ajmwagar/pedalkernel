@@ -246,11 +246,25 @@ fn ba283_runtime_nr() {
     assert!(max_iters < 40, "grouped NR not converging (max_iters={max_iters})");
     assert!(max_resid < 1e-2, "grouped NR residual too high ({max_resid:.3e})");
 
+    // Per-device identity threaded from the compiler (ref + model type), so the
+    // op-point is attributed to the PHYSICAL transistor — never a guessed group
+    // index. This is the pedalkernel-3hsi fix that resolves the ej0v/kzla
+    // port→transistor mapping ambiguity.
+    eprintln!("\n  device identity (compiler-threaded ref/type, group order):");
+    for g in 0..ngroups {
+        let r = &series[0][g];
+        eprintln!(
+            "    group {g} = {:<6} ({:<8})  [build/port order — NO guessing]",
+            if r.ref_str().is_empty() { "?" } else { r.ref_str() },
+            if r.type_str().is_empty() { "?" } else { r.type_str() },
+        );
+    }
+
     // Per-group transconductance behavior across the swing.
     eprintln!("\n  per-BJT operating-point swing + transconductance check:");
     eprintln!(
-        "  {:>5} {:>9} {:>9} {:>11} {:>11} {:>11}",
-        "grp", "Vbe~", "gm~", "dVbe", "dIc", "dIc/(gm·dVbe)"
+        "  {:>10} {:>9} {:>9} {:>11} {:>11} {:>11} {:>11}",
+        "ref/type", "Vbe~", "Ic~", "gm~", "dVbe", "dIc", "dIc/(gm·dVbe)"
     );
     for g in 0..ngroups {
         // Find the two blocks with the largest Vbe spread for this group.
@@ -271,14 +285,21 @@ fn ba283_runtime_nr() {
         let dvbe = (c.v_be - a.v_be) as f64;
         let dic = (c.i_c - a.i_c) as f64;
         let gm_avg = ((a.gm + c.gm) / 2.0) as f64;
+        let ic_avg = ((a.i_c + c.i_c) / 2.0) as f64;
         let ratio = if gm_avg * dvbe != 0.0 {
             dic / (gm_avg * dvbe)
         } else {
             f64::NAN
         };
+        let ident = if a.ref_str().is_empty() {
+            format!("g{g}")
+        } else {
+            format!("{}/{}", a.ref_str(), a.type_str())
+        };
         eprintln!(
-            "  {g:>5} {:>9.4} {:>9.5} {:>11.3e} {:>11.3e} {:>13.3}",
+            "  {ident:>10} {:>9.4} {:>9.3e} {:>9.5} {:>11.3e} {:>11.3e} {:>13.3}",
             (a.v_be + c.v_be) / 2.0,
+            ic_avg,
             gm_avg,
             dvbe,
             dic,

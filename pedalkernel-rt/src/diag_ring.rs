@@ -68,7 +68,7 @@ pub const MAX_STAGE_LEVELS: usize = 16;
 /// `v_be`/`v_ce` are the NR operating-point voltages, `i_c`/`i_b` the device
 /// currents at that point, and `gm = ∂Ic/∂Vbe` the transconductance. The
 /// **whole BA283 question** is whether `i_c` swings with `v_be` at `gm`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct OpPointRecord {
     /// Stage index this device belongs to.
@@ -87,11 +87,66 @@ pub struct OpPointRecord {
     pub gm: f32,
     /// Self conductance on the CE port `∂Ic/∂Vce` (output conductance proxy).
     pub g_ce: f32,
+    /// Component **reference** (the `.pedal` element id, e.g. `Q3`/`TR1`), NUL-
+    /// padded ASCII. This is the device IDENTITY threaded from the compiler so
+    /// the op-point is attributed to a physical transistor, **never** a guessed
+    /// port index (`grp0`). Use [`Self::ref_str`] to read it.
+    pub ref_name: [u8; Self::NAME_LEN],
+    /// Device **type** (the model name, e.g. `2N3055`/`BC184C`), NUL-padded
+    /// ASCII. Read via [`Self::type_str`].
+    pub device_type: [u8; Self::NAME_LEN],
+}
+
+impl Default for OpPointRecord {
+    fn default() -> Self {
+        Self {
+            stage_index: 0,
+            group_index: 0,
+            v_be: 0.0,
+            v_ce: 0.0,
+            i_c: 0.0,
+            i_b: 0.0,
+            gm: 0.0,
+            g_ce: 0.0,
+            ref_name: [0u8; Self::NAME_LEN],
+            device_type: [0u8; Self::NAME_LEN],
+        }
+    }
 }
 
 impl OpPointRecord {
+    /// Fixed inline length for the component ref / device-type ASCII fields.
+    pub const NAME_LEN: usize = 16;
+
     /// Byte length of one op-point record.
-    pub const LEN: usize = 4 + 4 + 4 * 6; // 2×u32 + 6×f32 = 32
+    /// `2×u32 + 6×f32 + 2×NAME_LEN`.
+    pub const LEN: usize = 4 + 4 + 4 * 6 + 2 * Self::NAME_LEN;
+
+    /// Pack a `&str` into a fixed `[u8; NAME_LEN]`, truncating + NUL-padding.
+    pub fn pack_name(s: &str) -> [u8; Self::NAME_LEN] {
+        let mut out = [0u8; Self::NAME_LEN];
+        let b = s.as_bytes();
+        let n = b.len().min(Self::NAME_LEN);
+        out[..n].copy_from_slice(&b[..n]);
+        out
+    }
+
+    /// Decode a NUL-padded inline name field to `&str` (lossless for ASCII).
+    fn name_str(field: &[u8; Self::NAME_LEN]) -> &str {
+        let end = field.iter().position(|&b| b == 0).unwrap_or(Self::NAME_LEN);
+        // Safe: producers only write valid ASCII via `pack_name`.
+        core::str::from_utf8(&field[..end]).unwrap_or("")
+    }
+
+    /// The component reference (e.g. `Q3`) as a string.
+    pub fn ref_str(&self) -> &str {
+        Self::name_str(&self.ref_name)
+    }
+
+    /// The device type / model name (e.g. `2N3055`) as a string.
+    pub fn type_str(&self) -> &str {
+        Self::name_str(&self.device_type)
+    }
 
     fn write_le(&self, out: &mut [u8]) {
         out[0..4].copy_from_slice(&self.stage_index.to_le_bytes());
@@ -102,11 +157,19 @@ impl OpPointRecord {
         out[20..24].copy_from_slice(&self.i_b.to_le_bytes());
         out[24..28].copy_from_slice(&self.gm.to_le_bytes());
         out[28..32].copy_from_slice(&self.g_ce.to_le_bytes());
+        let nl = Self::NAME_LEN;
+        out[32..32 + nl].copy_from_slice(&self.ref_name);
+        out[32 + nl..32 + 2 * nl].copy_from_slice(&self.device_type);
     }
 
     fn read_le(buf: &[u8]) -> Self {
         let u32a = |o: usize| u32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
         let f32a = |o: usize| f32::from_le_bytes([buf[o], buf[o + 1], buf[o + 2], buf[o + 3]]);
+        let nl = Self::NAME_LEN;
+        let mut ref_name = [0u8; Self::NAME_LEN];
+        let mut device_type = [0u8; Self::NAME_LEN];
+        ref_name.copy_from_slice(&buf[32..32 + nl]);
+        device_type.copy_from_slice(&buf[32 + nl..32 + 2 * nl]);
         Self {
             stage_index: u32a(0),
             group_index: u32a(4),
@@ -116,6 +179,8 @@ impl OpPointRecord {
             i_b: f32a(20),
             gm: f32a(24),
             g_ce: f32a(28),
+            ref_name,
+            device_type,
         }
     }
 }
@@ -351,6 +416,8 @@ mod tests {
             i_b: 6.0e-6,
             gm: 0.033,
             g_ce: 1e-5,
+            ref_name: OpPointRecord::pack_name("Q3"),
+            device_type: OpPointRecord::pack_name("2N3055"),
         };
         f.stage_levels[0] = 0.1;
         f.stage_levels[1] = 0.032;
@@ -363,6 +430,9 @@ mod tests {
         assert_eq!(back.nr_solves, 7);
         assert_eq!(back.n_op_records, 1);
         assert_eq!(back.op_records[0], f.op_records[0]);
+        // Identity survives the binary round-trip and decodes back to &str.
+        assert_eq!(back.op_records[0].ref_str(), "Q3");
+        assert_eq!(back.op_records[0].type_str(), "2N3055");
         assert!((back.stage_levels[1] - 0.032).abs() < 1e-9);
     }
 
