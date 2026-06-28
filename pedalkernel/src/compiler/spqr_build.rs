@@ -2159,8 +2159,10 @@ pub fn compile_via_spqr_with_options(
                 // Find the WDF stage containing this component and wrap
                 // its leaf with a named VS in series. Record stage index
                 // so runtime only touches this stage for this port.
+                let mut injected = false;
                 for (si, stage) in compiled.stages.iter_mut().enumerate() {
                     if let pedalkernel_rt::processor::Stage::Wdf(ref mut wdf) = stage {
+                        // Primary path: NL-root WDF tree leaf wrapping.
                         let found = wdf.tree.wrap_leaf_with_vs(&comp_id, &port_binding.name);
                         if found {
                             wdf.tree.recompute();
@@ -2170,10 +2172,26 @@ pub fn compile_via_spqr_with_options(
                                 "  Injected port VS '{}' at leaf '{}' in stage {si}",
                                 port_binding.name, comp_id
                             );
+                            injected = true;
+                            break;
+                        }
+                        // Fallback: PassiveRType MNA superposition injection.
+                        if wdf.register_port_vs_injection(
+                            &port_binding.name,
+                            port_binding.node_id,
+                        ) {
+                            port_binding.stage_idx = si;
+                            #[cfg(test)]
+                            eprintln!(
+                                "  Injected port VS '{}' at node {} in stage {si} (PassiveRType MNA)",
+                                port_binding.name, port_binding.node_id
+                            );
+                            injected = true;
                             break;
                         }
                     }
                 }
+                let _ = injected;
             }
         }
 
@@ -3579,6 +3597,9 @@ fn build_passive_rtype_stage(
         child_runtime_states.push(child.bind_runtime_state());
     }
 
+    // `nodes` maps MNA index → circuit NodeId; needed for secondary port injection.
+    let mna_node_map: Vec<usize> = nodes.clone();
+
     let mut wdf = WdfStage::new(
         DynNode::Resistor(Some("__passive_rtype_dummy".to_string()), 1.0),
         RootKind::PassiveRType {
@@ -3597,6 +3618,8 @@ fn build_passive_rtype_stage(
             variable_resistors,
             needs_recompute: false,
             interp_table: None,
+            mna_node_map,
+            port_vs_injections: Vec::new(),
         },
         Oversampler::new(OversamplingFactor::X1),
     );
