@@ -422,6 +422,8 @@ mod tests {
                 i_b: 4.0e-7,
                 gm: 0.00027,
                 g_ce: 9.0e-8,
+                ref_name: OpPointRecord::pack_name("TR1"),
+                device_type: OpPointRecord::pack_name("BC184C"),
             };
             ring.push(&f);
         }
@@ -438,5 +440,8 @@ mod tests {
         assert_eq!(latest.nr_solves, 256);
         assert_eq!(latest.n_op_records, 1);
         assert!((latest.op_records[0].gm - 0.00027).abs() < 1e-9);
+        // Device identity survives the mmap IPC round-trip.
+        assert_eq!(latest.op_records[0].ref_str(), "TR1");
+        assert_eq!(latest.op_records[0].type_str(), "BC184C");
     }
 }

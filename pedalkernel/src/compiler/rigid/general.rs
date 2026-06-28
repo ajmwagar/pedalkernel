@@ -23,8 +23,8 @@ use super::super::dyn_node::DynNode;
 use super::super::graph::{CircuitGraph, NodeId};
 use super::super::helpers::{gummel_poon_model, pentode_model, triode_model, vari_mu_model};
 use super::super::stage::{
-    MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind, NlDeviceKind,
-    ScatteringRecomputeData, NR_ITERATION_BUDGET,
+    DeviceIdentity, MultiNlDeviceGroups, MultiNlScattering, MultiNlStage, NlDeviceGroupKind,
+    NlDeviceKind, ScatteringRecomputeData, NR_ITERATION_BUDGET,
 };
 use super::super::wdf_leaf::LeafKind;
 use super::StageStats;
@@ -238,8 +238,11 @@ fn build_general_mna_from_edges_inner(
         supply_voltage,
     );
 
-    // Step 7: Create NL device groups
-    let (nl_devices, device_groups) = create_nl_devices(&nl_kinds, supply_voltage)?;
+    // Step 7: Create NL device groups (threading per-device component identity
+    // — ref + model type — so the runtime op-point readout names the physical
+    // transistor, never a guessed port index).
+    let (nl_devices, device_groups) =
+        create_nl_devices(&nl_kinds, &nl_comp_labels, supply_voltage)?;
 
     // Step 8: Assemble stage
     let mut stage = assemble_multi_nl_stage(
@@ -1020,10 +1023,39 @@ fn is_diode_connected_bjt(kind: &NonlinearKind) -> bool {
 /// `supply_voltage` sets the initial `v_max` on tube devices so that
 /// the MNA solver's plate-voltage interpretation is correct from
 /// the first Newton-Raphson iteration.
+/// Human-readable device TYPE for a classified NL device — the model name when
+/// the kind carries one (e.g. `2N3055`, `BC184C`, `12AX7`), else a generic
+/// device-class label. This is the `device_type` half of the op-point identity.
+fn nl_device_type(kind: &NonlinearKind) -> String {
+    match kind {
+        NonlinearKind::BjtNpn { model_name, .. } | NonlinearKind::BjtPnp { model_name, .. } => {
+            model_name.clone()
+        }
+        NonlinearKind::Triode { model_name, .. } | NonlinearKind::Pentode { model_name, .. } => {
+            model_name.clone()
+        }
+        NonlinearKind::Jfet { model_name, .. } => model_name.clone(),
+        NonlinearKind::DiodePair(_) => "DiodePair".to_string(),
+        NonlinearKind::SingleDiode(_) => "Diode".to_string(),
+        NonlinearKind::Mosfet { .. } => "MOSFET".to_string(),
+        NonlinearKind::Zener { .. } => "Zener".to_string(),
+        NonlinearKind::Ota => "OTA".to_string(),
+    }
+}
+
 fn create_nl_devices(
     nl_kinds: &[NonlinearKind],
+    nl_comp_labels: &[String],
     supply_voltage: f64,
 ) -> Result<(Vec<NlDeviceKind>, Option<MultiNlDeviceGroups>), String> {
+    // `nl_comp_labels[i]` is the `.pedal` component ref of `nl_kinds[i]` (1:1,
+    // same build order); `nl_device_type(nl_kinds[i])` is its model type. The
+    // grouped branches below iterate `nl_kinds` in this same order, so the
+    // identity at index `i` attaches to the group built from `nl_kinds[i]`.
+    let identity_for = |i: usize| DeviceIdentity {
+        ref_name: nl_comp_labels.get(i).cloned().unwrap_or_default(),
+        device_type: nl_device_type(&nl_kinds[i]),
+    };
     // Check if all NL devices are tubes (triodes or pentodes) with a connected grid node.
     // Triodes and pentodes both use the 3-port grouped path [Vgk, Vpk] — the
     // grid-context solve is essential for push-pull stages of either tube type.
@@ -1057,9 +1089,11 @@ fn create_nl_devices(
     if all_tube_with_grid {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
+        let mut identities = Vec::new();
         let mut offset = 0usize;
-        for kind in nl_kinds {
+        for (i, kind) in nl_kinds.iter().enumerate() {
             offsets.push(offset);
+            identities.push(identity_for(i));
             match kind {
                 NonlinearKind::Triode {
                     model_name,
@@ -1095,13 +1129,22 @@ fn create_nl_devices(
                 _ => unreachable!(),
             }
         }
-        Ok((Vec::new(), Some(MultiNlDeviceGroups { groups, offsets })))
+        Ok((
+            Vec::new(),
+            Some(MultiNlDeviceGroups {
+                groups,
+                offsets,
+                identities,
+            }),
+        ))
     } else if all_bjt && any_bjt_two_port {
         let mut groups = Vec::new();
         let mut offsets = Vec::new();
+        let mut identities = Vec::new();
         let mut offset = 0usize;
-        for kind in nl_kinds {
+        for (i, kind) in nl_kinds.iter().enumerate() {
             offsets.push(offset);
+            identities.push(identity_for(i));
             match kind {
                 NonlinearKind::BjtNpn { model_name, .. } if !is_diode_connected_bjt(kind) => {
                     groups.push(NlDeviceGroupKind::BjtTwoPort(BjtTwoPort::new(
@@ -1125,7 +1168,14 @@ fn create_nl_devices(
                 _ => unreachable!(),
             }
         }
-        Ok((Vec::new(), Some(MultiNlDeviceGroups { groups, offsets })))
+        Ok((
+            Vec::new(),
+            Some(MultiNlDeviceGroups {
+                groups,
+                offsets,
+                identities,
+            }),
+        ))
     } else {
         let mut devices = Vec::new();
         for kind in nl_kinds {
