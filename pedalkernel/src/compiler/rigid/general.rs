@@ -248,8 +248,12 @@ fn build_general_mna_from_edges_inner(
         }
     }
 
-    // Step 5: Derive scattering matrix + Thevenin adaptation
-    let (scattering, vcc_injection_vec) =
+    // Step 5: Derive scattering matrix + Thevenin adaptation.
+    // r_adapted is the adapted input voltage-source port resistance (the real
+    // Thévenin impedance of the passive MNA at the injection node), used by the
+    // runtime scattering recompute so a pot/LED move re-derives with the SAME
+    // adapted input port instead of the old 1000 Ω placeholder.
+    let (scattering, vcc_injection_vec, r_adapted) =
         derive_scattering(&mna, &mut ports, &mut nl_port_resistances, n_nl, vcc_vs_idx)?;
 
     let n_total = ports.len();
@@ -897,7 +901,7 @@ fn derive_scattering(
     nl_port_resistances: &mut [f64],
     n_nl: usize,
     vcc_vs_idx: Option<usize>,
-) -> Result<(Vec<f64>, Option<Vec<f64>>), String> {
+) -> Result<(Vec<f64>, Option<Vec<f64>>, f64), String> {
     let n_total = ports.len();
     let mut vcc_injection: Option<Vec<f64>> = None;
 
@@ -916,8 +920,27 @@ fn derive_scattering(
         s
     };
 
-    // Iterative Thevenin adaptation of NL port resistances
-    for _iter in 0..5 {
+    // Iterative Thevenin adaptation.
+    //
+    // NL ports (0..n_nl): adapt each to the passive driving-point impedance the
+    // rest of the network presents at that port (drive the self-reflection to 0).
+    //
+    // Input voltage-source port (the LAST port, index n_total-1): this carries
+    // the injected audio. Historically it was pinned to a magic 1000 Ω
+    // placeholder, which divides the injected wave by the wrong ratio — a pure,
+    // shape-correct LEVEL deficit (the BA283 ~31 dB input-injection gap). Adapt
+    // it the SAME WDF-correct way as the NL ports: drive its self-reflection to
+    // ~0 so the port resistance equals the real Thévenin impedance the PASSIVE
+    // MNA presents at the injection node. This is passive adaptation only — it
+    // folds NO device small-signal Jacobian into the port (that would
+    // double-count the coupling the grouped NR already solves).
+    //
+    // Reactive ports (n_nl..n_total-1) are intentionally left at their physical
+    // `kind.rp()`: their resistance IS the discretized reactance and must not be
+    // adapted away.
+    let input_port = n_total - 1;
+    let adapt_input = n_total > n_nl; // there is an input VS port to adapt
+    for _iter in 0..8 {
         let mut needs_recompute = false;
         for i in 0..n_nl {
             let s_refl = scattering[i * n_total + i];
@@ -926,6 +949,17 @@ fn derive_scattering(
                 if z_th.is_finite() && z_th > 1.0 {
                     nl_port_resistances[i] = z_th;
                     ports[i].resistance = z_th;
+                    needs_recompute = true;
+                }
+            }
+        }
+        if adapt_input {
+            let s_refl = scattering[input_port * n_total + input_port];
+            if s_refl.abs() > 0.05 {
+                let r = ports[input_port].resistance;
+                let z_th = r * (1.0 + s_refl) / (1.0 - s_refl);
+                if z_th.is_finite() && z_th > 1.0 {
+                    ports[input_port].resistance = z_th;
                     needs_recompute = true;
                 }
             }
@@ -949,7 +983,13 @@ fn derive_scattering(
         }
     }
 
-    Ok((scattering, vcc_injection))
+    let r_adapted = if adapt_input {
+        ports[input_port].resistance
+    } else {
+        1000.0
+    };
+
+    Ok((scattering, vcc_injection, r_adapted))
 }
 
 /// Step 6: Compute DC bias from VCC injection vector.
@@ -1248,7 +1288,12 @@ fn assemble_multi_nl_stage(
     let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
-    let r_adapted = 1000.0;
+    // The input voltage-source port is the LAST port; its resistance was adapted
+    // to the passive driving-point impedance in `derive_scattering` (no longer the
+    // 1000 Ω placeholder). Reuse that exact value for the runtime scattering
+    // recompute so a pot/LED move re-derives the matrix with the SAME adapted input
+    // port that compile time baked in.
+    let r_adapted = port_resistances.last().copied().unwrap_or(1000.0);
     let extract_coeffs = extract_output_nodes.map(|out| {
         let (out_pos, out_neg) = out.as_tuple();
         mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
