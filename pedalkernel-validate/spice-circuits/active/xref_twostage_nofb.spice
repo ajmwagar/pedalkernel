@@ -1,0 +1,32 @@
+* ============================================================================
+* XREF control: two 2N3904 CE stages, NO global feedback (divider-biased)
+* PedalKernel Cross-Reference Experiment (pedalkernel-0c2p)
+* ============================================================================
+* Faithful twin of circuits/active/xref_twostage_nofb.pedal. Isolates whether
+* the WDF silence is triggered by the GLOBAL FEEDBACK loop vs a generic
+* two-coupled-BJT issue. +24 V rail.
+* ============================================================================
+VCC   vcc   0     DC 24
+
+Cin   v_in  ni    10u
+Rin   ni    nb1   2.2k
+
+RB1a  vcc   nb1   220k
+RB1b  nb1   0     33k
+
+RC1   vcc   nc1   10k
+Q1    nc1   nb1   ne1   2N3904
+RE1   ne1   0     1k
+CE1   ne1   0     220u
+
+RC2   vcc   nout  4.7k
+Q2    nout  nc1   ne2   2N3904
+RE2   ne2   0     1k
+CE2   ne2   0     220u
+
+Cout  nout  v_out 10u
+RL    v_out 0     10k
+
+.MODEL 2N3904 NPN(IS=6.734f BF=416.4 BR=0.7371 NF=1.0 NR=1.0 VAF=74.03 VAR=28.0
++ IKF=66.78m IKR=10m ISE=6.734f NE=1.259 ISC=0 NC=2.0 RB=10 RE=0.1 RC=1
++ CJE=4.493p VJE=0.7 MJE=0.2593 CJC=3.638p VJC=0.75 MJC=0.2593 TF=301.2p TR=24n)
