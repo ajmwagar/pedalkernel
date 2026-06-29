@@ -1,0 +1,59 @@
+# XREF control: SAME two 2N3904 CE stages as xref_feedback_amp, but with NO
+# global feedback (Rf/Cf removed; Q1 base biased by a normal divider instead).
+# Used to isolate whether the WDF silence is triggered by the GLOBAL FEEDBACK
+# loop specifically, vs. a generic two-coupled-BJT problem.
+#
+# Each stage is a standard divider-biased, emitter-bypassed CE amp, DC-coupled.
+
+pedal "XREF Two-Stage No-FB" {
+  supply 24V
+
+  ports {
+    in: input
+    out: output
+  }
+
+  components {
+    Cin:  cap(10u, electrolytic)
+    Rin:  resistor(2k2)
+
+    RB1a: resistor(220k)           # Q1 base divider (to vcc)
+    RB1b: resistor(33k)            # Q1 base divider (to gnd)
+
+    Q1:   npn(2n3904)
+    RC1:  resistor(10k)
+    RE1:  resistor(1k)
+    CE1:  cap(220u, electrolytic)
+
+    Q2:   npn(2n3904)
+    RC2:  resistor(4k7)
+    RE2:  resistor(1k)
+    CE2:  cap(220u, electrolytic)
+
+    Cout: cap(10u, electrolytic)
+    RL:   resistor(10k)
+  }
+
+  nets {
+    in -> Cin.a
+    Cin.b -> Rin.a
+    Rin.b -> Q1.base, RB1a.b, RB1b.a       # nb1
+    RB1a.a -> vcc
+    RB1b.b -> gnd
+
+    vcc -> RC1.a
+    RC1.b -> Q1.collector, Q2.base          # nc1
+    Q1.emitter -> RE1.a, CE1.a
+    RE1.b -> gnd
+    CE1.b -> gnd
+
+    vcc -> RC2.a
+    RC2.b -> Q2.collector, Cout.a           # nout
+    Q2.emitter -> RE2.a, CE2.a
+    RE2.b -> gnd
+    CE2.b -> gnd
+
+    Cout.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

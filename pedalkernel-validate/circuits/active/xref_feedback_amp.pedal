@@ -1,0 +1,72 @@
+# XREF Feedback Amplifier — minimal 2-BJT shunt-feedback gain block
+# PedalKernel Cross-Reference Experiment (pedalkernel-0c2p)
+#
+# TEXTBOOK trustworthy discrete feedback amp, FAITHFUL to the matching
+# spice-circuits/active/xref_feedback_amp.spice (identical nodes / values /
+# 2N3904 model). Two DC-coupled NPN common-emitter stages, each emitter
+# bypassed for high open-loop gain, with GLOBAL shunt-shunt feedback:
+# out -> Rf -> Q1 base, with Cf (the reactive port INSIDE the feedback loop)
+# in parallel with Rf. Rf also DC-biases Q1's base. +24 V single rail.
+#
+# Node map (pedal net  <->  spice node):
+#   Q1.base / Rf.b / Cf.b / Rin.b   = nb1   (summing node)
+#   Q1.collector / Q2.base          = nc1
+#   Q2.collector / Rf.a / Cf.a / RC2.b / Cout.a = nout (output)
+#   Q1.emitter = ne1 , Q2.emitter = ne2
+#
+# Design feedback point: Rf = 33k (closed-loop ~+19 dB, HF rolloff in SPICE).
+
+pedal "XREF Feedback Amp" {
+  supply 24V
+
+  ports {
+    in: input
+    out: output
+  }
+
+  components {
+    Cin:  cap(10u, electrolytic)   # input coupling
+    Rin:  resistor(2k2)            # base series into summing node nb1
+
+    Rf:   resistor(33k)            # GLOBAL shunt feedback out -> nb1 (DESIGN point)
+    Cf:   cap(100p)                # feedback/compensation cap, parallel with Rf
+
+    Q1:   npn(2n3904)              # input common-emitter
+    RC1:  resistor(10k)            # Q1 collector load
+    RE1:  resistor(1k)             # Q1 emitter
+    CE1:  cap(220u, electrolytic)  # Q1 emitter bypass
+
+    Q2:   npn(2n3904)              # output common-emitter (DC-coupled from nc1)
+    RC2:  resistor(4k7)            # Q2 collector load
+    RE2:  resistor(1k)             # Q2 emitter
+    CE2:  cap(220u, electrolytic)  # Q2 emitter bypass
+
+    Cout: cap(10u, electrolytic)   # output coupling
+    RL:   resistor(10k)            # output load
+  }
+
+  nets {
+    # input -> summing node nb1
+    in -> Cin.a
+    Cin.b -> Rin.a
+    Rin.b -> Q1.base, Rf.b, Cf.b           # nb1
+
+    # Q1 common-emitter
+    vcc -> RC1.a
+    RC1.b -> Q1.collector, Q2.base          # nc1  (Q1 collector = Q2 base)
+    Q1.emitter -> RE1.a, CE1.a              # ne1
+    RE1.b -> gnd
+    CE1.b -> gnd
+
+    # Q2 common-emitter output stage
+    vcc -> RC2.a
+    RC2.b -> Q2.collector, Rf.a, Cf.a, Cout.a   # nout (output node, feedback source)
+    Q2.emitter -> RE2.a, CE2.a              # ne2
+    RE2.b -> gnd
+    CE2.b -> gnd
+
+    # output tap
+    Cout.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

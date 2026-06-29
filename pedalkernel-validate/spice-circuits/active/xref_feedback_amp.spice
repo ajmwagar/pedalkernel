@@ -1,0 +1,54 @@
+* ============================================================================
+* XREF Feedback Amplifier — minimal 2-BJT shunt-feedback gain block
+* PedalKernel Cross-Reference Experiment (pedalkernel-0c2p)
+* ============================================================================
+* PURPOSE: a TEXTBOOK, trustworthy discrete feedback amplifier, faithful in
+* BOTH this SPICE deck and the matching xref_feedback_amp.pedal (identical
+* nodes / values / model). Used to decide whether the BA283 small-signal-gain
+* bug is an ENGINE bug (WDF mishandles discrete global feedback loops) or a
+* BA283-TOPOLOGY bug.
+*
+* Topology: two DC-coupled NPN common-emitter stages (2N3904), each emitter
+* bypassed for high open-loop gain, with GLOBAL shunt-shunt (transresistance)
+* feedback: out -> Rf -> Q1 base. A compensation cap Cf sits in parallel with
+* Rf (the reactive port INSIDE the feedback loop — this stresses the engine's
+* "reactive-port-in-feedback" path). Rf also DC-biases Q1's base (no floating
+* base). +24 V single rail, Class A.
+*
+* Small-signal closed-loop gain is set by the summing-node ratio Rf/Rin
+* (shunt-shunt feedback with high loop gain), magnitude ~= Rf/Rin, inverting.
+*
+* NOTE: Rf and Cf values are templated (RF_VALUE / CF_VALUE) and substituted by
+* the harness/script so the feedback amount can be swept in BOTH tools.
+* ============================================================================
+VCC   vcc   0     DC 24
+
+* ── Input coupling -> Q1 base summing node (nb1) ─────────────────────────────
+Cin   v_in  ni    10u
+Rin   ni    nb1   2.2k
+
+* ── Global shunt feedback: out -> Rf (|| Cf) -> Q1 base (nb1) ────────────────
+* Rf both closes the AC loop and DC-biases nb1 from the output node.
+Rf    nout  nb1   RF_VALUE
+Cf    nout  nb1   CF_VALUE
+
+* ── Q1 common-emitter input stage (emitter bypassed) ─────────────────────────
+RC1   vcc   nc1   10k
+Q1    nc1   nb1   ne1   2N3904
+RE1   ne1   0     1k
+CE1   ne1   0     220u
+
+* ── Q2 common-emitter output stage (DC-coupled from Q1 collector) ────────────
+RC2   vcc   nout  4.7k
+Q2    nout  nc1   ne2   2N3904
+RE2   ne2   0     1k
+CE2   ne2   0     220u
+
+* ── Output coupling + load ───────────────────────────────────────────────────
+Cout  nout  v_out 10u
+RL    v_out 0     10k
+
+* ── Model (identical to engine pedalkernel/models/transistors.model) ─────────
+.MODEL 2N3904 NPN(IS=6.734f BF=416.4 BR=0.7371 NF=1.0 NR=1.0 VAF=74.03 VAR=28.0
++ IKF=66.78m IKR=10m ISE=6.734f NE=1.259 ISC=0 NC=2.0 RB=10 RE=0.1 RC=1
++ CJE=4.493p VJE=0.7 MJE=0.2593 CJC=3.638p VJC=0.75 MJC=0.2593 TF=301.2p TR=24n)
