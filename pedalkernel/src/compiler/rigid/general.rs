@@ -916,14 +916,50 @@ fn derive_scattering(
         s
     };
 
-    // Iterative Thevenin adaptation of NL port resistances
+    // Iterative Thevenin adaptation of NL port resistances.
+    //
+    // ADAPTATION-FLOOR EXPERIMENT (pedalkernel-0c2p), GATED OFF BY DEFAULT:
+    // The Thevenin port-R adaptation shrinks a conducting NL-junction port when
+    // its self-reflection s_refl is negative ((1+s)/(1-s) < 1) — the multi-BJT
+    // Vbe ports collapse 1000 -> ~154 ohm. The dissection hypothesised that
+    // this collapse was the cause of the grouped-NR divergence/gain-loss, and
+    // that PINNING/FLOORING Rp would restore convergence. EXPERIMENT RESULT:
+    // it does NOT — pinning Rp at 1000 ohm leaves the port BADLY mismatched
+    // (s_refl jumps -0.078 -> -0.355) and the grouped-NR diverges WORSE
+    // (residual ~30 vs ~10). The Rp collapse is the adaptation correctly
+    // matching the port, not the root cause. So this stays an opt-in probe and
+    // the default path is byte-identical to baseline.
+    //
+    // PK_PIN_NL_RP gate:
+    //   unset / "off" : original behavior (DEFAULT, byte-identical baseline).
+    //   "floor"       : never shrink an NL port below its initial port R.
+    //   "pin"         : hard-pin NL ports to their initial R (skip NL adapt).
+    let rp_mode = std::env::var("PK_PIN_NL_RP").unwrap_or_default();
+    let floor_enabled = rp_mode == "floor" || rp_mode == "pin";
+    let pin_mode = rp_mode == "pin";
+    // Initial NL port resistances = the device small-signal port resistance.
+    let nl_rp_init: Vec<f64> = nl_port_resistances[..n_nl].to_vec();
     for _iter in 0..5 {
         let mut needs_recompute = false;
         for i in 0..n_nl {
+            if pin_mode {
+                // Experiment: do not adapt NL ports at all.
+                continue;
+            }
             let s_refl = scattering[i * n_total + i];
             if s_refl.abs() > 0.05 {
-                let z_th = nl_port_resistances[i] * (1.0 + s_refl) / (1.0 - s_refl);
-                if z_th.is_finite() && z_th > 1.0 {
+                let mut z_th = nl_port_resistances[i] * (1.0 + s_refl) / (1.0 - s_refl);
+                // Floor: never reduce a conducting NL junction port below its
+                // initial small-signal port resistance — only adapt UPWARD.
+                if floor_enabled && z_th < nl_rp_init[i] {
+                    z_th = nl_rp_init[i];
+                }
+                // The `(!floor_enabled || changed)` guard keeps the DEFAULT
+                // (off) path byte-identical to the original accept condition
+                // `z_th.is_finite() && z_th > 1.0`; `changed` only matters once
+                // the floor clamps a port to its already-current value.
+                let changed = (z_th - nl_port_resistances[i]).abs() > 1e-12;
+                if z_th.is_finite() && z_th > 1.0 && (!floor_enabled || changed) {
                     nl_port_resistances[i] = z_th;
                     ports[i].resistance = z_th;
                     needs_recompute = true;
@@ -947,6 +983,16 @@ fn derive_scattering(
             }
             scattering = s;
         }
+    }
+
+    if std::env::var("PK_RP_TRACE").is_ok() && n_nl > 0 {
+        let diag: Vec<f64> = (0..n_nl).map(|i| scattering[i * n_total + i]).collect();
+        eprintln!(
+            "[PK_RP_TRACE] mode={:?} n_nl={n_nl} nl_rp={:?} s_diag={:?}",
+            std::env::var("PK_PIN_NL_RP").unwrap_or_default(),
+            &nl_port_resistances[..n_nl],
+            diag.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>()
+        );
     }
 
     Ok((scattering, vcc_injection))
