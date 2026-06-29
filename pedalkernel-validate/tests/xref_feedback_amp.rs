@@ -279,3 +279,44 @@ fn xref_wdf_gain_vs_feedback() {
         g1k.iter().map(|g| format!("{g:.2}")).collect::<Vec<_>>()
     );
 }
+
+/// ISOLATED steady-state trace dump for the 2-BJT cascade on the MultiNl path.
+/// Run with: cargo test -p pedalkernel-validate --features debug-trace \
+///   --test xref_feedback_amp xref_dump_twostage_multinl -- --nocapture
+/// Set PK_TRACE_SKIP to the warmup count so the trace fires at steady state.
+#[test]
+fn xref_dump_twostage_multinl() {
+    let src = std::fs::read_to_string(pedal_path_named("xref_twostage_nofb.pedal")).unwrap();
+    let amp = 0.01;
+    let freq = 1_000.0;
+    let g = wdf_gain_db_opt(&src, freq, amp, true);
+    eprintln!("\n  TWOSTAGE NOFB (MultiNl) gain @1kHz = {g:.3} dB");
+}
+
+/// Same dump for the WORKING single-BJT feedback amp (WDF-root path).
+#[test]
+fn xref_dump_single_bjt() {
+    let src = std::fs::read_to_string(pedal_path_named("xref_single_bjt_fb.pedal")).unwrap();
+    let amp = 0.01;
+    let freq = 1_000.0;
+    let g = wdf_gain_db_opt(&src, freq, amp, false);
+    eprintln!("\n  SINGLE-BJT FB gain @1kHz = {g:.3} dB");
+}
+
+/// DEFAULT-path dump for the 2-BJT cascade (no skip_blockwise → the path the
+/// controls test exercises, which gave -123 dB).
+#[test]
+fn xref_dump_twostage_default() {
+    let src = std::fs::read_to_string(pedal_path_named("xref_twostage_nofb.pedal")).unwrap();
+    let g = wdf_gain_db_opt(&src, 1_000.0, 0.01, false);
+    eprintln!("\n  TWOSTAGE NOFB (default path) gain @1kHz = {g:.3} dB");
+}
+
+/// Dump the SHUNT-FEEDBACK amp on the MultiNl path (the BA283 path: the global
+/// feedback loop forces the two BJTs into a single grouped-NR MultiNl group).
+#[test]
+fn xref_dump_feedback_multinl() {
+    let src = pedal_source_with_rf("33k");
+    let g = wdf_gain_db_opt(&src, 1_000.0, 0.01, true);
+    eprintln!("\n  FEEDBACK AMP (MultiNl, Rf=33k) gain @1kHz = {g:.3} dB");
+}

@@ -9,6 +9,8 @@ license = "AGPL-3.0-or-later"
 # Live runtime diagnostics ring (IPC Phase B). Enables the BA283 grouped-NR
 # transconductance harness (`ba283_runtime_nr`). Off by default.
 diag = ["pedalkernel/diag"]
+# Forward the rt-level WDF signal trace (per-port a/b/v dumps in MultiNlStage).
+debug-trace = ["pedalkernel/debug-trace"]
 
 [dependencies]
 pedalkernel = { path = "../pedalkernel", version = "0.1", default-features = false, features = ["gummel-poon", "analysis"] }

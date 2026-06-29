@@ -30,7 +30,7 @@ gummel-poon = []
 ebers-moll = []
 # Enable detailed signal-level tracing for debugging WDF pipeline.
 # Zero-cost when disabled (tracing macros are no-ops without a subscriber).
-debug-trace = []
+debug-trace = ["pedalkernel-rt/debug-trace"]
 solver-stats = []
 # Deliberately injected faults for validating test tolerances.
 # Zero-cost when disabled — all hooks are behind #[cfg(feature)].

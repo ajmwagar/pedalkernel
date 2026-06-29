@@ -335,6 +335,12 @@ static TRACE_COUNT_MNL: AtomicU64 = AtomicU64::new(0);
 #[cfg(feature = "debug-trace")]
 const MAX_TRACE_MNL: u64 = 20;
 
+/// Total `process()` invocations seen (used to delay the trace window past the
+/// DC-ramp / coupling-cap settle so the dumped numbers are STEADY STATE, not
+/// startup transients). Configurable via env `PK_TRACE_SKIP` (default 30000).
+#[cfg(feature = "debug-trace")]
+static TRACE_INVOCATIONS_MNL: AtomicU64 = AtomicU64::new(0);
+
 // ═══════════════════════════════════════════════════════════════════════════
 // K-method lookup table for NL roots
 // ═══════════════════════════════════════════════════════════════════════════
@@ -6368,9 +6374,18 @@ impl MultiNlStage {
             #[cfg(feature = "debug-trace")]
             {
                 static NR_TRACE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                let n = NR_TRACE.fetch_add(1, Ordering::Relaxed);
-                if n < 5 {
-                    std::eprintln!("[NR-input] n_nl={} sample={:.6e} comp={} known_a={:?} b_passive={:?} b_adapted={:.6e} s_nl_adapted={:?}", n_nl, sample, compensation, known_a, b_passive, b_adapted, &self.scattering.s_nl_adapted);
+                // Only trace at steady state (past PK_TRACE_SKIP invocations),
+                // and only a handful of consecutive samples.
+                let inv_now = TRACE_INVOCATIONS_MNL.load(Ordering::Relaxed);
+                let skip: u64 = std::env::var("PK_TRACE_SKIP")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30_000);
+                if inv_now >= skip {
+                    let n = NR_TRACE.fetch_add(1, Ordering::Relaxed);
+                    if n < 16 {
+                        std::eprintln!("[NR-input] n_nl={} sample={:.6e} known_a={:.5?} b_passive={:.5?} b_adapted={:.6e}", n_nl, sample, known_a, b_passive, b_adapted);
+                    }
                 }
             }
             // 3. Multi-port NR solve (skipped when n_nl=0, e.g. linearized OTA)
@@ -6484,9 +6499,19 @@ multi_port_nr_solve_grouped_into(
             #[cfg(feature = "debug-trace")]
             {
                 static NR_TRACE2: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                let n = NR_TRACE2.fetch_add(1, Ordering::Relaxed);
-                if n < 5 {
-                    std::eprintln!("[NR-output] b_nl={:?} v_prev={:?}", b_nl, self.v_prev);
+                let inv_now = TRACE_INVOCATIONS_MNL.load(Ordering::Relaxed);
+                let skip: u64 = std::env::var("PK_TRACE_SKIP")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(30_000);
+                if inv_now >= skip {
+                    let n = NR_TRACE2.fetch_add(1, Ordering::Relaxed);
+                    if n < 16 {
+                        // v_prev IS the converged per-port node voltage (v=(a+b)/2).
+                        // Port order for 2-BJT cascade: [Q1.Vbe, Q1.Vce(=nc1),
+                        // Q2.Vbe(=nc1), Q2.Vce(=nout)]. residual from workspace.
+                        std::eprintln!("[NR-output] iters={} b_nl={:.5?} v_port={:.5?}", self.nr_workspace.iters_used, b_nl, self.v_prev);
+                    }
                 }
             }
             // 4. Build full b-vector for scatter_down (into pre-allocated buffer):
@@ -6579,7 +6604,16 @@ multi_port_nr_solve_grouped_into(
             self.nr_workspace.frozen_failures == 0 && self.nr_workspace.has_cached_jac && n_nl > 0;
 
         #[cfg(feature = "debug-trace")]
-        if input.abs() > 1e-10 {
+        {
+            // Count every invocation; only enter the trace window once we are
+            // past the settle threshold (steady state) AND near a signal peak.
+            let inv = TRACE_INVOCATIONS_MNL.fetch_add(1, Ordering::Relaxed);
+            let skip: u64 = std::env::var("PK_TRACE_SKIP")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30_000);
+            let steady = inv >= skip;
+            if steady && input.abs() > 1e-10 {
             let n = TRACE_COUNT_MNL.fetch_add(1, Ordering::Relaxed);
             if n < MAX_TRACE_MNL {
                 let stage_id = if let Some(ref dg) = self.device_groups {
@@ -6615,11 +6649,21 @@ multi_port_nr_solve_grouped_into(
                     s_diag.push(self.scattering.s_nl[i * self.n_nl + i]);
                 }
                 std::eprintln!("  s_nl_diag={:.6?}", s_diag);
+                // FULL s_nl matrix — exposes the inter-stage off-diagonal coupling
+                // (e.g. BJT1-collector port -> BJT2-base port). Port order for an
+                // N-BJT cascade is [Q1.Vbe, Q1.Vce, Q2.Vbe, Q2.Vce, ...].
+                let nnl = self.n_nl;
+                for i in 0..nnl {
+                    let row: Vec<crate::Wave> =
+                        (0..nnl).map(|j| self.scattering.s_nl[i * nnl + j]).collect();
+                    std::eprintln!("  s_nl[row {i}] = {:.6?}", row);
+                }
                 std::eprintln!(
-                    "  v_prev={:.4?} Rp={:.1?}",
+                    "  v_prev(port volts)={:.5?} Rp={:.1?}",
                     &self.v_prev,
                     &self.nl_port_resistances
                 );
+            }
             }
         }
 
