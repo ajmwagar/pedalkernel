@@ -4142,7 +4142,8 @@ impl PedalProcessor for CompiledPedal {
                 #[cfg(feature = "debug-trace")]
                 if trace_on {
                     std::eprintln!(
-                            "  [WDF {wdf_stage_counter}] in={pre_stage:.6e} out={stage_output:.6e} rp={:.1}",
+                            "  [WDF {wdf_stage_counter}] root={} in={pre_stage:.6e} out={stage_output:.6e} rp={:.1}",
+                            stage.root_comp_id,
                             stage.tree.port_resistance()
                         );
                 }

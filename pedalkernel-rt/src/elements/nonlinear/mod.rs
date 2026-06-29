@@ -43,3 +43,6 @@ pub use solver::{
     disable_solver_trace, enable_solver_trace, reset_solver_stats, solver_stats_snapshot,
     SolverMethod as DiodeSolverMethod, SolverStatsSnapshot, SolverTraceEntry,
 };
+
+#[cfg(feature = "std")]
+pub use solver::{disable_grouped_residual_log, enable_grouped_residual_log};

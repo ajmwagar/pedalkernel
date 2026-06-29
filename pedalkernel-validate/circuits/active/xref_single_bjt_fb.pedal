@@ -1,0 +1,45 @@
+# XREF bonus: SINGLE-BJT collector->base shunt feedback amplifier (2N3904).
+# A textbook one-transistor shunt-feedback CE stage: Rf from collector (output)
+# back to base both biases the base AND closes the feedback loop, with Cf across
+# Rf. This likely takes a DIFFERENT engine path than the 2-BJT blockwise/MultiNl
+# group, so it tells us whether the feedback bug is path-specific or general.
+#
+# Faithful to spice-circuits/active/xref_single_bjt_fb.spice.
+
+pedal "XREF Single-BJT FB" {
+  supply 24V
+
+  ports {
+    in: input
+    out: output
+  }
+
+  components {
+    Cin:  cap(10u, electrolytic)
+    Rin:  resistor(2k2)
+
+    Rf:   resistor(220k)           # collector->base shunt feedback + bias
+    Cf:   cap(100p)                # feedback/compensation cap parallel with Rf
+
+    Q1:   npn(2n3904)
+    RC1:  resistor(4k7)            # collector load = output node
+    RE1:  resistor(470)
+    CE1:  cap(220u, electrolytic)
+
+    Cout: cap(10u, electrolytic)
+    RL:   resistor(10k)
+  }
+
+  nets {
+    in -> Cin.a
+    Cin.b -> Rin.a
+    Rin.b -> Q1.base, Rf.b, Cf.b           # nb1
+    vcc -> RC1.a
+    RC1.b -> Q1.collector, Rf.a, Cf.a, Cout.a   # nout (collector = output, fb source)
+    Q1.emitter -> RE1.a, CE1.a
+    RE1.b -> gnd
+    CE1.b -> gnd
+    Cout.b -> RL.a, out
+    RL.b -> gnd
+  }
+}
