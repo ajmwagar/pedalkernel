@@ -1055,6 +1055,66 @@ impl NlDeviceGroupIv for BjtTwoPort {
             _ => (-self.v_max, self.v_max),     // Vce: full swing
         }
     }
+
+    fn limit_port_voltage(
+        &self,
+        port: usize,
+        v_new: crate::Wave,
+        v_old: crate::Wave,
+    ) -> crate::Wave {
+        // Only the Vbe junction (port 0) is an exponential pn junction that
+        // needs SPICE-style pnjlim. Vce (port 1) has no exponential blow-up.
+        if port != 0 {
+            return v_new;
+        }
+        // The port voltage maps to the internal junction voltage via the
+        // device polarity sign: vbe_int = sign * v_port. Limit in the
+        // internal (forward-junction) frame, then map back.
+        let sign = if self.is_pnp { -1.0 } else { 1.0 };
+        let vj_new = sign * v_new;
+        let vj_old = sign * v_old;
+        let vt = self.model.nf * self.model.vt;
+        let vj_lim = pnjlim(vj_new, vj_old, vt, self.model.is);
+        sign * vj_lim
+    }
+}
+
+/// SPICE-style pn-junction voltage limiting (`pnjlim`).
+///
+/// Bounds the per-iteration change of a forward-biased junction voltage so the
+/// exponential `exp(v/vt)` cannot overflow between Newton iterates. This is the
+/// classic Berkeley SPICE `pnjlim` (see SPICE3 `devpnjlim`):
+///
+/// * `vcrit = vt * ln(vt / (sqrt(2) * is))` is the voltage of maximum
+///   conductance-to-current ratio; beyond it the exponential is too stiff to
+///   step linearly.
+/// * Above `vcrit` (and when the step is large) the update is recomputed in
+///   log space so the *current* — not the voltage — changes by a bounded
+///   factor, which is the well-conditioned quantity.
+#[inline]
+fn pnjlim(v_new: crate::Wave, v_old: crate::Wave, vt: crate::Wave, is: crate::Wave) -> crate::Wave {
+    // Critical voltage: vt * ln(vt / (sqrt(2) * is)).
+    let is_eff = is.max(1e-30);
+    const SQRT_2: crate::Wave = core::f64::consts::SQRT_2 as crate::Wave;
+    let vcrit = vt * crate::math::ln(vt / (SQRT_2 * is_eff));
+
+    if v_new > vcrit && (v_new - v_old).abs() > 2.0 * vt {
+        if v_old > 0.0 {
+            let arg = 1.0 + (v_new - v_old) / vt;
+            if arg > 0.0 {
+                // Step in log space: v_old + vt*ln(arg) keeps the diode current
+                // bounded to at most `arg`× the previous current.
+                v_old + vt * crate::math::ln(arg)
+            } else {
+                vcrit
+            }
+        } else {
+            // Coming from reverse/zero bias: snap onto the log curve.
+            vt * crate::math::ln((v_new / vt).max(1e-30))
+        }
+    } else {
+        v_new
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,6 +1286,20 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
             0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent
             _ => (-self.v_max, self.v_max),     // Vce: full swing
         }
+    }
+
+    fn limit_port_voltage(
+        &self,
+        port: usize,
+        v_new: crate::Wave,
+        v_old: crate::Wave,
+    ) -> crate::Wave {
+        if port != 0 {
+            return v_new;
+        }
+        let sign = if self.is_pnp { -1.0 } else { 1.0 };
+        let vj_lim = pnjlim(sign * v_new, sign * v_old, self.nf_vt, self.is);
+        sign * vj_lim
     }
 }
 

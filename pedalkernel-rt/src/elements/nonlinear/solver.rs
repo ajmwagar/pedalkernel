@@ -60,6 +60,11 @@ pub struct NrWorkspace {
     pub cached_currents: Vec<crate::Wave>, // n_nl
     pub has_cached_jac: bool,
 
+    // Line-search scratch (grouped solver globalized damped Newton):
+    // trial port voltages and the device currents evaluated there.
+    pub v_trial: Vec<crate::Wave>,     // n_nl
+    pub ls_currents: Vec<crate::Wave>, // n_nl
+
     // Adaptive oversampling: track frozen Newton failures within a base sample.
     // When zero, the signal is slowly varying and X2 NR rate suffices.
     pub frozen_failures: u8,
@@ -88,6 +93,8 @@ impl NrWorkspace {
             cached_sys_jac: vec![0.0; n_nl * n_nl],
             cached_currents: vec![0.0; n_nl],
             has_cached_jac: false,
+            v_trial: vec![0.0; n_nl],
+            ls_currents: vec![0.0; n_nl],
             frozen_failures: 0,
             iters_used: 0,
         }
@@ -110,6 +117,8 @@ impl NrWorkspace {
             cached_sys_jac: vec![0.0; n_nl * n_nl],
             cached_currents: vec![0.0; n_nl],
             has_cached_jac: false,
+            v_trial: vec![0.0; n_nl],
+            ls_currents: vec![0.0; n_nl],
             frozen_failures: 0,
             iters_used: 0,
         }
@@ -132,7 +141,40 @@ const SOLVER_STATS_ENABLED: bool = false;
 std::thread_local! {
     static SOLVER_STATS: RefCell<SolverStatsAggregate> = RefCell::new(SolverStatsAggregate::default());
     static SOLVER_TRACE: RefCell<Option<Vec<SolverTraceEntry>>> = const { RefCell::new(None) };
+    /// Per-iteration residual log for the grouped solver (diagnostic/test only).
+    /// When `Some`, each accepted grouped-NR iteration pushes its post-step
+    /// residual ‖F‖ so a test can assert the line search is monotone.
+    static GROUPED_RESIDUAL_LOG: RefCell<Option<Vec<crate::Wave>>> = const { RefCell::new(None) };
 }
+
+/// Enable per-iteration residual logging for the grouped solver (std + test
+/// diagnostic). Each grouped-NR iteration appends its residual norm so callers
+/// can assert the Armijo line search produces a monotone non-increasing
+/// residual. Call [`disable_grouped_residual_log`] to retrieve the buffer.
+#[cfg(feature = "std")]
+pub fn enable_grouped_residual_log(capacity: usize) {
+    GROUPED_RESIDUAL_LOG.with(|t| *t.borrow_mut() = Some(Vec::with_capacity(capacity)));
+}
+
+/// Disable per-iteration residual logging and return the accumulated residuals.
+#[cfg(feature = "std")]
+pub fn disable_grouped_residual_log() -> Vec<crate::Wave> {
+    GROUPED_RESIDUAL_LOG.with(|t| t.borrow_mut().take().unwrap_or_default())
+}
+
+#[cfg(feature = "std")]
+#[inline]
+fn record_grouped_residual(r: crate::Wave) {
+    GROUPED_RESIDUAL_LOG.with(|t| {
+        if let Some(ref mut buf) = *t.borrow_mut() {
+            buf.push(r);
+        }
+    });
+}
+
+#[cfg(not(feature = "std"))]
+#[inline]
+fn record_grouped_residual(_r: crate::Wave) {}
 
 #[cfg(feature = "std")]
 #[derive(Default, Clone, Debug)]
@@ -374,6 +416,28 @@ pub trait NlDeviceGroupIv {
 
     /// Voltage clamp bounds for a specific port.
     fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave);
+
+    /// SPICE-style junction voltage limiting (`pnjlim`) hook.
+    ///
+    /// Given a proposed new voltage `v_new` for `port` and the previous
+    /// iterate `v_old`, return a limited voltage that bounds the per-iteration
+    /// change across a forward-biased exponential junction so `exp()` cannot
+    /// blow up between Newton iterates. The default is a no-op (identity) —
+    /// only devices with exponential junctions (e.g. a BJT Vbe port) override
+    /// this.
+    ///
+    /// This is applied *inside* the grouped-NR line search at every trial
+    /// point, so it must be a pure, side-effect-free function of
+    /// `(port, v_new, v_old)`.
+    #[inline]
+    fn limit_port_voltage(
+        &self,
+        _port: usize,
+        v_new: crate::Wave,
+        _v_old: crate::Wave,
+    ) -> crate::Wave {
+        v_new
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +914,14 @@ pub fn multi_port_nr_solve_grouped_into(
     let n_groups = device_groups.len();
     ws.zero_all(n_nl);
     ws.iters_used = 0;
+    // Ensure line-search scratch is sized (a workspace built with `new` rather
+    // than `new_grouped` would not have allocated these).
+    if ws.v_trial.len() < n_nl {
+        ws.v_trial.resize(n_nl, 0.0);
+    }
+    if ws.ls_currents.len() < n_nl {
+        ws.ls_currents.resize(n_nl, 0.0);
+    }
     for g in 0..n_groups {
         let np = device_groups[g].n_ports();
         let offset = group_port_offsets[g];
@@ -967,6 +1039,7 @@ pub fn multi_port_nr_solve_grouped_into(
                 max_f = max_f.max(fi.abs());
             }
             last_residual = max_f;
+            record_grouped_residual(max_f);
 
             // Debug: print diagnostics for diverging solves (debug-trace + std only)
             #[cfg(all(feature = "debug-trace", feature = "std"))]
@@ -1030,29 +1103,129 @@ pub fn multi_port_nr_solve_grouped_into(
                 break;
             }
 
-            // Apply damped Newton step
-            let mut max_dv = 0.0 as crate::Wave;
-            for (v, (&step_raw, &(g, lp))) in v_guess[..n_nl]
-                .iter_mut()
-                .zip(ws.rhs[..n_nl].iter().zip(&ws.port_group[..n_nl]))
-            {
-                let mut dv = step_raw;
-                if dv.abs() > 5.0 {
-                    dv *= 0.5;
-                    step_limited = true;
+            // --------------------------------------------------------------
+            // Globalized damped Newton step: Armijo backtracking line search
+            // with SPICE-style junction voltage limiting (pnjlim).
+            //
+            // The Newton direction is `delta = ws.rhs` (J·delta = F, v -= delta).
+            // We scale the WHOLE delta vector by a single λ (preserving the
+            // direction), apply per-port junction limiting + the clamp as a
+            // last-resort safety, re-evaluate the device currents to form the
+            // residual F at the trial point, and accept the first λ that gives
+            // a sufficient (Armijo) decrease vs ‖F(v)‖. This guarantees a
+            // monotone non-increasing residual across accepted steps, which is
+            // what lets the stiff coupled-exponential-junction multi-BJT system
+            // converge instead of ping-ponging at the rails.
+            // --------------------------------------------------------------
+            const LS_C: crate::Wave = 1e-4; // Armijo sufficient-decrease constant
+            const LS_MAX_BACKTRACKS: u32 = 10;
+            let f_norm = max_f; // ‖F(v)‖ at the current iterate (computed above)
+
+            // Helper closure scope: evaluate ‖F‖ at a trial point built by
+            // stepping `v_guess - lambda*delta`, with junction limiting + clamp.
+            // Writes the trial voltages into `ws.v_trial` and the device
+            // currents into `ws.ls_currents`.
+            let mut lambda = 1.0 as crate::Wave;
+            let mut accepted = false;
+            let mut max_step = 0.0 as crate::Wave;
+            let mut step_was_limited = false;
+            let mut step_was_clamped = false;
+
+            for _bt in 0..=LS_MAX_BACKTRACKS {
+                // Build trial point: per-port limited + clamped.
+                let mut bt_limited = false;
+                let mut bt_clamped = false;
+                let mut bt_max_step = 0.0 as crate::Wave;
+                for i in 0..n_nl {
+                    let (g, lp) = ws.port_group[i];
+                    let v_old = v_guess[i];
+                    let raw = v_old - lambda * ws.rhs[i];
+                    // SPICE pnjlim: bound per-iteration junction change.
+                    let limited = device_groups[g].limit_port_voltage(lp, raw, v_old);
+                    if limited != raw {
+                        bt_limited = true;
+                    }
+                    // Last-resort safety clamp to the device's port bounds.
+                    let (lo, hi) = device_groups[g].v_clamp_port(lp);
+                    let clamped = limited.clamp(lo, hi);
+                    if clamped != limited {
+                        bt_clamped = true;
+                    }
+                    ws.v_trial[i] = clamped;
+                    bt_max_step = bt_max_step.max((clamped - v_old).abs());
                 }
-                *v -= dv;
-                let (lo, hi) = device_groups[g].v_clamp_port(lp);
-                let clamped = (*v).clamp(lo, hi);
-                if clamped != *v {
-                    clamp_hit = true;
+
+                // Evaluate device currents at the trial point.
+                for g in 0..n_groups {
+                    let np = device_groups[g].n_ports();
+                    let offset = group_port_offsets[g];
+                    let v_group = &ws.v_trial[offset..offset + np];
+                    device_groups[g].eval(
+                        v_group,
+                        &mut ws.dev_currents[..np],
+                        &mut ws.dev_jacobian[..np * np],
+                    );
+                    for lp in 0..np {
+                        ws.ls_currents[offset + lp] = ws.dev_currents[lp];
+                    }
                 }
-                *v = clamped;
-                max_dv = max_dv.max(dv.abs());
+
+                // Residual ‖F(v_trial)‖_inf.
+                let mut trial_norm = 0.0 as crate::Wave;
+                let mut trial_finite = true;
+                for i in 0..n_nl {
+                    let mut fi =
+                        known_a[i] - ws.v_trial[i] - port_resistances[i] * ws.ls_currents[i];
+                    for j in 0..n_nl {
+                        fi += s_nl[i * n_nl + j]
+                            * (ws.v_trial[j] - port_resistances[j] * ws.ls_currents[j]);
+                    }
+                    if !fi.is_finite() {
+                        trial_finite = false;
+                        break;
+                    }
+                    trial_norm = trial_norm.max(fi.abs());
+                }
+
+                // Armijo sufficient-decrease test on the residual norm.
+                if trial_finite && trial_norm < (1.0 - LS_C * lambda) * f_norm {
+                    accepted = true;
+                    max_step = bt_max_step;
+                    step_was_limited = bt_limited;
+                    step_was_clamped = bt_clamped;
+                    break;
+                }
+                lambda *= 0.5;
             }
 
-            if max_dv < tolerance {
-                break;
+            if accepted {
+                // Commit the accepted trial point.
+                v_guess[..n_nl].copy_from_slice(&ws.v_trial[..n_nl]);
+                if step_was_limited || lambda < 1.0 {
+                    step_limited = true;
+                }
+                if step_was_clamped {
+                    clamp_hit = true;
+                }
+                if max_step < tolerance {
+                    break;
+                }
+            } else {
+                // Line search exhausted without sufficient decrease. Take the
+                // smallest damped step anyway (junction-limited + clamped) so we
+                // still make progress, then let the next iteration re-assess.
+                // `ws.v_trial` currently holds the last (smallest-λ) trial.
+                let mut moved = 0.0 as crate::Wave;
+                for i in 0..n_nl {
+                    if ws.v_trial[i].is_finite() {
+                        moved = moved.max((ws.v_trial[i] - v_guess[i]).abs());
+                        v_guess[i] = ws.v_trial[i];
+                    }
+                }
+                step_limited = true;
+                if moved < tolerance {
+                    break;
+                }
             }
         }
 
