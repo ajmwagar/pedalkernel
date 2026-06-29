@@ -4852,6 +4852,42 @@ pub struct MultiNlStage {
     /// when no seed is present.
     #[cfg_attr(feature = "serde", serde(default))]
     pub dc_qpoint_passive_b: Vec<crate::Wave>,
+    /// **Low-rate, physics-derived DC servo** for DC-coupled feedback-servo
+    /// topologies (BA283 TR1↔Darlington).  The seeded conducting operating point
+    /// `dc_qpoint_v` is an exact single-step NR fixed point but is *dynamically
+    /// unstable* in the per-sample cap-coupled dynamics — the runtime slides to
+    /// the starved/cutoff fixed point.  This servo mirrors the real analog bias
+    /// servo: it measures the slow runtime operating point and applies a leaky
+    /// integral correction that re-pins the NR onto the conducting point, at a
+    /// bandwidth derived from the bias network's dominant `τ = R_thévenin · C`.
+    ///
+    /// Only engaged when `dc_qpoint_v` is `Some` (multi-BJT feedback servo) AND
+    /// `dc_servo_gain > 0`.  `None`/zero leaves every other stage byte-identical.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_servo_active: bool,
+    /// Low-pass coefficient `α = dt/τ` used to measure the slow runtime operating
+    /// point of each NL port (filters out the audio swing so the servo sees DC).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_servo_alpha: crate::Wave,
+    /// Integral correction gain (per sample) — also derived from `τ`/fs.  Drives
+    /// `dc_servo_corr` toward the value that re-pins `v_lp` at the seeded `v*`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_servo_gain: crate::Wave,
+    /// Dominant bias-network time constant `τ` (seconds), logged for diagnostics.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_servo_tau: crate::Wave,
+    /// Low-pass state: slow (DC) estimate of each NL port voltage `v_prev[i]`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_servo_v_lp: Vec<crate::Wave>,
+    /// Accumulated integral correction added to `known_a[i]` each sample to hold
+    /// the conducting operating point against the per-sample drift.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_servo_corr: Vec<crate::Wave>,
+    /// Per-port mask: `true` only for the controlling (base-emitter) ports the
+    /// servo should pin.  Load-line (Vce) ports are left free so the natural AC
+    /// swing is not over-constrained.  Same length as `dc_bias` when active.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dc_servo_mask: Vec<bool>,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -6316,6 +6352,19 @@ impl MultiNlStage {
                 *ka = a_i;
             }
 
+            // DC SERVO correction: add the slow leaky-integral term that re-pins
+            // the conducting operating point.  `dc_servo_corr[i]` is the accrued
+            // DC incident-wave nudge driving the runtime op-point toward the
+            // seeded `v*` at the bias-network bandwidth (1/τ).  Audio-rate
+            // content is rejected by the `v_lp` low-pass that feeds it, so this
+            // only shifts the DC bias, not the signal.  Gated: empty/inactive
+            // ⇒ no effect (byte-identical for every non-servo stage).
+            if self.dc_servo_active && self.dc_servo_corr.len() == n_nl {
+                for (ka, &c) in known_a.iter_mut().zip(&self.dc_servo_corr[..n_nl]) {
+                    *ka += c * dc_scale;
+                }
+            }
+
             #[cfg(feature = "debug-trace")]
             {
                 static NR_TRACE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -6374,6 +6423,61 @@ multi_port_nr_solve_grouped_into(
                     .saturating_sub(self.nr_workspace.iters_used);
             }
             } // end if !skip_nr — b_nl in workspace is either fresh or reused
+
+            // DC SERVO update (proportional DC-restoring spring, per solved
+            // sub-sample — gated off by default, see `apply_bjt_dc_qpoint`):
+            //   1. Low-pass the converged port voltage `v_prev` at bandwidth 1/τ
+            //      → `v_lp` (a slow DC estimate that rejects the audio swing).
+            //   2. Drive a proportional correction toward the seeded conducting
+            //      op-point: `corr[i] = k_p·(v*[i] − v_lp[i])`.
+            // The correction is added to `known_a` next sub-sample (above).  A
+            // proportional law (vs a pure integrator) cannot wind up / limit-cycle
+            // around the unstable conducting fixed point.  `dc_scale<1` during the
+            // DC ramp ⇒ skip (op-point not yet meaningful).
+            if self.dc_servo_active
+                && !skip_nr
+                && dc_scale >= 1.0
+                && self.dc_servo_corr.len() == n_nl
+                && self.dc_servo_v_lp.len() == n_nl
+                && self.dc_servo_mask.len() == n_nl
+            {
+                if let Some(ref v_star) = self.dc_qpoint_v {
+                    if v_star.len() == n_nl {
+                        let alpha = self.dc_servo_alpha;
+                        let k = self.dc_servo_gain;
+                        for i in 0..n_nl {
+                            // Only servo the *controlling* (base-emitter) ports —
+                            // marked at compile time.  Forcing the load-line (Vce)
+                            // ports fights the natural AC swing and over-constrains
+                            // the coupled solve; the Vbe ports alone set conduction.
+                            if !self.dc_servo_mask[i] {
+                                continue;
+                            }
+                            let v = self.v_prev[i];
+                            if !v.is_finite() {
+                                continue;
+                            }
+                            // 1) Slow DC estimate of this port voltage (rejects the
+                            //    audio swing: τ_servo ≫ audio period).
+                            let lp = self.dc_servo_v_lp[i] + alpha * (v - self.dc_servo_v_lp[i]);
+                            self.dc_servo_v_lp[i] = lp;
+                            // 2) PROPORTIONAL DC-restoring spring toward the seeded
+                            //    conducting op-point.  A proportional law (vs a pure
+                            //    integrator) cannot wind up / limit-cycle around the
+                            //    unstable fixed point — it just adds a restoring DC
+                            //    incident-wave proportional to how far the slow op-
+                            //    point has drifted from `v*`.  `k_p = 1/S_ii`-scaled
+                            //    via the port resistance so a unit Vbe error maps to
+                            //    the incident-wave units of `known_a`.
+                            let err = v_star[i] - lp;
+                            let c = k * err;
+                            if c.is_finite() {
+                                self.dc_servo_corr[i] = c;
+                            }
+                        }
+                    }
+                }
+            }
 
             let b_nl = &self.nr_workspace.b_nl[..n_nl];
 
@@ -6594,6 +6698,20 @@ multi_port_nr_solve_grouped_into(
         self.iteration_budget_remaining = NR_ITERATION_BUDGET;
         if let Some(ref mut opamp) = self.feedback_opamp {
             opamp.reset();
+        }
+
+        // DC servo: restart the integral correction from zero and re-seed the
+        // op-point low-pass at the target `v*`, so the servo re-converges from the
+        // warm-started operating point rather than carrying a stale correction.
+        if self.dc_servo_active {
+            for c in &mut self.dc_servo_corr {
+                *c = 0.0;
+            }
+            if let Some(ref v_star) = self.dc_qpoint_v {
+                if self.dc_servo_v_lp.len() == v_star.len() {
+                    self.dc_servo_v_lp.copy_from_slice(v_star);
+                }
+            }
         }
 
         // ko5g g725.2: a nonlinear DC Q-point seed pre-charges the coupling caps
