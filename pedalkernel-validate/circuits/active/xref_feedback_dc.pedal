@@ -1,0 +1,53 @@
+# XREF Feedback Amp — MINIMAL MultiNl reproducer for the 1:1 SPICE-vs-WDF
+# balance-residual diagnostic. 2-BJT shunt-feedback topology with the GLOBAL
+# feedback loop (forces the two BJTs into ONE MultiNl grouped-NR — the BA283
+# path). All caps removed EXCEPT Cf (the reactive port INSIDE the feedback
+# loop), which is what triggers the R-type/MultiNl path (a pure-resistive loop
+# gets split into single-BJT Wdf stages). So the MultiNl stage has exactly ONE
+# passive port (Cf), whose DC contribution to known_a is a single, exactly
+# computable term: known_a[i] = dc_bias[i] + s_nl_passive[i][0]·b_passive(Cf),
+# with b_passive(Cf) = the DC voltage across Cf (= v(nout) − v(nb1) from SPICE).
+# Rf both closes the loop AND DC-biases Q1. Faithful twin of
+# spice-circuits/active/xref_feedback_dc.spice.
+
+pedal "XREF Feedback Amp (1-cap MultiNl)" {
+  supply 24V
+
+  ports {
+    in: input
+    out: output
+  }
+
+  components {
+    Rin:  resistor(2k2)
+    Rf:   resistor(33k)            # global shunt feedback out -> nb1 + DC bias
+    Cf:   cap(100p)                # reactive port IN the feedback loop (forces MultiNl)
+
+    Q1:   npn(2n3904)
+    RC1:  resistor(10k)
+    RE1:  resistor(1k)
+
+    Q2:   npn(2n3904)
+    RC2:  resistor(4k7)
+    RE2:  resistor(1k)
+
+    RL:   resistor(10k)
+  }
+
+  nets {
+    in -> Rin.a
+    Rin.b -> Q1.base, Rf.b, Cf.b            # nb1 (summing node)
+
+    vcc -> RC1.a
+    RC1.b -> Q1.collector, Q2.base          # nc1 (DC-coupled inter-stage)
+    Q1.emitter -> RE1.a
+    RE1.b -> gnd
+
+    vcc -> RC2.a
+    RC2.b -> Q2.collector, Rf.a, Cf.a, RL.a, out  # nout (output + feedback source)
+    Q2.emitter -> RE2.a
+    RE2.b -> gnd
+
+    RL.b -> gnd
+  }
+}
