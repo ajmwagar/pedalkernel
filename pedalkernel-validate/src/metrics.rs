@@ -98,6 +98,87 @@ pub fn peak_error_db(wdf: &[f64], reference: &[f64]) -> f64 {
     20.0 * (max_err / max_ref).log10()
 }
 
+// ===========================================================================
+// Steady-state, level-INDEPENDENT measurement
+//
+// `normalized_rms_error_db` is a DIFFERENCE metric: rms(wdf-ref)/rms(ref).  When
+// the two levels differ by a factor k it computes |k-1|, NOT shape — and worse,
+// when the WDF is far BELOW the golden (k→0) it reads ≈0 dB (because
+// rms(wdf-ref) ≈ rms(ref)), falsely implying "shapes match" while the WDF is
+// effectively silent.  These functions measure the magnitude of the test tone
+// directly so the true gain gap is visible and is immune to any DC pedestal.
+// ===========================================================================
+
+/// Mean (DC offset) of a signal.  Use as the AC-coupling / settle guard: an
+/// AC-coupled output that has reached steady state has |mean| ≈ 0.
+pub fn dc_offset(signal: &[f64]) -> f64 {
+    if signal.is_empty() {
+        return 0.0;
+    }
+    signal.iter().sum::<f64>() / signal.len() as f64
+}
+
+/// Single-bin DFT amplitude (peak, in signal units) of the component at exactly
+/// `freq_hz`.
+///
+/// Goertzel-style projection onto cos/sin at `freq_hz`.  The DC offset is
+/// removed first, so the result is the AC amplitude AT THE TEST FREQUENCY and is
+/// immune to any DC pedestal (a device sitting at its bias point) or slow drift
+/// baseline.  This is the steady-state level measurement that
+/// [`normalized_rms_error_db`] cannot provide.
+pub fn single_bin_amplitude(signal: &[f64], freq_hz: f64, sample_rate: f64) -> f64 {
+    let n = signal.len();
+    if n == 0 || sample_rate <= 0.0 {
+        return 0.0;
+    }
+    let mean = dc_offset(signal);
+    let w = 2.0 * std::f64::consts::PI * freq_hz / sample_rate;
+    let (mut re, mut im) = (0.0_f64, 0.0_f64);
+    for (i, &x) in signal.iter().enumerate() {
+        let a = w * i as f64;
+        let v = x - mean;
+        re += v * a.cos();
+        im += v * a.sin();
+    }
+    2.0 * (re * re + im * im).sqrt() / n as f64
+}
+
+/// Steady-state, level-independent AC gain ratio in dB at `freq_hz`:
+/// `20*log10(amp_wdf / amp_ref)`.  Positive = WDF louder than the reference.
+///
+/// Unlike [`normalized_rms_error_db`], this directly compares the magnitude of
+/// the test tone, so it reports the TRUE level gap even when one signal rides on
+/// a large DC bias or is far below the other.  Returns `-inf` when the reference
+/// tone is silent.
+pub fn ac_gain_db(wdf: &[f64], reference: &[f64], freq_hz: f64, sample_rate: f64) -> f64 {
+    let aw = single_bin_amplitude(wdf, freq_hz, sample_rate);
+    let ar = single_bin_amplitude(reference, freq_hz, sample_rate);
+    if ar < 1e-30 {
+        return f64::NEG_INFINITY;
+    }
+    20.0 * (aw / ar).log10()
+}
+
+/// AC-amplitude drift across a signal: dB difference between the single-bin
+/// amplitude of the SECOND half vs the FIRST half of `signal`.
+///
+/// ≈0 dB means the tone has SETTLED (steady state).  A large magnitude means the
+/// window is still inside a transient (e.g. a coupling cap still charging), so
+/// any gain/shape number taken on it is unreliable.  This is the programmatic
+/// guard that a measurement window is past the settling transient.
+pub fn ac_amplitude_drift_db(signal: &[f64], freq_hz: f64, sample_rate: f64) -> f64 {
+    let h = signal.len() / 2;
+    if h == 0 {
+        return 0.0;
+    }
+    let a1 = single_bin_amplitude(&signal[..h], freq_hz, sample_rate);
+    let a2 = single_bin_amplitude(&signal[h..], freq_hz, sample_rate);
+    if a1 < 1e-30 {
+        return f64::INFINITY;
+    }
+    20.0 * (a2 / a1).log10()
+}
+
 /// Compute THD (Total Harmonic Distortion) in dB.
 ///
 /// THD = 10 * log10(sum(harmonic_powers) / fundamental_power)
@@ -546,6 +627,93 @@ mod tests {
         let sig: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.1).sin()).collect();
         assert!(normalized_rms_error_db(&sig, &sig) < -100.0);
         assert!(peak_error_db(&sig, &sig) < -100.0);
+    }
+
+    #[test]
+    fn single_bin_amplitude_recovers_tone_level() {
+        let sr = 48000.0;
+        let amp = 0.7;
+        let sig: Vec<f64> = (0..48000)
+            .map(|i| amp * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        let a = single_bin_amplitude(&sig, 1000.0, sr);
+        assert!((a - amp).abs() < 1e-3, "expected ~{amp}, got {a}");
+    }
+
+    #[test]
+    fn single_bin_amplitude_is_immune_to_dc_pedestal() {
+        // A device output sitting on a +5 V DC bias with a small AC tone.
+        let sr = 48000.0;
+        let ac = 0.05;
+        let sig: Vec<f64> = (0..48000)
+            .map(|i| 5.0 + ac * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        let a = single_bin_amplitude(&sig, 1000.0, sr);
+        assert!((a - ac).abs() < 1e-3, "DC pedestal must not affect AC amplitude; got {a}");
+    }
+
+    /// The core point of the new metric: when the WDF is far BELOW the golden,
+    /// `normalized_rms_error_db` DEGENERATES to ~0 dB ("shape matches") while
+    /// `ac_gain_db` correctly reports the true ~-40 dB level gap.
+    #[test]
+    fn ac_gain_db_exposes_what_normalized_rms_hides() {
+        let sr = 48000.0;
+        let golden: Vec<f64> = (0..48000)
+            .map(|i| (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        // WDF is the same tone at 1% of the level (≈ -40 dB), e.g. an under-driven
+        // input port.
+        let wdf: Vec<f64> = golden.iter().map(|&x| 0.01 * x).collect();
+
+        let nrms = normalized_rms_error_db(&wdf, &golden);
+        let gain = ac_gain_db(&wdf, &golden, 1000.0, sr);
+
+        // normalized RMS reads ~0 dB (degenerate: rms(wdf-ref) ≈ rms(ref)).
+        assert!(
+            nrms.abs() < 1.0,
+            "normalized_rms_error_db is degenerate here (expected ~0 dB), got {nrms:.2}"
+        );
+        // ac_gain_db reports the real gap: 0.01 → -40 dB.
+        assert!(
+            (gain + 40.0).abs() < 0.5,
+            "ac_gain_db must report the true -40 dB gap, got {gain:.2}"
+        );
+    }
+
+    #[test]
+    fn ac_gain_db_doubling_is_plus_six_db_regardless_of_dc() {
+        let sr = 48000.0;
+        let golden: Vec<f64> = (0..48000)
+            .map(|i| 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        // WDF: double the AC amplitude AND add an unrelated DC bias.
+        let wdf: Vec<f64> = golden.iter().map(|&x| 3.3 + 2.0 * x).collect();
+        let gain = ac_gain_db(&wdf, &golden, 1000.0, sr);
+        assert!((gain - 6.02).abs() < 0.1, "2x AC → +6 dB, got {gain:.2}");
+    }
+
+    #[test]
+    fn ac_amplitude_drift_zero_for_steady_large_for_ramp() {
+        let sr = 48000.0;
+        // Steady tone → ~0 dB drift.
+        let steady: Vec<f64> = (0..48000)
+            .map(|i| (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        assert!(
+            ac_amplitude_drift_db(&steady, 1000.0, sr).abs() < 0.2,
+            "steady tone must show ~0 dB drift"
+        );
+        // Amplitude ramp (transient): envelope grows from 0.1 to 1.0 over the
+        // window → second half is much louder than the first.
+        let n = 48000usize;
+        let ramp: Vec<f64> = (0..n)
+            .map(|i| {
+                let env = 0.1 + 0.9 * (i as f64 / n as f64);
+                env * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin()
+            })
+            .collect();
+        let drift = ac_amplitude_drift_db(&ramp, 1000.0, sr);
+        assert!(drift > 3.0, "ramping (unsettled) tone must show large drift, got {drift:.2}");
     }
 
     #[test]
