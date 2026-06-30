@@ -426,6 +426,55 @@ VIN v_in 0 PWL({pwl_data})
     pub fn config(&self) -> &SpiceConfig {
         &self.config
     }
+
+    /// Decimate an internal-rate signal (`sample_rate × oversample`) down to the
+    /// base `sample_rate` by taking every `oversample`-th sample.
+    ///
+    /// [`simulate`] returns at the INTERNAL rate (to match the oversampled main
+    /// runner).  The standalone `*_spice.rs` tests instead compare against a WDF
+    /// processor compiled at the BASE `sample_rate`, so their golden must be at
+    /// the base rate too — otherwise a 1 kHz golden tone carries `oversample×`
+    /// the samples-per-period of the WDF tone and the 1:1 comparison lines up two
+    /// signals at different rates (the bug this fixes).
+    pub fn decimate_to_base(&self, internal: &[f64]) -> Vec<f64> {
+        let k = self.config.oversample.max(1) as usize;
+        internal.iter().step_by(k).copied().collect()
+    }
+
+    /// Run a SETTLED steady-state simulation and return the MEASUREMENT window at
+    /// the base `sample_rate`.
+    ///
+    /// `input_internal` is the full stimulus at the internal rate covering
+    /// `settle_s + measure_s` seconds.  The circuit is simulated over that whole
+    /// span so coupling caps / bias networks reach steady state; the first
+    /// `settle_s` is then discarded and the remaining tail is decimated to the
+    /// base `sample_rate`.  The settle boundary is floored to a multiple of
+    /// `oversample` so the decimated grid stays phase-aligned with a WDF
+    /// processor warmed up by the same `settle_s`.
+    ///
+    /// The returned golden is at the base `sample_rate`: `len ≈ measure_s ×
+    /// sample_rate`, and a tone of frequency `f` has `sample_rate / f`
+    /// samples per period.
+    pub fn simulate_settled_window(
+        &self,
+        circuit_path: impl AsRef<Path>,
+        input_internal: &[f64],
+        output_node: &str,
+        settle_s: f64,
+    ) -> Result<Vec<f64>, SpiceError> {
+        let internal = self.simulate(circuit_path, input_internal, output_node)?;
+        let k = self.config.oversample.max(1) as usize;
+        // Floor the settle boundary to a multiple of the oversample factor so the
+        // decimation phase is identical to a base-rate WDF warmup.
+        let mut settle_internal = (settle_s * self.config.internal_rate()).round() as usize;
+        settle_internal -= settle_internal % k;
+        let tail: &[f64] = if settle_internal < internal.len() {
+            &internal[settle_internal..]
+        } else {
+            &internal[..]
+        };
+        Ok(self.decimate_to_base(tail))
+    }
 }
 
 fn single_sample_impulse(signal: &[f64]) -> Option<f64> {

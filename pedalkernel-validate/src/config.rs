@@ -91,6 +91,23 @@ pub struct GlobalConfig {
     ///   THD (Blackman window needs ~5 cycles) and spectral resolution (25 Hz/bin).
     #[serde(default = "default_warmup_trim_ms")]
     pub warmup_trim_ms: f64,
+    /// Steady-state SETTLE window in milliseconds: how long a coupling-cap /
+    /// bias network must charge before its output reaches steady state.  Goldens
+    /// (and the WDF side) are generated long enough to settle, and `settle_ms` of
+    /// the head is discarded so EVERY metric is computed on the settled tail.
+    ///
+    /// Why this is distinct from `warmup_trim_ms`: a 10 ms trim only skips a
+    /// fast turn-on transient.  An AC-coupled output with a 10 µF cap into a 10 k
+    /// load has RC ≈ 100 ms, so it needs ~5–10 τ (0.5–1 s) to settle — measuring
+    /// before that captures the DC charge-up ramp, not the gain.  Default 500 ms
+    /// (= 5 τ for a 100 ms-RC coupling cap).  Slow circuits (e.g. the BA283 with
+    /// two 10 µF caps) override per-test via [`TestCase::warmup_trim_ms`].
+    ///
+    /// The conservative default does not shorten any existing window: when the
+    /// settle exceeds the signal length the trim clamps to the full slice, so
+    /// short fast-settling tests are unaffected.
+    #[serde(default = "default_settle_ms")]
+    pub settle_ms: f64,
 }
 
 fn default_sample_rate() -> u32 {
@@ -105,6 +122,9 @@ fn default_fft_size() -> usize {
 fn default_warmup_trim_ms() -> f64 {
     10.0
 }
+fn default_settle_ms() -> f64 {
+    500.0
+}
 
 impl Default for GlobalConfig {
     fn default() -> Self {
@@ -113,6 +133,7 @@ impl Default for GlobalConfig {
             oversample: default_oversample(),
             fft_size: default_fft_size(),
             warmup_trim_ms: default_warmup_trim_ms(),
+            settle_ms: default_settle_ms(),
         }
     }
 }
@@ -458,6 +479,17 @@ impl TestCase {
     /// per-test override when set, otherwise falling back to the global value.
     pub fn effective_warmup_trim_ms(&self, global: &GlobalConfig) -> f64 {
         self.warmup_trim_ms.unwrap_or(global.warmup_trim_ms)
+    }
+
+    /// Resolve the effective STEADY-STATE settle window in milliseconds.
+    ///
+    /// A per-test `warmup_trim_ms` override IS that test's settle window (a slow
+    /// circuit sets it explicitly, e.g. 800 ms for the BA283's 10 µF coupling
+    /// caps); otherwise the conservative `GlobalConfig::settle_ms` default
+    /// applies.  Generators run long enough to cover this window and metrics are
+    /// computed only on the settled tail past it.
+    pub fn effective_settle_ms(&self, global: &GlobalConfig) -> f64 {
+        self.warmup_trim_ms.unwrap_or(global.settle_ms)
     }
 
     /// Classify the test into a reporting bucket without changing pass/fail

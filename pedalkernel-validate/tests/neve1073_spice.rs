@@ -34,9 +34,16 @@ use std::path::PathBuf;
 
 const SR: f64 = 48_000.0;
 const OVERSAMPLE: u32 = 4;
-const SINE_DURATION: f64 = 0.1;
 const SINE_AMP: f64 = 0.1;
 const TEST_FREQ: f64 = 1_000.0;
+
+/// Steady-state settle window.  The BA283 has TWO 10 µF coupling caps (Cin and
+/// Cout into a 10 k load → RC ≈ 100 ms), so the AC-coupled output needs ~10 τ ≈
+/// 1 s to settle.  The previous golden was bootstrapped over only 0.1 s, so it
+/// was measured mid-charge (golden mean ≈ +5 V instead of ≈ 0).
+const SETTLE_S: f64 = 1.0;
+/// Measurement window AFTER settling — the only span stored / compared.
+const MEASURE_S: f64 = 0.1;
 
 const PRO_PATH: &str = "pedals/500/1073/sub/ba283.pedal";
 const DECK: &str = "neve1073_ba283";
@@ -52,14 +59,36 @@ fn golden_dir(name: &str) -> PathBuf {
     PathBuf::from(format!("{manifest}/golden/active/{name}"))
 }
 
-fn rms(signal: &[f64]) -> f64 {
-    if signal.is_empty() {
-        return 0.0;
-    }
-    (signal.iter().map(|&x| x * x).sum::<f64>() / signal.len() as f64).sqrt()
+/// Build the internal-rate (SR × OVERSAMPLE) input sine over `settle_s + MEASURE_S`.
+fn internal_input(settle_s: f64) -> (SpiceRunner, Vec<f64>) {
+    let config = SpiceConfig {
+        sample_rate: SR as u32,
+        oversample: OVERSAMPLE,
+    };
+    let internal_rate = config.internal_rate();
+    let n = ((settle_s + MEASURE_S) * internal_rate) as usize;
+    let input: Vec<f64> = (0..n)
+        .map(|i| SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / internal_rate).sin())
+        .collect();
+    (SpiceRunner::new(config), input)
 }
 
-/// Simulate the ngspice deck and write `golden/active/<GOLDEN>/sine_1k.npy`.
+/// Generate the SETTLED, base-rate (48 kHz) measurement window via ngspice.
+fn generate_settled_golden(settle_s: f64) -> Vec<f64> {
+    let circuit = spice_path(DECK);
+    assert!(circuit.exists(), "{DECK}.spice not found at {circuit:?}");
+    let (runner, input_internal) = internal_input(settle_s);
+    runner
+        .simulate_settled_window(&circuit, &input_internal, "v_out", settle_s)
+        .unwrap_or_else(|e| panic!("ngspice simulation failed for {GOLDEN} bootstrap: {e}"))
+}
+
+/// Simulate the ngspice deck SETTLED and write a 48 kHz measurement-window golden.
+///
+/// PROVES (printed + asserted): the stored golden is at 48 kHz (len == MEASURE_S
+/// × 48000, 48 samples/period at 1 kHz), its mean ≈ 0 (the AC-coupled output has
+/// settled — no DC charge-up ramp), and the single-bin AC level is the same when
+/// the settle is extended (steady state, not a transient artifact).
 #[test]
 fn bootstrap_ba283_golden() {
     if std::env::var("PEDALKERNEL_BOOTSTRAP_1073").as_deref() != Ok("1") {
@@ -67,38 +96,76 @@ fn bootstrap_ba283_golden() {
         return;
     }
 
-    let circuit = spice_path(DECK);
-    assert!(circuit.exists(), "{DECK}.spice not found at {circuit:?}");
+    let golden = generate_settled_golden(SETTLE_S);
 
-    let config = SpiceConfig {
-        sample_rate: SR as u32,
-        oversample: OVERSAMPLE,
-    };
-    let runner = SpiceRunner::new(config.clone());
+    // (i) Rate proof: base-rate 48 kHz, not the 192 kHz internal rate.
+    let expected = (MEASURE_S * SR) as usize;
+    let samples_per_period = SR / TEST_FREQ;
+    eprintln!("  bootstrapped {GOLDEN} SETTLED golden:");
+    eprintln!(
+        "    len = {} (expected ≈ {expected} = {MEASURE_S}s × 48000); {samples_per_period} samples/period @ {TEST_FREQ} Hz",
+        golden.len()
+    );
+    assert!(
+        golden.len().abs_diff(expected) <= OVERSAMPLE as usize,
+        "golden must be at 48 kHz base rate: len {} vs expected {expected}",
+        golden.len()
+    );
 
-    let internal_rate = config.internal_rate();
-    let n_internal = (SINE_DURATION * internal_rate) as usize;
-    let input_internal: Vec<f64> = (0..n_internal)
-        .map(|i| SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / internal_rate).sin())
-        .collect();
+    // (ii) Settle proof: AC-coupled output mean ≈ 0 (was ≈ +5 V un-settled).
+    let mean = metrics::dc_offset(&golden);
+    let amp = metrics::single_bin_amplitude(&golden, TEST_FREQ, SR);
+    let drift = metrics::ac_amplitude_drift_db(&golden, TEST_FREQ, SR);
+    eprintln!("    mean = {mean:+.5} V   AC amp = {amp:.5} V   half-to-half drift = {drift:+.3} dB");
+    assert!(
+        mean.abs() < 0.05 * amp.max(1e-9) + 1e-3,
+        "golden tail mean {mean:+.5} V is not ≈0 — output not settled (AC amp {amp:.5})"
+    );
+    assert!(drift.abs() < 0.5, "golden AC level still drifting ({drift:+.3} dB) — extend settle");
 
-    let golden_output = runner
-        .simulate(&circuit, &input_internal, "v_out")
-        .unwrap_or_else(|e| panic!("ngspice simulation failed for {GOLDEN} bootstrap: {e}"));
+    // (iii) Stability proof: regenerate with 50% more settle; AC level must not move.
+    let golden_long = generate_settled_golden(SETTLE_S * 1.5);
+    let amp_long = metrics::single_bin_amplitude(&golden_long, TEST_FREQ, SR);
+    let settle_delta = 20.0 * (amp_long / amp).log10();
+    eprintln!(
+        "    AC amp @1.5× settle = {amp_long:.5} V  → Δ = {settle_delta:+.3} dB (must be ≈0: steady state)"
+    );
+    assert!(
+        settle_delta.abs() < 0.3,
+        "AC level changed {settle_delta:+.3} dB when settle extended — still transient"
+    );
 
     let dir = golden_dir(GOLDEN);
     std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create golden/active/{GOLDEN}: {e}"));
     let golden_path = dir.join("sine_1k.npy");
-    npy::write_f64(&golden_path, &golden_output)
+    npy::write_f64(&golden_path, &golden)
         .unwrap_or_else(|e| panic!("write {GOLDEN} golden: {e}"));
-
-    eprintln!(
-        "  bootstrapped {GOLDEN} golden: {} samples → {golden_path:?}",
-        golden_output.len()
-    );
+    eprintln!("    wrote {} samples → {golden_path:?}", golden.len());
 }
 
-/// Compare the WDF BA283 block against the ngspice golden (GAIN = 0.5).
+/// Run the WDF BA283 at the BASE 48 kHz rate: warm up `settle_s`, then record a
+/// `MEASURE_S` window.  Returns the settled measurement window — same rate, same
+/// length, same phase as the golden.
+fn wdf_settled_window(proc: &mut impl PedalProcessor, settle_s: f64) -> Vec<f64> {
+    let settle_n = (settle_s * SR) as usize;
+    let measure_n = (MEASURE_S * SR) as usize;
+    for i in 0..settle_n {
+        proc.process(SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / SR).sin());
+    }
+    (0..measure_n)
+        .map(|j| {
+            let i = settle_n + j;
+            proc.process(SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / SR).sin())
+        })
+        .collect()
+}
+
+/// Compare the WDF BA283 block against the SETTLED ngspice golden (GAIN = 0.5).
+///
+/// Both signals are at 48 kHz, settled, same length/phase.  The trustworthy
+/// number is the single-bin AC gain ratio at the test frequency — NOT
+/// `normalized_rms_error_db`, which degenerates to ~0 dB whenever the WDF is far
+/// below the golden.
 #[test]
 fn ba283_wdf_vs_spice() {
     let source = skip_if_missing!(load_pro_pedal_sub(PRO_PATH), PRO_PATH);
@@ -117,45 +184,56 @@ fn ba283_wdf_vs_spice() {
     let mut proc = compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile {PRO_PATH}: {e}"));
     proc.set_control("Gain", 0.5);
 
-    let n = golden.len();
-    let input: Vec<f64> = (0..n)
-        .map(|i| SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / SR).sin())
-        .collect();
+    let wdf = wdf_settled_window(&mut proc, SETTLE_S);
+    let n = wdf.len().min(golden.len());
+    let wdf = &wdf[..n];
+    let golden_w = &golden[..n];
 
-    // Warm up half a buffer before recording (DC-block / coupling-cap settling).
-    let warmup = n / 2;
-    for i in 0..warmup {
-        proc.process(SINE_AMP * (2.0 * PI * TEST_FREQ * i as f64 / SR).sin());
-    }
-    let wdf_output: Vec<f64> = input.iter().map(|&s| proc.process(s)).collect();
+    // Settle guards on BOTH sides — an AC-coupled output that has settled has
+    // mean ≈ 0 and ~0 dB half-to-half drift.
+    let wdf_mean = metrics::dc_offset(wdf);
+    let gold_mean = metrics::dc_offset(golden_w);
+    let wdf_amp = metrics::single_bin_amplitude(wdf, TEST_FREQ, SR);
+    let gold_amp = metrics::single_bin_amplitude(golden_w, TEST_FREQ, SR);
+    let wdf_drift = metrics::ac_amplitude_drift_db(wdf, TEST_FREQ, SR);
 
-    let trim = (0.01 * SR) as usize;
-    let wdf_trim = &wdf_output[trim.min(wdf_output.len())..];
-    let golden_trim = &golden[trim.min(golden.len())..];
-    let result = metrics::compare(wdf_trim, golden_trim, SR, Some(TEST_FREQ));
+    // THE steady-state, level-independent number.
+    let ac_gain = metrics::ac_gain_db(wdf, golden_w, TEST_FREQ, SR);
+    let nrms = metrics::normalized_rms_error_db(wdf, golden_w);
 
-    eprintln!("  {GOLDEN} WDF vs ngspice (after {trim}-sample trim):");
-    eprintln!("    normalized RMS error : {:.1} dB", result.normalized_rms_error_db);
-    eprintln!("    peak error           : {:.1} dB", result.peak_error_db);
-    eprintln!("    WDF RMS amplitude    : {:.4} V", rms(wdf_trim));
-    eprintln!("    ngspice RMS amplitude: {:.4} V", rms(golden_trim));
-    if rms(golden_trim) > 1e-9 {
-        eprintln!(
-            "    WDF-vs-ngspice gap   : {:.1} dB (positive = WDF hotter)",
-            20.0 * (rms(wdf_trim) / rms(golden_trim)).log10()
-        );
-    }
-    if let Some(thd_err) = result.thd_error_db {
-        eprintln!("    THD error            : {:.1} dB", thd_err);
-    }
+    eprintln!("  {GOLDEN} WDF vs ngspice — SETTLED, both 48 kHz, {n} samples:");
+    eprintln!("    golden  : mean {gold_mean:+.5} V   AC amp {gold_amp:.5} V");
+    eprintln!("    wdf     : mean {wdf_mean:+.5} V   AC amp {wdf_amp:.5} V   drift {wdf_drift:+.3} dB");
+    eprintln!("    >>> single-bin AC gain (WDF/golden) = {ac_gain:+.2} dB  <<<  (steady-state, level-independent)");
+    eprintln!("    normalized_rms_error = {nrms:+.2} dB  (DEGENERATE shape proxy — do not gate on this)");
 
+    // Guard: a too-short settle window can never silently pass again.
     assert!(
-        rms(&wdf_output) > 1e-6,
-        "{GOLDEN} WDF output is silence (RMS < 1e-6): compilation or processing failed"
+        gold_mean.abs() < 0.05 * gold_amp.max(1e-9) + 1e-3,
+        "golden not settled (mean {gold_mean:+.5} V vs AC amp {gold_amp:.5}); regenerate with PEDALKERNEL_BOOTSTRAP_1073=1"
+    );
+    assert!(
+        wdf_mean.abs() < 0.05 * wdf_amp.max(1e-9) + 1e-3 && wdf_drift.abs() < 0.5,
+        "WDF output not settled (mean {wdf_mean:+.5} V, drift {wdf_drift:+.3} dB) — extend SETTLE_S"
+    );
+    assert!(
+        wdf_amp > 1e-6,
+        "{GOLDEN} WDF output is silence (AC amp < 1e-6): compilation or processing failed"
     );
 
-    // No hard gate yet — thresholds are set after the first measured run
-    // (house style: measure, then gate at measured + ~3 dB margin).
+    // WDF-side steady-state stability: doubling the settle must not move the AC
+    // level (proves the measured gain is steady state, not a transient sample).
+    let mut proc2 = compile_pedal(&def, SR).unwrap();
+    proc2.set_control("Gain", 0.5);
+    let wdf_long = wdf_settled_window(&mut proc2, SETTLE_S * 2.0);
+    let amp_long = metrics::single_bin_amplitude(&wdf_long, TEST_FREQ, SR);
+    let stab = 20.0 * (amp_long / wdf_amp.max(1e-30)).log10();
+    eprintln!("    WDF AC amp @2× settle = {amp_long:.5} V → Δ {stab:+.3} dB (steady-state check)");
+    assert!(stab.abs() < 0.3, "WDF AC level moved {stab:+.3} dB on 2× settle — not steady state");
+
+    // No hard accuracy gate yet — the BA283 has a known large gain deficit
+    // (the adapted-input-port-impedance investigation). The point here is that
+    // the AC gain number is now a TRUSTWORTHY steady-state figure.
 }
 
 /// PRIMARY DELIVERABLE (pedalkernel-9u6u.2 Phase B): the BA283 grouped-NR
