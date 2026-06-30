@@ -4607,6 +4607,41 @@ pub struct ScatteringRecomputeData {
     pub extract_output_nodes: Option<WdfPortTerminals>,
 }
 
+/// One NL port's four-term DC balance-residual breakdown, as returned by
+/// [`MultiNlStage::op_seed_residual`].
+///
+/// `residual = a − dc_bias − cap − nl`. At a true fixed point of OUR DC
+/// equations every field's combination yields `residual ≈ 0`; a large value
+/// localizes the formulation discrepancy term-by-term.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OpSeedResidualPort {
+    /// `a[i] = v[i] + Rp[i]·i_device(v)[i]` (outgoing wave from the device).
+    pub a: f64,
+    /// DC source term `dc_bias[i]` (VCC/Norton injection into this port).
+    pub dc_bias: f64,
+    /// Cap-coupling term `Σ_k s_nl_passive[i][k]·b_passive[k]`.
+    pub cap: f64,
+    /// NL-coupling term `Σ_j s_nl[i][j]·b[j]`.
+    pub nl: f64,
+    /// Adapted-input-port term `s_nl_adapted[i]·b_adapted` (DC input level).
+    pub adapted: f64,
+    /// DC-servo runtime correction `dc_servo_corr[i]` (the integral band-aid
+    /// that the engine accumulates to re-pin the conducting op-point; 0 when no
+    /// servo is active). This term existing & nonzero is itself evidence the
+    /// static op-point is unstable.
+    pub servo: f64,
+    /// Device port current `i_device(v)[i]` at the seed (amps).
+    pub i_device: f64,
+    /// **Static** formulation residual `a − dc_bias − cap − nl − adapted`
+    /// (volts). Excludes the runtime servo: this is the gap the servo must
+    /// patch, i.e. how far the seed is from a zero of the STATIC DC equations.
+    pub residual: f64,
+    /// **Full** residual `static − servo`. Includes the servo term, so it must
+    /// be ≈ 0 at the engine's own settled fixed point — a self-validation that
+    /// the residual formula matches the engine's per-sample `known_a`.
+    pub residual_full: f64,
+}
+
 /// Scattering matrix sub-blocks for multi-NL solving.
 ///
 /// These sub-blocks are extracted from the full R-type adaptor scattering
@@ -6992,6 +7027,110 @@ multi_port_nr_solve_grouped_into(
             }
         }
         out
+    }
+
+    /// Per-port WDF DC **balance residual** at the current warm-start `v_prev`.
+    ///
+    /// The grouped Newton-Raphson enforces, per NL port `i`, the fixed-point
+    /// equation
+    ///
+    /// ```text
+    ///   a[i] = dc_bias[i] + Σ_k s_nl_passive[i][k]·b_passive[k]
+    ///                     + Σ_j s_nl[i][j]·b[j]
+    /// ```
+    ///
+    /// with `a[i] = v[i] + Rp[i]·i_device(v)[i]`, `b[j] = v[j] − Rp[j]·i_device(v)[j]`,
+    /// `b_passive[k]` the reflected wave of passive one-port `k`, and `i_device`
+    /// the device port current. The residual is
+    ///
+    /// ```text
+    ///   r[i] = a[i] − dc_bias[i] − cap[i] − nl[i]
+    /// ```
+    ///
+    /// At a TRUE fixed point of OUR DC equations `r ≡ 0`. Evaluating it at an
+    /// **externally-seeded** operating point (e.g. an `op { }` block carrying
+    /// ngspice's `.op`) answers a decisive question: a nonzero `r` proves the
+    /// seeded point is NOT a zero of our residual, i.e. our DC formulation
+    /// differs from spice (a formulation bug, not convergence). The four-term
+    /// breakdown localizes WHICH term (`dc_bias` source, cap coupling, or NL
+    /// scattering) carries the discrepancy.
+    ///
+    /// `v` defaults to `self.v_prev`; `b_passive` reads the current
+    /// `passive_runtime_state`. Returns one [`OpSeedResidualPort`] per NL port.
+    /// Read-only; cheap; safe to call from the compile-time op-seed path.
+    pub fn op_seed_residual(&self) -> alloc::vec::Vec<OpSeedResidualPort> {
+        let n = self.n_nl;
+        let n_passive = self.passive_one_ports.len();
+        let s = &self.scattering.s_nl;
+        let s_pass = &self.scattering.s_nl_passive;
+        let rp = &self.nl_port_resistances;
+        let dc_bias = &self.dc_bias;
+
+        // Device port currents at the seeded operating point.
+        let mut i_dev = alloc::vec![0.0f64; n];
+        if let Some(dg) = self.device_groups.as_ref() {
+            let mut cur = [0.0 as crate::Wave; 3];
+            let mut jac = [0.0 as crate::Wave; 9];
+            let mut vbuf = [0.0 as crate::Wave; 3];
+            for (g, group) in dg.groups.iter().enumerate() {
+                let np = group.n_ports().min(3);
+                let off = dg.offsets.get(g).copied().unwrap_or(0);
+                for p in 0..np {
+                    vbuf[p] = self.v_prev.get(off + p).copied().unwrap_or(0.0);
+                }
+                group
+                    .as_group_iv()
+                    .eval(&vbuf[..np], &mut cur[..np], &mut jac[..np * np]);
+                for p in 0..np {
+                    if off + p < n {
+                        i_dev[off + p] = cur[p] as f64;
+                    }
+                }
+            }
+        }
+
+        let v: alloc::vec::Vec<f64> =
+            (0..n).map(|i| self.v_prev.get(i).copied().unwrap_or(0.0) as f64).collect();
+        let b: alloc::vec::Vec<f64> = (0..n)
+            .map(|j| v[j] - rp.get(j).copied().unwrap_or(0.0) as f64 * i_dev[j])
+            .collect();
+        let b_passive: alloc::vec::Vec<f64> = self
+            .passive_one_ports
+            .iter()
+            .map(|op| op.wdf_reflected(&self.passive_runtime_state) as f64)
+            .collect();
+
+        // Adapted-input-port incident wave at DC: the engine forms
+        // `b_adapted = prev_input · compensation` (no feedback opamp) and adds
+        // `s_nl_adapted[i]·b_adapted` to known_a[i] (stage.rs process()).
+        let b_adapted = self.prev_input as f64 * self.compensation as f64;
+        let s_adapt = &self.scattering.s_nl_adapted;
+        let servo_on = self.dc_servo_active && self.dc_servo_corr.len() == n;
+
+        (0..n)
+            .map(|i| {
+                let a = v[i] + rp.get(i).copied().unwrap_or(0.0) as f64 * i_dev[i];
+                let cap: f64 = (0..n_passive)
+                    .map(|k| s_pass[i * n_passive + k] as f64 * b_passive[k])
+                    .sum();
+                let nl: f64 = (0..n).map(|j| s[i * n + j] as f64 * b[j]).sum();
+                let adapted = s_adapt.get(i).copied().unwrap_or(0.0) as f64 * b_adapted;
+                let servo = if servo_on { self.dc_servo_corr[i] as f64 } else { 0.0 };
+                let dcb = dc_bias.get(i).copied().unwrap_or(0.0) as f64;
+                let residual = a - dcb - cap - nl - adapted;
+                OpSeedResidualPort {
+                    a,
+                    dc_bias: dcb,
+                    cap,
+                    nl,
+                    adapted,
+                    servo,
+                    i_device: i_dev[i],
+                    residual,
+                    residual_full: residual - servo,
+                }
+            })
+            .collect()
     }
 
     /// Live runtime operating-point capture for the diagnostics ring (Phase B).

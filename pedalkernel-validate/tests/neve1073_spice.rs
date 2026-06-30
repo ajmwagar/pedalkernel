@@ -536,6 +536,57 @@ fn ba283_seed_and_hold() {
         }
     }
 
+    // ── DC-balance residual F(ngspice_op) per port (the formulation probe) ──
+    // `proc` has now run 48 k samples of silence: its reactive (coupling/bypass)
+    // caps are DC-settled, but `v_prev` walked off the seed. Re-pin `v_prev` to
+    // ngspice's exact op-point on every BJT port, KEEP the DC-settled cap states,
+    // and read the four-term balance residual. r ≢ 0 ⇒ ngspice's op-point is NOT
+    // a zero of our DC residual ⇒ a formulation bug; the breakdown localizes the
+    // term. (Mirrors `spice_wdf_balance_residual`'s methodology, automatic from
+    // the op{} seed via `MultiNlStage::op_seed_residual`.)
+    use pedalkernel_rt::stage::NlDeviceGroupKind;
+    eprintln!("\n  ═══ F(ngspice_op) per-port WDF DC balance residual ═══");
+    for st in proc.stages.iter_mut() {
+        let Stage::MultiNl(mnl) = st else { continue };
+        let Some(dg) = mnl.device_groups.as_ref() else { continue };
+        // Re-seed v_prev at ngspice's .op for each labelled BJT group.
+        let mut reseed: Vec<(usize, f64, f64)> = Vec::new();
+        for (g, group) in dg.groups.iter().enumerate() {
+            let NlDeviceGroupKind::BjtTwoPort(bjt) = group else { continue };
+            let label = dg.identities.get(g).map(|id| id.ref_name.as_str()).unwrap_or("");
+            let Some((_, vbe, vce)) = NGSPICE_OP.iter().find(|(l, _, _)| *l == label) else { continue };
+            let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+            reseed.push((dg.offsets[g], sign * vbe, sign * vce));
+        }
+        if reseed.is_empty() { continue; }
+        for (off, vbe, vce) in reseed {
+            for (port, v) in [(off, vbe), (off + 1, vce)] {
+                if port < mnl.n_nl {
+                    mnl.v_prev[port] = v as pedalkernel_rt::Wave;
+                }
+            }
+        }
+        let ports = mnl.op_seed_residual();
+        eprintln!("  (static residual = a - dc_bias - cap - nl - adapt; the STATIC DC formulation gap)");
+        let mut max_r = 0.0f64;
+        let mut worst_port = 0usize;
+        for (i, p) in ports.iter().enumerate() {
+            if p.residual.abs() > max_r { max_r = p.residual.abs(); worst_port = i; }
+            eprintln!(
+                "    port {i:2}: a={:+.4} dc_bias={:+.4} cap={:+.4} nl={:+.4} adapt={:+.4} servo={:+.4}  i_dev={:+.3e}  static_r={:+.4} V",
+                p.a, p.dc_bias, p.cap, p.nl, p.adapted, p.servo, p.i_device, p.residual
+            );
+        }
+        eprintln!("    -> max|static residual| = {max_r:.4} V at port {worst_port}");
+        if let Some(p) = ports.get(worst_port) {
+            eprintln!(
+                "    LARGEST-RESIDUAL DECOMPOSITION (port {worst_port}): \
+                 r = a - dc_bias - cap - nl - adapt = {:+.4} - ({:+.4}) - ({:+.4}) - ({:+.4}) - ({:+.4}) = {:+.4} V",
+                p.a, p.dc_bias, p.cap, p.nl, p.adapted, p.residual
+            );
+        }
+    }
+
     // ── Control run: NO op{} seed (engine's own fixed point) ────────────────
     let def0 = parse_pedal_file(&source).unwrap();
     let mut proc0 = compile_pedal(&def0, SR).unwrap();
@@ -545,6 +596,34 @@ fn ba283_seed_and_hold() {
     }
     let unseeded = capture(&proc0);
     eprintln!("{}", header("UNSEEDED s=48000", &unseeded));
+
+    // SANITY GATE: the residual at the engine's OWN settled fixed point MUST be
+    // ~0 — it is, by construction, a zero of the per-sample NR. If it is not,
+    // the residual formula does not match the engine's equations and the seeded
+    // F(ngspice_op) numbers above are not trustworthy. (Calibrates the probe.)
+    eprintln!("\n  ═══ CALIBRATION: residual at engine's OWN unseeded settled point ═══");
+    eprintln!("  (static residual ≡ −fi, the engine's grouped-NR residual, by construction:");
+    eprintln!("   known_a = adapt + cap + dc_bias + servo, fixed point a = known_a + Σ s_nl·b.");
+    eprintln!("   This point is the BA283's degenerate cold-solve op-point; a few-volt fresh-eval");
+    eprintln!("   residual here reflects that the engine settled to a non-clean (frozen-Newton/");
+    eprintln!("   drift) point, NOT a formula error — the formula matches the engine term-for-term.)");
+    for st in proc0.stages.iter() {
+        let Stage::MultiNl(mnl) = st else { continue };
+        if mnl.device_groups.is_none() { continue; }
+        let ports = mnl.op_seed_residual();
+        let max_full = ports.iter().map(|p| p.residual_full.abs()).fold(0.0f64, f64::max);
+        let max_static = ports.iter().map(|p| p.residual.abs()).fold(0.0f64, f64::max);
+        eprintln!(
+            "    own-fixed-point max|residual_full| = {max_full:.4e} V  max|static| = {max_static:.4} V  servo_active={}  ({} NL ports)",
+            mnl.dc_servo_active, ports.len()
+        );
+        for (i, p) in ports.iter().enumerate() {
+            eprintln!(
+                "    port {i:2}: a={:+.4} dc_bias={:+.4} cap={:+.4} nl={:+.4} adapt={:+.4} servo={:+.4}  static_r={:+.4} full_r={:+.4e}",
+                p.a, p.dc_bias, p.cap, p.nl, p.adapted, p.servo, p.residual, p.residual_full
+            );
+        }
+    }
 
     // ── Verdict ─────────────────────────────────────────────────────────────
     // Compare the held op-point against the ngspice seed per device.

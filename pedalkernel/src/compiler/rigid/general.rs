@@ -510,6 +510,38 @@ fn apply_op_seed(
             vbe, vce
         );
     }
+
+    // Self-validation: the op{} seed is, by construction, an externally-supplied
+    // operating point. Compute and report the per-port WDF DC balance residual
+    // F(seed) = a − dc_bias − cap − nl right here, as a byproduct of seeding.
+    // A nonzero residual proves the seed is NOT a fixed point of OUR DC equations
+    // (a formulation bug), and the four-term breakdown localizes which term is
+    // off. Always emitted when an explicit op{} seed is present; also honors
+    // PK_OP_RESIDUAL=1 for ad-hoc probing.
+    //
+    // NOTE: at this compile-time call the reactive (cap) ports are at their
+    // freshly-built state, not yet DC-settled, so the `cap` column reflects the
+    // initial wave state. For a DC-consistent cap term, settle silence first and
+    // re-read via `MultiNlStage::op_seed_residual` (the ba283_seed_and_hold test
+    // does exactly this).
+    let report = has_explicit
+        || std::env::var("PK_OP_RESIDUAL").map(|v| v == "1").unwrap_or(false);
+    if report {
+        let ports = stage.op_seed_residual();
+        eprintln!(
+            "[op-seed/residual] per-port WDF DC balance residual F(seed)=a-dc_bias-cap-nl \
+             (nonzero ⇒ seed is NOT a fixed point of our DC eqns ⇒ formulation bug):"
+        );
+        let mut max_r = 0.0f64;
+        for (i, p) in ports.iter().enumerate() {
+            max_r = max_r.max(p.residual.abs());
+            eprintln!(
+                "  port {i:2}: a={:+.4} dc_bias={:+.4} cap={:+.4} nl={:+.4} adapt={:+.4} servo={:+.4}  i_dev={:+.3e}  static_r={:+.4} V",
+                p.a, p.dc_bias, p.cap, p.nl, p.adapted, p.servo, p.i_device, p.residual
+            );
+        }
+        eprintln!("[op-seed/residual] max|static residual| = {max_r:.4} V");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
