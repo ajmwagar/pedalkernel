@@ -86,6 +86,91 @@ fn build_general_mna_from_edges_inner(
     // Step 1: Collect unique MNA nodes
     let mut node_set = collect_mna_nodes(all_edges, graph);
 
+    // Step 1b: Input-coupling-network inclusion (pedalkernel adapted-input-port).
+    //
+    // The WDF adapted (voltage-source) input port injects the signal at
+    // `graph.in_node`. For a cap-coupled discrete amp the global input is the
+    // OUTER plate of an input coupling cap (e.g. BA283 `Cin.a`), which is NOT a
+    // member of this group's MNA — the coupling cap is a boundary edge that was
+    // stripped during signal-flow partitioning. Injection then falls back to the
+    // amplifier's base node, BYPASSING the input coupling cap + series base
+    // resistor and injecting with a placeholder source impedance.
+    //
+    // Fix (Option B): pull the source node + its coupling cap INTO the group. We
+    // locate the single passive (cap/resistor) edge that bridges `graph.in_node`
+    // to a node already in this MNA, add `graph.in_node` as an MNA node, and add
+    // that bridge edge to the passive edge set so it is stamped as a reactive
+    // (or resistive) WDF port. The adapted VS port then lands at the TRUE source
+    // node with the source's own (low) impedance, and the WDF scatters
+    // source -> Cin -> Rin -> base by construction — correct for ANY input
+    // network, not just a lumped series resistor.
+    let mut passive_edges_owned: Vec<usize> = all_edges.to_vec();
+    let mut input_coupling_included = false;
+    if !node_set.contains(&graph.in_node)
+        && graph.in_node != graph.gnd_node
+        && graph.in_node != graph.vcc_node
+    {
+        let edge_set: HashSet<usize> = all_edges.iter().copied().collect();
+        // The bridge edge: incident to in_node, other terminal already in MNA,
+        // and a 2-terminal passive (capacitor preferred — the coupling cap).
+        let bridge = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(eidx, e)| {
+                !edge_set.contains(eidx)
+                    && (e.node_a == graph.in_node || e.node_b == graph.in_node)
+            })
+            .filter_map(|(eidx, e)| {
+                let other = if e.node_a == graph.in_node {
+                    e.node_b
+                } else {
+                    e.node_a
+                };
+                if !node_set.contains(&other) {
+                    return None;
+                }
+                let comp = &graph.components[e.comp_idx];
+                // Only coupling caps / series resistors — never an active device.
+                let is_passive_bridge =
+                    comp.kind.capacitance().is_some() || comp.kind.resistance().is_some();
+                is_passive_bridge.then_some(eidx)
+            })
+            // Prefer a capacitor (the DC-blocking coupling cap) if several exist.
+            .min_by_key(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                if comp.kind.capacitance().is_some() {
+                    0
+                } else {
+                    1
+                }
+            });
+        if let Some(bridge_eidx) = bridge {
+            node_set.push(graph.in_node);
+            passive_edges_owned.push(bridge_eidx);
+            input_coupling_included = true;
+        }
+    }
+    let passive_edges: &[usize] = &passive_edges_owned;
+
+    // Adapted (input voltage-source) port reference resistance = the source's own
+    // (low/known) impedance. When we pulled the true global source node + its
+    // coupling cap into the group (`input_coupling_included`), the adapted port
+    // sits at the actual signal source, which is near-ideal (low Z) — use a small
+    // line-source impedance instead of the legacy 1 kΩ placeholder, so the WDF
+    // input divider (source -> Cin -> Rin -> base) is not artificially loaded.
+    // Inter-stage / boundary-fallback adapted ports keep the legacy 1 kΩ (their
+    // true driving-point impedance is the upstream stage, not a known source), so
+    // no existing non-cap-coupled circuit changes.
+    let adapted_source_r: f64 = if input_coupling_included {
+        std::env::var("PK_RADAPT")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(50.0)
+    } else {
+        1000.0
+    };
+
     let diode_ladder_filter = differential_diode_ladder_component_filter(all_edges, graph);
 
     // Step 2: Classify NL devices (also returns component labels for hint matching)
@@ -174,7 +259,7 @@ fn build_general_mna_from_edges_inner(
         .collect();
 
     let (mut mna, reactive_edges, variable_resistor_candidates) = stamp_passive_edges(
-        all_edges,
+        passive_edges,
         &nl_edge_set,
         graph,
         &node_to_mna,
@@ -192,8 +277,9 @@ fn build_general_mna_from_edges_inner(
         graph,
         &node_to_mna,
         n_nl,
-        all_edges,
+        passive_edges,
         effective_rate,
+        adapted_source_r,
     );
     let n_passive = passive_children.len();
     let extract_output_node_id = find_output_extract_node(all_edges, &node_set, graph);
@@ -291,6 +377,7 @@ fn build_general_mna_from_edges_inner(
         extract_output_nodes,
         &nl_comp_labels,
         init_hints,
+        adapted_source_r,
     )?;
 
     // Step 9: DC Q-point pre-charge for triode-with-grid stages.
@@ -751,6 +838,7 @@ fn build_wdf_ports(
     n_nl: usize,
     edge_indices: &[usize],
     effective_rate: f64,
+    r_adapted: f64,
 ) -> (
     Vec<WdfPort>,
     Vec<WdfPortTerminals>,
@@ -758,7 +846,6 @@ fn build_wdf_ports(
     Vec<f64>,
 ) {
     let r_nl_default = 1000.0;
-    let r_adapted = 1000.0;
     let mut ports = Vec::with_capacity(n_nl + reactive_edges.len() + 1);
     let mut port_node_pairs = Vec::new();
     let mut nl_port_resistances = vec![r_nl_default; n_nl];
@@ -1254,11 +1341,11 @@ fn assemble_multi_nl_stage(
     extract_output_nodes: Option<WdfPortTerminals>,
     nl_comp_labels: &[String],
     init_hints: &[crate::dsl::InitHint],
+    r_adapted: f64,
 ) -> Result<MultiNlStage, String> {
     let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
-    let r_adapted = 1000.0;
     let extract_coeffs = extract_output_nodes.map(|out| {
         let (out_pos, out_neg) = out.as_tuple();
         mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
