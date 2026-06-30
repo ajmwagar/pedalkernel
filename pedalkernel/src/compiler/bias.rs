@@ -1244,6 +1244,66 @@ pub(super) fn solve_triode_dc_qpoint(
 /// excluded but the BJT-terminal rails are included so the caller can resolve
 /// ports), or `None` if the group has no BJTs, the system is singular, the solve
 /// fails to converge, or the result is non-physical.
+//
+// ── Parasitic-resistance internal-voltage fixed point ───────────────────────
+// Mirror of the runtime `BjtTwoPort::eval` constants (pedalkernel-rt
+// elements/nonlinear/bjt.rs). 0.5 damping keeps the map a contraction even when
+// the undamped loop gain `d(i·R)/dv` exceeds 1 for large RB.
+const BJT_PARASITIC_DAMP: f64 = 0.5;
+const BJT_PARASITIC_TOL: f64 = 1e-9;
+const BJT_PARASITIC_MAX_ITER: usize = 40;
+
+/// Gummel-Poon collector/base currents from **terminal** (node-difference) port
+/// voltages, applying the device's parasitic ohmic drops (RB·Ib, RE·Ie, RC·Ic)
+/// exactly as the runtime [`pedalkernel_rt::elements::BjtTwoPort`]`::eval` does.
+///
+/// The intrinsic `GummelPoonModel::currents(vbe, vbc)` takes *junction* voltages;
+/// feeding it the raw terminal node difference (omitting the parasitic drops)
+/// biases a high-RB input transistor at the intrinsic-Vbe operating point — for
+/// the BA283 TR1 (QBC184C, RB=500 Ω) that is the under-conducting ~half-current
+/// point, because Ic is exponential in Vbe and the omitted `Ib·RB` ≈ 33 mV maps
+/// to ~2× collector current. The compile-time DC solve must therefore apply the
+/// SAME terminal→internal map as runtime so the baked `dc_bias` is a true fixed
+/// point of the runtime balance (no compile-vs-runtime divergence).
+///
+/// `vbe_term`/`vbc_term` are NPN-normalized (the caller applies the device sign
+/// before calling and re-applies it to the returned currents), so the damped
+/// Picard runs in the same normalized space as the runtime `eval`.
+fn bjt_currents_terminal(model: &GummelPoonModel, vbe_term: f64, vbc_term: f64) -> (f64, f64) {
+    let rb = model.rb as f64;
+    let re = model.re as f64;
+    let rc = model.rc as f64;
+    let currents = |vbe: f64, vbc: f64| -> (f64, f64) {
+        let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc as pedalkernel_rt::Wave);
+        (ic as f64, ib as f64)
+    };
+    if rb + re + rc <= 0.0 {
+        // No parasitics: terminal voltages ARE the junction voltages.
+        return currents(vbe_term, vbc_term);
+    }
+    // Damped fixed point on the internal junction voltages:
+    //   v_int = v_term − i(v_int)·R   (vbc = vbe − vce throughout)
+    let vce_term = vbe_term - vbc_term;
+    let mut vbe_int = vbe_term;
+    let mut vce_int = vce_term;
+    for _ in 0..BJT_PARASITIC_MAX_ITER {
+        let vbc_int = vbe_int - vce_int;
+        let (ic, ib) = currents(vbe_int, vbc_int);
+        let ie_out = ic + ib;
+        let vbe_t = vbe_term - ib * rb - ie_out * re;
+        let vce_t = vce_term - ic * rc - ie_out * re;
+        let dvbe = BJT_PARASITIC_DAMP * (vbe_t - vbe_int);
+        let dvce = BJT_PARASITIC_DAMP * (vce_t - vce_int);
+        vbe_int += dvbe;
+        vce_int += dvce;
+        if dvbe.abs() + dvce.abs() < BJT_PARASITIC_TOL {
+            break;
+        }
+    }
+    let vbc_int = vbe_int - vce_int;
+    currents(vbe_int, vbc_int)
+}
+
 pub(super) fn solve_bjt_group_dc_qpoint(
     nl_kinds: &[NonlinearKind],
     all_edges: &[usize],
@@ -1437,9 +1497,11 @@ pub(super) fn solve_bjt_group_dc_qpoint(
                 let vbe = sign * (vb_ - ve_);
                 let vbc = sign * (vb_ - vc_);
 
-                let (ic, ib_) =
-                    model.currents(vbe as pedalkernel_rt::Wave, vbc as pedalkernel_rt::Wave);
-                let (ic, ib_) = (sign * ic as f64, sign * ib_ as f64);
+                // Apply the SAME parasitic terminal→internal map as runtime
+                // `BjtTwoPort::eval` (see `bjt_currents_terminal`): the node
+                // voltages are TERMINAL, not intrinsic-junction.
+                let (ic, ib_) = bjt_currents_terminal(model, vbe, vbc);
+                let (ic, ib_) = (sign * ic, sign * ib_);
                 // Terminal currents flowing INTO the device (leaving the node):
                 //   base: +Ib, collector: +Ic, emitter: -(Ib+Ic)
                 let term = [(b.base, ib_), (b.collector, ic), (b.emitter, -(ib_ + ic))];
@@ -1468,9 +1530,8 @@ pub(super) fn solve_bjt_group_dc_qpoint(
                     }
                     let vbe_p = sign * (vbn - ven);
                     let vbc_p = sign * (vbn - vcn);
-                    let (icp, ibp) = model
-                        .currents(vbe_p as pedalkernel_rt::Wave, vbc_p as pedalkernel_rt::Wave);
-                    let (icp, ibp) = (sign * icp as f64, sign * ibp as f64);
+                    let (icp, ibp) = bjt_currents_terminal(model, vbe_p, vbc_p);
+                    let (icp, ibp) = (sign * icp, sign * ibp);
                     let dterm = [
                         (b.base, (ibp - ib_) / h),
                         (b.collector, (icp - ic) / h),

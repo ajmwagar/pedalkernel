@@ -1,6 +1,16 @@
-//! BA283 residual reconciliation — DIAGNOSTIC (measure only, no fix).
+//! BA283 residual reconciliation — now a REGRESSION lock for the parasitic fix.
 //!
-//! # The puzzle
+//! # POST-FIX (parasitic-drop reconciliation landed)
+//!
+//! `solve_bjt_group_dc_qpoint` now routes every BJT current through
+//! `bjt_currents_terminal`, which applies the SAME RB/RE/RC parasitic drops as
+//! the runtime `BjtTwoPort::eval`. The engine therefore biases TR1 at the
+//! TERMINAL op (Vbe 0.6417 → intrinsic 0.6087 → Ic ≈ 258 µA), and the assertions
+//! below were FLIPPED to lock that in: the **terminal** seed now holds (residual
+//! ~0.04 V, was 0.63), while the under-conducting **intrinsic** seed no longer
+//! does (~0.64 V). The historical analysis below is preserved for context.
+//!
+//! # The puzzle (pre-fix)
 //!
 //! Two probes report the four-term WDF DC-balance residual `F(ngspice_op)` at the
 //! BA283's ngspice operating point, and they DISAGREED by ~0.6 V at TR1.Vce:
@@ -195,40 +205,54 @@ fn ba283_residual_reconcile_intrinsic_vs_terminal() {
         p5t.2 - p5i.2
     );
 
-    eprintln!("\n  ═══ VERDICT ═══");
+    eprintln!("\n  ═══ VERDICT (POST parasitic-drop fix) ═══");
     eprintln!(
-        "  0.027-vs-0.62 = PROBE ARTIFACT (intrinsic 0.6087 V vs terminal 0.6417 V TR1.Vbe seed;"
+        "  The compile-time DC solve (`solve_bjt_group_dc_qpoint` → `bjt_currents_terminal`) now"
     );
     eprintln!(
-        "  gap = Ib·RB = 65.6µA·500Ω = 0.033 V). At the IDENTICAL terminal op the TRUE residual is"
+        "  applies the SAME RB/RE/RC parasitic drops as runtime `BjtTwoPort::eval`, so it biases TR1"
     );
     eprintln!(
-        "  ~{:.2} V at TR1.Vce ⇒ a REAL FORMULATION residual in the dc_bias/Norton source term,",
+        "  at the TERMINAL op (Vbe 0.6417 → intrinsic 0.6087 → Ic 258µA). The engine's `dc_bias` is"
+    );
+    eprintln!(
+        "  therefore a fixed point of the TRUE terminal op: TERMINAL-seed residual = {:.3} V (was 0.63),",
         mt
     );
-    eprintln!("  NOT pure root-selection. (The engine biases TR1 at the under-conducting point.)\n");
+    eprintln!(
+        "  while the under-conducting INTRINSIC-Vbe seed no longer holds ({:.3} V) — the roles flipped.\n",
+        mi
+    );
 
-    // ── Assertions: the artifact is reproducible and localized ───────────────
-    // 1. The intrinsic seed (the dashboard's golden) yields a small residual.
+    // ── Assertions: the parasitic-drop fix reconciled compile vs runtime ──────
+    // 1. The TERMINAL seed (the physically-correct WDF port op-point) is now a
+    //    fixed point of the engine's DC equations — the residual collapsed from
+    //    ~0.63 V (pre-fix) to ~0 across ALL ports.
     assert!(
-        mi < 0.10,
-        "INTRINSIC-seed residual should be small (was {mi:.4} V) — this is the dashboard's 0.027 path"
+        mt < 0.10,
+        "TERMINAL-seed residual should now be small (was {mt:.4} V); the engine bias is reconciled \
+         with the runtime parasitic-aware eval"
     );
-    // 2. The terminal seed (the true WDF port op-point) yields ~0.6 V at TR1.Vce.
+    // 2. The INTRINSIC-Vbe seed (the OLD under-conducting point the engine used to
+    //    bake) is NO LONGER a fixed point — its residual is now the large one,
+    //    localized to TR1(Q3).Vce. This is the mirror image of the pre-fix split.
     assert!(
-        mt > 0.50,
-        "TERMINAL-seed residual should be ~0.6 V (was {mt:.4} V) — the hold test's 0.62 path"
+        mi > 0.40,
+        "INTRINSIC-seed residual should now be the off one (was {mi:.4} V) — proof the engine moved \
+         off the intrinsic under-conducting point"
     );
-    assert_eq!(wt, 5, "worst terminal-seed residual must localize to TR1(Q3).Vce");
-    // 3. The gap is carried entirely by `a` (device current), not dc_bias/cap.
+    assert_eq!(wi, 5, "worst INTRINSIC-seed residual must localize to TR1(Q3).Vce");
+    // 3. The gap between the two seeds is carried entirely by `a` (device
+    //    current), not dc_bias/cap — both seeds share the IDENTICAL engine dc_bias.
     let dc_bias_moved = (p5t.3 - p5i.3).abs();
     let cap_moved = (p5t.4 - p5i.4).abs();
     assert!(
         dc_bias_moved < 1e-6 && cap_moved < 1e-6,
         "dc_bias and cap must be identical across seeds (moved {dc_bias_moved:.2e}/{cap_moved:.2e})"
     );
-    // 4. The terminal seed roughly DOUBLES TR1 collector current vs the intrinsic
-    //    seed (the exponential Vbe sensitivity that drives the whole gap).
+    // 4. The terminal seed still ~doubles TR1 collector current vs the intrinsic
+    //    seed (the exponential Vbe sensitivity) — the engine now converges to the
+    //    terminal (≈258 µA) branch, which MATCHES ngspice.
     assert!(
         p5t.1 > 1.8 * p5i.1,
         "terminal seed should ~2× TR1 collector current ({:.3e} vs {:.3e})",

@@ -615,12 +615,63 @@ VIN v_in 0 DC 0
         }
 
         let stem = circuit_path.file_stem().unwrap().to_string_lossy().to_string();
-        parse_op_output(&stdout, stem)
+        // Map each BJT to its (collector, base, emitter) nodes from the netlist so
+        // the parser can report TERMINAL (node-difference) Vbe/Vce instead of the
+        // `show` table's INTRINSIC junction voltages. The two differ by the device
+        // parasitic IR drops (Ib·RB + Ie·RE); the WDF port sees the TERMINAL value,
+        // so that is what the bias-accuracy golden must store.
+        let bjt_nodes = parse_bjt_terminal_nodes(&raw_body);
+        parse_op_output(&stdout, stem, &bjt_nodes)
     }
 }
 
+/// Parse `Qxxx nc nb ne model …` device lines from a SPICE deck, returning a map
+/// from the **uppercased** device ref to its `(collector, base, emitter)` node
+/// names (lowercased, matching ngspice's `print all` node keys).
+///
+/// Skips comment (`*`) and continuation (`+`) lines. Only the first three node
+/// tokens after the device name are read (BJT topology: C B E [substrate] model).
+fn parse_bjt_terminal_nodes(
+    deck: &str,
+) -> std::collections::HashMap<String, (String, String, String)> {
+    let mut map = std::collections::HashMap::new();
+    for line in deck.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('*') || t.starts_with('+') {
+            continue;
+        }
+        let parts: Vec<&str> = t.split_whitespace().collect();
+        // `Qname C B E model` → at least name + 3 nodes + model.
+        if parts.len() < 5 {
+            continue;
+        }
+        let name = parts[0];
+        if !name.starts_with('Q') && !name.starts_with('q') {
+            continue;
+        }
+        map.insert(
+            name.to_uppercase(),
+            (
+                parts[1].to_lowercase(),
+                parts[2].to_lowercase(),
+                parts[3].to_lowercase(),
+            ),
+        );
+    }
+    map
+}
+
 /// Parse the combined `show` + `print all` ngspice `.op` output.
-fn parse_op_output(out: &str, circuit: String) -> Result<SpiceOpSnapshot, SpiceError> {
+///
+/// `bjt_nodes` maps each BJT (uppercased ref) to its `(collector, base, emitter)`
+/// node names; when present, the device's reported `vbe`/`vce` are the TERMINAL
+/// node differences `v(base)−v(emitter)` / `v(collector)−v(emitter)` rather than
+/// the `show` table's intrinsic junction voltages.
+fn parse_op_output(
+    out: &str,
+    circuit: String,
+    bjt_nodes: &std::collections::HashMap<String, (String, String, String)>,
+) -> Result<SpiceOpSnapshot, SpiceError> {
     // ── `show` device table ─────────────────────────────────────────────────
     // ngspice prints one block per device type. A `device <name> <name>...`
     // header names the columns; following `param val val ...` rows carry values.
@@ -721,18 +772,33 @@ fn parse_op_output(out: &str, circuit: String) -> Result<SpiceOpSnapshot, SpiceE
     let mut devices = Vec::new();
     for (name, p) in dev_params {
         // Keep only transistor columns (carry both vbe and vbc).
-        let (vbe, vbc) = match (p.get("vbe"), p.get("vbc")) {
+        let (vbe_intrinsic, vbc_intrinsic) = match (p.get("vbe"), p.get("vbc")) {
             (Some(a), Some(b)) => (*a, *b),
             _ => continue,
         };
         let ic = p.get("ic").copied().unwrap_or(0.0);
         let ib = p.get("ib").copied().unwrap_or(0.0);
         let gm = p.get("gm").copied().unwrap_or(0.0);
+
+        // Prefer TERMINAL node-difference voltages (what the WDF port sees). The
+        // `show` table's `vbe`/`vbc` are INTRINSIC junction voltages; they differ
+        // from the terminal values by the parasitic drops (Ib·RB + Ie·RE). Ground
+        // (node `0`, absent from `print all`) defaults to 0 V. Fall back to the
+        // intrinsic values when the device's nodes are unknown.
+        let (vbe, vce) = match bjt_nodes.get(&name) {
+            Some((c, b, e)) => {
+                let vc = nodes.get(c).copied().unwrap_or(0.0);
+                let vb = nodes.get(b).copied().unwrap_or(0.0);
+                let ve = nodes.get(e).copied().unwrap_or(0.0);
+                (vb - ve, vc - ve)
+            }
+            None => (vbe_intrinsic, vbe_intrinsic - vbc_intrinsic),
+        };
         devices.push(SpiceDeviceOp {
             model: models_by_dev.get(&name).cloned().unwrap_or_default(),
             device: name,
             vbe,
-            vce: vbe - vbc,
+            vce,
             ic,
             ib,
             gm,
