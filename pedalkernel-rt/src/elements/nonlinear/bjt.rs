@@ -897,10 +897,11 @@ impl NlDeviceGroupIv for BjtTwoPort {
         let vbe_ext = sign * v[0];
         let vce_ext = sign * v[1];
 
-        // Clamp Vbc to prevent catastrophic BC junction forward bias.
-        const VBC_MAX: crate::Wave = 0.4;
-        let clamp_vbc =
-            |vbe: crate::Wave, vce: crate::Wave| -> crate::Wave { (vbe - vce).min(VBC_MAX) };
+        // No Vbc clamp: pass Vbc through so the companion can represent deep
+        // saturation (Vbc up to the real value), matching SPICE. The old 0.4 V
+        // clamp suppressed the Iec reverse-transport term, yielding active-region
+        // beta for a saturated BJT (wrong op-point in DC-coupled feedback amps).
+        let clamp_vbc = |vbe: crate::Wave, vce: crate::Wave| -> crate::Wave { vbe - vce };
 
         let rb = self.model.rb;
         let re = self.model.re;
@@ -948,7 +949,7 @@ impl NlDeviceGroupIv for BjtTwoPort {
         if !has_parasitics {
             // Fast path: analytical Jacobian, no parasitic iteration needed.
             let vbc = clamp_vbc(vbe_ext, vce_ext);
-            let vbc_was_clamped = (vbe_ext - vce_ext) > VBC_MAX;
+            let vbc_was_clamped = false;
             let (ic, ib, jac_be_bc) = self.model.currents_and_jacobian(vbe_ext, vbc);
             currents[0] = sign * ib;
             currents[1] = sign * ic;
@@ -980,7 +981,7 @@ impl NlDeviceGroupIv for BjtTwoPort {
                 vce_int = vce_ext - ic * rc - ie_out * re;
             }
             let vbc_int = clamp_vbc(vbe_int, vce_int);
-            let vbc_was_clamped = (vbe_int - vce_int) > VBC_MAX;
+            let vbc_was_clamped = false;
 
             let (ic, ib, jac_be_bc) = self.model.currents_and_jacobian(vbe_int, vbc_int);
             currents[0] = sign * ib;
@@ -1229,11 +1230,10 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         let vbe = sign * v[0];
         let vce = sign * v[1];
 
-        // Clamp Vbc to prevent catastrophic BC junction forward bias.
-        const VBC_MAX: crate::Wave = 0.4;
-        let vbc_raw = vbe - vce;
-        let vbc_was_clamped = vbc_raw > VBC_MAX;
-        let vbc = vbc_raw.min(VBC_MAX);
+        // No Vbc clamp: pass Vbc through (see BjtTwoPort) so a saturated junction
+        // is represented faithfully rather than pinned at 0.4 V.
+        let vbc = vbe - vce;
+        let vbc_was_clamped = false;
 
         // Clamp exponential arguments to prevent overflow (same limit as GP).
         let arg_be = (vbe / self.nf_vt).min(40.0);

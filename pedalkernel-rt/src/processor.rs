@@ -1880,12 +1880,12 @@ impl CompiledPedal {
     /// For BJT circuits, Vce can swing from ~0V to Vcc (supply).
     pub fn set_supply_voltage(&mut self, voltage: crate::Wave) {
         let prev_voltage = self.supply_voltage;
-        // Support negative supplies (PNP positive-ground, e.g. -9V Rangemaster)
-        self.supply_voltage = if voltage >= 0.0 {
-            voltage.clamp(5.0, 500.0)
-        } else {
-            voltage.clamp(-500.0, -5.0)
-        };
+        // Support negative supplies (PNP positive-ground, e.g. -9V Rangemaster).
+        // No [5,500] clamp: a proper startup VCC ramp must sweep from ~0 to
+        // nominal so the DC solve tracks the power-on branch (the same root
+        // SPICE's source-stepping finds). The old 5V floor forced the ramp to
+        // begin on the wrong branch in multistable circuits.
+        self.supply_voltage = voltage;
 
         // Calculate op-amp v_max from supply voltage.
         // For single-supply biased at Vsupply/2: v_max = (Vsupply/2) - saturation_margin
