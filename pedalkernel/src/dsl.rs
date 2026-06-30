@@ -158,6 +158,14 @@ pub enum InitState {
     /// stage's DC source term. Used to test whether an externally-derived
     /// operating point (e.g. ngspice's `.op`) is a stable WDF fixed point.
     Explicit { vbe: f64, vce: f64 },
+    /// Explicit **node voltage** seed from the optional `op { nodes { ... } }`
+    /// sub-block. `device_label` carries the circuit node NAME (a pin name like
+    /// `Q3.base`, or a reserved node like `in`/`out`/`vcc`), and `v` is its DC
+    /// voltage. Used to seed reactive (capacitor) ports at a full operating
+    /// point: each cap's stored DC voltage is `V(node_a) − V(node_b)`. Like
+    /// `Explicit`, it is a pure warm-start seed — it never changes the stage's
+    /// DC source term.
+    NodeVoltage { v: f64 },
 }
 
 /// One device hint from the `init { ... }` block.
@@ -3413,9 +3421,67 @@ fn op_section(input: &str) -> IResult<&str, Vec<InitHint>> {
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('{')(input)?;
     let (input, hints) = many0(parse_op_entry)(input)?;
+    // Optional `nodes { name: voltage, ... }` sub-block: node-voltage seeds for
+    // reactive (capacitor) ports. Parsed AFTER the per-device entries so it does
+    // not collide with `Label: { vbe, vce }`.
+    let (input, node_hints) = opt(op_nodes_block)(input)?;
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
+    let mut hints = hints;
+    if let Some(mut nh) = node_hints {
+        hints.append(&mut nh);
+    }
     Ok((input, hints))
+}
+
+/// Parse the optional `nodes { name: voltage, ... }` sub-block inside `op { }`.
+///
+/// ```text
+/// op {
+///     Q3: { vbe: 0.64, vce: 5.35 }
+///     nodes { Q3.base: 1.0308, Q3.collector: 5.7426, in: 0.0 }
+/// }
+/// ```
+///
+/// Each entry becomes an [`InitHint`] with the node name in `device_label` and
+/// an [`InitState::NodeVoltage`].
+fn op_nodes_block(input: &str) -> IResult<&str, Vec<InitHint>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("nodes")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+    let mut hints = Vec::new();
+    let mut rest = input;
+    loop {
+        let (r, _) = ws_comments(rest)?;
+        if let Ok((r2, _)) = char::<&str, nom::error::Error<&str>>('}')(r) {
+            rest = r2;
+            break;
+        }
+        // Node names may contain a dot (e.g. `Q3.base`); accept identifier with
+        // an optional `.pin` suffix.
+        let (r, head) = identifier(r)?;
+        let (r, tail) = opt(|i| {
+            let (i, _) = char('.')(i)?;
+            identifier(i)
+        })(r)?;
+        let name = match tail {
+            Some(pin) => format!("{head}.{pin}"),
+            None => head.to_string(),
+        };
+        let (r, _) = ws_comments(r)?;
+        let (r, _) = char(':')(r)?;
+        let (r, _) = ws_comments(r)?;
+        let (r, val) = double(r)?;
+        hints.push(InitHint {
+            device_label: name,
+            state: InitState::NodeVoltage { v: val },
+        });
+        let (r, _) = ws_comments(r)?;
+        let (r, _) = opt(char(','))(r)?;
+        rest = r;
+    }
+    Ok((rest, hints))
 }
 
 /// Parse a complete `.pedal` or `.synth` file.
@@ -6183,5 +6249,58 @@ pedal "Simple" {
         assert_eq!(def.ports.len(), 2);
         assert_eq!(def.ports[0].impedance, None);
         assert_eq!(def.ports[1].impedance, None);
+    }
+
+    #[test]
+    fn parse_op_block_with_node_voltage_seeds() {
+        // `op { Q1: { vbe, vce }  nodes { name: v, ... } }` — device-port seeds
+        // PLUS reactive-port (capacitor) node-voltage seeds.
+        let src = r#"pedal "test" {
+    supply 24V
+    components { Q1: npn(BC184C)  R1: resistor(10k)  C1: cap(10u) }
+    nets { in -> C1.a  C1.b -> Q1.base, R1.a  R1.b -> gnd  Q1.collector -> out  Q1.emitter -> gnd }
+    controls {}
+    op {
+        Q1: { vbe: 0.64, vce: 5.35 }
+        nodes {
+            Q1.base: 1.0308
+            Q1.collector: 5.7426
+            C1.a: 0.0
+        }
+    }
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        let explicit: Vec<_> = def
+            .init_hints
+            .iter()
+            .filter(|h| matches!(h.state, InitState::Explicit { .. }))
+            .collect();
+        let nodes: Vec<_> = def
+            .init_hints
+            .iter()
+            .filter(|h| matches!(h.state, InitState::NodeVoltage { .. }))
+            .collect();
+        assert_eq!(explicit.len(), 1, "one Explicit device seed");
+        assert_eq!(nodes.len(), 3, "three NodeVoltage seeds");
+        let qb = nodes
+            .iter()
+            .find(|h| h.device_label == "Q1.base")
+            .expect("Q1.base node seed");
+        assert!(matches!(qb.state, InitState::NodeVoltage { v } if (v - 1.0308).abs() < 1e-6));
+    }
+
+    #[test]
+    fn parse_op_block_without_nodes_still_works() {
+        // Back-compat: an `op { }` block with only device seeds (no nodes block).
+        let src = r#"pedal "test" {
+    supply 24V
+    components { Q1: npn(BC184C) }
+    nets { in -> Q1.base  Q1.collector -> out  Q1.emitter -> gnd }
+    controls {}
+    op { Q1: { vbe: 0.64, vce: 5.35 } }
+}"#;
+        let def = parse_pedal_file(src).unwrap();
+        assert_eq!(def.init_hints.len(), 1);
+        assert!(matches!(def.init_hints[0].state, InitState::Explicit { .. }));
     }
 }

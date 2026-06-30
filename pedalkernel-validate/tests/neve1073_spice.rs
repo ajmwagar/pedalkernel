@@ -426,12 +426,55 @@ const NGSPICE_OP: &[(&str, f64, f64)] = &[
     ("Q2", 0.4063, 19.2039), // TR3 — 2N3055 output
 ];
 
+/// ngspice `.op` NODE voltages for the BA283 (1 MΩ input pulldown), keyed by
+/// `.pedal` pin names (each name aliases one circuit net). Re-derived fresh from
+/// `neve1073_ba283.spice` + Rpd via `/opt/homebrew/bin/ngspice`. These let the
+/// FULL operating point be seeded: each coupling/bypass cap's stored DC voltage
+/// is `V(node_a) − V(node_b)`.
+///
+///   ni=1.0308  nb1=1.0308  n1=5.7426  ne1=0.3891  nrc=5.7426
+///   ne2=5.2024  nd=4.7961  nfb=4.7051  v_in=0  v_out=0  vcc=24
+const NGSPICE_NODES: &[(&str, f64)] = &[
+    ("Cin.a", 0.0),         // v_in (AC-grounded at DC)
+    ("Cin.b", 1.030802),    // ni
+    ("Q3.base", 1.030802),  // nb1
+    ("Q3.collector", 5.742598), // n1
+    ("Q3.emitter", 0.389135),   // ne1
+    ("Rcmp.b", 5.742598),   // nrc
+    ("Q1.emitter", 5.202446),   // ne2
+    ("Q2.emitter", 4.796136),   // nd
+    ("RU1.b", 4.705094),    // nfb
+    ("Cout.b", 0.0),        // v_out (AC-grounded at DC through RL)
+];
+
+/// The cap DC voltages implied by [`NGSPICE_NODES`], in `.pedal` orientation
+/// (a − b), for the verdict print: Cin −1.0308, Cmil −4.7118, Ccmp +5.3535,
+/// Cfb +3.6743, Cout +4.7961.
+const NGSPICE_CAPS: &[(&str, f64)] = &[
+    ("Cin", -1.030802),
+    ("Cmil", -4.711796),
+    ("Ccmp", 5.353463),
+    ("Cfb", 3.674292),
+    ("Cout", 4.796136),
+];
+
 /// Inject an `op { ... }` block (ngspice's operating point) before the closing
 /// brace of the loaded BA283 source. Keeps the private `.pedal` untouched.
-fn inject_op_block(source: &str) -> String {
+///
+/// When `with_nodes` is true, also emits the `nodes { ... }` sub-block so the
+/// reactive (capacitor) ports are seeded to ngspice's DC node voltages — the
+/// FULL operating-point seed (device ports + cap voltages).
+fn inject_op_block_full(source: &str, with_nodes: bool) -> String {
     let mut block = String::from("\n  op {\n");
     for (label, vbe, vce) in NGSPICE_OP {
         block.push_str(&format!("    {label}: {{ vbe: {vbe}, vce: {vce} }}\n"));
+    }
+    if with_nodes {
+        block.push_str("    nodes {\n");
+        for (name, v) in NGSPICE_NODES {
+            block.push_str(&format!("      {name}: {v}\n"));
+        }
+        block.push_str("    }\n");
     }
     block.push_str("  }\n");
     let cut = source.rfind('}').expect("pedal has a closing brace");
@@ -481,16 +524,49 @@ fn ba283_seed_and_hold() {
 
     let probes = [0usize, 1, 10, 100, 1000, 48_000];
 
-    // ── Seeded run ──────────────────────────────────────────────────────────
-    let seeded_src = inject_op_block(&source);
+    // ── Seeded run (FULL seed: device ports + cap voltages) ─────────────────
+    let seeded_src = inject_op_block_full(&source, true);
     let def = parse_pedal_file(&seeded_src)
         .unwrap_or_else(|e| panic!("parse seeded BA283: {e}"));
     let mut proc = compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile seeded BA283: {e}"));
     proc.set_control("Gain", 0.5);
 
-    eprintln!("\n  ═══ BA283 SEED-AND-HOLD (silence) ═══");
+    eprintln!("\n  ═══ BA283 FULL SEED-AND-HOLD (silence) ═══");
     eprintln!("  ngspice .op seed: Q3(TR1) {:.4}/{:.4}  Q1(TR2) {:.4}/{:.4}  Q2(TR3) {:.4}/{:.4}  (Vbe/Vce)",
         NGSPICE_OP[0].1, NGSPICE_OP[0].2, NGSPICE_OP[1].1, NGSPICE_OP[1].2, NGSPICE_OP[2].1, NGSPICE_OP[2].2);
+    eprint!("  cap DC seeds (a−b):");
+    for (name, v) in NGSPICE_CAPS {
+        eprint!("  {name}={v:+.4}");
+    }
+    eprintln!();
+
+    // F(ngspice_op) on the FRESH proc — device ports AND caps both seeded at
+    // ngspice's operating point, BEFORE any silence. This is the decisive
+    // formulation probe: r ≈ 0 ⇒ ngspice's point is a zero of our DC residual
+    // once caps are included (the cap-confound resolved). Was 0.63 V device-only.
+    {
+        use pedalkernel_rt::processor::Stage;
+        eprintln!("\n  ═══ F(ngspice_op) FULL SEED (fresh, caps+ports seeded, pre-silence) ═══");
+        for st in proc.stages.iter() {
+            let Stage::MultiNl(mnl) = st else { continue };
+            if mnl.device_groups.is_none() { continue; }
+            let ports = mnl.op_seed_residual();
+            let max_static = ports.iter().map(|p| p.residual.abs()).fold(0.0f64, f64::max);
+            let (worst, _) = ports
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.residual.abs().partial_cmp(&b.1.residual.abs()).unwrap())
+                .map(|(i, p)| (i, p.residual))
+                .unwrap_or((0, 0.0));
+            eprintln!("  max|F(ngspice_op)_full_seed| = {max_static:.4} V at port {worst}");
+            for (i, p) in ports.iter().enumerate() {
+                eprintln!(
+                    "    port {i:2}: a={:+.4} dc_bias={:+.4} cap={:+.4} nl={:+.4} adapt={:+.4}  i_dev={:+.3e}  r={:+.4} V",
+                    p.a, p.dc_bias, p.cap, p.nl, p.adapted, p.i_device, p.residual
+                );
+            }
+        }
+    }
 
     let header = |label: &str, recs: &[OpPointRecord]| {
         let mut s = format!("  {label:>12}: ");

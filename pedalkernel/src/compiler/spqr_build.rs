@@ -2972,7 +2972,12 @@ pub(super) fn build_spqr_stage_with_options(
             // multivibrators). Without asymmetric initial conditions, the NR solver
             // can trap at the symmetric DC fixed point and produce no oscillation.
             if let RootKind::Bjt(ref mut bjt) = root {
-                if let Some(hint) = init_hints.iter().find(|h| h.device_label == comp.id) {
+                // Node-voltage seeds key on circuit nodes, not BJT refs — skip
+                // them here (they seed reactive ports, not this BjtRoot).
+                if let Some(hint) = init_hints.iter().find(|h| {
+                    h.device_label == comp.id
+                        && !matches!(h.state, crate::dsl::InitState::NodeVoltage { .. })
+                }) {
                     let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
                     let vce = match &hint.state {
                         crate::dsl::InitState::Named(state_name) => {
@@ -2981,6 +2986,8 @@ pub(super) fn build_spqr_stage_with_options(
                         // Explicit `op { }` seed: warm-start the single-port WDF
                         // BjtRoot at the supplied collector-emitter voltage.
                         crate::dsl::InitState::Explicit { vce, .. } => sign * *vce,
+                        // Filtered out above; unreachable.
+                        crate::dsl::InitState::NodeVoltage { .. } => 0.0,
                     };
                     bjt.set_initial_prev_v(vce);
                 }

@@ -298,6 +298,43 @@ impl<N> RuntimeOnePort<N> {
         }
     }
 
+    /// Seed a reactive one-port at a **DC steady-state** operating point.
+    ///
+    /// Unlike [`Self::wdf_set_one_port_state`] (which sets the next reflected
+    /// wave to `2·v − previous_reflected`, valid mid-stream), this pins the
+    /// one-port to the DC fixed point directly: for a capacitor at DC the
+    /// incident and reflected waves are equal (`a = b = v`, so `v = (a+b)/2`),
+    /// so both `wave_state` and `previous_reflected` are set to `v`. The
+    /// residual probe ([`crate::stage::MultiNlStage::op_seed_residual`]) reads
+    /// `wdf_reflected` (= `wave_state`), so this makes the cap contribute its
+    /// true DC voltage on the very first solve.
+    ///
+    /// An inductor is a short at DC (zero voltage); its DC current is not
+    /// recoverable from a node-voltage seed, so it is zeroed. Returns `false`
+    /// for resistors / stateless ports. This is the cap half of a full
+    /// operating-point seed (device ports + reactive ports).
+    pub fn wdf_seed_dc_voltage(&self, voltage: Wave, state: &mut RuntimeState) -> bool {
+        let Some(slot) = self.state_slot else {
+            return false;
+        };
+        let slot = slot.0;
+        match self.spec.kind {
+            OnePortKind::Capacitor(_) => {
+                state.states[slot] = OnePortState::CapacitorVoltage(voltage);
+                state.wave_cache[slot].wave_state = voltage;
+                state.wave_cache[slot].previous_reflected = voltage;
+                true
+            }
+            OnePortKind::Inductor(_) => {
+                state.states[slot] = OnePortState::InductorScaledCurrent(0.0);
+                state.wave_cache[slot].wave_state = 0.0;
+                state.wave_cache[slot].previous_reflected = 0.0;
+                true
+            }
+            OnePortKind::Resistor(_) => false,
+        }
+    }
+
     pub fn wdf_reset(&self, state: &mut RuntimeState) {
         match self.spec.kind {
             OnePortKind::Resistor(_) => {}

@@ -451,7 +451,83 @@ fn build_general_mna_from_edges_inner(
     // so we do not.
     apply_op_seed(&mut stage, init_hints, &nl_comp_labels);
 
+    // Step 12: reactive-port (capacitor) seed from `op { nodes { ... } }`.
+    // Seeds each WDF capacitor's stored DC voltage to `V(node_a) − V(node_b)`
+    // from the supplied node-voltage map, completing a FULL operating-point seed
+    // (device ports via Step 11 + cap voltages here). No-op without node hints.
+    apply_cap_seed(&mut stage, init_hints, &reactive_edges, graph);
+
     Ok(stage)
+}
+
+/// Step 12 helper: seed reactive (capacitor) one-port voltages from the
+/// `op { nodes { ... } }` node-voltage map.
+///
+/// `reactive_edges[k]` is 1:1 with `stage.passive_one_ports[k]` (both built in
+/// the same order by `build_wdf_ports`). For each capacitor, the stored DC
+/// voltage is `V(node_a) − V(node_b)`, read from the node-voltage hints keyed by
+/// `.pedal` node NAME (a pin name like `Q3.base`, or a reserved node like
+/// `in`/`vcc`). Ground defaults to 0 V. Caps whose terminals are not both in the
+/// map are left at their existing (engine-DC-solved) state.
+///
+/// This is the reusable cap half of a full operating-point seed: a future
+/// compile-time DC solver can call the same path with its solved node vector.
+/// No-op when no `NodeVoltage` hints are present (byte-identical to before).
+fn apply_cap_seed(
+    stage: &mut MultiNlStage,
+    init_hints: &[crate::dsl::InitHint],
+    reactive_edges: &[(usize, OnePortKind)],
+    graph: &CircuitGraph,
+) {
+    use std::collections::HashMap;
+    // name → DC voltage, from the node-voltage hints only.
+    let mut name_v: HashMap<&str, f64> = HashMap::new();
+    for h in init_hints {
+        if let crate::dsl::InitState::NodeVoltage { v } = &h.state {
+            name_v.insert(h.device_label.as_str(), *v);
+        }
+    }
+    if name_v.is_empty() {
+        return;
+    }
+
+    // Resolve to NodeId → voltage via the graph's pin-name map.
+    let mut node_v: HashMap<NodeId, f64> = HashMap::new();
+    for (name, v) in &name_v {
+        if let Some(&nid) = graph.node_names.get(*name) {
+            node_v.insert(nid, *v);
+        } else {
+            eprintln!("[cap-seed] node name {name:?} not found in graph — ignored");
+        }
+    }
+
+    let voltage_at = |node: NodeId| -> Option<f64> {
+        if node == graph.gnd_node {
+            Some(0.0)
+        } else {
+            node_v.get(&node).copied()
+        }
+    };
+
+    for (k, (eidx, kind)) in reactive_edges.iter().enumerate() {
+        if !matches!(kind, OnePortKind::Capacitor(_)) {
+            continue;
+        }
+        let e = &graph.edges[*eidx];
+        let (Some(va), Some(vb)) = (voltage_at(e.node_a), voltage_at(e.node_b)) else {
+            continue;
+        };
+        let v_cap = va - vb;
+        if let Some(&one_port) = stage.passive_one_ports.get(k) {
+            let seeded =
+                one_port.wdf_seed_dc_voltage(v_cap as pedalkernel_rt::Wave, &mut stage.passive_runtime_state);
+            if seeded {
+                eprintln!(
+                    "[cap-seed] reactive port {k} (edge {eidx}): V = {va:.4} − {vb:.4} = {v_cap:+.4} V"
+                );
+            }
+        }
+    }
 }
 
 /// Step 11 helper: apply explicit `op { }` operating-point seeds as the final
@@ -1533,7 +1609,12 @@ fn assemble_multi_nl_stage(
         if let Some(ref dg) = device_groups {
             for (g, group) in dg.groups.iter().enumerate() {
                 let label = nl_comp_labels.get(g).map(|s| s.as_str()).unwrap_or("");
-                let hint = init_hints.iter().find(|h| h.device_label == label);
+                // Node-voltage seeds key on circuit nodes, not device refs — they
+                // seed reactive ports (apply_cap_seed), never this BJT warm-start.
+                let hint = init_hints.iter().find(|h| {
+                    h.device_label == label
+                        && !matches!(h.state, crate::dsl::InitState::NodeVoltage { .. })
+                });
                 let Some(hint) = hint else { continue };
                 let off = dg.offsets[g];
                 if let NlDeviceGroupKind::BjtTwoPort(bjt) = group {
@@ -1575,6 +1656,8 @@ fn assemble_multi_nl_stage(
                                 vbe, vce
                             );
                         }
+                        // Filtered out of the `find` above; unreachable here.
+                        crate::dsl::InitState::NodeVoltage { .. } => {}
                     }
                 }
             }
