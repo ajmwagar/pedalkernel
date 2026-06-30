@@ -184,42 +184,12 @@ impl GummelPoonModel {
     /// Returns (Ic, Ib) tuple.
     #[inline]
     pub fn currents(&self, vbe: crate::Wave, vbc: crate::Wave) -> (crate::Wave, crate::Wave) {
-        // Compute all exponentials once — shared between base_charge and transport
-        let exp_vbe =
-            crate::math::exp((vbe / (self.nf * self.vt)).min(40.0) as crate::Wave) as crate::Wave;
-        let exp_vbc =
-            crate::math::exp((vbc / (self.nr * self.vt)).min(40.0) as crate::Wave) as crate::Wave;
-
-        let qb = self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc);
-
-        // Forward and reverse currents divided by Qb
-        let icc = self.is * (exp_vbe - 1.0) / qb; // Forward transport
-        let iec = self.is * (exp_vbc - 1.0) / qb; // Reverse transport
-
-        // Collector current: Icc - Iec/Br
-        let ic = icc - iec / self.br;
-
-        // Base current: recombination + leakage
-        let ib_f = icc / self.bf; // Forward base current
-        let ib_r = iec / self.br; // Reverse base current
-        let ib_leak_e = if self.ise > 0.0 {
-            self.ise
-                * (crate::math::exp((vbe / (self.ne * self.vt)).min(40.0) as crate::Wave)
-                    as crate::Wave
-                    - 1.0)
-        } else {
-            0.0
-        };
-        let ib_leak_c = if self.isc > 0.0 {
-            self.isc
-                * (crate::math::exp((vbc / (self.nc * self.vt)).min(40.0) as crate::Wave)
-                    as crate::Wave
-                    - 1.0)
-        } else {
-            0.0
-        };
-        let ib = ib_f + ib_r + ib_leak_e + ib_leak_c;
-
+        // Single source of truth: the Jacobian variant computes the same Ic/Ib
+        // via the Gummel-Poon equations; drop the derivatives. (currents() is
+        // only hit by the numerical-Jacobian fallback + construction-time
+        // validation, never the analytical hot path, so the discarded jac is
+        // free in practice — and the two can never drift apart.)
+        let (ic, ib, _jac) = self.currents_and_jacobian(vbe, vbc);
         (ic, ib)
     }
 
@@ -351,19 +321,8 @@ impl GummelPoonModel {
             0.0
         };
 
-        // ic = icc - iec/br
-        let ic = icc - iec / self.br;
-        let dic_dvbe = dicc_dvbe - diec_dvbe / self.br;
-        let dic_dvbc = dicc_dvbc - diec_dvbc / self.br;
-
-        // ib = icc/bf + iec/br + leakage terms
-        let ib_f = icc / self.bf;
-        let ib_r = iec / self.br;
-
-        let dib_dvbe = dicc_dvbe / self.bf + diec_dvbe / self.br;
-        let dib_dvbc = dicc_dvbc / self.bf + diec_dvbc / self.br;
-
-        // Leakage: ise * (exp(vbe/(ne*vt)) - 1)
+        // Non-ideal junction leakage (computed before Ic — the BC leak enters
+        // both the collector and base currents under Gummel-Poon).
         let (ib_leak_e, dleak_e_dvbe) = if self.ise > 0.0 {
             let arg = (vbe / (self.ne * self.vt)).min(40.0);
             let e = crate::math::exp(arg as crate::Wave) as crate::Wave;
@@ -379,7 +338,6 @@ impl GummelPoonModel {
         } else {
             (0.0, 0.0)
         };
-
         let (ib_leak_c, dleak_c_dvbc) = if self.isc > 0.0 {
             let arg = (vbc / (self.nc * self.vt)).min(40.0);
             let e = crate::math::exp(arg as crate::Wave) as crate::Wave;
@@ -396,15 +354,18 @@ impl GummelPoonModel {
             (0.0, 0.0)
         };
 
-        let ib = ib_f + ib_r + ib_leak_e + ib_leak_c;
+        // ic = (icc - iec) - er/br - ib_leak_c   (transport − base-collector junction)
+        let ic = icc - iec - er / self.br - ib_leak_c;
+        let dic_dvbe = dicc_dvbe - diec_dvbe;
+        let dic_dvbc = dicc_dvbc - diec_dvbc - self.is * dexp_vbc / self.br - dleak_c_dvbc;
+
+        // ib = ef/bf + er/br + leakage   (junction currents, NOT transport — no Qb)
+        let ib = ef / self.bf + er / self.br + ib_leak_e + ib_leak_c;
+        let dib_dvbe = self.is * dexp_vbe / self.bf + dleak_e_dvbe;
+        let dib_dvbc = self.is * dexp_vbc / self.br + dleak_c_dvbc;
 
         // Final Jacobian: [∂ib/∂vbe, ∂ib/∂vbc, ∂ic/∂vbe, ∂ic/∂vbc]
-        let jac = [
-            dib_dvbe + dleak_e_dvbe,
-            dib_dvbc + dleak_c_dvbc,
-            dic_dvbe,
-            dic_dvbc,
-        ];
+        let jac = [dib_dvbe, dib_dvbc, dic_dvbe, dic_dvbc];
 
         (ic, ib, jac)
     }
@@ -897,10 +858,11 @@ impl NlDeviceGroupIv for BjtTwoPort {
         let vbe_ext = sign * v[0];
         let vce_ext = sign * v[1];
 
-        // Clamp Vbc to prevent catastrophic BC junction forward bias.
-        const VBC_MAX: crate::Wave = 0.4;
-        let clamp_vbc =
-            |vbe: crate::Wave, vce: crate::Wave| -> crate::Wave { (vbe - vce).min(VBC_MAX) };
+        // No Vbc clamp: pass Vbc through so the companion can represent deep
+        // saturation (Vbc up to the real value), matching SPICE. The old 0.4 V
+        // clamp suppressed the Iec reverse-transport term, yielding active-region
+        // beta for a saturated BJT (wrong op-point in DC-coupled feedback amps).
+        let clamp_vbc = |vbe: crate::Wave, vce: crate::Wave| -> crate::Wave { vbe - vce };
 
         let rb = self.model.rb;
         let re = self.model.re;
@@ -948,7 +910,7 @@ impl NlDeviceGroupIv for BjtTwoPort {
         if !has_parasitics {
             // Fast path: analytical Jacobian, no parasitic iteration needed.
             let vbc = clamp_vbc(vbe_ext, vce_ext);
-            let vbc_was_clamped = (vbe_ext - vce_ext) > VBC_MAX;
+            let vbc_was_clamped = false;
             let (ic, ib, jac_be_bc) = self.model.currents_and_jacobian(vbe_ext, vbc);
             currents[0] = sign * ib;
             currents[1] = sign * ic;
@@ -980,7 +942,7 @@ impl NlDeviceGroupIv for BjtTwoPort {
                 vce_int = vce_ext - ic * rc - ie_out * re;
             }
             let vbc_int = clamp_vbc(vbe_int, vce_int);
-            let vbc_was_clamped = (vbe_int - vce_int) > VBC_MAX;
+            let vbc_was_clamped = false;
 
             let (ic, ib, jac_be_bc) = self.model.currents_and_jacobian(vbe_int, vbc_int);
             currents[0] = sign * ib;
@@ -1229,11 +1191,10 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         let vbe = sign * v[0];
         let vce = sign * v[1];
 
-        // Clamp Vbc to prevent catastrophic BC junction forward bias.
-        const VBC_MAX: crate::Wave = 0.4;
-        let vbc_raw = vbe - vce;
-        let vbc_was_clamped = vbc_raw > VBC_MAX;
-        let vbc = vbc_raw.min(VBC_MAX);
+        // No Vbc clamp: pass Vbc through (see BjtTwoPort) so a saturated junction
+        // is represented faithfully rather than pinned at 0.4 V.
+        let vbc = vbe - vce;
+        let vbc_was_clamped = false;
 
         // Clamp exponential arguments to prevent overflow (same limit as GP).
         let arg_be = (vbe / self.nf_vt).min(40.0);
@@ -1246,7 +1207,10 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         // Currents
         let ef = self.is * (exp_be - 1.0);
         let er = self.is * (exp_bc - 1.0);
-        let ic = ef - er / self.br;
+        // Ic = (ef - er) - er/br: transport (Ebers-Moll has no Qb) minus the
+        // base-collector junction. The old `ef - er/br` dropped the -er
+        // transport term, so Ic failed to collapse in saturation (ef≈er).
+        let ic = ef - er - er / self.br;
         let ib = ef / self.bf + er / self.br;
 
         currents[0] = sign * ib;
@@ -1271,14 +1235,13 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         let dvbc_dvbe = if vbc_was_clamped { 0.0 } else { 1.0 };
         let dvbc_dvce = if vbc_was_clamped { 0.0 } else { -1.0 };
 
-        // ∂Ib/∂Vbe = def_dvbe/bf + der_dvbc * dvbc_dvbe / br
-        // ∂Ib/∂Vce =              + der_dvbc * dvbc_dvce / br
-        // ∂Ic/∂Vbe = def_dvbe    - der_dvbc * dvbc_dvbe / br
-        // ∂Ic/∂Vce =             - der_dvbc * dvbc_dvce / br
+        // Ib uses the BC junction (er/br); Ic uses BOTH the transport (-er) and
+        // the BC junction (-er/br), i.e. the er coefficient is (1 + 1/br).
+        let er_ic_coeff = 1.0 + 1.0 / self.br;
         jacobian[0] = def_dvbe / self.bf + der_dvbc * dvbc_dvbe / self.br; // ∂Ib/∂Vbe
         jacobian[1] = der_dvbc * dvbc_dvce / self.br; // ∂Ib/∂Vce
-        jacobian[2] = def_dvbe - der_dvbc * dvbc_dvbe / self.br; // ∂Ic/∂Vbe
-        jacobian[3] = -der_dvbc * dvbc_dvce / self.br; // ∂Ic/∂Vce
+        jacobian[2] = def_dvbe - der_dvbc * dvbc_dvbe * er_ic_coeff; // ∂Ic/∂Vbe
+        jacobian[3] = -der_dvbc * dvbc_dvce * er_ic_coeff; // ∂Ic/∂Vce
     }
 
     fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {

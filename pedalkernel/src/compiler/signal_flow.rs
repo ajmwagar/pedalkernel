@@ -359,10 +359,17 @@ fn build_flow_graph(
         // false cycle edges.
         //
         // The barrier property comes from Component::feedback_input_is_barrier().
+        // Don't block sibling ports of the SAME component. A BJT's B-E and C-E
+        // ports share the device's output node, so blocking the sibling blocks
+        // the device's own collector and severs resistor-coupled feedback
+        // (Fuzz Face: Q1.collector -> R4 -> Q2.base never forms a flow edge,
+        // so the loop can't become one SCC / co-solve group).
+        let comp_i_idx = graph.edges[elem_i.edge_idx].comp_idx;
         let mut blocked_outputs: HashSet<NodeId> = elements
             .iter()
             .enumerate()
             .filter(|&(j, _)| j != i)
+            .filter(|(_, e)| graph.edges[e.edge_idx].comp_idx != comp_i_idx)
             .filter(|(_, e)| active_output_blocks_passive_reachability(e, graph, rails))
             .flat_map(|(_, e)| {
                 let mut nodes: Vec<NodeId> = e.output_nodes.clone();
@@ -1815,6 +1822,16 @@ pub(in crate::compiler) fn find_flow_groups(
                             }
                         }
                     }
+                    // Don't block the DFS endpoints (mirrors the self-feedback
+                    // path above, which removes its own output/input from the
+                    // block). A sibling port of elem_i shares elem_i's output
+                    // node, so without this the DFS can't leave the device's own
+                    // collector — the resistor-coupled feedback (Fuzz Face:
+                    // Q1.collector -> R4 -> Q2.base, Q2.collector -> R2 ->
+                    // Q1.base) is never collected, leaving feedback_edges empty
+                    // and the loop mis-routed as a non-feedback (split) group.
+                    feedback_block.remove(&elem_i.output_node);
+                    feedback_block.remove(&elem_j.input_node);
                     let mut path = Vec::new();
                     let mut visited = HashSet::new();
                     visited.insert(elem_i.output_node);

@@ -1,0 +1,75 @@
+# Silicon 2-BJT Shunt-Feedback Amp ("silicon fuzz") — co-solve reference
+# PedalKernel WDF grouped-Newton validation vehicle
+#
+# A CLEAN, STABLE 2-transistor silicon gain block built FAITHFULLY in BOTH this
+# WDF `.pedal` and the matching spice-circuits/active/si_fb_amp.spice (identical
+# nodes / values / 2N3904 model). Two DC-coupled NPN common-emitter stages with
+# GLOBAL DEGENERATIVE feedback: Q2's EMITTER -> Rf -> Q1's base. Because the
+# feedback is taken from Q2's emitter (in phase with Q1's base) the loop is
+# NEGATIVE — one robust stable mid-rail operating point (nout ~4.35 V), both BJTs
+# active, no bistability. This REPLACES the degenerate xref_feedback_amp (which is
+# bistable-by-design via positive collector feedback) as the trustworthy co-solve
+# reference.
+#
+# Rf is the co-solve COUPLER: it ties Q2's emitter node back into Q1's base node,
+# forcing the WDF compiler to place BOTH transistors into ONE grouped-Newton
+# MultiNl group (4 NL ports), not two independent stages. Rf also DC-biases Q1's
+# base (the base sees DC only through Rf).
+#
+# Node map (pedal net  <->  spice node):
+#   in / Cin.a / Rpd.a              = v_in
+#   Q1.base / Cin.b / Rf.b          = nb1   (summing node, DC-biased via Rf)
+#   Q1.collector / Q2.base / Rc1.b  = nc1   (interstage, DC-coupled)
+#   Q2.collector / Rc2.b / Cout.a   = nout  (output node, ~4.35 V mid-rail)
+#   Q2.emitter / Re2.a / Rf.a       = ne2   (feedback source)
+#   Q1.emitter                      = gnd
+#
+# +9 V single rail, Class A.
+
+pedal "Silicon Feedback Amp" {
+  supply 9V
+
+  ports {
+    in: input
+    out: output
+  }
+
+  components {
+    Cin:  cap(10u, electrolytic)   # input coupling
+    Rpd:  resistor(1M)             # input pulldown / DC reference (guitar side)
+
+    Rc1:  resistor(33k)            # Q1 collector load
+    Q1:   npn(2n3904)              # input common-emitter, emitter grounded
+
+    Rc2:  resistor(5.6k)           # Q2 collector load
+    Q2:   npn(2n3904)              # output common-emitter, DC-coupled from nc1
+    Re2:  resistor(1k)             # Q2 emitter degeneration
+
+    Rf:   resistor(100k)           # *** GLOBAL FEEDBACK: ne2 -> nb1 (co-solve coupler) ***
+
+    Cout: cap(10u, electrolytic)   # output coupling
+    RL:   resistor(10k)            # output load
+  }
+
+  nets {
+    # input -> summing node nb1
+    in -> Cin.a, Rpd.a            # v_in
+    Rpd.b -> gnd
+    Cin.b -> Q1.base, Rf.b       # nb1
+
+    # Q1 common-emitter (emitter grounded)
+    vcc -> Rc1.a
+    Rc1.b -> Q1.collector, Q2.base   # nc1 (Q1 collector = Q2 base, DC-coupled)
+    Q1.emitter -> gnd
+
+    # Q2 common-emitter output stage
+    vcc -> Rc2.a
+    Rc2.b -> Q2.collector, Cout.a    # nout (output node)
+    Q2.emitter -> Re2.a, Rf.a        # ne2 (feedback source)
+    Re2.b -> gnd
+
+    # output tap
+    Cout.b -> RL.a, out
+    RL.b -> gnd
+  }
+}

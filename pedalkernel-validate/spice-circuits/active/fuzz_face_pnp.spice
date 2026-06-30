@@ -41,10 +41,15 @@ C2 net6 v_out 10u
 RL v_out 0 10k
 
 * AC128 PNP Germanium transistor model
-* Germanium: lower Vbe (~0.2V), higher leakage, lower beta than silicon
-.MODEL QAC128 PNP(IS=2.5e-6 BF=120 NF=1.1 VAF=50 IKF=0.1
-+                 ISE=5e-9 NE=1.8 BR=3 NR=1 VAR=20 IKR=0.01
-+                 ISC=1e-9 NC=1.5 RB=30 RE=0.5 RC=1.5
-+                 CJE=40p VJE=0.3 MJE=0.4 CJC=25p VJC=0.4 MJC=0.35
-+                 TF=500p TR=50n XTB=1.5 EG=0.67)
+* DAFx-2017 vintage-extracted, audio-validated AC128 (Holmes/Holters/van Walstijn).
+* Source: https://www.dafx17.eca.ed.ac.uk/papers/DAFx17_paper_28.pdf
+*         https://github.com/grwhitehead/germaniumbjts
+* Parameters MATCH pedalkernel/models/transistors.model .MODEL AC128 exactly so the WDF
+* and this ngspice golden use identical devices. (The previous tuned IS=2.5u model biased
+* Q2 dead/floating.)
+.MODEL QAC128 PNP(IS=20.66u BF=229.6 BR=14.66 NF=1.133 NR=1.140 VAF=19.68 VAR=88.28
++                 IKF=463m IKR=241.5m ISE=2.190u ISC=7.546u NE=1.796 NC=1.364
++                 RB=1.885 RE=306.4m RC=1.727u
++                 CJE=100p VJE=0.3 MJE=0.5 CJC=100p VJC=0.3 MJC=0.5
++                 TF=1n TR=100n)
 

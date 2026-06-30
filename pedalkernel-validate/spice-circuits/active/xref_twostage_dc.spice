@@ -1,0 +1,35 @@
+* ============================================================================
+* XREF DC-coupled, CAP-FREE 2-BJT cascade — faithful twin of
+* circuits/active/xref_twostage_dc.pedal.
+* Two 2N3904 CE stages, un-bypassed emitters, NO reactive elements.
+* Used for the 1:1 SPICE-vs-WDF MultiNl balance-residual diagnostic: SPICE .op
+* is the ground-truth operating point; the WDF must satisfy its own balance
+* equation `a = known_a + S·b` at that point. +24 V rail. Input grounded for .op.
+* ============================================================================
+VCC   vcc   0     DC 24
+Vin   ni    0     DC 0
+
+Rin   ni    nb1   2.2k
+RB1a  vcc   nb1   220k
+RB1b  nb1   0     33k
+
+RC1   vcc   nc1   10k
+Q1    nc1   nb1   ne1   2N3904
+RE1   ne1   0     1k
+
+RC2   vcc   nout  4.7k
+Q2    nout  nc1   ne2   2N3904
+RE2   ne2   0     1k
+
+RL    nout  0     10k
+
+.MODEL 2N3904 NPN(IS=6.734f BF=416.4 BR=0.7371 NF=1.0 NR=1.0 VAF=74.03 VAR=28.0
++ IKF=66.78m IKR=10m ISE=6.734f NE=1.259 ISC=0 NC=2.0 RB=10 RE=0.1 RC=1
++ CJE=4.493p VJE=0.7 MJE=0.2593 CJC=3.638p VJC=0.75 MJC=0.2593 TF=301.2p TR=24n)
+
+.control
+op
+print v(nb1) v(nc1) v(ne1) v(nout) v(ne2)
+print @q1[vbe] @q1[vce] @q1[ic] @q2[vbe] @q2[vce] @q2[ic]
+.endc
+.end
