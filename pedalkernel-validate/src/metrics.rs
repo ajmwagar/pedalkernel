@@ -618,6 +618,236 @@ pub fn compare(
     }
 }
 
+// ============================================================================
+// DC operating-point (bias) accuracy metric
+// ============================================================================
+//
+// This module adds the missing *primary* validation axis for active circuits:
+// does our compile-time/settled DC bias agree with ngspice's `.op`? It answers
+// two distinct questions that map to the literature's Layer A / Layer B
+// (`docs/dc-operating-point-solve.md`):
+//
+//   1. **MATCH** (Layer B): per-device ΔVbe / ΔVce / ΔIc between OUR settled DC
+//      operating point and ngspice's `.op`. A large MATCH error with a small
+//      RESIDUAL is a *solver / root-selection* problem — our equations are right
+//      but the cold solve lands in the wrong basin.
+//
+//   2. **RESIDUAL** (Layer A): `F(ngspice_op)` — is ngspice's `.op` a zero of OUR
+//      DC equations? A large residual is a *formulation* bug — our bias math
+//      genuinely differs from spice, independent of which root we converge to.
+//
+// The metric is plain-numeric so it stays decoupled from `pedalkernel-rt` (which
+// is a dev-dependency only): the test harness reads the engine's per-device bias
+// and per-port residual and feeds them in here.
+pub mod op_point {
+    use crate::spice::SpiceDeviceOp;
+
+    /// Our (WDF) DC operating point for a single device, read at the engine's
+    /// settled bias. Sign convention is the engine's *port* convention; the
+    /// comparison normalizes against ngspice's junction-magnitude convention.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct DeviceBias {
+        /// Component reference, uppercased (e.g. `Q1`).
+        pub reference: String,
+        /// Base–emitter port voltage, volts.
+        pub vbe: f64,
+        /// Collector–emitter port voltage, volts.
+        pub vce: f64,
+        /// Collector current, amps.
+        pub ic: f64,
+    }
+
+    /// Per-device MATCH comparison (ours vs ngspice).
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct DeviceMatch {
+        pub reference: String,
+        pub model: String,
+        /// Our reading (Vbe, Vce, Ic).
+        pub ours: (f64, f64, f64),
+        /// ngspice `.op` (Vbe, Vce, Ic).
+        pub spice: (f64, f64, f64),
+        /// ΔVbe = ours − spice (volts), compared on junction magnitude.
+        pub d_vbe: f64,
+        /// ΔVce = ours − spice (volts), compared on magnitude.
+        pub d_vce: f64,
+        /// ΔIc as a percentage of |spice Ic| (∞-guarded: 0 when spice Ic ≈ 0).
+        pub d_ic_pct: f64,
+    }
+
+    /// Per-port DC-balance residual `F(ngspice_op)` (from
+    /// `MultiNlStage::op_seed_residual`, fed in as plain numbers).
+    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    pub struct PortResidual {
+        /// Static formulation residual `a − dc_bias − cap − nl − adapt` (volts).
+        pub residual: f64,
+        /// Full residual (includes the runtime DC servo); ≈ 0 at the engine's own
+        /// fixed point — calibrates the probe.
+        pub residual_full: f64,
+    }
+
+    /// Thresholds for grading the bias-accuracy dimension. Informative, not
+    /// punitive — tuned to localize Layer A vs Layer B, not to gate CI.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct OpPassCriteria {
+        /// ΔVbe warn threshold (volts). Default 10 mV.
+        pub vbe_warn_v: f64,
+        /// ΔVbe fail threshold (volts). Default 25 mV.
+        pub vbe_fail_v: f64,
+        /// ΔVce fail threshold (volts). Default 0.3 V.
+        pub vce_fail_v: f64,
+        /// ΔIc fail threshold (percent). Default 10 %.
+        pub ic_fail_pct: f64,
+        /// Static-residual threshold separating "formulation ≈ ok" from a
+        /// formulation bug (volts). Default 1.0 V — generous: a few-hundred-mV
+        /// residual against multi-volt rail swings means ngspice's `.op` is
+        /// *approximately* a fixed point of our equations (the BA283 lands here
+        /// at ≈ 0.63 V post-parasitic-fix).
+        pub residual_formulation_v: f64,
+    }
+
+    impl Default for OpPassCriteria {
+        fn default() -> Self {
+            Self {
+                vbe_warn_v: 0.010,
+                vbe_fail_v: 0.025,
+                vce_fail_v: 0.3,
+                ic_fail_pct: 10.0,
+                residual_formulation_v: 1.0,
+            }
+        }
+    }
+
+    /// The formulation-vs-solver verdict for one circuit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub enum Verdict {
+        /// Residual ≈ 0 AND MATCH within thresholds — bias is right.
+        BiasOk,
+        /// Residual ≈ 0 but MATCH off — ngspice's `.op` IS a fixed point of our
+        /// equations, but the cold solve converged to a different root.
+        /// (Layer B: solver / root-selection.)
+        FormulationOkSolverOff,
+        /// Residual far from 0 — ngspice's `.op` is NOT a fixed point of our
+        /// equations. (Layer A: formulation bug.)
+        FormulationBug,
+        /// No active devices / no residual ports — nothing to grade.
+        NoData,
+    }
+
+    impl Verdict {
+        pub fn label(&self) -> &'static str {
+            match self {
+                Verdict::BiasOk => "BIAS OK",
+                Verdict::FormulationOkSolverOff => "FORMULATION ~OK / SOLVER-OFF (Layer B)",
+                Verdict::FormulationBug => "FORMULATION BUG (Layer A)",
+                Verdict::NoData => "NO DATA",
+            }
+        }
+    }
+
+    /// Full bias-accuracy result for one circuit.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct OpPointResult {
+        pub circuit: String,
+        pub devices: Vec<DeviceMatch>,
+        /// Worst per-device readings (rolled up).
+        pub max_abs_d_vbe: f64,
+        pub max_abs_d_vce: f64,
+        pub max_abs_d_ic_pct: f64,
+        /// Worst static residual across ports (volts) — the formulation probe.
+        pub max_abs_residual: f64,
+        /// Worst full residual across ports (volts) — should be ≈ 0 (calibration).
+        pub max_abs_residual_full: f64,
+        pub n_residual_ports: usize,
+        pub verdict: Verdict,
+    }
+
+    impl OpPointResult {
+        /// True when MATCH is within all fail thresholds.
+        pub fn match_ok(&self, c: &OpPassCriteria) -> bool {
+            self.max_abs_d_vbe <= c.vbe_fail_v
+                && self.max_abs_d_vce <= c.vce_fail_v
+                && self.max_abs_d_ic_pct <= c.ic_fail_pct
+        }
+        /// True when the static residual is small enough to call the formulation
+        /// approximately correct.
+        pub fn formulation_ok(&self, c: &OpPassCriteria) -> bool {
+            self.max_abs_residual <= c.residual_formulation_v
+        }
+    }
+
+    /// Compute the per-device MATCH between our settled bias and ngspice `.op`.
+    ///
+    /// Devices are paired by uppercased reference. Comparison is on junction
+    /// magnitude (|Vbe|, |Vce|, |Ic|) so PNP/NPN and port-vs-node sign
+    /// conventions don't masquerade as errors.
+    pub fn match_devices(ours: &[DeviceBias], spice: &[SpiceDeviceOp]) -> Vec<DeviceMatch> {
+        let mut out = Vec::new();
+        for s in spice {
+            let key = s.device.to_uppercase();
+            let Some(o) = ours.iter().find(|d| d.reference.to_uppercase() == key) else {
+                continue;
+            };
+            let d_vbe = o.vbe.abs() - s.vbe.abs();
+            let d_vce = o.vce.abs() - s.vce.abs();
+            let d_ic_pct = if s.ic.abs() > 1e-12 {
+                100.0 * (o.ic.abs() - s.ic.abs()) / s.ic.abs()
+            } else {
+                0.0
+            };
+            out.push(DeviceMatch {
+                reference: o.reference.clone(),
+                model: s.model.clone(),
+                ours: (o.vbe, o.vce, o.ic),
+                spice: (s.vbe, s.vce, s.ic),
+                d_vbe,
+                d_vce,
+                d_ic_pct,
+            });
+        }
+        out
+    }
+
+    /// Assemble the full bias-accuracy result + verdict for one circuit.
+    pub fn evaluate(
+        circuit: &str,
+        ours: &[DeviceBias],
+        spice: &[SpiceDeviceOp],
+        residuals: &[PortResidual],
+        criteria: &OpPassCriteria,
+    ) -> OpPointResult {
+        let devices = match_devices(ours, spice);
+        let max_abs_d_vbe = devices.iter().map(|d| d.d_vbe.abs()).fold(0.0, f64::max);
+        let max_abs_d_vce = devices.iter().map(|d| d.d_vce.abs()).fold(0.0, f64::max);
+        let max_abs_d_ic_pct = devices.iter().map(|d| d.d_ic_pct.abs()).fold(0.0, f64::max);
+        let max_abs_residual = residuals.iter().map(|p| p.residual.abs()).fold(0.0, f64::max);
+        let max_abs_residual_full =
+            residuals.iter().map(|p| p.residual_full.abs()).fold(0.0, f64::max);
+
+        let mut result = OpPointResult {
+            circuit: circuit.to_string(),
+            devices,
+            max_abs_d_vbe,
+            max_abs_d_vce,
+            max_abs_d_ic_pct,
+            max_abs_residual,
+            max_abs_residual_full,
+            n_residual_ports: residuals.len(),
+            verdict: Verdict::NoData,
+        };
+
+        result.verdict = if result.devices.is_empty() && residuals.is_empty() {
+            Verdict::NoData
+        } else if !result.formulation_ok(criteria) {
+            Verdict::FormulationBug
+        } else if result.match_ok(criteria) {
+            Verdict::BiasOk
+        } else {
+            Verdict::FormulationOkSolverOff
+        };
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -945,5 +1175,81 @@ mod tests {
             err > 20.0,
             "30 dB h2 level gap should produce > 20 dB spectral error, got {err:.1} dB."
         );
+    }
+
+    // ── op_point bias-accuracy metric (ngspice-free, synthetic) ──────────────
+    mod op_point_logic {
+        use crate::metrics::op_point::*;
+        use crate::spice::SpiceDeviceOp;
+
+        fn spice(dev: &str, vbe: f64, vce: f64, ic: f64) -> SpiceDeviceOp {
+            SpiceDeviceOp {
+                device: dev.into(),
+                model: "qmod".into(),
+                vbe,
+                vce,
+                ic,
+                ib: ic / 100.0,
+                gm: 0.03,
+            }
+        }
+        fn ours(reference: &str, vbe: f64, vce: f64, ic: f64) -> DeviceBias {
+            DeviceBias { reference: reference.into(), vbe, vce, ic }
+        }
+
+        #[test]
+        fn residual_near_zero_and_match_ok_is_bias_ok() {
+            let c = OpPassCriteria::default();
+            let r = evaluate(
+                "x",
+                &[ours("Q1", 0.6505, 1.10, 1.0e-3)],
+                &[spice("Q1", 0.650, 1.10, 1.0e-3)],
+                &[PortResidual { residual: 0.01, residual_full: 0.01 }],
+                &c,
+            );
+            assert_eq!(r.verdict, Verdict::BiasOk);
+            assert!(r.match_ok(&c) && r.formulation_ok(&c));
+        }
+
+        #[test]
+        fn residual_small_but_match_off_is_solver_off_layer_b() {
+            // The BA283 signature: ngspice's .op IS a fixed point (small residual)
+            // but our settled bias lands elsewhere (large ΔVbe / wrong Ic).
+            let c = OpPassCriteria::default();
+            let r = evaluate(
+                "ba283-like",
+                &[ours("Q1", 0.20, 19.9, 0.0)],
+                &[spice("Q1", 0.61, 5.35, 0.26e-3)],
+                &[PortResidual { residual: 0.027, residual_full: 0.027 }],
+                &c,
+            );
+            assert_eq!(r.verdict, Verdict::FormulationOkSolverOff);
+            assert!(r.formulation_ok(&c) && !r.match_ok(&c));
+        }
+
+        #[test]
+        fn large_residual_is_formulation_bug_layer_a() {
+            let c = OpPassCriteria::default();
+            let r = evaluate(
+                "y",
+                &[ours("Q1", 0.0, 0.0, 0.0)],
+                &[spice("Q1", 0.0, 0.0, 0.0)],
+                &[PortResidual { residual: 8.5, residual_full: 8.5 }],
+                &c,
+            );
+            assert_eq!(r.verdict, Verdict::FormulationBug);
+        }
+
+        #[test]
+        fn match_compares_on_magnitude_for_pnp() {
+            // PNP: our port Vbe is negative, ngspice reports positive magnitude.
+            let dm = match_devices(
+                &[ours("Q1", -0.62, -3.5, -1.0e-3)],
+                &[spice("Q1", 0.62, 3.5, -1.0e-3)],
+            );
+            assert_eq!(dm.len(), 1);
+            assert!(dm[0].d_vbe.abs() < 1e-9, "magnitude match ⇒ ΔVbe≈0");
+            assert!(dm[0].d_ic_pct.abs() < 1e-6);
+        }
     }
 }

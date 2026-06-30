@@ -481,6 +481,151 @@ impl ValidationReport {
     }
 }
 
+// ============================================================================
+// DC bias-accuracy dashboard section
+// ============================================================================
+
+/// Render the bias-accuracy table for a set of per-circuit op-point results.
+///
+/// Produces a `circuit × device × (Vbe / Vce / Ic: ours / ngspice / Δ)` table
+/// plus, per circuit, the worst DC-balance residual `F(ngspice_op)` and the
+/// formulation-vs-solver verdict. Returns the rendered string (so tests can
+/// print AND assert on it).
+pub fn render_bias_accuracy(
+    results: &[crate::metrics::op_point::OpPointResult],
+    criteria: &crate::metrics::op_point::OpPassCriteria,
+) -> String {
+    use crate::metrics::op_point::Verdict;
+    use std::fmt::Write as _;
+    use tabled::settings::Style;
+    use tabled::{Table, Tabled};
+
+    #[derive(Tabled)]
+    struct BiasRow {
+        circuit: String,
+        device: String,
+        model: String,
+        #[tabled(rename = "Vbe ours")]
+        vbe_ours: String,
+        #[tabled(rename = "Vbe ng")]
+        vbe_ng: String,
+        #[tabled(rename = "ΔVbe")]
+        d_vbe: String,
+        #[tabled(rename = "Vce ours")]
+        vce_ours: String,
+        #[tabled(rename = "Vce ng")]
+        vce_ng: String,
+        #[tabled(rename = "ΔVce")]
+        d_vce: String,
+        #[tabled(rename = "Ic ours")]
+        ic_ours: String,
+        #[tabled(rename = "Ic ng")]
+        ic_ng: String,
+        #[tabled(rename = "ΔIc%")]
+        d_ic: String,
+    }
+
+    fn fmt_i(a: f64) -> String {
+        if a.abs() >= 1e-3 {
+            format!("{:.3}mA", a * 1e3)
+        } else {
+            format!("{:.1}µA", a * 1e6)
+        }
+    }
+
+    let mut rows = Vec::new();
+    for r in results {
+        if r.devices.is_empty() {
+            rows.push(BiasRow {
+                circuit: r.circuit.clone(),
+                device: "(no BJT devices)".to_string(),
+                model: "-".into(),
+                vbe_ours: "-".into(),
+                vbe_ng: "-".into(),
+                d_vbe: "-".into(),
+                vce_ours: "-".into(),
+                vce_ng: "-".into(),
+                d_vce: "-".into(),
+                ic_ours: "-".into(),
+                ic_ng: "-".into(),
+                d_ic: "-".into(),
+            });
+        }
+        for (i, d) in r.devices.iter().enumerate() {
+            let flag = if d.d_vbe.abs() > criteria.vbe_fail_v {
+                "!"
+            } else if d.d_vbe.abs() > criteria.vbe_warn_v {
+                "~"
+            } else {
+                ""
+            };
+            rows.push(BiasRow {
+                circuit: if i == 0 { r.circuit.clone() } else { String::new() },
+                device: d.reference.clone(),
+                model: d.model.clone(),
+                vbe_ours: format!("{:+.4}", d.ours.0),
+                vbe_ng: format!("{:+.4}", d.spice.0),
+                d_vbe: format!("{:+.4}{}", d.d_vbe, flag),
+                vce_ours: format!("{:+.3}", d.ours.1),
+                vce_ng: format!("{:+.3}", d.spice.1),
+                d_vce: format!("{:+.3}", d.d_vce),
+                ic_ours: fmt_i(d.ours.2),
+                ic_ng: fmt_i(d.spice.2),
+                d_ic: format!("{:+.1}", d.d_ic_pct),
+            });
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("\n══════════════════════ DC BIAS ACCURACY (WDF vs ngspice .op) ══════════════════════\n");
+    out.push_str(
+        "  MATCH = our settled DC bias vs ngspice .op (Layer B / solver-root).\n  \
+         ΔVbe flags: '~' warn >",
+    );
+    let _ = write!(
+        out,
+        "{:.0}mV, '!' fail >{:.0}mV; |ΔVce| fail >{:.2}V; |ΔIc| fail >{:.0}%.\n",
+        criteria.vbe_warn_v * 1e3,
+        criteria.vbe_fail_v * 1e3,
+        criteria.vce_fail_v,
+        criteria.ic_fail_pct,
+    );
+    if !rows.is_empty() {
+        let mut table = Table::new(rows);
+        table.with(Style::rounded());
+        let _ = write!(out, "{}\n", table);
+    }
+
+    // Per-circuit residual + verdict roll-up.
+    out.push_str(
+        "\n  RESIDUAL = F(ngspice_op): is ngspice's .op a fixed point of OUR DC equations?\n  \
+         (residual ≈ 0 ⇒ formulation ok → Layer B; residual ≫ 0 ⇒ formulation bug → Layer A)\n",
+    );
+    for r in results {
+        let mark = match r.verdict {
+            Verdict::BiasOk => "✓",
+            Verdict::FormulationOkSolverOff => "→B",
+            Verdict::FormulationBug => "→A",
+            Verdict::NoData => "·",
+        };
+        let _ = write!(
+            out,
+            "  [{mark}] {:<22} max|resid|={:>7.4}V  (full={:.2e}V, {} ports)  \
+             max ΔVbe={:.4}V ΔVce={:.3}V ΔIc={:.1}%  ⇒ {}\n",
+            r.circuit,
+            r.max_abs_residual,
+            r.max_abs_residual_full,
+            r.n_residual_ports,
+            r.max_abs_d_vbe,
+            r.max_abs_d_vce,
+            r.max_abs_d_ic_pct,
+            r.verdict.label(),
+        );
+    }
+    out.push_str("═══════════════════════════════════════════════════════════════════════════════════\n");
+    out
+}
+
 /// Get a simple timestamp without pulling in chrono.
 fn chrono_lite_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

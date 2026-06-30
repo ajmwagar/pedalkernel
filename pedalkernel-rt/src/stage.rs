@@ -4642,6 +4642,41 @@ pub struct OpSeedResidualPort {
     pub residual_full: f64,
 }
 
+/// One grouped NL device's DC operating point, as returned by
+/// [`MultiNlStage::device_op_points`].
+///
+/// This is the **feature-ungated** analogue of the `diag`-only
+/// [`MultiNlStage::runtime_op_points`] capture: it carries the same per-device
+/// `(Vbe, Vce, Ib, Ic, gm, g_ce)` readout plus the compiler-threaded identity,
+/// but returns plain owned structs (no `diag_ring` dependency) so the SPICE
+/// validation dashboard can read the engine's DC bias without enabling `diag`.
+///
+/// Port→slot mapping (same convention as `runtime_op_points`): for 2-port
+/// devices port 0 = base/grid (`Vbe`/`Vgk`, `Ib`/`Ig`), port 1 = collector/plate
+/// (`Vce`/`Vpk`, `Ic`/`Ip`). 1-port devices fold into the base slot. Values are
+/// read at the stage's current warm-start `v_prev` (the settled DC bias after a
+/// silence warm-up).
+#[derive(Clone, Debug, Default)]
+pub struct DeviceOpPoint {
+    /// Component reference (the `.pedal` element id, e.g. `Q3` / `TR1`). Empty
+    /// when the compiler did not thread an identity for this group.
+    pub ref_name: alloc::string::String,
+    /// Device type / model name (e.g. `2N3055` / `BC184C` / `12AX7`).
+    pub device_type: alloc::string::String,
+    /// Base–emitter (grid–cathode) port voltage, volts.
+    pub v_be: f64,
+    /// Collector–emitter (plate–cathode) port voltage, volts. 0 for 1-port.
+    pub v_ce: f64,
+    /// Base/grid port current, amps.
+    pub i_b: f64,
+    /// Collector/plate port current, amps. 0 for 1-port.
+    pub i_c: f64,
+    /// Transconductance `∂Ic/∂Vbe`, siemens.
+    pub gm: f64,
+    /// Output conductance `∂Ic/∂Vce`, siemens.
+    pub g_ce: f64,
+}
+
 /// Scattering matrix sub-blocks for multi-NL solving.
 ///
 /// These sub-blocks are extracted from the full R-type adaptor scattering
@@ -7131,6 +7166,65 @@ multi_port_nr_solve_grouped_into(
                 }
             })
             .collect()
+    }
+
+    /// Feature-ungated per-device DC operating-point readout.
+    ///
+    /// Evaluates each grouped device at the stage's current warm-start `v_prev`
+    /// (the engine's settled DC bias) and returns one [`DeviceOpPoint`] per
+    /// group, attributing each to its compiler-threaded physical identity
+    /// (`ref_name` / `device_type`). This is the additive, `diag`-free sibling of
+    /// [`Self::runtime_op_points`]: same math, same port→slot convention, but it
+    /// returns plain owned structs so the SPICE bias-accuracy dashboard can read
+    /// `Vbe`/`Vce`/`Ic` per transistor without the diagnostics ring.
+    ///
+    /// Read-only; does not touch cap/reactive state or any solver field.
+    pub fn device_op_points(&self) -> alloc::vec::Vec<DeviceOpPoint> {
+        let dg = match self.device_groups {
+            Some(ref dg) => dg,
+            None => return alloc::vec::Vec::new(),
+        };
+        let mut out = alloc::vec::Vec::with_capacity(dg.groups.len());
+        let mut v_buf = [0.0 as crate::Wave; 3];
+        let mut i_buf = [0.0 as crate::Wave; 3];
+        let mut jac = [0.0 as crate::Wave; 9];
+        for (g, group) in dg.groups.iter().enumerate() {
+            let np = group.n_ports().min(3);
+            let off = dg.offsets.get(g).copied().unwrap_or(0);
+            for (p, slot) in v_buf.iter_mut().enumerate().take(np) {
+                *slot = self.v_prev.get(off + p).copied().unwrap_or(0.0);
+            }
+            group
+                .as_group_iv()
+                .eval(&v_buf[..np], &mut i_buf[..np], &mut jac[..np * np]);
+            let (v_be, v_ce, i_b, i_c, gm, g_ce) = if np >= 2 {
+                (
+                    v_buf[0] as f64,
+                    v_buf[1] as f64,
+                    i_buf[0] as f64,
+                    i_buf[1] as f64,
+                    jac[np] as f64,     // jac[1*np + 0] = ∂i_ce/∂v_be
+                    jac[np + 1] as f64, // jac[1*np + 1] = ∂i_ce/∂v_ce
+                )
+            } else {
+                (v_buf[0] as f64, 0.0, i_buf[0] as f64, 0.0, jac[0] as f64, 0.0)
+            };
+            let (ref_name, device_type) = match dg.identities.get(g) {
+                Some(id) => (id.ref_name.clone(), id.device_type.clone()),
+                None => (alloc::string::String::new(), alloc::string::String::new()),
+            };
+            out.push(DeviceOpPoint {
+                ref_name,
+                device_type,
+                v_be,
+                v_ce,
+                i_b,
+                i_c,
+                gm,
+                g_ce,
+            });
+        }
+        out
     }
 
     /// Live runtime operating-point capture for the diagnostics ring (Phase B).
