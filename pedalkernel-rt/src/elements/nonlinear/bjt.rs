@@ -1207,7 +1207,10 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         // Currents
         let ef = self.is * (exp_be - 1.0);
         let er = self.is * (exp_bc - 1.0);
-        let ic = ef - er / self.br;
+        // Ic = (ef - er) - er/br: transport (Ebers-Moll has no Qb) minus the
+        // base-collector junction. The old `ef - er/br` dropped the -er
+        // transport term, so Ic failed to collapse in saturation (ef≈er).
+        let ic = ef - er - er / self.br;
         let ib = ef / self.bf + er / self.br;
 
         currents[0] = sign * ib;
@@ -1232,14 +1235,13 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
         let dvbc_dvbe = if vbc_was_clamped { 0.0 } else { 1.0 };
         let dvbc_dvce = if vbc_was_clamped { 0.0 } else { -1.0 };
 
-        // ∂Ib/∂Vbe = def_dvbe/bf + der_dvbc * dvbc_dvbe / br
-        // ∂Ib/∂Vce =              + der_dvbc * dvbc_dvce / br
-        // ∂Ic/∂Vbe = def_dvbe    - der_dvbc * dvbc_dvbe / br
-        // ∂Ic/∂Vce =             - der_dvbc * dvbc_dvce / br
+        // Ib uses the BC junction (er/br); Ic uses BOTH the transport (-er) and
+        // the BC junction (-er/br), i.e. the er coefficient is (1 + 1/br).
+        let er_ic_coeff = 1.0 + 1.0 / self.br;
         jacobian[0] = def_dvbe / self.bf + der_dvbc * dvbc_dvbe / self.br; // ∂Ib/∂Vbe
         jacobian[1] = der_dvbc * dvbc_dvce / self.br; // ∂Ib/∂Vce
-        jacobian[2] = def_dvbe - der_dvbc * dvbc_dvbe / self.br; // ∂Ic/∂Vbe
-        jacobian[3] = -der_dvbc * dvbc_dvce / self.br; // ∂Ic/∂Vce
+        jacobian[2] = def_dvbe - der_dvbc * dvbc_dvbe * er_ic_coeff; // ∂Ic/∂Vbe
+        jacobian[3] = -der_dvbc * dvbc_dvce * er_ic_coeff; // ∂Ic/∂Vce
     }
 
     fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
