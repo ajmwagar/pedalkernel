@@ -916,16 +916,26 @@ fn derive_scattering(
         s
     };
 
-    // Iterative Thevenin adaptation of NL port resistances
-    for _iter in 0..5 {
+    // Iterative Thevenin adaptation: drive each free port's self-reflection
+    // S_ii -> 0 so its reference resistance equals the driving-point impedance
+    // it actually sees. This covers the NL device ports AND the adapted input
+    // (voltage-source) port — which the old loop left pinned at the 1000Ω
+    // placeholder, mis-scaling the injected signal. Reactive ports keep their
+    // physical rp (not adapted). Tight tolerance + more iters so the result no
+    // longer depends on the seed; low-Z ports (e.g. an emitter follower) are
+    // allowed to adapt below 1Ω.
+    let adapt_ports: Vec<usize> = (0..n_nl).collect();
+    for _iter in 0..40 {
         let mut needs_recompute = false;
-        for i in 0..n_nl {
+        for &i in &adapt_ports {
             let s_refl = scattering[i * n_total + i];
-            if s_refl.abs() > 0.05 {
-                let z_th = nl_port_resistances[i] * (1.0 + s_refl) / (1.0 - s_refl);
-                if z_th.is_finite() && z_th > 1.0 {
-                    nl_port_resistances[i] = z_th;
+            if s_refl.abs() > 1e-5 {
+                let z_th = ports[i].resistance * (1.0 + s_refl) / (1.0 - s_refl);
+                if z_th.is_finite() && z_th > 1e-3 {
                     ports[i].resistance = z_th;
+                    if i < n_nl {
+                        nl_port_resistances[i] = z_th;
+                    }
                     needs_recompute = true;
                 }
             }
