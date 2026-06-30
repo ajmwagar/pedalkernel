@@ -2973,8 +2973,15 @@ pub(super) fn build_spqr_stage_with_options(
             // can trap at the symmetric DC fixed point and produce no oscillation.
             if let RootKind::Bjt(ref mut bjt) = root {
                 if let Some(hint) = init_hints.iter().find(|h| h.device_label == comp.id) {
-                    let crate::dsl::InitState::Named(ref state_name) = hint.state;
-                    let vce = bjt_hint_vce(state_name, supply_voltage, bjt.is_pnp);
+                    let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+                    let vce = match &hint.state {
+                        crate::dsl::InitState::Named(state_name) => {
+                            bjt_hint_vce(state_name, supply_voltage, bjt.is_pnp)
+                        }
+                        // Explicit `op { }` seed: warm-start the single-port WDF
+                        // BjtRoot at the supplied collector-emitter voltage.
+                        crate::dsl::InitState::Explicit { vce, .. } => sign * *vce,
+                    };
                     bjt.set_initial_prev_v(vce);
                 }
             }

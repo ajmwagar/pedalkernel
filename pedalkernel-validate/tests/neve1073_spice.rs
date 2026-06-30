@@ -416,6 +416,180 @@ fn ba283_runtime_nr() {
     assert!(out_peak > 1e-9, "BA283 output is silence");
 }
 
+/// ngspice `.op` operating point for the BA283 (with a 1 MΩ input pulldown).
+/// Re-derived fresh from `neve1073_ba283.spice` + Rpd via `/opt/homebrew/bin/ngspice`.
+/// Device labels follow the `.pedal`: Q3 = TR1 (input CE), Q1 = TR2 (Darlington
+/// driver), Q2 = TR3 (2N3055 output). Each tuple is (Vbe, Vce).
+const NGSPICE_OP: &[(&str, f64, f64)] = &[
+    ("Q3", 0.6417, 5.3535), // TR1 — input common-emitter
+    ("Q1", 0.5402, 18.7976), // TR2 — Darlington driver
+    ("Q2", 0.4063, 19.2039), // TR3 — 2N3055 output
+];
+
+/// Inject an `op { ... }` block (ngspice's operating point) before the closing
+/// brace of the loaded BA283 source. Keeps the private `.pedal` untouched.
+fn inject_op_block(source: &str) -> String {
+    let mut block = String::from("\n  op {\n");
+    for (label, vbe, vce) in NGSPICE_OP {
+        block.push_str(&format!("    {label}: {{ vbe: {vbe}, vce: {vce} }}\n"));
+    }
+    block.push_str("  }\n");
+    let cut = source.rfind('}').expect("pedal has a closing brace");
+    let mut out = String::with_capacity(source.len() + block.len());
+    out.push_str(&source[..cut]);
+    out.push_str(&block);
+    out.push_str(&source[cut..]);
+    out
+}
+
+/// SEED-AND-HOLD (pedalkernel — decisive op-point test).
+///
+/// Seeds each BJT's NR warm-start (`v_prev`) at ngspice's exact `.op` operating
+/// point via the new `op { }` block, then processes SILENCE for ≥1 s and traces
+/// whether each device's (Vbe, Vce) HOLDS at the seeded ngspice point or WALKS
+/// away (TR1 toward cutoff). The `op { }` seed touches only the warm-start, never
+/// the stage's DC source term, so this is an honest test of whether ngspice's
+/// op-point is a fixed point of the engine's OWN bias equations:
+///
+///   HOLDS  → ngspice's op-point is a stable WDF fixed point ⇒ bias math agrees,
+///            the cold-solve just lands in the wrong basin (root-selection).
+///   WALKS  → ngspice's op-point is NOT a WDF fixed point ⇒ the engine's bias
+///            math genuinely differs from spice; whichever device drifts most
+///            localizes the residual.
+///
+/// Run: `cargo test -p pedalkernel-validate --features diag --test neve1073_spice
+///       ba283_seed_and_hold -- --nocapture`
+#[cfg(feature = "diag")]
+#[test]
+fn ba283_seed_and_hold() {
+    use pedalkernel_rt::diag_ring::OpPointRecord;
+    use pedalkernel_rt::processor::Stage;
+
+    let source = skip_if_missing!(load_pro_pedal_sub(PRO_PATH), PRO_PATH);
+
+    // Capture the live (Vbe, Vce) for every MultiNl BJT group.
+    fn capture(proc: &pedalkernel::compiler::CompiledPedal) -> Vec<OpPointRecord> {
+        let mut recs = [OpPointRecord::default(); 8];
+        let mut n = 0usize;
+        for (si, st) in proc.stages.iter().enumerate() {
+            if let Stage::MultiNl(mnl) = st {
+                n += mnl.runtime_op_points(si, &mut recs[n..]);
+            }
+        }
+        recs[..n].to_vec()
+    }
+
+    let probes = [0usize, 1, 10, 100, 1000, 48_000];
+
+    // ── Seeded run ──────────────────────────────────────────────────────────
+    let seeded_src = inject_op_block(&source);
+    let def = parse_pedal_file(&seeded_src)
+        .unwrap_or_else(|e| panic!("parse seeded BA283: {e}"));
+    let mut proc = compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile seeded BA283: {e}"));
+    proc.set_control("Gain", 0.5);
+
+    eprintln!("\n  ═══ BA283 SEED-AND-HOLD (silence) ═══");
+    eprintln!("  ngspice .op seed: Q3(TR1) {:.4}/{:.4}  Q1(TR2) {:.4}/{:.4}  Q2(TR3) {:.4}/{:.4}  (Vbe/Vce)",
+        NGSPICE_OP[0].1, NGSPICE_OP[0].2, NGSPICE_OP[1].1, NGSPICE_OP[1].2, NGSPICE_OP[2].1, NGSPICE_OP[2].2);
+
+    let header = |label: &str, recs: &[OpPointRecord]| {
+        let mut s = format!("  {label:>12}: ");
+        for r in recs {
+            let id = if r.ref_str().is_empty() { "?".to_string() } else { r.ref_str().to_string() };
+            s.push_str(&format!("{id}={:.4}/{:.4}  ", r.v_be, r.v_ce));
+        }
+        s
+    };
+
+    // Probe 0 = the seed itself (before any process()).
+    let seed_recs = capture(&proc);
+    eprintln!("{}", header("seed (s=0)", &seed_recs));
+
+    let mut sample = 0usize;
+    let mut last_recs = seed_recs.clone();
+    let mut s1_recs = seed_recs.clone();
+    for &target in &probes[1..] {
+        while sample < target {
+            proc.process(0.0);
+            sample += 1;
+        }
+        last_recs = capture(&proc);
+        if target == 1 {
+            s1_recs = last_recs.clone();
+        }
+        eprintln!("{}", header(&format!("s={target}"), &last_recs));
+    }
+
+    // First-sample drift = the cleanest per-device residual proxy: the direction
+    // and magnitude the network's KCL pushes each port on the very first solve,
+    // BEFORE the slow coupling caps (τ≈100 ms) move the operating point. A port
+    // that the engine's equations agree on stays put; the one carrying the
+    // residual moves first. (Localizes WHERE the bias math disagrees.)
+    eprintln!("\n  first-sample residual (seed→s=1, ΔVbe/ΔVce per device):");
+    for (label, vbe_seed, vce_seed) in NGSPICE_OP {
+        if let Some(r) = s1_recs.iter().find(|r| r.ref_str() == *label) {
+            eprintln!(
+                "    {label:>4}: ΔVbe {:+.4}   ΔVce {:+.4}",
+                (r.v_be as f64) - vbe_seed,
+                (r.v_ce as f64) - vce_seed
+            );
+        }
+    }
+
+    // ── Control run: NO op{} seed (engine's own fixed point) ────────────────
+    let def0 = parse_pedal_file(&source).unwrap();
+    let mut proc0 = compile_pedal(&def0, SR).unwrap();
+    proc0.set_control("Gain", 0.5);
+    for _ in 0..48_000 {
+        proc0.process(0.0);
+    }
+    let unseeded = capture(&proc0);
+    eprintln!("{}", header("UNSEEDED s=48000", &unseeded));
+
+    // ── Verdict ─────────────────────────────────────────────────────────────
+    // Compare the held op-point against the ngspice seed per device.
+    eprintln!("\n  per-device drift seed→s=48000 (vs ngspice .op):");
+    let mut max_vbe_drift = 0.0f64;
+    let mut worst = String::new();
+    for (label, vbe_seed, vce_seed) in NGSPICE_OP {
+        let held = last_recs.iter().find(|r| r.ref_str() == *label);
+        if let Some(h) = held {
+            let dvbe = (h.v_be as f64) - vbe_seed;
+            let dvce = (h.v_ce as f64) - vce_seed;
+            eprintln!(
+                "    {label:>4}: Vbe {:.4}→{:.4} (Δ{:+.4})   Vce {:.4}→{:.4} (Δ{:+.4})",
+                vbe_seed, h.v_be, dvbe, vce_seed, h.v_ce, dvce
+            );
+            if dvbe.abs() > max_vbe_drift {
+                max_vbe_drift = dvbe.abs();
+                worst = label.to_string();
+            }
+        } else {
+            eprintln!("    {label:>4}: NOT FOUND among MultiNl groups (label mismatch?)");
+        }
+    }
+    let verdict = if max_vbe_drift < 0.02 { "HOLDS" } else { "WALKS" };
+    eprintln!(
+        "\n  VERDICT: {verdict} (max |ΔVbe| = {max_vbe_drift:.4} V at {worst}; HOLDS if < 0.02 V)"
+    );
+
+    // ── If it holds, re-measure AC gain WITH the seed (does it close?) ──────
+    let golden_path = golden_dir(GOLDEN).join("sine_1k.npy");
+    if golden_path.exists() {
+        let golden = npy::read_f64(&golden_path).expect("read golden");
+        let mut procg = compile_pedal(&def, SR).unwrap();
+        procg.set_control("Gain", 0.5);
+        let wdf = wdf_settled_window(&mut procg, SETTLE_S);
+        let n = wdf.len().min(golden.len());
+        let ac_gain = metrics::ac_gain_db(&wdf[..n], &golden[..n], TEST_FREQ, SR);
+        eprintln!(
+            "  AC gain WITH op{{}} seed = {ac_gain:+.2} dB  (baseline unseeded = -25.13 dB; 0 dB = matches ngspice)"
+        );
+    }
+
+    assert!(!seed_recs.is_empty(), "no MultiNl BJT groups captured — wiring/labels wrong");
+}
+
 /// Prove the skip mechanism works when the pro repo is absent.
 #[test]
 fn ba283_skip_when_pro_absent() {

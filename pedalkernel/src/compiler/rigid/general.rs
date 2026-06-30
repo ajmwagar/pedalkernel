@@ -431,7 +431,85 @@ fn build_general_mna_from_edges_inner(
         );
     }
 
+    // Step 11: explicit `op { }` operating-point seed (pedalkernel — seed-and-hold).
+    //
+    // This is the AUTHORITATIVE warm-start override: it runs LAST, after the
+    // engine's own `apply_bjt_dc_qpoint` (which otherwise sets `v_prev` from the
+    // engine's homotopy DC solve). It overrides ONLY the NR warm-start
+    // (`v_prev` / `initial_v_prev` / `v_prev_2`) at the named device's ports and
+    // deliberately leaves the stage's DC source term (`dc_bias` / `dc_qpoint_v`)
+    // exactly as the engine computed it.
+    //
+    // That is the whole point: the stage's `dc_bias` defines WHERE the runtime
+    // NR fixed point sits. Seeding `v_prev` at an externally-supplied operating
+    // point (e.g. ngspice's `.op`) and then running silence answers a precise
+    // question — does the NR HOLD the seed (the seed IS a root of the engine's
+    // residual ⇒ bias math agrees, cold-solve is a basin/root-selection issue)
+    // or WALK back to the engine's own root (the seed is NOT a root ⇒ the
+    // engine's bias math genuinely differs from spice). Re-deriving `dc_bias`
+    // from the seed would force it to be a fixed point and make the test vacuous,
+    // so we do not.
+    apply_op_seed(&mut stage, init_hints, &nl_comp_labels);
+
     Ok(stage)
+}
+
+/// Step 11 helper: apply explicit `op { }` operating-point seeds as the final
+/// NR warm-start, overriding `v_prev` / `initial_v_prev` / `v_prev_2` only.
+///
+/// Maps each `InitState::Explicit` device label to its BJT device group's port
+/// offsets (`off` = base-emitter port, `off + 1` = collector-emitter port) and
+/// writes the seeded `Vbe` / `Vce` (sign-flipped for PNP). Leaves `dc_bias`,
+/// `dc_qpoint_v`, and every passive cap state untouched. Devices without an
+/// explicit hint, and `Named` hints, are skipped. No-op when there are no
+/// explicit hints (the common case ⇒ byte-identical).
+fn apply_op_seed(
+    stage: &mut MultiNlStage,
+    init_hints: &[crate::dsl::InitHint],
+    nl_comp_labels: &[String],
+) {
+    let has_explicit = init_hints
+        .iter()
+        .any(|h| matches!(h.state, crate::dsl::InitState::Explicit { .. }));
+    if !has_explicit {
+        return;
+    }
+    let Some(dg) = stage.device_groups.as_ref() else {
+        return;
+    };
+    // Snapshot (offset, is_pnp) per group before mutably borrowing the stage's
+    // warm-start vectors.
+    let mut seeds: Vec<(usize, f64, f64)> = Vec::new();
+    for (g, group) in dg.groups.iter().enumerate() {
+        let NlDeviceGroupKind::BjtTwoPort(bjt) = group else {
+            continue;
+        };
+        let label = nl_comp_labels.get(g).map(|s| s.as_str()).unwrap_or("");
+        let Some(hint) = init_hints.iter().find(|h| h.device_label == label) else {
+            continue;
+        };
+        let crate::dsl::InitState::Explicit { vbe, vce } = &hint.state else {
+            continue;
+        };
+        let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+        seeds.push((dg.offsets[g], sign * *vbe, sign * *vce));
+    }
+    let n_nl = stage.n_nl;
+    for (off, vbe, vce) in seeds {
+        for (port, v) in [(off, vbe), (off + 1, vce)] {
+            if port >= n_nl {
+                continue;
+            }
+            let w = v as pedalkernel_rt::Wave;
+            stage.v_prev[port] = w;
+            stage.initial_v_prev[port] = w;
+            stage.v_prev_2[port] = w;
+        }
+        eprintln!(
+            "[op-seed/hold] port {off}: Vbe={:.4} Vce={:.4} (v_prev overridden post-apply_bjt_dc_qpoint)",
+            vbe, vce
+        );
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1428,19 +1506,44 @@ fn assemble_multi_nl_stage(
                 let off = dg.offsets[g];
                 if let NlDeviceGroupKind::BjtTwoPort(bjt) = group {
                     let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
-                    let crate::dsl::InitState::Named(ref state_name) = hint.state;
-                    let (vbe, vce) = resolve_bjt_init_state(state_name, supply_voltage);
-                    if off < n_nl {
-                        initial_v[off] = sign * vbe;
+                    match &hint.state {
+                        crate::dsl::InitState::Named(state_name) => {
+                            let (vbe, vce) = resolve_bjt_init_state(state_name, supply_voltage);
+                            if off < n_nl {
+                                initial_v[off] = sign * vbe;
+                            }
+                            if off + 1 < n_nl {
+                                initial_v[off + 1] = sign * vce;
+                            }
+                            // Named states are the asymmetric-oscillator seed path:
+                            // engaging the DC ramp protects the seed across reset().
+                            any_hint_applied = true;
+                            eprintln!(
+                                "[init-hint] {label}: {state_name} → Vbe={:.3}, Vce={:.3} (sign={sign})",
+                                vbe, vce
+                            );
+                        }
+                        crate::dsl::InitState::Explicit { vbe, vce } => {
+                            // Explicit `op { }` operating-point seed: a steady-state
+                            // warm-start (the opposite of an oscillator asymmetry), so
+                            // it deliberately does NOT set `any_hint_applied` and the
+                            // stage keeps `dc_ramp = 0` (full DC excitation at t=0,
+                            // mirroring ngspice's `.op`-then-`.tran`). This only sets
+                            // the build-time `initial_v`; the authoritative override
+                            // that survives `apply_bjt_dc_qpoint` is `apply_op_seed`
+                            // (Step 11 in build_general_mna_from_edges_inner).
+                            if off < n_nl {
+                                initial_v[off] = sign * *vbe;
+                            }
+                            if off + 1 < n_nl {
+                                initial_v[off + 1] = sign * *vce;
+                            }
+                            eprintln!(
+                                "[op-seed] {label}: Vbe={:.4}, Vce={:.4} (sign={sign})",
+                                vbe, vce
+                            );
+                        }
                     }
-                    if off + 1 < n_nl {
-                        initial_v[off + 1] = sign * vce;
-                    }
-                    any_hint_applied = true;
-                    eprintln!(
-                        "[init-hint] {label}: {state_name} → Vbe={:.3}, Vce={:.3} (sign={sign})",
-                        vbe, vce
-                    );
                 }
             }
         }

@@ -150,6 +150,14 @@ pub struct SidechainInfo {
 pub enum InitState {
     /// A human-readable alias: "saturated", "cutoff", "active", "forward", "reverse".
     Named(String),
+    /// Explicit per-terminal operating-point seed from the optional `op { }` block.
+    ///
+    /// For a BJT these are the two nonlinear-port voltages the grouped-NR solves
+    /// over: base-emitter (`vbe`) and collector-emitter (`vce`). This is a pure
+    /// warm-start seed (`v_prev`); it never folds device Jacobians or changes the
+    /// stage's DC source term. Used to test whether an externally-derived
+    /// operating point (e.g. ngspice's `.op`) is a stable WDF fixed point.
+    Explicit { vbe: f64, vce: f64 },
 }
 
 /// One device hint from the `init { ... }` block.
@@ -3320,6 +3328,96 @@ fn init_section(input: &str) -> IResult<&str, Vec<InitHint>> {
     Ok((input, hints))
 }
 
+/// Parse one explicit per-device operating-point entry inside an `op { }` block.
+///
+/// ```text
+/// Q1: { vbe: 0.64, vce: 5.35 }
+/// ```
+///
+/// Fields may appear in any order and are comma- or whitespace-separated. Both
+/// `vbe` and `vce` are required (a BJT's two nonlinear ports). Each entry yields
+/// an [`InitHint`] carrying [`InitState::Explicit`].
+fn parse_op_entry(input: &str) -> IResult<&str, InitHint> {
+    let (input, _) = ws_comments(input)?;
+    let (input, label) = identifier(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char(':')(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+
+    let mut vbe: Option<f64> = None;
+    let mut vce: Option<f64> = None;
+    let mut rest = input;
+    loop {
+        let (r, _) = ws_comments(rest)?;
+        // End of entry?
+        if let Ok((r2, _)) = char::<&str, nom::error::Error<&str>>('}')(r) {
+            rest = r2;
+            break;
+        }
+        let (r, field) = identifier(r)?;
+        let (r, _) = ws_comments(r)?;
+        let (r, _) = char(':')(r)?;
+        let (r, _) = ws_comments(r)?;
+        let (r, val) = double(r)?;
+        match field {
+            "vbe" => vbe = Some(val),
+            "vce" => vce = Some(val),
+            _ => {
+                return Err(nom::Err::Failure(nom::error::Error::new(
+                    r,
+                    nom::error::ErrorKind::Tag,
+                )));
+            }
+        }
+        // Optional separator (comma).
+        let (r, _) = ws_comments(r)?;
+        let (r, _) = opt(char(','))(r)?;
+        rest = r;
+    }
+    let (input, _) = ws_comments(rest)?;
+    // Optional trailing separator between entries.
+    let (input, _) = opt(char(','))(input)?;
+
+    let (vbe, vce) = match (vbe, vce) {
+        (Some(b), Some(c)) => (b, c),
+        _ => {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Tag,
+            )));
+        }
+    };
+
+    Ok((
+        input,
+        InitHint {
+            device_label: label.to_string(),
+            state: InitState::Explicit { vbe, vce },
+        },
+    ))
+}
+
+/// Parse the optional `op { ... }` block: explicit per-device operating-point
+/// seeds (terminal voltages) used as a pure NR warm-start.
+///
+/// ```text
+/// op {
+///     Q1: { vbe: 0.64, vce: 5.35 }
+///     Q2: { vbe: 0.54, vce: 18.8 }
+/// }
+/// ```
+fn op_section(input: &str) -> IResult<&str, Vec<InitHint>> {
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = tag("op")(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('{')(input)?;
+    let (input, hints) = many0(parse_op_entry)(input)?;
+    let (input, _) = ws_comments(input)?;
+    let (input, _) = char('}')(input)?;
+    Ok((input, hints))
+}
+
 /// Parse a complete `.pedal` or `.synth` file.
 /// Both `pedal "Name" { ... }` and `synth "Name" { ... }` produce the same AST.
 pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
@@ -3377,6 +3475,10 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
     let (input, sidechains) = opt(sidechains_section)(input)?;
     let (input, calibrate) = opt(parse_calibrate)(input)?;
     let (input, init_hints) = opt(init_section)(input)?;
+    // Optional `op { }` block: explicit per-device operating-point seeds. These
+    // are merged into the same `init_hints` vector (carried as
+    // `InitState::Explicit`), so they flow through the existing init-hint wiring.
+    let (input, op_hints) = opt(op_section)(input)?;
 
     let (input, _) = ws_comments(input)?;
     let (input, _) = char('}')(input)?;
@@ -3396,7 +3498,11 @@ pub fn parse_pedal(input: &str) -> IResult<&str, PedalDef> {
         calibrate: calibrate.is_some(),
         subcircuits,
         ports: ports.unwrap_or_default(),
-        init_hints: init_hints.unwrap_or_default(),
+        init_hints: {
+            let mut h = init_hints.unwrap_or_default();
+            h.extend(op_hints.unwrap_or_default());
+            h
+        },
         uses,
     };
     resolve_subcircuit_pins(&mut pedal);
