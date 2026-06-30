@@ -731,6 +731,17 @@ impl BjtGummelPoonRoot {
 // BjtTwoPort — 2-port grouped BJT for multi-NL solver
 // ---------------------------------------------------------------------------
 
+/// Damping factor for the parasitic-resistance internal-voltage fixed point.
+/// 0.5 keeps the map a contraction even when the undamped loop gain
+/// (`d(i·R)/dv`) exceeds 1 for large RB.
+const PARASITIC_DAMP: crate::Wave = 0.5;
+/// Convergence tolerance (volts) on the internal-voltage update; below this the
+/// fixed point is settled and the loop early-exits (small-RB devices: a few iters).
+const PARASITIC_TOL: crate::Wave = 1e-9;
+/// Hard iteration cap for the parasitic fixed point. Bounds the worst case
+/// (steep exponential + large RB) while the early-exit covers the common case.
+const PARASITIC_MAX_ITER: usize = 40;
+
 /// 2-port BJT for the multi-NL grouped solver.
 ///
 /// Exposes both junction voltages as solver variables:
@@ -879,12 +890,25 @@ impl NlDeviceGroupIv for BjtTwoPort {
                     }
                     let mut vbe_int = vbe_ext;
                     let mut vce_int = vce_ext;
-                    for _ in 0..4 {
+                    // Damped fixed-point on the internal junction voltages. The
+                    // undamped map `v_int = v_ext - i(v_int)·R` has loop gain > 1
+                    // for large RB (e.g. BC184C RB=500Ω) and oscillates, so a fixed
+                    // 4-step Picard returned a wrong internal Vbe (→ ~2× the device
+                    // current at the BA283 input transistor). Damp + iterate to
+                    // convergence; early-exit keeps small-RB devices at a few iters.
+                    for _ in 0..PARASITIC_MAX_ITER {
                         let vbc_int = clamp_vbc(vbe_int, vce_int);
                         let (ic, ib) = self.model.currents(vbe_int, vbc_int);
                         let ie_out = ic + ib;
-                        vbe_int = vbe_ext - ib * rb - ie_out * re;
-                        vce_int = vce_ext - ic * rc - ie_out * re;
+                        let vbe_t = vbe_ext - ib * rb - ie_out * re;
+                        let vce_t = vce_ext - ic * rc - ie_out * re;
+                        let dvbe = PARASITIC_DAMP * (vbe_t - vbe_int);
+                        let dvce = PARASITIC_DAMP * (vce_t - vce_int);
+                        vbe_int += dvbe;
+                        vce_int += dvce;
+                        if dvbe.abs() + dvce.abs() < PARASITIC_TOL {
+                            break;
+                        }
                     }
                     let vbc_int = clamp_vbc(vbe_int, vce_int);
                     self.model.currents(vbe_int, vbc_int)
@@ -934,12 +958,21 @@ impl NlDeviceGroupIv for BjtTwoPort {
             // through the parasitic voltage drops.
             let mut vbe_int = vbe_ext;
             let mut vce_int = vce_ext;
-            for _ in 0..4 {
+            // See note in the numerical-Jacobian path: damped + converged
+            // fixed-point (the old fixed 4-step Picard diverges for large RB).
+            for _ in 0..PARASITIC_MAX_ITER {
                 let vbc_int = clamp_vbc(vbe_int, vce_int);
                 let (ic, ib) = self.model.currents(vbe_int, vbc_int);
                 let ie_out = ic + ib;
-                vbe_int = vbe_ext - ib * rb - ie_out * re;
-                vce_int = vce_ext - ic * rc - ie_out * re;
+                let vbe_t = vbe_ext - ib * rb - ie_out * re;
+                let vce_t = vce_ext - ic * rc - ie_out * re;
+                let dvbe = PARASITIC_DAMP * (vbe_t - vbe_int);
+                let dvce = PARASITIC_DAMP * (vce_t - vce_int);
+                vbe_int += dvbe;
+                vce_int += dvce;
+                if dvbe.abs() + dvce.abs() < PARASITIC_TOL {
+                    break;
+                }
             }
             let vbc_int = clamp_vbc(vbe_int, vce_int);
             let vbc_was_clamped = false;
