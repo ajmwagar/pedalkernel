@@ -738,3 +738,46 @@ fn corpus_crash_check() {
         }
     }
 }
+
+#[test]
+fn fuzz_face_residual() {
+    let src = std::fs::read_to_string("circuits/active/fuzz_face_pnp.pedal").expect("read");
+    let def = parse_pedal_file(&src).expect("parse");
+    let opts = CompileOptions { skip_blockwise: true, ..CompileOptions::default() };
+    let mut proc = compile_pedal_with_options(&def, SR, opts).expect("compile");
+    let idx = proc.stages.iter().position(|s| matches!(s, Stage::MultiNl(_))).unwrap();
+    for _ in 0..40000 { proc.process(0.0); }
+    let mnl = match &proc.stages[idx] { Stage::MultiNl(m)=>m, _=>unreachable!() };
+    let n = mnl.n_nl; let n_passive = mnl.scattering.s_nl_passive.len()/n;
+    let rp=&mnl.nl_port_resistances; let s=&mnl.scattering.s_nl; let s_pass=&mnl.scattering.s_nl_passive;
+    let dc_bias=&mnl.dc_bias; let dg=mnl.device_groups.as_ref().unwrap();
+    let pnp = mnl.recompute_data.as_ref().unwrap().port_node_pairs.clone();
+    // Fuzz Face MNA idx -> SPICE node voltage (PK9XU1 map + ngspice .op)
+    let vmap = |i: Option<usize>| -> f64 { match i {
+        Some(0)=>5.364623, Some(1)=>8.945559, Some(2)=>8.838318, Some(3)=>8.974608,
+        Some(4)=>8.802090, Some(5)=>0.0, Some(6)=>9.0, _=>0.0 }};
+    let resid = |v: &[f64], bp: &[f64]| -> (Vec<f64>,Vec<f64>) {
+        let mut id = vec![0.0;n];
+        for (g,grp) in dg.groups.iter().enumerate() { let giv=grp.as_group_iv(); let np=giv.n_ports(); let off=dg.offsets[g];
+            let mut c=vec![0.0;np]; let mut j=vec![0.0;np*np]; giv.eval(&v[off..off+np],&mut c,&mut j); for p in 0..np {id[off+p]=c[p];}}
+        let a:Vec<f64>=(0..n).map(|i| v[i]+rp[i]*id[i]).collect();
+        let b:Vec<f64>=(0..n).map(|i| v[i]-rp[i]*id[i]).collect();
+        let cap:Vec<f64>=(0..n).map(|i| (0..n_passive).map(|k| s_pass[i*n_passive+k]*bp[k]).sum()).collect();
+        let nlt:Vec<f64>=(0..n).map(|i| (0..n).map(|j| s[i*n+j]*b[j]).sum()).collect();
+        ((0..n).map(|i| a[i]-dc_bias[i]-cap[i]-nlt[i]).collect(), id)
+    };
+    let v_wdf = mnl.v_prev.clone();
+    let bp_wdf:Vec<f64>=(0..n_passive).map(|k| mnl.passive_one_ports[k].wdf_reflected(&mnl.passive_runtime_state)).collect();
+    let (r_wdf,_) = resid(&v_wdf,&bp_wdf);
+    eprintln!("\n=== Fuzz Face VALIDATION (residual at WDF fixed point, must be ~0) ===");
+    eprintln!("v_wdf={v_wdf:.4?}  max|r|={:.4}", r_wdf.iter().cloned().fold(0.0f64,|m,x|m.max(x.abs())));
+    let v_sp:Vec<f64>=(0..n).map(|i| vmap(pnp[i].pos)-vmap(pnp[i].neg)).collect();
+    let bp_sp:Vec<f64>=(0..n_passive).map(|k| vmap(pnp[n+k].pos)-vmap(pnp[n+k].neg)).collect();
+    let (r_sp,i_sp) = resid(&v_sp,&bp_sp);
+    eprintln!("=== Fuzz Face residual at SPICE op-point ===");
+    eprintln!("v_spice (port volts) = {v_sp:.4?}   (expect ~[-0.20,-0.03,-0.11,-3.58] order-permuted)");
+    eprintln!("i_dev = {i_sp:?}");
+    eprintln!("b_passive = {bp_sp:.4?}");
+    for i in 0..n { eprintln!("  port {i} (mna {:?},{:?}): r = {:+.4}", pnp[i].pos, pnp[i].neg, r_sp[i]); }
+    eprintln!("max|r| = {:.4}", r_sp.iter().cloned().fold(0.0f64,|m,x|m.max(x.abs())));
+}

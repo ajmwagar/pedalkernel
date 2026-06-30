@@ -184,42 +184,12 @@ impl GummelPoonModel {
     /// Returns (Ic, Ib) tuple.
     #[inline]
     pub fn currents(&self, vbe: crate::Wave, vbc: crate::Wave) -> (crate::Wave, crate::Wave) {
-        // Compute all exponentials once — shared between base_charge and transport
-        let exp_vbe =
-            crate::math::exp((vbe / (self.nf * self.vt)).min(40.0) as crate::Wave) as crate::Wave;
-        let exp_vbc =
-            crate::math::exp((vbc / (self.nr * self.vt)).min(40.0) as crate::Wave) as crate::Wave;
-
-        let qb = self.base_charge_from_exp(vbe, vbc, exp_vbe, exp_vbc);
-
-        // Forward and reverse currents divided by Qb
-        let icc = self.is * (exp_vbe - 1.0) / qb; // Forward transport
-        let iec = self.is * (exp_vbc - 1.0) / qb; // Reverse transport
-
-        // Collector current: Icc - Iec/Br
-        let ic = icc - iec / self.br;
-
-        // Base current: recombination + leakage
-        let ib_f = icc / self.bf; // Forward base current
-        let ib_r = iec / self.br; // Reverse base current
-        let ib_leak_e = if self.ise > 0.0 {
-            self.ise
-                * (crate::math::exp((vbe / (self.ne * self.vt)).min(40.0) as crate::Wave)
-                    as crate::Wave
-                    - 1.0)
-        } else {
-            0.0
-        };
-        let ib_leak_c = if self.isc > 0.0 {
-            self.isc
-                * (crate::math::exp((vbc / (self.nc * self.vt)).min(40.0) as crate::Wave)
-                    as crate::Wave
-                    - 1.0)
-        } else {
-            0.0
-        };
-        let ib = ib_f + ib_r + ib_leak_e + ib_leak_c;
-
+        // Single source of truth: the Jacobian variant computes the same Ic/Ib
+        // via the Gummel-Poon equations; drop the derivatives. (currents() is
+        // only hit by the numerical-Jacobian fallback + construction-time
+        // validation, never the analytical hot path, so the discarded jac is
+        // free in practice — and the two can never drift apart.)
+        let (ic, ib, _jac) = self.currents_and_jacobian(vbe, vbc);
         (ic, ib)
     }
 
@@ -351,19 +321,8 @@ impl GummelPoonModel {
             0.0
         };
 
-        // ic = icc - iec/br
-        let ic = icc - iec / self.br;
-        let dic_dvbe = dicc_dvbe - diec_dvbe / self.br;
-        let dic_dvbc = dicc_dvbc - diec_dvbc / self.br;
-
-        // ib = icc/bf + iec/br + leakage terms
-        let ib_f = icc / self.bf;
-        let ib_r = iec / self.br;
-
-        let dib_dvbe = dicc_dvbe / self.bf + diec_dvbe / self.br;
-        let dib_dvbc = dicc_dvbc / self.bf + diec_dvbc / self.br;
-
-        // Leakage: ise * (exp(vbe/(ne*vt)) - 1)
+        // Non-ideal junction leakage (computed before Ic — the BC leak enters
+        // both the collector and base currents under Gummel-Poon).
         let (ib_leak_e, dleak_e_dvbe) = if self.ise > 0.0 {
             let arg = (vbe / (self.ne * self.vt)).min(40.0);
             let e = crate::math::exp(arg as crate::Wave) as crate::Wave;
@@ -379,7 +338,6 @@ impl GummelPoonModel {
         } else {
             (0.0, 0.0)
         };
-
         let (ib_leak_c, dleak_c_dvbc) = if self.isc > 0.0 {
             let arg = (vbc / (self.nc * self.vt)).min(40.0);
             let e = crate::math::exp(arg as crate::Wave) as crate::Wave;
@@ -396,15 +354,18 @@ impl GummelPoonModel {
             (0.0, 0.0)
         };
 
-        let ib = ib_f + ib_r + ib_leak_e + ib_leak_c;
+        // ic = (icc - iec) - er/br - ib_leak_c   (transport − base-collector junction)
+        let ic = icc - iec - er / self.br - ib_leak_c;
+        let dic_dvbe = dicc_dvbe - diec_dvbe;
+        let dic_dvbc = dicc_dvbc - diec_dvbc - self.is * dexp_vbc / self.br - dleak_c_dvbc;
+
+        // ib = ef/bf + er/br + leakage   (junction currents, NOT transport — no Qb)
+        let ib = ef / self.bf + er / self.br + ib_leak_e + ib_leak_c;
+        let dib_dvbe = self.is * dexp_vbe / self.bf + dleak_e_dvbe;
+        let dib_dvbc = self.is * dexp_vbc / self.br + dleak_c_dvbc;
 
         // Final Jacobian: [∂ib/∂vbe, ∂ib/∂vbc, ∂ic/∂vbe, ∂ic/∂vbc]
-        let jac = [
-            dib_dvbe + dleak_e_dvbe,
-            dib_dvbc + dleak_c_dvbc,
-            dic_dvbe,
-            dic_dvbc,
-        ];
+        let jac = [dib_dvbe, dib_dvbc, dic_dvbe, dic_dvbc];
 
         (ic, ib, jac)
     }
