@@ -1822,6 +1822,16 @@ pub(in crate::compiler) fn find_flow_groups(
                             }
                         }
                     }
+                    // Don't block the DFS endpoints (mirrors the self-feedback
+                    // path above, which removes its own output/input from the
+                    // block). A sibling port of elem_i shares elem_i's output
+                    // node, so without this the DFS can't leave the device's own
+                    // collector — the resistor-coupled feedback (Fuzz Face:
+                    // Q1.collector -> R4 -> Q2.base, Q2.collector -> R2 ->
+                    // Q1.base) is never collected, leaving feedback_edges empty
+                    // and the loop mis-routed as a non-feedback (split) group.
+                    feedback_block.remove(&elem_i.output_node);
+                    feedback_block.remove(&elem_j.input_node);
                     let mut path = Vec::new();
                     let mut visited = HashSet::new();
                     visited.insert(elem_i.output_node);
