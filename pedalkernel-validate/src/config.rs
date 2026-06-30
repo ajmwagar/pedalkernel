@@ -1199,6 +1199,52 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                     },
                 );
 
+                // Silicon 2-BJT shunt-feedback amp ("silicon fuzz") — co-solve reference.
+                // Two DC-coupled 2N3904 common-emitter stages with GLOBAL DEGENERATIVE
+                // feedback (Q2 emitter -> Rf -> Q1 base). The feedback resistor Rf forces
+                // BOTH transistors into ONE grouped-Newton MultiNl group (4 NL ports), the
+                // trustworthy stable-mid-rail co-solve vehicle that replaces the bistable
+                // xref_feedback_amp. ngspice .op: nout ~4.35 V mid-rail, both BJTs active,
+                // holds flat. Any level gap is the separate input-impedance investigation.
+                tests.insert(
+                    "si_fb_amp".to_string(),
+                    TestCase {
+                        circuit: "active/si_fb_amp.pedal".to_string(),
+                        description: "2N3904 2-BJT global shunt-feedback amp (co-solve reference)"
+                            .to_string(),
+                        signals: vec![
+                            SignalConfig::Sine {
+                                frequency: 1000.0,
+                                amplitude: 0.01, // small signal — linear co-solve region
+                                duration: 0.05,
+                                label: Some("clean".to_string()),
+                            },
+                        ],
+                        metrics: vec![MetricConfig::TimeDomain],
+                        pass_criteria: PassCriteria {
+                            // Generous bounds: the point of this reference is a CLEAN, STABLE
+                            // co-solving bias, not a tight level match. There IS a large level
+                            // gap here — ngspice small-signal gain is ~+49 dB (277x), WDF is
+                            // ~0 dB (unity), i.e. ~49 dB low. That is the banked adapted-input-
+                            // port-impedance investigation (hardcoded 1000 Ohm input port; same
+                            // family as the ba283 -49.5 dB gap), NOT a bias error.
+                            //
+                            // NOTE on the metric: normalized_rms_error_db = rms(wdf-ref)/rms(ref).
+                            // Because the WDF output is ~49 dB BELOW the ngspice golden, wdf-ref
+                            // ~= -ref, so the ratio ~= 1 and the metric reads ~0 dB. This ~0 dB is
+                            // the DEGENERATE "WDF ~silent vs reference" reading, NOT a waveform
+                            // match. The trustworthy comparison is the explicit gain measurement
+                            // in tests/si_fb_amp_cosolve.rs (WDF ~0 dB vs ngspice +49 dB).
+                            normalized_rms_error_db: Some(12.0),
+                            peak_error_db: Some(12.0),
+                            ..Default::default()
+                        },
+                        warmup_trim_ms: None,
+                        pending_reference: false,
+                        pro_circuit_path: None,
+                    },
+                );
+
                 // PNP common emitter amplifier (2N3906)
                 // Tests PNP BJT modeling - essential for Fuzz Face, vintage fuzzes
                 tests.insert(

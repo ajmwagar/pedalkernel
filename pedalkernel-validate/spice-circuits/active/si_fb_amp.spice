@@ -1,0 +1,45 @@
+* ============================================================================
+* Silicon 2-BJT Shunt-Feedback Amp ("silicon fuzz") — co-solve reference
+* PedalKernel Validation Circuit
+* ============================================================================
+* A CLEAN, STABLE 2-transistor silicon gain block, faithful in BOTH this SPICE
+* deck and the matching circuits/active/si_fb_amp.pedal (identical nodes /
+* values / 2N3904 model). Two DC-coupled NPN common-emitter stages with GLOBAL
+* DEGENERATIVE feedback: Q2's EMITTER -> Rf -> Q1's base.
+*
+* Because the feedback is taken from Q2's emitter (in phase with Q1's base), the
+* loop is NEGATIVE -> ONE robust stable mid-rail root (nout ~4.35 V), both BJTs
+* active, holds flat over time. This is a genuine 2-BJT co-solve: Rf couples
+* Q2's emitter node back into Q1's base node. Replaces the bistable-by-design
+* xref_feedback_amp as the trustworthy co-solve validation vehicle.
+*
+* +9 V single rail, Class A.
+* ============================================================================
+Vcc  vcc  0    DC 9
+
+* -- input coupling -> Q1 base summing node (nb1) ----------------------------
+Cin  v_in nb1  10u
+Rpd  v_in 0    1Meg            ; input pulldown / DC reference
+
+* -- Q1 common-emitter input stage (emitter grounded) ------------------------
+Rc1  vcc  nc1  33k
+Q1   nc1  nb1  0    2N3904
+
+* -- Q2 common-emitter output stage (DC-coupled from Q1 collector) -----------
+Rc2  vcc  nout 5.6k
+Q2   nout nc1  ne2  2N3904
+Re2  ne2  0    1k
+
+* -- GLOBAL feedback: Q2 emitter -> Q1 base (the co-solve coupler) -----------
+Rf   ne2  nb1  100k
+
+* -- output coupling + load --------------------------------------------------
+Cout nout v_out 10u
+RL   v_out 0   10k
+
+* -- Model (identical to engine pedalkernel/models/transistors.model) --------
+.MODEL 2N3904 NPN(IS=6.734f BF=416.4 BR=0.7371 NF=1.0 NR=1.0 VAF=74.03 VAR=28.0
++ IKF=66.78m IKR=10m ISE=6.734f NE=1.259 ISC=0 NC=2.0 RB=10 RE=0.1 RC=1
++ CJE=4.493p VJE=0.7 MJE=0.2593 CJC=3.638p VJC=0.75 MJC=0.2593 TF=301.2p TR=24n)
+
+.end
