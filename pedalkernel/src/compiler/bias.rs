@@ -65,8 +65,8 @@ use std::collections::{HashSet, VecDeque};
 use super::classify::NonlinearKind;
 use super::component::EdgeKind;
 use super::graph::{CircuitGraph, NodeId};
-use super::helpers::{gummel_poon_model, triode_model, vari_mu_model};
-use crate::elements::{GummelPoonModel, TriodeRoot, VariMuTriodeRoot};
+use super::helpers::{gummel_poon_model, vari_mu_model};
+use crate::elements::{GummelPoonModel, VariMuTriodeRoot};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Error types
@@ -968,19 +968,24 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
         };
         let _ = model_name;
 
-        // Find R_plate: resistor between vcc_node and plate_node (BFS or direct).
-        let r_plate = find_load_resistor_bfs(plate_node, graph.vcc_node, edge_indices, graph)
-            .or_else(|| find_load_resistor_direct(plate_node, graph.vcc_node, edge_indices, graph))
+        // Find R_plate: resistor between vcc_node and plate_node.
+        //
+        // Direct-edge FIRST, then cap-aware BFS as a fallback.  The direct match
+        // is what the legacy per-type `solve_triode_dc_qpoint` used, so trying it
+        // first keeps the production triode call-site's Q-point bit-for-bit
+        // identical when a direct plate/cathode resistor exists (the common
+        // grounded-cathode topology).  BFS still rescues cap-coupled cathode-
+        // followers where no direct edge exists.
+        let r_plate = find_load_resistor_direct(plate_node, graph.vcc_node, edge_indices, graph)
+            .or_else(|| find_load_resistor_bfs(plate_node, graph.vcc_node, edge_indices, graph))
             .ok_or_else(|| BiasError::UndeterminableTriode {
                 label: self.label.clone(),
                 missing: TopologyTerm::PlateResistor,
             })?;
 
-        // Find R_cathode: resistor between cathode_node and gnd_node (BFS or direct).
-        let r_cathode = find_load_resistor_bfs(cathode_node, graph.gnd_node, edge_indices, graph)
-            .or_else(|| {
-                find_load_resistor_direct(cathode_node, graph.gnd_node, edge_indices, graph)
-            })
+        // Find R_cathode: resistor between cathode_node and gnd_node (direct, then BFS).
+        let r_cathode = find_load_resistor_direct(cathode_node, graph.gnd_node, edge_indices, graph)
+            .or_else(|| find_load_resistor_bfs(cathode_node, graph.gnd_node, edge_indices, graph))
             .ok_or_else(|| BiasError::UndeterminableTriode {
                 label: self.label.clone(),
                 missing: TopologyTerm::CathodeResistor,
@@ -1517,29 +1522,35 @@ pub(super) fn solve_triode_dc_qpoint(
         });
     }
 
-    // Newton-Raphson on F(Ia) = Ia - plate_current(Vgk(Ia), Vpk(Ia)) = 0.
-    let model = triode_model(model_name);
-    let mut triode =
-        TriodeRoot::new_with_v_max(model, supply_voltage).with_parallel_count(parallel_count);
+    // Non-varimu common-cathode: delegate to the unified shared load-line core
+    // (ko5g inc-3).  `TriodeSeed` carries the `MainCurrentRelaxation` scheme, which
+    // reproduces the legacy Ia-relaxation loop bit-for-bit (initial Ia = 0.1 mA,
+    // 0.5 damping, 50 iters, 1 nA tol), and its direct-first resistor finder
+    // returns the SAME R_plate/R_cathode the direct gate above located.  The
+    // load-line Q-point is therefore identical to the deleted per-type loop, and
+    // the triode now rides the same solver core the BJT does.  `_ = r_plate` keeps
+    // the direct gate (a missing plate resistor => None, unchanged).
+    let _ = r_plate;
 
-    let mut ia = 1e-4_f64; // initial guess: 0.1mA
-    for _iter in 0..50 {
-        let vgk = -ia * r_cathode;
-        let vpk = (supply_voltage - ia * r_plate).max(0.0);
-        triode.set_vgk(vgk);
-        let ia_model = triode.plate_current(vpk);
-        let f = ia - ia_model;
-        // Numerical Jacobian dF/dIa ≈ 1 (since dIa_model/dIa is small)
-        // Refine with secant step if needed; simple relaxation converges here.
-        ia = (ia - f * 0.5).max(0.0);
-        if f.abs() < 1e-9 {
-            break;
-        }
-    }
+    let seed = TriodeSeed {
+        nl_kind: &nl_kinds[0],
+        label: model_name.to_owned(),
+        supply_voltage,
+        parallel_count,
+    };
+    let op = solve_operating_point(
+        &seed,
+        all_edges,
+        graph,
+        &NetworkBias::default(),
+        supply_voltage,
+    )
+    .ok()?;
 
-    let vgk = -ia * r_cathode;
-    let vpk = (supply_voltage - ia * r_plate).max(0.0);
-    let v_cathode = ia * r_cathode;
+    let vgk = op.control_bias;
+    let vpk = op.output_warm_start;
+    let v_cathode = -vgk; // cathode auto-bias: V_cathode = Ia*Rk = -Vgk
+    let ia = v_cathode / r_cathode;
 
     // Sanity: Q-point should have negative Vgk and positive Vpk.
     if vgk >= 0.0 || vpk <= 0.0 || !vgk.is_finite() || !vpk.is_finite() {
