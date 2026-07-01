@@ -10,13 +10,24 @@
 //! nodal solve (`classify_group_bias` / `solve_network_bias`, absorbed from the
 //! now-deleted `bias_analysis.rs`), the grouped-BJT nodal co-solve
 //! (`solve_bjt_group_dc_qpoint`, the BA283 fix-#1 solver with terminal/parasitic
-//! handling), and the per-type triode solve (`solve_triode_dc_qpoint`).
+//! handling), and the grouped triode solve (`solve_triode_dc_qpoint`).
 //!
-//! Still per-type / not yet on the shared `BiasSeed`/`solve_operating_point`
-//! path: the single-port-WDF-root solvers in `spqr_build.rs`
-//! (`compute_wdf_triode_dc_qpoint`, `compute_wdf_bjt_dc_qpoint`,
-//! `compute_wdf_fet_dc_qpoint`) and the varimu/pentode branches inside
-//! `solve_triode_dc_qpoint`.  See the module TODO for the migration plan.
+//! As of ko5g inc-3 the **non-varimu common-cathode triode** call-site rides the
+//! shared `BiasSeed`/`solve_operating_point` core (`TriodeSeed` +
+//! `IterationScheme::MainCurrentRelaxation`): `solve_triode_dc_qpoint`'s
+//! non-varimu branch is now a thin delegation (bit-for-bit vs the deleted
+//! Ia-relaxation loop; corpus failing-set unchanged).
+//!
+//! Still per-type / not yet on the shared path:
+//! - the **varimu** branch inside `solve_triode_dc_qpoint` (fixed-bias, a
+//!   VariMu/Raffensperger model + Ia bisection — needs a dedicated `VariMuSeed`;
+//!   NOT bit-preserving under the relaxation scheme and has no characterization
+//!   golden, so left as-is);
+//! - the **pentode** DC path (no `PentodeSeed`; `solve_triode_dc_qpoint` returns
+//!   `None` for non-triode kinds);
+//! - the single-port-WDF-root solvers in `spqr_build.rs`
+//!   (`compute_wdf_triode_dc_qpoint`, `compute_wdf_bjt_dc_qpoint`,
+//!   `compute_wdf_fet_dc_qpoint`) — a separate follow-up.
 //!
 //! # Architecture
 //!
@@ -1373,36 +1384,36 @@ pub(super) struct TriodeDcQpoint {
 
 /// Compute the DC operating point for a triode-with-grid stage.
 ///
-/// # Migration status (ko5g inc-3)
+/// # Migration status (ko5g inc-3 — DONE for the common-cathode branch)
 ///
-/// The shared `BiasSeed`/`solve_operating_point` core (which the BJT rides on via
-/// `BjtNpnSeed`) already reproduces THIS solver's Q-point via `TriodeSeed`.
-/// Evidence: `bias_characterization_tests::probe_triode_unified_vs_per_type_qpoint`
-/// measures |dVgk| = 1.96 mV, |dVpk| = 131 mV on the 12AX7 @250V stage, with
-/// `TriodeSeed` matched to this function's semantics (v_max = supply,
-/// parallel_count, set_vgk).  The residual is ALGORITHMIC (the shared solver's
-/// v_ctrl-Newton with the `i_load_est` degeneration approximation vs this
-/// function's Ia-relaxation) and is independent of v_max.
+/// The **non-varimu common-cathode** path is migrated: it delegates to the shared
+/// `solve_operating_point` core via `TriodeSeed`
+/// (`IterationScheme::MainCurrentRelaxation`), the same core the BJT rides on.
+/// The migration is bit-for-bit — the alignment of the shared solver's NR scheme
+/// to the Ia-relaxation drove
+/// `bias_characterization_tests::probe_triode_unified_vs_per_type_qpoint` from
+/// |dVgk| = 1.96 mV / |dVpk| = 131 mV down to 0.000000, and the full corpus
+/// failing-set is unchanged.  `TriodeSeed`'s direct-first resistor finder returns
+/// the same R_plate/R_cathode this function's direct gate locates, so the
+/// load-line Q-point is identical.  NOTE: this is a pure algorithmic unification —
+/// it does NOT add any device parasitics, so the triode Q-point does not move
+/// toward ngspice (fix #1's terminal-parasitic handling is BJT-specific).
 ///
-/// **To finish the migration** (behaviour-preserving): align the shared solver's
-/// Newton scheme to the Ia-relaxation so the two land bit-identical, then have
-/// the non-varimu branch below `return solve_operating_point(&TriodeSeed{ nl_kind,
-/// label, supply_voltage, parallel_count }, all_edges, graph, &NetworkBias::default(),
-/// supply_voltage)` — mapping DeviceOperatingPoint → TriodeDcQpoint
-/// (vgk=control_bias, vpk=output_warm_start, v_cathode=-vgk, ia=v_cathode/r_cathode)
-/// — and delete this loop.  Gate on the corpus failing SET (the ~2 mV shift must
-/// not flip any tube test).  The `is_vari_mu` FIXED-BIAS branch below does NOT
-/// fit `TriodeSeed` (it establishes Vgk from the model's bias, not cathode
-/// self-bias) and must migrate to a dedicated `VariMuSeed`; the single-port-WDF
-/// `compute_wdf_triode_dc_qpoint` in spqr_build.rs and the pentode branch are the
-/// remaining per-type triode solvers (follow-up).
+/// **Remaining (still per-type):**
+/// - The `is_vari_mu` FIXED-BIAS branch below does NOT fit `TriodeSeed` (it
+///   establishes Vgk from the model's bias, not cathode self-bias) and uses a
+///   VariMu/Raffensperger model + Ia bisection; migrating it needs a dedicated
+///   `VariMuSeed` and is NOT bit-preserving under the relaxation scheme (bisection
+///   vs relaxation) and has no characterization golden — left as-is.
+/// - The pentode branch (`solve_triode_dc_qpoint` returns `None` for non-triode
+///   kinds) and the single-port-WDF `compute_wdf_triode_dc_qpoint` in
+///   spqr_build.rs are separate follow-ups.
 ///
 /// Uses the load-line equations:
 ///   Vgk = -Ia × R_cathode    (cathode self-bias)
 ///   Vpk = VCC - Ia × R_plate (plate load line)
 ///   Ia = Triode.plate_current(Vgk, Vpk)
 ///
-/// Solves with a simple Newton-Raphson iteration on the 1-D residual in Ia.
 /// Returns `None` if the circuit doesn't have exactly one triode-with-grid or
 /// if R_plate/R_cathode cannot be found.
 pub(super) fn solve_triode_dc_qpoint(
