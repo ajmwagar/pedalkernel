@@ -196,6 +196,38 @@ HARD CONSTRAINT (documented regression trap): do **not** fold device small-signa
 Jacobians into the linear source term. With `F(op)=0` *and* the implicit caps
 (ρ<1), the op is a stable discrete fixed point ⇒ the DC servo becomes removable.
 
+### 2026-07-01 (latest) — DC-solve root: Early-effect model fix + residual localization
+
+Pursuing the remaining Layer-B gap (compile-time BJT DC solve lands Q3 over- /
+Q1-Q2 under-conducting, ΔIc 46-74% vs ngspice). Decisive diagnostics (temporary,
+now removed):
+
+1. **Model vs ngspice at ngspice's exact op** (`bjt_currents_terminal` at the
+   `.op` voltages): our Ic matched ngspice to 1-13%. The 13% (BC184C @ Vce=18.8)
+   traced to the **base-charge Early factor being linearized**:
+   `q1 = 1 + vbc/VAF + vbe/VAR` instead of SPICE's `q1 = 1/(1 − vbc/VAF − vbe/VAR)`.
+   At vbc/VAF≈−0.37 the linear form over-predicts Ic ~15%. **Fixed** (commit
+   `fix(bjt): SPICE Gummel-Poon base-charge q1`): all three devices now match
+   ngspice Ic to ~1%; corpus lib failure set byte-identical (79); BA283 fold
+   ρ=0.9994 and servo-OFF hold (ΔVbe 0.0054V) preserved; cap-seeded residual
+   0.0402→0.0344V.
+
+2. **Nodal KCL residual at ngspice's node voltages** (`solve_bjt_group_dc_qpoint`,
+   `PK_DC_DIAG_NODES`): after the q1 fix, ngspice's op is a **~2µA root** of our
+   nodal equations (the resistor network — incl. RU1 4.7k pot as a single a-b edge
+   and Rfb 56k — is complete and correct; the earlier "1mA" output-node imbalance
+   was a diagnostic node-mapping artifact at R7's midpoint). Our solve converges to
+   a TRUE root (KCL 2.5e-11) that sits ~40mV away, starving the Q1/Q2 Darlington.
+
+**Why it's not fully closed:** the residual is dominated by **base-current
+(ISE/ISC recombination)** — BC184C runs β≈2-6 here, so Ib is recombination- not
+transport-dominated — and a ~1-2µA Ib discrepancy is amplified by the **56k (Rfb)
+/ 68k (R3) bias resistors** and the shunt feedback into the ~40mV node offset (a
+2µA error × 56k ≈ 110mV). Matching ngspice's bias to <10% ΔIc therefore requires
+matching the base current to <~0.2µA — a base-current-recombination calibration
+that is a deeper, global-BJT change with regression risk, deferred. The collector
+model and the nodal formulation are now correct; the gap is base-current precision.
+
 ### 2026-07-01 (later) — LANDED: implicit stiff-cap fold + seed self-consistency → ρ<1
 
 Both parts implemented and validated against the probe. **ρ(Jcap) = 0.9994 < 1**
