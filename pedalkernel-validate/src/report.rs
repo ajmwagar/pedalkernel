@@ -626,6 +626,140 @@ pub fn render_bias_accuracy(
     out
 }
 
+// ============================================================================
+// AC-signal accuracy dashboard section (the audio twin of the bias dashboard)
+// ============================================================================
+
+/// Render the AC-accuracy table for a set of per-circuit results.
+///
+/// Mirrors [`render_bias_accuracy`], but for the AC SIGNAL instead of the DC
+/// operating point. One summary row per circuit — LEVEL (`gain@f`), the
+/// gain-normalized SHAPE residual (rms + phase-immune spectral), THD (WDF vs
+/// ngspice) and its Δ, the response tilt (max−min gain across the sweep), and the
+/// verdict — followed by the per-harmonic breakdown and the full frequency sweep.
+/// Returns the rendered string so tests can print AND assert on it.
+pub fn render_ac_accuracy(
+    results: &[crate::metrics::ac_accuracy::AcResult],
+    th: &crate::metrics::ac_accuracy::AcThresholds,
+) -> String {
+    use crate::metrics::ac_accuracy::AcVerdict;
+    use std::fmt::Write as _;
+    use tabled::settings::Style;
+    use tabled::{Table, Tabled};
+
+    #[derive(Tabled)]
+    struct AcRow {
+        circuit: String,
+        #[tabled(rename = "gain@f")]
+        gain: String,
+        #[tabled(rename = "shape rms")]
+        shape_rms: String,
+        #[tabled(rename = "shape spec")]
+        shape_spec: String,
+        #[tabled(rename = "THD wdf")]
+        thd_wdf: String,
+        #[tabled(rename = "THD ng")]
+        thd_ng: String,
+        #[tabled(rename = "ΔTHD")]
+        d_thd: String,
+        #[tabled(rename = "resp tilt")]
+        tilt: String,
+        verdict: String,
+    }
+
+    let mut rows = Vec::new();
+    for r in results {
+        let mark = match r.verdict {
+            AcVerdict::Clean => "✓",
+            AcVerdict::LevelOnly => "≈",
+            AcVerdict::ShapeError => "!S",
+            AcVerdict::HarmonicError => "!H",
+            AcVerdict::ResponseError => "!R",
+            AcVerdict::NoData => "·",
+        };
+        rows.push(AcRow {
+            circuit: format!("{mark} {}", r.circuit),
+            gain: format!("{:+.2}dB", r.gain_db),
+            shape_rms: format!("{:.1}dB", r.shape_rms_db),
+            shape_spec: format!("{:.1}dB", r.shape_spectral_db),
+            thd_wdf: format!("{:.1}", r.thd_wdf_db),
+            thd_ng: format!("{:.1}", r.thd_golden_db),
+            d_thd: format!("{:.1}", r.thd_error_db()),
+            tilt: format!("{:.2}dB", r.response_tilt_db),
+            verdict: r.verdict.label().to_string(),
+        });
+    }
+
+    let mut out = String::new();
+    out.push_str("\n══════════════════════ AC SIGNAL ACCURACY (WDF vs ngspice golden) ══════════════════════\n");
+    let _ = write!(
+        out,
+        "  LEVEL = ac_gain@f (scalar offset).  SHAPE = gain-normalized residual (rms time-domain,\n  \
+         spec = phase-immune magnitude, in-band).  THD ratio is level-independent.  \n  \
+         resp tilt = max−min gain across the sweep (≈0 ⇒ flat scalar; ≫0 ⇒ frequency-shaped).\n  \
+         flags: '≈' level-only (shape clean); '!S' shape; '!H' harmonic; '!R' response.  \n  \
+         thresholds: |gain|>{:.1}dB=level, shape_rms>{:.0}dB, shape_spec>{:.0}dB, ΔTHD>{:.0}dB, \
+         harm>{:.0}dB, tilt>{:.0}dB.\n",
+        th.gain_warn_db,
+        th.shape_rms_fail_db,
+        th.shape_spectral_fail_db,
+        th.thd_error_fail_db,
+        th.harmonic_fail_db,
+        th.response_tilt_fail_db,
+    );
+    if !rows.is_empty() {
+        let mut table = Table::new(rows);
+        table.with(Style::rounded());
+        let _ = write!(out, "{}\n", table);
+    }
+
+    // Per-harmonic breakdown (2nd–5th, dBc) + full sweep, per circuit.
+    for r in results {
+        let _ = write!(
+            out,
+            "\n  [{}] {} @ {:.0} Hz  —  {}\n",
+            match r.verdict {
+                AcVerdict::Clean => "✓",
+                AcVerdict::LevelOnly => "≈",
+                AcVerdict::ShapeError => "!S",
+                AcVerdict::HarmonicError => "!H",
+                AcVerdict::ResponseError => "!R",
+                AcVerdict::NoData => "·",
+            },
+            r.circuit,
+            r.test_freq_hz,
+            r.verdict.label(),
+        );
+        out.push_str("    harmonics (dBc, wdf / ng / Δ): ");
+        if r.harmonics.is_empty() {
+            out.push_str("(none)");
+        }
+        for h in &r.harmonics {
+            let note = if h.scored { "" } else { "·" };
+            let _ = write!(
+                out,
+                "h{}={:.1}/{:.1}/{:.1}{}  ",
+                h.order, h.wdf_dbc, h.golden_dbc, h.error_db, note
+            );
+        }
+        out.push('\n');
+        if !r.response.is_empty() {
+            out.push_str("    response gain vs freq: ");
+            for p in &r.response {
+                let g = if p.gain_db.is_finite() {
+                    format!("{:+.2}", p.gain_db)
+                } else {
+                    "n/a".to_string()
+                };
+                let _ = write!(out, "{:.0}Hz={}dB  ", p.freq_hz, g);
+            }
+            let _ = write!(out, " (tilt {:.2} dB)\n", r.response_tilt_db);
+        }
+    }
+    out.push_str("══════════════════════════════════════════════════════════════════════════════════════\n");
+    out
+}
+
 /// Get a simple timestamp without pulling in chrono.
 fn chrono_lite_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

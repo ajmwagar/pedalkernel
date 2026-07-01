@@ -848,6 +848,326 @@ pub mod op_point {
     }
 }
 
+// ============================================================================
+// AC-signal accuracy metric (the audio twin of the DC bias-accuracy dashboard)
+// ============================================================================
+//
+// The DC dashboard (`op_point`) grades the operating point; this module grades
+// the AC SIGNAL — WDF vs the ngspice-derived golden. Its whole reason to exist
+// is that `normalized_rms_error_db` DEGENERATES for a pure-gain-offset circuit:
+// when the WDF and golden differ only by a scalar level `k`, that difference
+// metric reads |k−1| (and → 0 dB as the WDF falls far below the golden), so it
+// can neither see the true level gap nor the shape. The BA283 is exactly such a
+// circuit (a clean Class-A gain block sitting at a fixed +2.42 dB level offset
+// with the DC servo on), so a single-bin gain scalar is all the old test could
+// honestly report.
+//
+// The fix here is to DECOMPOSE the AC error into orthogonal dimensions so each
+// is actually measured:
+//
+//   1. LEVEL   — `ac_gain_db` at the test tone (the scalar offset, e.g. +2.42).
+//   2. SHAPE   — gain-normalize the WDF (× golden_amp/wdf_amp) so the level is
+//                factored OUT, THEN measure `normalized_rms_error_db` (phase-
+//                sensitive, time domain) and `spectral_error_db` (phase-immune,
+//                magnitude) on the level-matched pair = the honest shape residual.
+//   3. HARMONICS — `thd_db(wdf)` vs `thd_db(golden)` (a ratio, inherently level-
+//                independent) plus per-harmonic (2nd–5th) magnitude error read in
+//                dBc (relative to the fundamental), which is also level-immune.
+//   4. RESPONSE — `ac_gain_db` across a frequency sweep. If the per-frequency
+//                gain is FLAT the error is a pure scalar (a level bug); if it is
+//                frequency-SHAPED it is a genuine response error.
+//
+// The verdict then states plainly whether the AC error is JUST the level offset
+// (shape/THD/response all clean ⇒ a flat scalar bug) or ALSO a shape / harmonic /
+// response error (⇒ more than one bug). Plain-numeric like `op_point`, so it
+// stays decoupled from `pedalkernel-rt`.
+pub mod ac_accuracy {
+    use super::{
+        ac_gain_db, normalized_rms_error_db, single_bin_amplitude, spectral_error_db, thd_db,
+    };
+    use serde::{Deserialize, Serialize};
+
+    /// Harmonic orders scored per-tone (2nd through 5th).
+    pub const HARMONIC_ORDERS: [usize; 4] = [2, 3, 4, 5];
+
+    /// A golden harmonic weaker than this (relative to the fundamental) is treated
+    /// as absent (below the simulator noise grass): its per-harmonic error is not
+    /// scored for the verdict, so ngspice noise bins don't masquerade as shape
+    /// error. −80 dBc sits above ngspice's typical noise grass yet below a real
+    /// diode/BJT harmonic.
+    pub const HARMONIC_FLOOR_DBC: f64 = -80.0;
+
+    /// One harmonic's level, WDF vs golden, expressed in dBc (relative to the
+    /// fundamental) so it is level-independent by construction.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct HarmonicError {
+        /// Harmonic order (2..=5).
+        pub order: usize,
+        /// WDF harmonic level relative to its own fundamental, dB.
+        pub wdf_dbc: f64,
+        /// Golden harmonic level relative to its own fundamental, dB.
+        pub golden_dbc: f64,
+        /// `|wdf_dbc − golden_dbc|`, the level-independent per-harmonic residual.
+        pub error_db: f64,
+        /// True when the GOLDEN harmonic is above [`HARMONIC_FLOOR_DBC`] (present,
+        /// not noise). Only scored harmonics feed the verdict.
+        pub scored: bool,
+    }
+
+    /// One frequency-sweep point: WDF-vs-golden AC gain at that frequency.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct FreqPoint {
+        pub freq_hz: f64,
+        /// `ac_gain_db(wdf, golden)` at this frequency (WDF louder ⇒ positive).
+        pub gain_db: f64,
+    }
+
+    /// Thresholds for grading the AC dimensions. Informative (localizes which
+    /// dimension carries the error), not a hard CI gate.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AcThresholds {
+        /// A |gain| above this at the test tone counts as a LEVEL offset. 1 dB.
+        pub gain_warn_db: f64,
+        /// Gain-normalized RMS shape residual (dB) above which SHAPE is bad. The
+        /// residual is `20·log10(rms(wdf_norm − golden)/rms(golden))`, so −20 dB
+        /// (≈ 10 % shape difference) is the boundary. NOTE: this is phase-
+        /// SENSITIVE — a pure group-delay difference inflates it even when the
+        /// magnitude shape agrees; cross-check with `shape_spectral`.
+        pub shape_rms_fail_db: f64,
+        /// Gain-normalized, phase-IMMUNE in-band magnitude shape error (dB) above
+        /// which SHAPE is bad. 3 dB.
+        pub shape_spectral_fail_db: f64,
+        /// |THD_wdf − THD_golden| (dB) above which HARMONICS are bad. 6 dB.
+        pub thd_error_fail_db: f64,
+        /// Max per-harmonic dBc error above which HARMONICS are bad. 6 dB.
+        pub harmonic_fail_db: f64,
+        /// Response tilt (max−min gain across the sweep, dB) above which the error
+        /// is frequency-SHAPED (a RESPONSE error, not a flat scalar). 3 dB.
+        pub response_tilt_fail_db: f64,
+    }
+
+    impl Default for AcThresholds {
+        fn default() -> Self {
+            Self {
+                gain_warn_db: 1.0,
+                shape_rms_fail_db: -20.0,
+                shape_spectral_fail_db: 3.0,
+                thd_error_fail_db: 6.0,
+                harmonic_fail_db: 6.0,
+                response_tilt_fail_db: 3.0,
+            }
+        }
+    }
+
+    /// The AC-fidelity verdict for one circuit — which dimension carries the error.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum AcVerdict {
+        /// Level, shape, harmonics AND response all within thresholds.
+        Clean,
+        /// ONLY the level tone is off; shape + THD + response are all clean ⇒ the
+        /// AC error is a FLAT SCALAR (a pure-gain bug), the waveform shape matches.
+        LevelOnly,
+        /// The gain-normalized shape residual exceeds threshold ⇒ the waveform
+        /// shape itself differs (beyond a scalar level).
+        ShapeError,
+        /// THD or a per-harmonic level differs ⇒ the nonlinearity/harmonic content
+        /// differs (beyond a scalar level).
+        HarmonicError,
+        /// The per-frequency gain is not flat ⇒ a frequency-shaped RESPONSE error.
+        ResponseError,
+        /// No usable golden tone (silence) — nothing to grade.
+        NoData,
+    }
+
+    impl AcVerdict {
+        pub fn label(&self) -> &'static str {
+            match self {
+                AcVerdict::Clean => "AC OK",
+                AcVerdict::LevelOnly => "LEVEL-ONLY (flat scalar; shape clean)",
+                AcVerdict::ShapeError => "SHAPE ERROR (waveform differs)",
+                AcVerdict::HarmonicError => "HARMONIC ERROR (THD/harmonics differ)",
+                AcVerdict::ResponseError => "RESPONSE ERROR (frequency-shaped)",
+                AcVerdict::NoData => "NO DATA",
+            }
+        }
+    }
+
+    /// Full AC-accuracy result for one circuit.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AcResult {
+        pub circuit: String,
+        /// Fundamental at which the level/shape/harmonic decomposition was taken.
+        pub test_freq_hz: f64,
+        /// LEVEL: `ac_gain_db(wdf, golden)` at the test tone (the scalar offset).
+        pub gain_db: f64,
+        /// WDF single-bin amplitude at the test tone (signal units).
+        pub wdf_amp: f64,
+        /// Golden single-bin amplitude at the test tone (signal units).
+        pub golden_amp: f64,
+        /// SHAPE (level factored out, phase-sensitive time domain), dB.
+        pub shape_rms_db: f64,
+        /// SHAPE (level factored out, phase-immune magnitude), dB.
+        pub shape_spectral_db: f64,
+        /// THD of the WDF tone, dB.
+        pub thd_wdf_db: f64,
+        /// THD of the golden tone, dB.
+        pub thd_golden_db: f64,
+        /// Per-harmonic (2nd–5th) dBc levels + error.
+        pub harmonics: Vec<HarmonicError>,
+        /// Frequency-response sweep (per-frequency WDF-vs-golden gain).
+        pub response: Vec<FreqPoint>,
+        /// Response tilt = max−min gain across the sweep, dB. ≈0 ⇒ flat (a scalar
+        /// level offset); large ⇒ frequency-shaped response error.
+        pub response_tilt_db: f64,
+        pub verdict: AcVerdict,
+    }
+
+    impl AcResult {
+        /// Worst per-harmonic error over SCORED harmonics (golden present).
+        pub fn max_harmonic_error_db(&self) -> f64 {
+            self.harmonics
+                .iter()
+                .filter(|h| h.scored)
+                .map(|h| h.error_db)
+                .fold(0.0, f64::max)
+        }
+
+        /// |THD_wdf − THD_golden|.
+        pub fn thd_error_db(&self) -> f64 {
+            (self.thd_wdf_db - self.thd_golden_db).abs()
+        }
+    }
+
+    /// One harmonic's level relative to the fundamental, in dBc, via single-bin
+    /// projection (DC-immune). Returns `NEG_INFINITY` if the fundamental is silent.
+    fn harmonic_dbc(signal: &[f64], fund_hz: f64, harm_hz: f64, sample_rate: f64) -> f64 {
+        let fund = single_bin_amplitude(signal, fund_hz, sample_rate);
+        if fund < 1e-30 {
+            return f64::NEG_INFINITY;
+        }
+        let harm = single_bin_amplitude(signal, harm_hz, sample_rate);
+        20.0 * (harm / fund).max(1e-12).log10()
+    }
+
+    /// Response tilt: max−min over the finite per-frequency gains.
+    pub fn response_tilt_db(response: &[FreqPoint]) -> f64 {
+        let finite: Vec<f64> = response
+            .iter()
+            .map(|p| p.gain_db)
+            .filter(|g| g.is_finite())
+            .collect();
+        if finite.len() < 2 {
+            return 0.0;
+        }
+        let max = finite.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min = finite.iter().cloned().fold(f64::INFINITY, f64::min);
+        max - min
+    }
+
+    /// Decompose the WDF-vs-golden AC error into level / shape / harmonics /
+    /// response and reach a verdict.
+    ///
+    /// `wdf` and `golden` are settled, same-rate, same-length, same-phase
+    /// windows of the SAME test tone at `test_freq_hz`. `response` is the
+    /// per-frequency gain sweep (may be empty; then RESPONSE is not graded).
+    pub fn evaluate(
+        circuit: &str,
+        wdf: &[f64],
+        golden: &[f64],
+        sample_rate: f64,
+        test_freq_hz: f64,
+        response: Vec<FreqPoint>,
+        th: &AcThresholds,
+    ) -> AcResult {
+        let n = wdf.len().min(golden.len());
+        let wdf = &wdf[..n];
+        let golden = &golden[..n];
+
+        let wdf_amp = single_bin_amplitude(wdf, test_freq_hz, sample_rate);
+        let golden_amp = single_bin_amplitude(golden, test_freq_hz, sample_rate);
+        let gain_db = ac_gain_db(wdf, golden, test_freq_hz, sample_rate);
+
+        // SHAPE: gain-normalize the WDF so the scalar level is factored OUT, then
+        // measure the residual. This is THE fix for the degeneracy — after
+        // normalization a pure level offset contributes nothing, so what remains
+        // is the honest shape difference.
+        let k = if wdf_amp > 1e-30 {
+            golden_amp / wdf_amp
+        } else {
+            0.0
+        };
+        let wdf_norm: Vec<f64> = wdf.iter().map(|&x| k * x).collect();
+        let shape_rms_db = normalized_rms_error_db(&wdf_norm, golden);
+        let shape_spectral_db = spectral_error_db(&wdf_norm, golden, sample_rate, None);
+
+        // HARMONICS: THD ratio (level-independent) + per-harmonic dBc.
+        let thd_wdf_db = thd_db(wdf, test_freq_hz, sample_rate, 10);
+        let thd_golden_db = thd_db(golden, test_freq_hz, sample_rate, 10);
+        let harmonics: Vec<HarmonicError> = HARMONIC_ORDERS
+            .iter()
+            .filter_map(|&order| {
+                let hf = order as f64 * test_freq_hz;
+                if hf >= sample_rate / 2.0 {
+                    return None;
+                }
+                let wdf_dbc = harmonic_dbc(wdf, test_freq_hz, hf, sample_rate);
+                let golden_dbc = harmonic_dbc(golden, test_freq_hz, hf, sample_rate);
+                let scored = golden_dbc > HARMONIC_FLOOR_DBC;
+                Some(HarmonicError {
+                    order,
+                    wdf_dbc,
+                    golden_dbc,
+                    error_db: (wdf_dbc - golden_dbc).abs(),
+                    scored,
+                })
+            })
+            .collect();
+
+        let response_tilt_db = response_tilt_db(&response);
+
+        let mut result = AcResult {
+            circuit: circuit.to_string(),
+            test_freq_hz,
+            gain_db,
+            wdf_amp,
+            golden_amp,
+            shape_rms_db,
+            shape_spectral_db,
+            thd_wdf_db,
+            thd_golden_db,
+            harmonics,
+            response,
+            response_tilt_db,
+            verdict: AcVerdict::NoData,
+        };
+
+        // Classify. Priority: a genuine shape/harmonic/response error outranks a
+        // pure level offset (which is the benign, expected BA283 signature).
+        let level_off = gain_db.abs() > th.gain_warn_db;
+        let shape_bad = shape_rms_db > th.shape_rms_fail_db
+            || shape_spectral_db > th.shape_spectral_fail_db;
+        let harm_bad = result.thd_error_db() > th.thd_error_fail_db
+            || result.max_harmonic_error_db() > th.harmonic_fail_db;
+        let resp_bad =
+            !result.response.is_empty() && response_tilt_db > th.response_tilt_fail_db;
+
+        result.verdict = if golden_amp < 1e-12 {
+            AcVerdict::NoData
+        } else if shape_bad {
+            AcVerdict::ShapeError
+        } else if harm_bad {
+            AcVerdict::HarmonicError
+        } else if resp_bad {
+            AcVerdict::ResponseError
+        } else if level_off {
+            AcVerdict::LevelOnly
+        } else {
+            AcVerdict::Clean
+        };
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1250,6 +1570,98 @@ mod tests {
             assert_eq!(dm.len(), 1);
             assert!(dm[0].d_vbe.abs() < 1e-9, "magnitude match ⇒ ΔVbe≈0");
             assert!(dm[0].d_ic_pct.abs() < 1e-6);
+        }
+    }
+
+    // ── ac_accuracy AC-fidelity metric (ngspice-free, synthetic) ─────────────
+    mod ac_accuracy_logic {
+        use crate::metrics::ac_accuracy::*;
+
+        const SR: f64 = 48_000.0;
+        const F: f64 = 1_000.0;
+
+        /// A pure 1 kHz tone (+ optional harmonics) as a golden.
+        fn tone(amp: f64, h2: f64, h3: f64) -> Vec<f64> {
+            (0..48_000)
+                .map(|i| {
+                    let t = i as f64 / SR;
+                    amp * ((2.0 * std::f64::consts::PI * F * t).sin()
+                        + h2 * (2.0 * std::f64::consts::PI * 2.0 * F * t).sin()
+                        + h3 * (2.0 * std::f64::consts::PI * 3.0 * F * t).sin())
+                })
+                .collect()
+        }
+
+        /// THE core point: when the WDF differs from the golden ONLY by a scalar
+        /// level, the verdict must be LevelOnly — the +N dB is a flat scalar and
+        /// the gain-normalized shape residual is ~0 (what the degenerate
+        /// `normalized_rms_error_db` could never separate).
+        #[test]
+        fn pure_level_offset_is_level_only_and_shape_clean() {
+            let th = AcThresholds::default();
+            let golden = tone(0.1, 0.02, 0.005);
+            // WDF: same waveform SHAPE, +2.42 dB louder (the BA283 signature).
+            let k = 10f64.powf(2.42 / 20.0);
+            let wdf: Vec<f64> = golden.iter().map(|&x| k * x).collect();
+            // Flat frequency response (same +2.42 dB at every frequency).
+            let response: Vec<FreqPoint> = [50.0, 1000.0, 10000.0]
+                .iter()
+                .map(|&f| FreqPoint { freq_hz: f, gain_db: 2.42 })
+                .collect();
+
+            let r = evaluate("scaled", &wdf, &golden, SR, F, response, &th);
+            assert!((r.gain_db - 2.42).abs() < 0.05, "level = +2.42 dB, got {:.3}", r.gain_db);
+            // Gain factored out ⇒ shape residual collapses.
+            assert!(r.shape_rms_db < -60.0, "shape RMS must be clean, got {:.1}", r.shape_rms_db);
+            assert!(r.shape_spectral_db < 1.0, "shape spectral clean, got {:.2}", r.shape_spectral_db);
+            assert!(r.thd_error_db() < 1.0, "THD matches, got {:.2}", r.thd_error_db());
+            assert!(r.max_harmonic_error_db() < 1.0, "harmonics match, got {:.2}", r.max_harmonic_error_db());
+            assert!(r.response_tilt_db < 0.5, "response flat, got {:.2}", r.response_tilt_db);
+            assert_eq!(r.verdict, AcVerdict::LevelOnly);
+        }
+
+        /// A genuine shape difference (extra 2nd harmonic in the WDF) must NOT be
+        /// hidden by gain normalization — verdict Shape or Harmonic error.
+        #[test]
+        fn added_harmonic_is_not_level_only() {
+            let th = AcThresholds::default();
+            let golden = tone(0.1, 0.0, 0.0); // clean sine
+            let wdf = tone(0.1, 0.3, 0.0); // strong 2nd harmonic added
+            let r = evaluate("distorted", &wdf, &golden, SR, F, vec![], &th);
+            assert_ne!(r.verdict, AcVerdict::LevelOnly);
+            assert_ne!(r.verdict, AcVerdict::Clean);
+            assert!(
+                matches!(r.verdict, AcVerdict::ShapeError | AcVerdict::HarmonicError),
+                "added harmonic ⇒ Shape/Harmonic, got {:?}",
+                r.verdict
+            );
+        }
+
+        /// A frequency-SHAPED gain (flat level fine at 1 kHz, but tilted across the
+        /// sweep) must classify as ResponseError, not LevelOnly.
+        #[test]
+        fn frequency_shaped_response_is_response_error() {
+            let th = AcThresholds::default();
+            let golden = tone(0.1, 0.0, 0.0);
+            let wdf: Vec<f64> = golden.clone(); // identical at 1 kHz (level+shape clean)
+            let response: Vec<FreqPoint> = vec![
+                FreqPoint { freq_hz: 50.0, gain_db: -8.0 },
+                FreqPoint { freq_hz: 1000.0, gain_db: 0.0 },
+                FreqPoint { freq_hz: 10000.0, gain_db: 2.0 },
+            ];
+            let r = evaluate("tilted", &wdf, &golden, SR, F, response, &th);
+            assert!(r.response_tilt_db > 3.0, "tilt = {:.1} dB", r.response_tilt_db);
+            assert_eq!(r.verdict, AcVerdict::ResponseError);
+        }
+
+        /// Silence golden ⇒ NoData (no tone to grade against).
+        #[test]
+        fn silent_golden_is_no_data() {
+            let th = AcThresholds::default();
+            let golden = vec![0.0; 48_000];
+            let wdf = tone(0.1, 0.0, 0.0);
+            let r = evaluate("silent", &wdf, &golden, SR, F, vec![], &th);
+            assert_eq!(r.verdict, AcVerdict::NoData);
         }
     }
 }
