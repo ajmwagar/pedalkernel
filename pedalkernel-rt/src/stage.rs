@@ -4364,7 +4364,7 @@ impl PushPullStage {
 
 use crate::elements::nonlinear::solver::{
     multi_port_nr_solve_grouped, multi_port_nr_solve_grouped_into, multi_port_nr_solve_into,
-    NlDeviceGroupIv, NlDeviceIv,
+    NlDeviceGroupIv, NlDeviceIv, NrWorkspace,
 };
 use crate::elements::nonlinear::{PentodeThreePort, VariMuThreePort};
 
@@ -4733,6 +4733,110 @@ impl MultiNlScattering {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Implicit stiff-capacitor fold (BA283 op-repeller cure — Part 1)
+//
+// A WDF capacitor is a wave unit-delay: its outgoing wave this sample is the
+// incident wave from *last* sample.  For stiff HF caps sitting on a high-gm
+// Miller node (BA283 Cmil 220pF ⊕ Ccmp 330pF) that z⁻¹ closes a discrete loop
+// with gain ≫ 1 → the correct DC op is a per-sample REPELLER (ρ≈2743).
+//
+// The cure removes the delay by solving the stiff caps *simultaneously* with the
+// BJT device ports: each stiff cap becomes a coupled unknown with a linear
+// Backward-Euler companion `i_c(v) = G_c·(v − v_prev)`, `G_c = C·fs = 1/(2·R_c)`
+// (with `R_c = 1/(2·fs·C)` the existing WDF reference resistance).  Because the
+// reference resistance is unchanged, the R-adaptor scattering `S` is NOT rebuilt
+// — the stiff ports are simply *re-partitioned* out of the delayed passive set
+// and into the grouped-NR solved set.  `R_c·G_c = 1/2` places a stabilizing
+// conductance on the Newton diagonal at sample n, moving the pole to the stable
+// continuous location (ρ<1).  At the DC fixed point `v_prev = v_c`, `i_c = 0` and
+// the companion's outgoing wave equals `v_c` — byte-identical to the trapezoidal
+// delay cap, so Part 1 changes the map's *stability*, not its fixed point.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Linear Backward-Euler capacitor companion, exposed as a 1-port device group
+/// so it can be solved coupled with the real BJT ports by the existing grouped
+/// Newton-Raphson solver.  `i_c(v) = g_c·(v − v_prev)`, `di_c/dv = g_c`.
+struct CapCompanion {
+    g_c: crate::Wave,
+    v_prev: crate::Wave,
+}
+
+impl NlDeviceGroupIv for CapCompanion {
+    #[inline]
+    fn n_ports(&self) -> usize {
+        1
+    }
+
+    #[inline]
+    fn eval(&self, v: &[crate::Wave], currents: &mut [crate::Wave], jacobian: &mut [crate::Wave]) {
+        currents[0] = self.g_c * (v[0] - self.v_prev);
+        jacobian[0] = self.g_c;
+    }
+
+    #[inline]
+    fn v_clamp_port(&self, _port: usize) -> (crate::Wave, crate::Wave) {
+        // A linear companion has no exponential to overflow; keep bounds wide so
+        // the clamp never distorts the coupled solve.
+        (-1.0e6, 1.0e6)
+    }
+}
+
+/// One stiff capacitor folded into the coupled grouped-NR solve.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StiffCap {
+    /// Index into `passive_one_ports` (and the passive column block of `S`).
+    pub passive_idx: usize,
+    /// Runtime state slot (`passive_runtime_state.wave_cache[slot]`), holding the
+    /// previous solved cap voltage `v_prev` on entry and the new `v_c` on exit.
+    pub slot: usize,
+    /// WDF reference resistance `R_c = 1/(2·fs·C)` (matches the adaptor's port).
+    pub r_c: crate::Wave,
+    /// Backward-Euler companion conductance `G_c = C·fs = 1/(2·R_c)`.
+    pub g_c: crate::Wave,
+}
+
+/// Precomputed data for the implicit stiff-cap fold on a multi-BJT feedback
+/// stage.  Present only when the gate matches (≥2 BJT groups + ≥1 cap `C<1nF`);
+/// `None` leaves every other stage on the byte-identical legacy path.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StiffCapFold {
+    /// Extended port count `n_ext = n_nl + n_stiff`.
+    pub n_ext: usize,
+    /// Number of real NL device ports (extended ports `0..n_nl`).
+    pub n_nl: usize,
+    /// Stiff caps (extended ports `n_nl..n_ext`), in extended-port order.
+    pub stiff: Vec<StiffCap>,
+    /// Extended scattering `S_ext` (`n_ext × n_ext`, row-major) over
+    /// `[NL_0..NL_{n_nl-1}, stiff_0..stiff_{n_stiff-1}]`.
+    pub s_ext: Vec<crate::Wave>,
+    /// Stiff-row × all-passive scattering `S[stiff_s][passive_k]`
+    /// (`n_stiff × n_passive`, row-major) for the stiff rows' `known_a`.
+    pub stiff_row_passive: Vec<crate::Wave>,
+    /// Stiff-row × adapted-port scattering `S[stiff_s][adapted]` (`n_stiff`).
+    pub stiff_row_adapted: Vec<crate::Wave>,
+    /// Extended port resistances `[nl_port_R..., stiff.r_c...]` (`n_ext`).
+    pub port_r_ext: Vec<crate::Wave>,
+    /// Group-port offsets for the extended solve: real device-group offsets
+    /// followed by one 1-port offset per stiff cap (`n_nl, n_nl+1, …`).
+    pub offsets_ext: Vec<usize>,
+    /// Number of passive ports (columns) — used to index `stiff_row_passive`
+    /// and the NL `s_nl_passive` block.
+    pub n_passive: usize,
+    /// Dedicated NR workspace sized for `n_ext` (kept separate from the stage's
+    /// `nr_workspace` so the frozen-Newton cache dimension stays consistent).
+    pub ws: NrWorkspace,
+    /// Scratch: extended `known_a` (`n_ext`).
+    pub known_a_ext: Vec<crate::Wave>,
+    /// Scratch: extended warm-start / solution voltages (`n_ext`).
+    pub v_ext: Vec<crate::Wave>,
+    /// Scratch: solved stiff-cap outgoing waves `a_cap[s] = v_c − R_c·i_c`
+    /// (`n_stiff`), written back into `b_passive` for the full scatter.
+    pub a_cap: Vec<crate::Wave>,
+}
+
 /// Coupled nonlinear stage using an R-type adaptor and multi-port NR solver.
 ///
 /// This uses a physically correct formulation:
@@ -4964,6 +5068,15 @@ pub struct MultiNlStage {
     /// swing is not over-constrained.  Same length as `dc_bias` when active.
     #[cfg_attr(feature = "serde", serde(default))]
     pub dc_servo_mask: Vec<bool>,
+    /// **Implicit stiff-capacitor fold** (BA283 op-repeller cure, Part 1).
+    /// When `Some`, the stage solves the stiff HF caps (`C < 1 nF`) coupled with
+    /// the BJT ports via a Backward-Euler companion instead of the delayed
+    /// passive path, removing the z⁻¹ that makes the DC op a per-sample repeller.
+    /// Built lazily on first `process` when the gate matches (≥2 BJT groups +
+    /// ≥1 stiff cap) and cleared by `recompute_scattering`.  `None` (the default)
+    /// leaves every other stage byte-identical.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub stiff_fold: Option<StiffCapFold>,
 }
 
 /// State-space data for direct discrete-time simulation.
@@ -6236,7 +6349,270 @@ pub struct LinearizedOtaData {
     pub num_mna_nodes: usize,
 }
 
+/// Run one extended grouped-NR solve that couples the real BJT device ports with
+/// the stiff-cap Backward-Euler companions (Part 1). Updates `v_prev` (device
+/// ports) in place, writes each solved stiff cap voltage `v_c` back into its
+/// `wave_cache` slot, and stores the solved outgoing waves in `fold.a_cap` for
+/// the caller to splice into `b_passive` before the full scatter.
+#[allow(clippy::too_many_arguments)]
+fn solve_stiff_fold(
+    fold: &mut StiffCapFold,
+    real_groups: &[&dyn NlDeviceGroupIv],
+    real_offsets: &[usize],
+    scattering: &MultiNlScattering,
+    dc_bias: &[crate::Wave],
+    dc_servo_corr: Option<&[crate::Wave]>,
+    vcc_bias_all: &[crate::Wave],
+    b_passive: &[crate::Wave],
+    b_adapted: crate::Wave,
+    dc_scale: crate::Wave,
+    v_prev: &mut [crate::Wave],
+    runtime_state: &mut RuntimeState,
+    max_iter: usize,
+    tolerance: crate::Wave,
+) {
+    let StiffCapFold {
+        n_ext,
+        n_nl,
+        stiff,
+        s_ext,
+        stiff_row_passive,
+        stiff_row_adapted,
+        port_r_ext,
+        offsets_ext,
+        n_passive,
+        ws,
+        known_a_ext,
+        v_ext,
+        a_cap,
+    } = fold;
+    let n_nl = *n_nl;
+    let n_ext = *n_ext;
+    let n_passive = *n_passive;
+    let n_stiff = stiff.len();
+
+    // Per-passive "is this column a folded stiff cap?" flag (n_passive small).
+    // Stiff columns are unknowns in `s_ext`, so they are EXCLUDED from the
+    // delayed `known_a` sums (both NL and stiff rows).
+    let is_stiff_col = |k: usize| -> bool { stiff.iter().any(|sc| sc.passive_idx == k) };
+
+    // 1. Extended known_a. NL rows reuse the stage's NL sub-blocks; stiff rows
+    //    use the reconstructed stiff scattering rows. VCC/injection enters via
+    //    dc_bias (NL) / vcc_bias_all (stiff), matching the legacy path exactly.
+    for i in 0..n_nl {
+        let mut a = scattering.s_nl_adapted[i] * b_adapted + dc_bias[i] * dc_scale;
+        if let Some(corr) = dc_servo_corr {
+            a += corr[i] * dc_scale;
+        }
+        let row = &scattering.s_nl_passive[i * n_passive..i * n_passive + n_passive];
+        for (k, (&s, &bp)) in row.iter().zip(&b_passive[..n_passive]).enumerate() {
+            if !is_stiff_col(k) {
+                a += s * bp;
+            }
+        }
+        known_a_ext[i] = a;
+    }
+    for s in 0..n_stiff {
+        let fs_full = n_nl + stiff[s].passive_idx;
+        let mut a = stiff_row_adapted[s] * b_adapted;
+        if fs_full < vcc_bias_all.len() {
+            a += vcc_bias_all[fs_full] * dc_scale;
+        }
+        let row = &stiff_row_passive[s * n_passive..s * n_passive + n_passive];
+        for (k, (&sc, &bp)) in row.iter().zip(&b_passive[..n_passive]).enumerate() {
+            if !is_stiff_col(k) {
+                a += sc * bp;
+            }
+        }
+        known_a_ext[n_nl + s] = a;
+    }
+
+    // 2. Warm-start voltages: device ports from v_prev, cap ports from the
+    //    previous solved cap voltage held in wave_state (= companion v_prev).
+    v_ext[..n_nl].copy_from_slice(&v_prev[..n_nl]);
+    for s in 0..n_stiff {
+        v_ext[n_nl + s] = runtime_state.wave_cache[stiff[s].slot].wave_state;
+    }
+
+    // 3. Companion device groups (linear BE caps), constructed with this
+    //    sample's v_prev; appended after the real device groups.
+    let companions: Vec<CapCompanion> = stiff
+        .iter()
+        .map(|sc| CapCompanion {
+            g_c: sc.g_c,
+            v_prev: runtime_state.wave_cache[sc.slot].wave_state,
+        })
+        .collect();
+    let mut groups: Vec<&dyn NlDeviceGroupIv> = Vec::with_capacity(real_groups.len() + n_stiff);
+    groups.extend_from_slice(real_groups);
+    for c in &companions {
+        groups.push(c as &dyn NlDeviceGroupIv);
+    }
+    debug_assert_eq!(offsets_ext.len(), real_offsets.len() + n_stiff);
+
+    // 4. Coupled solve over [NL ∪ stiff]. Reuses the existing grouped NR machinery
+    //    (line search + pnjlim + frozen-Newton); the stiff conductance G_c enters
+    //    the Jacobian at sample n, removing the z⁻¹ wave-delay pole.
+    multi_port_nr_solve_grouped_into(
+        n_ext,
+        s_ext,
+        known_a_ext,
+        port_r_ext,
+        &groups,
+        offsets_ext,
+        v_ext,
+        max_iter,
+        tolerance,
+        ws,
+    );
+
+    // 5. Write back. Device ports → v_prev. Cap ports → wave_state (= v_c, the
+    //    probe's cross-sample state and next sample's companion v_prev) and the
+    //    solved outgoing wave → a_cap for the full scatter.
+    v_prev[..n_nl].copy_from_slice(&v_ext[..n_nl]);
+    for s in 0..n_stiff {
+        let v_c = v_ext[n_nl + s];
+        let slot = stiff[s].slot;
+        let prev = runtime_state.wave_cache[slot].wave_state;
+        runtime_state.wave_cache[slot].previous_reflected = prev;
+        runtime_state.wave_cache[slot].wave_state = v_c;
+        runtime_state.states[slot] = OnePortState::CapacitorVoltage(v_c);
+        a_cap[s] = ws.b_nl[n_nl + s];
+    }
+}
+
 impl MultiNlStage {
+    /// Threshold below which a capacitor is "stiff" and gets folded into the
+    /// coupled grouped-NR solve (Part 1). The BA283 HF caps are 220pF/330pF; the
+    /// coupling caps (Cfb 4.7nF, Cin/Cout 10µF) stay on the delayed passive path.
+    const STIFF_CAP_FARADS: crate::Wave = 1.0e-9;
+
+    /// Build the implicit stiff-cap fold if this stage matches the gate:
+    /// **≥2 BJT device groups AND ≥1 reactive one-port capacitor with `C < 1 nF`**.
+    ///
+    /// Returns `None` for every other stage so the legacy delayed-passive path is
+    /// taken byte-identically. Reconstructs the full standard scattering matrix
+    /// from the adaptor (the passive rows the NL-only sub-blocks discard) and
+    /// slices out the extended `[NL ∪ stiff]` system.
+    pub fn build_stiff_fold(&self) -> Option<StiffCapFold> {
+        let n_nl = self.n_nl;
+        if n_nl == 0 {
+            return None;
+        }
+        // Gate 1: at least two BJT device groups (multi-BJT DC-coupled feedback).
+        let dg = self.device_groups.as_ref()?;
+        let n_bjt = dg
+            .groups
+            .iter()
+            .filter(|g| {
+                matches!(
+                    g,
+                    NlDeviceGroupKind::BjtTwoPort(_) | NlDeviceGroupKind::EbersMollTwoPort(_)
+                )
+            })
+            .count();
+        if n_bjt < 2 {
+            return None;
+        }
+        // Gate 2: at least one stiff reactive capacitor (C < 1 nF).
+        let n_passive = self.passive_one_ports.len();
+        let mut stiff: Vec<StiffCap> = Vec::new();
+        let port_r_all = self.adaptor.port_resistances();
+        for (k, op) in self.passive_one_ports.iter().enumerate() {
+            if op.type_tag() != "capacitor" {
+                continue;
+            }
+            let c = op.physical_value();
+            if c >= Self::STIFF_CAP_FARADS || c <= 0.0 {
+                continue;
+            }
+            let slot = op.state_slot()?.0;
+            // WDF reference resistance for this passive port. Prefer the adaptor's
+            // value (exactly what S was built with); it equals 1/(2·fs·C).
+            let full_idx = n_nl + k;
+            let r_c = if full_idx < port_r_all.len() {
+                port_r_all[full_idx]
+            } else {
+                op.rp(self.passive_sample_rate)
+            };
+            if !(r_c.is_finite() && r_c > 0.0) {
+                return None;
+            }
+            let g_c = 0.5 / r_c; // G_c = C·fs = 1/(2·R_c)
+            stiff.push(StiffCap { passive_idx: k, slot, r_c, g_c });
+        }
+        if stiff.is_empty() {
+            return None;
+        }
+
+        // Reconstruct the full standard scattering S (n_total × n_total). The
+        // fold only exists for pure-injection VCC stages where the adaptor port
+        // ordering is [NL, passive, adapted] with the adapted port last.
+        let n_total = self.adaptor.num_ports();
+        if n_total != n_nl + n_passive + 1 {
+            // A VCC port or VS-injection layout we don't fold — stay on legacy.
+            return None;
+        }
+        let adapted_idx = n_total - 1;
+        let s_full = self.adaptor.scattering_matrix();
+
+        let n_stiff = stiff.len();
+        let n_ext = n_nl + n_stiff;
+
+        // Extended scattering S_ext over [NL_0..NL_{n_nl-1}, stiff_0..stiff_{k}].
+        let mut s_ext = vec![0.0 as crate::Wave; n_ext * n_ext];
+        let full = |i: usize, j: usize| -> crate::Wave { s_full[i * n_total + j] };
+        for i in 0..n_ext {
+            let fi = if i < n_nl { i } else { n_nl + stiff[i - n_nl].passive_idx };
+            for j in 0..n_ext {
+                let fj = if j < n_nl { j } else { n_nl + stiff[j - n_nl].passive_idx };
+                s_ext[i * n_ext + j] = full(fi, fj);
+            }
+        }
+
+        // Stiff-row coefficients for the stiff ports' known_a (over ALL passive
+        // columns + the adapted column).
+        let mut stiff_row_passive = vec![0.0 as crate::Wave; n_stiff * n_passive];
+        let mut stiff_row_adapted = vec![0.0 as crate::Wave; n_stiff];
+        for (s, sc) in stiff.iter().enumerate() {
+            let fs = n_nl + sc.passive_idx;
+            for k in 0..n_passive {
+                stiff_row_passive[s * n_passive + k] = full(fs, n_nl + k);
+            }
+            stiff_row_adapted[s] = full(fs, adapted_idx);
+        }
+
+        // Extended port resistances and device-group offsets.
+        let mut port_r_ext = Vec::with_capacity(n_ext);
+        port_r_ext.extend_from_slice(&self.nl_port_resistances[..n_nl]);
+        for sc in &stiff {
+            port_r_ext.push(sc.r_c);
+        }
+        let mut offsets_ext = dg.offsets.clone();
+        for s in 0..n_stiff {
+            offsets_ext.push(n_nl + s);
+        }
+
+        let max_group_ports = dg.groups.iter().map(|g| g.n_ports()).max().unwrap_or(1).max(1);
+        let ws = NrWorkspace::new_grouped(n_ext, max_group_ports);
+
+        Some(StiffCapFold {
+            n_ext,
+            n_nl,
+            stiff,
+            s_ext,
+            stiff_row_passive,
+            stiff_row_adapted,
+            port_r_ext,
+            offsets_ext,
+            n_passive,
+            ws,
+            known_a_ext: vec![0.0; n_ext],
+            v_ext: vec![0.0; n_ext],
+            a_cap: vec![0.0; n_stiff],
+        })
+    }
+
     /// Process one sample through the multi-NL stage.
     ///
     /// 1. Set control voltages (Vbe/Vgk) on each NL device
@@ -6317,6 +6693,15 @@ impl MultiNlStage {
         let n_passive = self.passive_one_ports.len();
         let output_port = self.output_port;
 
+        // Implicit stiff-cap fold (BA283 op-repeller cure): lazily build once on
+        // the first sample after (re)construction. `build_stiff_fold` returns
+        // `None` for every non-matching stage (the cheap gate short-circuits
+        // before any heavy work), so the corpus stays byte-identical.
+        if self.stiff_fold.is_none() {
+            self.stiff_fold = self.build_stiff_fold();
+        }
+        let use_stiff_fold = self.stiff_fold.is_some();
+
         // Set control voltages on each NL device.
         // For independent devices, set directly. For grouped devices,
         // multi-port groups (TriodeThreePort, VariMuThreePort) get grid
@@ -6390,7 +6775,10 @@ impl MultiNlStage {
             // Budget cap: skip NR when this base sample's iteration budget is exhausted.
             // Reuse last b_nl from workspace — still valid from the previous sub-sample.
             let skip_nr_budget = n_nl > 0 && self.iteration_budget_remaining == 0;
-            let skip_nr = skip_nr_adaptive || skip_nr_budget;
+            // The stiff-cap fold ALWAYS solves (it must update the folded cap
+            // states every sub-sample and never lets step 5 overwrite v_c) — so
+            // the adaptive/budget skips are disabled on the fold path.
+            let skip_nr = (skip_nr_adaptive || skip_nr_budget) && !use_stiff_fold;
 
             // The adapted port's b-wave is the input signal (voltage source).
             // When a feedback opamp is paired (e.g. Bluesbreaker, Tube Screamer fallback),
@@ -6402,6 +6790,50 @@ impl MultiNlStage {
             };
 
             if !skip_nr {
+            if use_stiff_fold {
+                // ── Part 1: extended coupled solve (BJT ports ∪ stiff caps) ──
+                // Removes the stiff-cap z⁻¹ wave-delay by solving Cmil/Ccmp
+                // simultaneously with the BJTs via a Backward-Euler companion.
+                let max_iter = crate::elements::nonlinear::solver::NR_MAX_ITER
+                    .min(self.iteration_budget_remaining.max(1));
+                let dg = self.device_groups.as_ref().unwrap();
+                let real_groups: Vec<&dyn NlDeviceGroupIv> =
+                    dg.groups.iter().map(|g| g.as_group_iv()).collect();
+                let real_offsets = &dg.offsets;
+                let servo: Option<&[crate::Wave]> =
+                    if self.dc_servo_active && self.dc_servo_corr.len() == n_nl {
+                        Some(&self.dc_servo_corr[..n_nl])
+                    } else {
+                        None
+                    };
+                let fold = self.stiff_fold.as_mut().unwrap();
+                solve_stiff_fold(
+                    fold,
+                    &real_groups,
+                    real_offsets,
+                    &self.scattering,
+                    &self.dc_bias[..n_nl],
+                    servo,
+                    &self.vcc_bias_all,
+                    b_passive,
+                    b_adapted,
+                    dc_scale,
+                    &mut self.v_prev,
+                    &mut self.passive_runtime_state,
+                    max_iter,
+                    nr_tolerance,
+                );
+                // Splice the solved stiff-cap outgoing waves into b_passive so
+                // the full scatter + output extraction use the coupled
+                // (non-delayed) reflected wave, not last sample's.
+                for s in 0..fold.stiff.len() {
+                    b_passive[fold.stiff[s].passive_idx] = fold.a_cap[s];
+                }
+                let iters = fold.ws.iters_used;
+                self.nr_workspace.b_nl[..n_nl].copy_from_slice(&fold.ws.b_nl[..n_nl]);
+                self.iteration_budget_remaining =
+                    self.iteration_budget_remaining.saturating_sub(iters);
+            } else {
             // 2. Compute known_a[i] for each NL port:
             // known_a[i] = Σ_k S_nl_passive[i][k] * b_passive[k]
             //             + S_nl_adapted[i] * b_adapted
@@ -6470,7 +6902,7 @@ impl MultiNlStage {
                     let groups: Vec<&dyn NlDeviceGroupIv> =
                         dg.groups.iter().map(|g| g.as_group_iv()).collect();
 
-multi_port_nr_solve_grouped_into(
+                    multi_port_nr_solve_grouped_into(
                         n_nl,
                         &self.scattering.s_nl,
                         known_a,
@@ -6507,6 +6939,7 @@ multi_port_nr_solve_grouped_into(
                     .iteration_budget_remaining
                     .saturating_sub(self.nr_workspace.iters_used);
             }
+            } // end else (legacy delayed-passive path)
             } // end if !skip_nr — b_nl in workspace is either fresh or reused
 
             // DC SERVO update (proportional DC-restoring spring, per solved
@@ -6618,6 +7051,16 @@ multi_port_nr_solve_grouped_into(
 
             // 5. Set incident waves on passive children
             for (k, one_port) in self.passive_one_ports.iter().enumerate() {
+                // Stiff-folded caps already had wave_state set to the solved
+                // v_c by the coupled solve — the scatter incident must NOT
+                // overwrite it (that would re-introduce the z⁻¹ delay).
+                if use_stiff_fold {
+                    if let Some(ref f) = self.stiff_fold {
+                        if f.stiff.iter().any(|sc| sc.passive_idx == k) {
+                            continue;
+                        }
+                    }
+                }
                 one_port.wdf_set_incident(a_all[n_nl + k], &mut self.passive_runtime_state);
             }
 
@@ -7589,6 +8032,9 @@ multi_port_nr_solve_grouped_into(
     /// and passive_one_ports, re-derives the scattering matrix, and updates all
     /// sub-blocks (s_nl, s_nl_passive, s_nl_adapted) and the RTypeAdaptor.
     fn recompute_scattering(&mut self) {
+        // The stiff-cap fold caches slices of the scattering matrix; invalidate
+        // it so the next `process` rebuilds it from the updated adaptor.
+        self.stiff_fold = None;
         // ── IIR recompute ────────────────────────────────────────────────
         // When IIR is active, read current pot resistances and recompute
         // the biquad coefficients. O(1) — no matrix inversion.

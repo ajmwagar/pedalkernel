@@ -196,17 +196,49 @@ HARD CONSTRAINT (documented regression trap): do **not** fold device small-signa
 Jacobians into the linear source term. With `F(op)=0` *and* the implicit caps
 (ρ<1), the op is a stable discrete fixed point ⇒ the DC servo becomes removable.
 
-**Status / honest verdict (2026-07-01):** baseline (ρ=2743) and the exact
-mechanism are confirmed at code level, and the runtime-feasible cure (no `S`
-rebuild) is designed above. The extended-NR itself — the coupled solve the task
-flagged as *possibly too invasive for one pass* — is **not yet landed/validated to
-ρ<1**: it is a multi-file change (solver path + `S`-block retention/reconstruction
-+ `MultiNlStage` fields with serde defaults + build-time detection + gating)
-requiring iterative build/probe/corpus cycles that cannot be responsibly validated
-in a single pass without risking a masked or regressing diff. **Remaining unstable
-mode: the Cmil ⊕ Ccmp z⁻¹ wave-delay loop (ρ=2743)** — unchanged until the
-extended-NR lands. Do not tune `Rp`/`k_p`/BE-damping to move ρ or the AC metric;
-that masks, per the servo note above.
+### 2026-07-01 (later) — LANDED: implicit stiff-cap fold + seed self-consistency → ρ<1
+
+Both parts implemented and validated against the probe. **ρ(Jcap) = 0.9994 < 1**
+(was 2743). The dominant eigenvalues collapsed from `[2743, −312, 154, 0.9998]` to
+`[0.002, 0.014, 0.881, 0.9994]`: the Cmil ⊕ Ccmp stiff modes are gone; the surviving
+0.9994 is the benign Cin coupling-cap mode (the marginal `λ≈1.000` the baseline
+already had).
+
+- **Part 1 — implicit fold** (`pedalkernel-rt/src/stage.rs`): `StiffCapFold` +
+  `CapCompanion` + `solve_stiff_fold`. Stiff caps (`C<1 nF`: Cmil 220p, Ccmp 330p)
+  are re-partitioned out of the delayed `passive_one_ports` set into the grouped-NR
+  as 1-port Backward-Euler companions `i_c=G_c·(v−v_prev)`, `G_c=1/(2·R_c)`, solved
+  coupled with the BJTs. The R-adaptor `S` is NOT rebuilt — the full standard `S` is
+  reconstructed from the adaptor (`RTypeAdaptor::scattering_matrix`) and sliced into
+  the extended `[NL ∪ stiff]` system reusing the existing
+  `multi_port_nr_solve_grouped_into`. Gated to ≥2 BJT groups + ≥1 stiff cap; every
+  other stage takes the byte-identical legacy path. `v_c` is kept in the cap's
+  `wave_state` slot so the probe stays before/after comparable.
+- **Part 2 — seed self-consistency** (`pedalkernel/src/compiler/rigid/general.rs`,
+  `apply_cap_seed`): the blocker was NOT the fold but that the probe seeds caps HOT
+  to ngspice's `nodes{}` voltages while `dc_bias` was derived (`apply_dc_qpoint_seed`)
+  against the compiler's own DC cap solve `dc_qpoint_passive_b`, whose **input
+  coupling cap Cin sat COLD at 0 V instead of its real −1.03 V**. That inconsistency
+  injected ~0.6 V of spurious `known_a` residual (`F(seed)=0.615` in BOTH the legacy
+  and folded paths) so the grouped-NR could not converge at the seeded op — and
+  folding caps into a NON-converging NR *amplified* ρ (2743→23611). The fix
+  re-points `dc_qpoint_passive_b` at the seeded (ngspice) cap waves and re-runs the
+  wave-domain Norton inversion → `F(ngspice_op)` drops **0.615 → 0.0402 V** (uses
+  only `i(v*)`, no small-signal Jacobians; fires only when `nodes{}` is present, so
+  production/corpus is byte-identical). This is the Part-2 directive (fix the Norton
+  `dc_bias` source so the op is a fixed point), realized as removing a cap-seed↔bias
+  inconsistency rather than new source math.
+
+**Gate results:** ρ=0.9994 (✓<1); **servo-OFF hold: HOLDS**, max|ΔVbe|=0.0064 V over
+48000 samples (was 4.73 V drift) ⇒ servo removable; **AC LEVEL +2.40 dB** (was
+−25.13); **bias residual 0.0402 V** (Layer A→B); **corpus 1050/79 unregressed**
+(79 = baseline, no fold/seed-related failures). **Still open (Layer B / deeper):**
+AC **THD −36 vs −16 dB** and **tilt 5 dB**, and bias **MATCH ΔIc 46-73%** (Q1/Q2
+starved vs ngspice) — the compiler's own BJT DC solve (`dc_qpoint_v`) still lands a
+root ~0.04 V off ngspice's device operating point; the fold makes that op *stable*
+and the seed *self-consistent*, but closing ΔIc needs the compile-time DC solve to
+match ngspice (source-stepping / a better group DC solve), not the runtime map. Do
+not tune `Rp`/`k_p`/BE-damping to move THD; that masks.
 
 ### 2026-06-30 — the "curvature loss" is the DC bias, not the runtime embedding
 

@@ -431,21 +431,36 @@ fn bias_accuracy_dashboard() {
             "BA283 MATCH should be clearly off (max ΔVbe={:.4}V)",
             r.max_abs_d_vbe
         );
-        // The cap-seeded residual must be the HONEST ≈ 0.615 V (Q3 Vbe dominant),
-        // NOT the old cold-cap ≈ 0.04 V. Guard the range so a regression back to
-        // the cold-cap contamination (or a runaway) is caught.
+        // Part 2 (stiff-cap fold branch, `apply_cap_seed` self-consistency fix):
+        // the cap-seeded residual is now the TRUE formulation residual ≈ 0.04 V,
+        // NOT the old 0.615 V. The 0.615 V was an ARTIFACT: the caps were seeded
+        // HOT to ngspice's node voltages, but `dc_bias` was still derived against
+        // the compiler's own DC cap solve (`dc_qpoint_passive_b`), whose input
+        // coupling cap Cin sat COLD at 0 V instead of its real −1.03 V. That
+        // inconsistency injected ~0.6 V of spurious `known_a` residual and stopped
+        // the grouped-NR from converging at the seeded op. Re-pointing
+        // `dc_qpoint_passive_b` at the seeded (ngspice) cap waves and re-running
+        // the wave-domain Norton inversion makes `F(ngspice_op) ≈ 0` — exactly the
+        // Part-2 directive (fix the `dc_bias` source so the op is a fixed point),
+        // using only `i(v*)` (no small-signal Jacobians). Guard the low band so a
+        // regression that RE-introduces the inconsistency (residual jumps back to
+        // ~0.6 V) or a runaway is caught.
         assert!(
-            (0.4..1.0).contains(&r.max_abs_residual),
-            "BA283 cap-seeded residual should be ≈ 0.615 V (Q3 Vbe dominant), got {:.4} V \
-             — a value near 0.04 V means the caps sat COLD (nodes{{}} seed missing)",
+            r.max_abs_residual < 0.15,
+            "BA283 cap-seeded residual should be the TRUE formulation residual \
+             ≈ 0.04 V after the Part-2 seed self-consistency fix, got {:.4} V \
+             — a value near 0.6 V means the dc_bias↔cap-seed inconsistency regressed",
             r.max_abs_residual
         );
-        // And with that honest residual it must localize to Layer A (formulation).
+        // With the seed now self-consistent the formulation-SOURCE bug is resolved;
+        // the residual localizes to Layer B (the solver still lands a bias whose
+        // MATCH is ~46-73% off ngspice — the remaining Q1/Q2 starvation the fold's
+        // source-stepping targets, NOT a dc_bias-source error).
         assert_eq!(
             r.verdict,
-            op_point::Verdict::FormulationBug,
-            "BA283 should localize to Layer A (formulation); its true cap-seeded \
-             residual {:.4} V exceeds the {:.2} V formulation threshold",
+            op_point::Verdict::FormulationOkSolverOff,
+            "BA283 should now localize to Layer B (solver/root); its cap-seeded \
+             residual {:.4} V is below the {:.2} V formulation threshold",
             r.max_abs_residual,
             criteria.residual_formulation_v,
         );

@@ -509,6 +509,7 @@ fn apply_cap_seed(
         }
     };
 
+    let mut any_seeded = false;
     for (k, (eidx, kind)) in reactive_edges.iter().enumerate() {
         if !matches!(kind, OnePortKind::Capacitor(_)) {
             continue;
@@ -522,11 +523,35 @@ fn apply_cap_seed(
             let seeded =
                 one_port.wdf_seed_dc_voltage(v_cap as pedalkernel_rt::Wave, &mut stage.passive_runtime_state);
             if seeded {
+                any_seeded = true;
                 eprintln!(
                     "[cap-seed] reactive port {k} (edge {eidx}): V = {va:.4} − {vb:.4} = {v_cap:+.4} V"
                 );
             }
         }
+    }
+
+    // Make the seed SELF-CONSISTENT (Part 2 for the seeded op): `dc_bias` was
+    // derived (`apply_dc_qpoint_seed`) against the compiler's own DC cap solve
+    // (`dc_qpoint_passive_b`). Overriding the cap wave_state to ngspice's
+    // node voltages without re-deriving `dc_bias` leaves a spurious residual
+    // `Σ_k s_nl_passive[i][k]·(b_ngspice[k] − b_compiler[k])` in the per-sample
+    // `known_a` — e.g. the input coupling cap Cin resolves to 0 V in the
+    // compiler solve but −1.03 V in ngspice, injecting ~0.6 V of bogus residual
+    // that prevents the grouped-NR from converging at the seeded op. Re-point
+    // `dc_qpoint_passive_b` at the seeded (ngspice) cap reflected waves and
+    // re-run the wave-domain inversion so the Norton `dc_bias` source term makes
+    // `F(ngspice_op) ≈ 0`. Uses only `i(v*)` (no device small-signal Jacobians),
+    // per the documented hard constraint. Only fires when `nodes{}` is present,
+    // so production (no seed) is byte-identical.
+    if any_seeded && stage.dc_qpoint_v.is_some() && !stage.dc_qpoint_passive_b.is_empty() {
+        let n_pb = stage.dc_qpoint_passive_b.len();
+        for k in 0..n_pb {
+            if let Some(&one_port) = stage.passive_one_ports.get(k) {
+                stage.dc_qpoint_passive_b[k] = one_port.wdf_reflected(&stage.passive_runtime_state);
+            }
+        }
+        stage.apply_dc_qpoint_seed();
     }
 }
 
@@ -1784,6 +1809,7 @@ fn assemble_multi_nl_stage(
         dc_servo_v_lp: Vec::new(),
         dc_servo_corr: Vec::new(),
         dc_servo_mask: Vec::new(),
+        stiff_fold: None,
     })
 }
 
