@@ -69,6 +69,8 @@ mod bias_analysis_tests;
 #[cfg(test)]
 mod bias_application_tests;
 #[cfg(test)]
+mod bias_characterization_tests;
+#[cfg(test)]
 mod bind_tests;
 #[cfg(test)]
 mod black_feedback_tests;
