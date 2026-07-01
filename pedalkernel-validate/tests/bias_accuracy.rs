@@ -76,6 +76,15 @@ struct Circuit {
     deck: &'static str,
     pedal: Pedal,
     gain: Option<f64>,
+    /// Map from a `.pedal` node NAME (a pin like `Q3.base`, `Cin.a`, or a reserved
+    /// node like `in`/`out`) to the ngspice net NAME the golden's node-voltage map
+    /// is keyed by. Used to emit the `op { nodes { … } }` sub-block so the reactive
+    /// (capacitor) ports are seeded to ngspice's DC node voltages — completing the
+    /// FULL operating-point seed. Each cap only fires when BOTH its terminals are
+    /// covered here; leaving an entry out leaves that cap at its cold state (and
+    /// contaminates the residual — the very bug this map exists to fix). Empty ⇒
+    /// caps sit COLD (the old, buggy behavior) and the residual is NOT trustworthy.
+    node_map: &'static [(&'static str, &'static str)],
 }
 
 /// The wired circuits. BA283 first (the known answer), then a fuzz face and the
@@ -91,18 +100,46 @@ const CIRCUITS: &[Circuit] = &[
         deck: "active/neve1073_ba283",
         pedal: Pedal::Pro("pedals/500/1073/sub/ba283.pedal"),
         gain: Some(0.5),
+        // BA283 caps (Cin, Cmil, Ccmp, Cfb, Cout) — every cap terminal maps to an
+        // ngspice net. Mirrors NGSPICE_NODES in tests/neve1073_spice.rs.
+        node_map: &[
+            ("Cin.a", "v_in"),
+            ("Cin.b", "ni"),
+            ("Q3.base", "nb1"),
+            ("Q3.collector", "n1"),
+            ("Q3.emitter", "ne1"),
+            ("Rcmp.b", "nrc"),
+            ("Q1.emitter", "ne2"),
+            ("Q2.emitter", "nd"),
+            ("RU1.b", "nfb"),
+            ("Cout.b", "v_out"),
+        ],
     },
     Circuit {
         name: "fuzz_face_pnp",
         deck: "active/fuzz_face_pnp",
         pedal: Pedal::Public("circuits/active/fuzz_face_pnp.pedal"),
         gain: None,
+        // Caps C1 (in→Q1.base) and C2 (Q2.collector→out).
+        node_map: &[
+            ("C1.a", "v_in"),
+            ("C1.b", "net2"),
+            ("C2.a", "net6"),
+            ("C2.b", "v_out"),
+        ],
     },
     Circuit {
         name: "si_fb_amp",
         deck: "active/si_fb_amp",
         pedal: Pedal::Public("circuits/active/si_fb_amp.pedal"),
         gain: None,
+        // Caps Cin (in→nb1) and Cout (nout→out).
+        node_map: &[
+            ("Cin.a", "v_in"),
+            ("Cin.b", "nb1"),
+            ("Cout.a", "nout"),
+            ("Cout.b", "v_out"),
+        ],
     },
 ];
 
@@ -190,20 +227,49 @@ fn compile_settle(circuit: &Circuit, source: &str) -> pedalkernel::compiler::Com
     proc
 }
 
-/// Inject an `op { Q1: { vbe, vce } … }` block (ngspice's `.op`) before the
-/// pedal's closing brace. This seeds every device's NR warm-start at ngspice's
-/// operating point so the coupling caps settle *consistent with* that point —
-/// the faithful `F(ngspice_op)` probe (the residual must be evaluated with the
-/// reactive state at ngspice's op, not at the engine's own cold-solve basin).
-/// Signs are ngspice's junction-magnitude convention; the DSL/op-seed path
-/// applies the per-device PNP sign internally.
-fn inject_op_block(source: &str, snap: &SpiceOpSnapshot) -> String {
+/// Inject an `op { Q1: { vbe, vce } … nodes { … } }` block (ngspice's `.op`)
+/// before the pedal's closing brace. This seeds:
+///   * every device's NR warm-start (`vbe`/`vce`) at ngspice's operating point,
+///     AND
+///   * every reactive (capacitor) port's stored DC voltage, via the `nodes { }`
+///     sub-block, so the caps sit at `V(node_a) − V(node_b)` from ngspice's `.op`
+///     NODE voltages instead of their COLD compile-time state.
+///
+/// Seeding the caps is what makes the residual honest: `F(ngspice_op)` MUST be
+/// evaluated with the reactive state AT ngspice's op, not at the engine's own
+/// cold-solve basin. Omitting `nodes { }` (the historical bug) left every cap
+/// cold, which under-reported the residual and mis-classified the BA283 as
+/// Layer B when the true, cap-seeded residual is Layer A (Q3 Vbe dominant).
+///
+/// The `nodes { }` entries are keyed by `.pedal` node NAME (from `circuit.node_map`)
+/// with values looked up by ngspice net name in `snap.nodes`. Signs are ngspice's
+/// junction-magnitude convention; the DSL/op-seed path applies the per-device PNP
+/// sign internally.
+fn inject_op_block(source: &str, snap: &SpiceOpSnapshot, circuit: &Circuit) -> String {
     let mut block = String::from("\n  op {\n");
     for d in &snap.devices {
         block.push_str(&format!(
             "    {}: {{ vbe: {}, vce: {} }}\n",
             d.device, d.vbe, d.vce
         ));
+    }
+    // Cap/node seed: emit `nodes { <pedal_name>: <ngspice_node_voltage> }` so the
+    // reactive ports are seeded consistent with ngspice's op — the fix for the
+    // cold-cap residual contamination. Only names whose ngspice net is present in
+    // the golden's node map are emitted.
+    if !circuit.node_map.is_empty() {
+        block.push_str("    nodes {\n");
+        for (pedal_name, spice_net) in circuit.node_map {
+            match snap.nodes.get(*spice_net) {
+                Some(v) => block.push_str(&format!("      {pedal_name}: {v}\n")),
+                None => eprintln!(
+                    "  [{}] node_map: ngspice net {spice_net:?} (for {pedal_name:?}) \
+                     absent from golden — cap seed incomplete",
+                    circuit.name
+                ),
+            }
+        }
+        block.push_str("    }\n");
     }
     block.push_str("  }\n");
     let cut = source.rfind('}').expect("pedal has a closing brace");
@@ -300,11 +366,13 @@ fn bias_accuracy_dashboard() {
         let match_proc = compile_settle(circuit, &source);
         let ours = wdf_device_bias(&match_proc);
 
-        // RESIDUAL: op{}-seed each device at ngspice's .op. At compile the engine
-        // initializes v_prev AND the reactive (cap) state consistent with that
-        // seed, so F(ngspice_op) is read IMMEDIATELY — no silence settle (which
-        // would walk the caps off the seed and contaminate the `cap` term).
-        let seeded = inject_op_block(&source, &snap);
+        // RESIDUAL: op{}-seed each device at ngspice's .op AND seed the caps via
+        // the `nodes { }` sub-block. At compile the engine initializes v_prev AND
+        // the reactive (cap) state consistent with that seed, so F(ngspice_op) is
+        // read IMMEDIATELY — no silence settle (which would walk the caps off the
+        // seed and contaminate the `cap` term). Seeding the caps (not leaving them
+        // COLD) is what makes the residual honest.
+        let seeded = inject_op_block(&source, &snap, circuit);
         let mut res_proc = compile_only(circuit, &seeded);
         let residuals = residual_at_ngspice_op(&mut res_proc, &snap);
         let res = op_point::evaluate(circuit.name, &ours, &snap.devices, &residuals, &criteria);
@@ -326,10 +394,14 @@ fn bias_accuracy_dashboard() {
     // BA283 is the calibration circuit: we KNOW its bias is wrong (TR1 starves),
     // so the dashboard must (a) pair all three transistors against ngspice, (b)
     // find a clearly-off MATCH, and (c) emit a decisive Layer-A/Layer-B verdict.
-    // We assert the metric COMPUTES correctly, not a predetermined verdict — the
-    // task prompt predicts Layer B (residual ≈ 0.63 V) while the repo's BA283
-    // note argues Layer A (DC-bias formulation / Norton source); whichever the
-    // engine actually produces post-parasitic-fix is printed here verbatim.
+    //
+    // With the FULL operating-point seed (device ports AND caps, via the `op {
+    // nodes { … } }` sub-block) the residual is HONEST: F(ngspice_op) ≈ 0.615 V,
+    // dominated by Q3's Vbe — ngspice's `.op` is genuinely NOT a fixed point of
+    // our DC equations. That is **Layer A** (DC-bias formulation), matching the
+    // repo's BA283 note. The old dashboard omitted `nodes { }`, so the caps sat
+    // COLD, the residual read a contaminated ≈ 0.04 V, and it MIS-classified the
+    // circuit as Layer B. The gate below now locks in Layer A.
     if let Some(r) = ba283 {
         println!(
             "\nBA283 verdict: {}\n  max|resid|={:.4}V (full={:.2e}V, {} ports)  \
@@ -359,14 +431,23 @@ fn bias_accuracy_dashboard() {
             "BA283 MATCH should be clearly off (max ΔVbe={:.4}V)",
             r.max_abs_d_vbe
         );
-        // And it must reach a decisive A-or-B verdict (never NoData/BiasOk).
+        // The cap-seeded residual must be the HONEST ≈ 0.615 V (Q3 Vbe dominant),
+        // NOT the old cold-cap ≈ 0.04 V. Guard the range so a regression back to
+        // the cold-cap contamination (or a runaway) is caught.
         assert!(
-            matches!(
-                r.verdict,
-                op_point::Verdict::FormulationBug | op_point::Verdict::FormulationOkSolverOff
-            ),
-            "BA283 verdict should be a decisive Layer A/B localization, got {:?}",
-            r.verdict
+            (0.4..1.0).contains(&r.max_abs_residual),
+            "BA283 cap-seeded residual should be ≈ 0.615 V (Q3 Vbe dominant), got {:.4} V \
+             — a value near 0.04 V means the caps sat COLD (nodes{{}} seed missing)",
+            r.max_abs_residual
+        );
+        // And with that honest residual it must localize to Layer A (formulation).
+        assert_eq!(
+            r.verdict,
+            op_point::Verdict::FormulationBug,
+            "BA283 should localize to Layer A (formulation); its true cap-seeded \
+             residual {:.4} V exceeds the {:.2} V formulation threshold",
+            r.max_abs_residual,
+            criteria.residual_formulation_v,
         );
     } else {
         eprintln!("  (BA283 pro pedal absent — verdict gate skipped)");

@@ -698,10 +698,17 @@ pub mod op_point {
         /// ΔIc fail threshold (percent). Default 10 %.
         pub ic_fail_pct: f64,
         /// Static-residual threshold separating "formulation ≈ ok" from a
-        /// formulation bug (volts). Default 1.0 V — generous: a few-hundred-mV
-        /// residual against multi-volt rail swings means ngspice's `.op` is
-        /// *approximately* a fixed point of our equations (the BA283 lands here
-        /// at ≈ 0.63 V post-parasitic-fix).
+        /// formulation bug (volts). Default 0.25 V.
+        ///
+        /// This is a DC-balance error in volts at a device port. Once the reactive
+        /// (capacitor) ports are seeded to ngspice's `.op` node voltages — the FULL
+        /// operating-point seed, not the old cold-cap probe — a residual on the
+        /// order of a junction drop means ngspice's `.op` is genuinely NOT a fixed
+        /// point of our DC equations (a formulation bug, Layer A). The BA283 lands
+        /// at ≈ 0.615 V (Q3 Vbe dominant) → Layer A. Tens-of-mV residuals still read
+        /// "≈ ok" → Layer B (solver / root-selection). The prior 1.0 V default was
+        /// set against a CONTAMINATED, cold-cap residual (≈ 0.04 V) and mis-called
+        /// the BA283 Layer B; with the caps seeded the true 0.615 V exceeds this.
         pub residual_formulation_v: f64,
     }
 
@@ -712,7 +719,7 @@ pub mod op_point {
                 vbe_fail_v: 0.025,
                 vce_fail_v: 0.3,
                 ic_fail_pct: 10.0,
-                residual_formulation_v: 1.0,
+                residual_formulation_v: 0.25,
             }
         }
     }
