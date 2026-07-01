@@ -1735,9 +1735,21 @@ pub(super) fn solve_bjt_group_dc_qpoint(
             continue;
         }
         let e = &graph.edges[eidx];
-        if let Some(r) = graph.components[e.comp_idx].kind.resistance() {
+        let comp = &graph.components[e.comp_idx];
+        if let Some(r) = comp.kind.resistance() {
             if r > 0.0 {
-                resistors.push((e.node_a, e.node_b, 1.0 / r));
+                // `Potentiometer::resistance()` reports the FULL track max_R,
+                // but the runtime stamps pot edges at the compile-time default
+                // position 0.5 (rheostat R = pos·max_R; 3-term halves aw/wb =
+                // pos·max_R / (1−pos)·max_R — see `make_leaf` and the
+                // spqr_build `max_r * 0.5` convention). The DC q-point must
+                // solve the SAME network the runtime scatters, or the seeded
+                // op is a root of a different circuit: on the BA283 the full
+                // 4.7k track (vs RV1=2350) shifted the solved q-point ~4 mV,
+                // which the exponential shunt-feedback loop amplified into the
+                // starved Q1/Q2 runtime root (ΔIc −74 %).
+                let r_eff = if comp.kind.is_pot() { r * 0.5 } else { r };
+                resistors.push((e.node_a, e.node_b, 1.0 / r_eff));
             }
         }
     }

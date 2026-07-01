@@ -155,6 +155,276 @@ fn ba283_ib_matches_ngspice_at_op_voltages() {
     );
 }
 
+/// Layer 3 — deck-KCL audit of OUR settled root.
+///
+/// With the device model now ngspice-exact, any difference between our settled
+/// DC root and ngspice's can only come from the compiled NETWORK.  This probe
+/// settles the compiled BA283 cold (as `bias_accuracy` MATCH does), reads the
+/// per-device op, reconstructs the deck node voltages from the emitter ladder,
+/// and evaluates the DECK's own KCL (R3=68k, R4=1.2k, R6=18k, R7=47, RV1=2350,
+/// Rfb=56k, VCC=24) at every DC node.  Our root satisfies OUR equations exactly,
+/// so any deck-KCL violation printed here IS the compiled-network-vs-deck delta,
+/// localized to a node.
+#[test]
+fn ba283_our_root_deck_kcl_audit() {
+    use pedalkernel::compiler::compile_pedal;
+    use pedalkernel::dsl::parse_pedal_file;
+    use pedalkernel::PedalProcessor;
+    use pedalkernel_rt::processor::Stage;
+    use pedalkernel_validate::pro_pedal::load_pro_pedal_sub;
+    use pedalkernel_validate::skip_if_missing;
+
+    let source = skip_if_missing!(
+        load_pro_pedal_sub("pedals/500/1073/sub/ba283.pedal"),
+        "pedals/500/1073/sub/ba283.pedal"
+    );
+    let def = parse_pedal_file(&source).expect("parse BA283");
+    let mut proc = compile_pedal(&def, 48_000.0).expect("compile BA283");
+    proc.set_control("Gain", 0.5);
+    let q3_vbe = |proc: &pedalkernel::compiler::CompiledPedal| -> f64 {
+        for st in proc.stages.iter() {
+            if let Stage::MultiNl(mnl) = st {
+                for d in mnl.device_op_points() {
+                    if d.ref_name == "Q3" {
+                        return d.v_be;
+                    }
+                }
+            }
+        }
+        f64::NAN
+    };
+    // Pre-settle: is the COLD-compiled state a fixed point of its own balance?
+    for st in proc.stages.iter() {
+        if let Stage::MultiNl(mnl) = st {
+            if mnl.device_groups.is_none() {
+                continue;
+            }
+            let ports = mnl.op_seed_residual();
+            let max_r = ports.iter().map(|p| p.residual.abs()).fold(0.0f64, f64::max);
+            eprintln!("  F(cold dc_qpoint seed) per-port:");
+            for (i, p) in ports.iter().enumerate() {
+                eprintln!(
+                    "    port {i}: a={:+.4} dc_bias={:+.4} cap={:+.4} nl={:+.4}  r={:+.4} V",
+                    p.a, p.dc_bias, p.cap, p.nl, p.residual
+                );
+            }
+            eprintln!("  max|F(cold)| = {max_r:.4} V");
+        }
+    }
+    eprintln!("  settle trajectory Q3.vbe (seed target 0.64167):");
+    for i in 0..48_000 {
+        proc.process(0.0);
+        if [0usize, 1, 3, 10, 30, 100, 300, 1_000, 3_000, 10_000, 30_000, 47_999]
+            .contains(&i)
+        {
+            eprintln!("    sample {i:>6}: vbe(Q3) = {:.5}", q3_vbe(&proc));
+        }
+    }
+
+    // Collect our settled per-device op (terminal vbe/vce) keyed by ref name.
+    let mut ops: std::collections::BTreeMap<String, (f64, f64, f64)> = Default::default();
+    for st in proc.stages.iter() {
+        if let Stage::MultiNl(mnl) = st {
+            if let Some(qv) = &mnl.dc_qpoint_v {
+                eprintln!(
+                    "  compile-time dc_qpoint_v (port order): {:?}",
+                    qv.iter().map(|v| (v * 1e4).round() / 1e4).collect::<Vec<_>>()
+                );
+            }
+            for d in mnl.device_op_points() {
+                if !d.ref_name.is_empty() {
+                    ops.insert(d.ref_name.clone(), (d.v_be, d.v_ce, d.i_c));
+                }
+            }
+        }
+    }
+    let get = |k: &str| *ops.get(k).unwrap_or_else(|| panic!("no op for {k}"));
+    let (vbe3, vce3, ic3_rt) = get("Q3");
+    let (vbe1, vce1, ic1_rt) = get("Q1");
+    let (vbe2, vce2, ic2_rt) = get("Q2");
+
+    // Device currents from the (ngspice-exact) model at OUR root.
+    let ib_ic = |model: &str, vbe: f64, vce: f64| -> (f64, f64) {
+        let bjt = BjtTwoPort::new(bjt_model_by_name(model));
+        let mut c = [0.0f64; 2];
+        let mut j = [0.0f64; 4];
+        bjt.eval(&[vbe, vce], &mut c, &mut j);
+        (c[0], c[1])
+    };
+    let (ib3, ic3) = ib_ic("BC184C", vbe3, vce3);
+    let (ib1, ic1) = ib_ic("BC184C", vbe1, vce1);
+    let (ib2, ic2) = ib_ic("2N3055", vbe2, vce2);
+    eprintln!("── Layer 3: our settled root, deck-KCL audit ──");
+    eprintln!(
+        "  Q3 vbe={vbe3:.5} vce={vce3:.4} ic_rt={:.2}µA ic_model={:.2}µA ib={:.2}µA",
+        ic3_rt * 1e6,
+        ic3 * 1e6,
+        ib3 * 1e6
+    );
+    eprintln!(
+        "  Q1 vbe={vbe1:.5} vce={vce1:.4} ic_rt={:.2}µA ic_model={:.2}µA ib={:.2}µA",
+        ic1_rt * 1e6,
+        ic1 * 1e6,
+        ib1 * 1e6
+    );
+    eprintln!(
+        "  Q2 vbe={vbe2:.5} vce={vce2:.4} ic_rt={:.2}µA ic_model={:.2}µA ib={:.2}µA",
+        ic2_rt * 1e6,
+        ic2 * 1e6,
+        ib2 * 1e6
+    );
+
+    // Reconstruct deck nodes from the emitter ladder.
+    let vcc = 24.0;
+    let ie3 = ib3 + ic3;
+    let ie1 = ib1 + ic1;
+    let ie2 = ib2 + ic2;
+    let ne1 = ie3 * 1_200.0;
+    let nb1 = ne1 + vbe3;
+    let n1 = ne1 + vce3;
+    let ne2 = n1 - vbe1; // Q1 base = n1
+    let nd = ne2 - vbe2; // Q2 base = ne2
+    let nfb = nd - ie2 * (47.0 + 2_350.0); // Cout blocks DC ⇒ I(R7)=Ie2
+    eprintln!(
+        "  nodes: nb1={nb1:.4} n1={n1:.4} ne1={ne1:.4} ne2={ne2:.4} nd={nd:.4} nfb={nfb:.4}"
+    );
+    eprintln!(
+        "  cross-checks: vce1 vs 24−ne2: {:.4} vs {:.4}   vce2 vs 24−nd: {:.4} vs {:.4}",
+        vce1,
+        vcc - ne2,
+        vce2,
+        vcc - nd
+    );
+
+    // Deck KCL residuals (µA). Positive = current surplus into the node.
+    let r_n1 = (vcc - n1) / 68_000.0 - ic3 - ib1;
+    let r_nb1 = (nfb - nb1) / 56_000.0 - ib3;
+    let r_ne2 = ie1 - ib2 - (ne2 - nfb) / 18_000.0;
+    let r_nfb = ie2 + (ne2 - nfb) / 18_000.0 - (nfb - nb1) / 56_000.0;
+    eprintln!("  deck-KCL residuals (µA, + = surplus into node):");
+    eprintln!("    n1  (R3 vs Ic3+Ib1)      : {:+9.3}", r_n1 * 1e6);
+    eprintln!("    nb1 (Rfb vs Ib3)         : {:+9.3}", r_nb1 * 1e6);
+    eprintln!("    ne2 (Ie1 vs Ib2+R6)      : {:+9.3}", r_ne2 * 1e6);
+    eprintln!("    nfb (R7+R6 in vs Rfb out): {:+9.3}", r_nfb * 1e6);
+}
+
+/// Layer 4 — standalone deck DC solve with OUR device model.
+///
+/// Newton-solves the deck's 6 DC nodes (nb1, n1, ne1, ne2, nd, nfb) using
+/// `BjtTwoPort::eval` terminal currents.  With the deck's RV1 = 2350 Ω (pot at
+/// 0.5) the root must land on ngspice's op — proving model+network agreement.
+/// With RV1 = 4700 Ω (the FULL pot track, which `Potentiometer::resistance()`
+/// reports to `solve_bjt_group_dc_qpoint`) the root shows where the compiler's
+/// DC q-point actually sits.
+#[test]
+fn ba283_deck_dc_solve_pot_sensitivity() {
+    let solve = |rv1: f64| -> [f64; 6] {
+        let q_bc = BjtTwoPort::new(bjt_model_by_name("BC184C"));
+        let q_3055 = BjtTwoPort::new(bjt_model_by_name("2N3055"));
+        let dev = |bjt: &BjtTwoPort, vbe: f64, vce: f64| -> (f64, f64) {
+            let mut c = [0.0f64; 2];
+            let mut j = [0.0f64; 4];
+            bjt.eval(&[vbe, vce], &mut c, &mut j);
+            (c[0], c[1]) // (ib, ic)
+        };
+        // v = [nb1, n1, ne1, ne2, nd, nfb]
+        let kcl = |v: &[f64; 6]| -> [f64; 6] {
+            let [nb1, n1, ne1, ne2, nd, nfb] = *v;
+            let (ib3, ic3) = dev(&q_bc, nb1 - ne1, n1 - ne1);
+            let (ib1, ic1) = dev(&q_bc, n1 - ne2, 24.0 - ne2);
+            let (ib2, ic2) = dev(&q_3055, ne2 - nd, 24.0 - nd);
+            let rfbk = 47.0 + rv1;
+            [
+                (nfb - nb1) / 56_000.0 - ib3,
+                (24.0 - n1) / 68_000.0 - ic3 - ib1,
+                (ib3 + ic3) - ne1 / 1_200.0,
+                (ib1 + ic1) - ib2 - (ne2 - nfb) / 18_000.0,
+                (ib2 + ic2) - (nd - nfb) / rfbk,
+                (ne2 - nfb) / 18_000.0 + (nd - nfb) / rfbk - (nfb - nb1) / 56_000.0,
+            ]
+        };
+        // Start at ngspice's op; NR with numeric Jacobian + step damping.
+        let mut v = [1.0308, 5.7426, 0.3891, 5.2024, 4.7961, 4.7051];
+        for _ in 0..200 {
+            let f = kcl(&v);
+            let maxf = f.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            if maxf < 1e-12 {
+                break;
+            }
+            let h = 1e-8;
+            let mut jac = [[0.0f64; 6]; 6];
+            for c in 0..6 {
+                let mut vp = v;
+                vp[c] += h;
+                let fp = kcl(&vp);
+                for r in 0..6 {
+                    jac[r][c] = (fp[r] - f[r]) / h;
+                }
+            }
+            // Gaussian elimination, solve jac·d = -f.
+            let mut a = jac;
+            let mut b: [f64; 6] = core::array::from_fn(|i| -f[i]);
+            for p in 0..6 {
+                let mut best = p;
+                for r in p + 1..6 {
+                    if a[r][p].abs() > a[best][p].abs() {
+                        best = r;
+                    }
+                }
+                a.swap(p, best);
+                b.swap(p, best);
+                let piv = a[p][p];
+                for r in p + 1..6 {
+                    let m = a[r][p] / piv;
+                    for c in p..6 {
+                        a[r][c] -= m * a[p][c];
+                    }
+                    b[r] -= m * b[p];
+                }
+            }
+            let mut d = [0.0f64; 6];
+            for r in (0..6).rev() {
+                let mut s = b[r];
+                for c in r + 1..6 {
+                    s -= a[r][c] * d[c];
+                }
+                d[r] = s / a[r][r];
+            }
+            let maxd = d.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+            let scale = if maxd > 0.25 { 0.25 / maxd } else { 1.0 };
+            for k in 0..6 {
+                v[k] += d[k] * scale;
+            }
+        }
+        v
+    };
+
+    for (label, rv1) in [("deck RV1=2350 (pot@0.5)", 2350.0), ("FULL track 4700", 4700.0)] {
+        let v = solve(rv1);
+        let [nb1, n1, ne1, ne2, nd, nfb] = v;
+        eprintln!("── Layer 4: deck DC root with {label} ──");
+        eprintln!("  nb1={nb1:.4} n1={n1:.4} ne1={ne1:.4} ne2={ne2:.4} nd={nd:.4} nfb={nfb:.4}");
+        eprintln!(
+            "  Q3 vbe={:.5} vce={:.4}   Q1 vbe={:.5} vce={:.4}   Q2 vbe={:.5} vce={:.4}",
+            nb1 - ne1,
+            n1 - ne1,
+            n1 - ne2,
+            24.0 - ne2,
+            ne2 - nd,
+            24.0 - nd
+        );
+    }
+    // Gate: with the deck's 2350 the root must be ngspice's op (terminal Vbe/Vce).
+    let v = solve(2350.0);
+    let ng = [1.030807, 5.742574, 0.389139, 5.202455, 4.796174, 4.705127];
+    for (i, (ours, ngv)) in v.iter().zip(ng.iter()).enumerate() {
+        assert!(
+            (ours - ngv).abs() < 2e-3,
+            "node {i}: deck-DC root {ours:.5} vs ngspice {ngv:.5} — model/network mismatch"
+        );
+    }
+}
+
 /// Localization aid: same layer-1 diff swept over candidate thermal voltages.
 /// Not a gate — prints which Vt the ngspice build actually uses.
 #[test]

@@ -2096,6 +2096,17 @@ fn apply_bjt_dc_qpoint(
     let resolve = |node: NodeId| -> Option<f64> {
         if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
             Some(0.0)
+        } else if node == graph.in_node || node == graph.out_node {
+            // AC-coupled I/O: the source / load network DC-references ground, so
+            // a coupling cap facing `in`/`out` charges to the full interior DC
+            // voltage.  Treating the input node as "floating ⇒ 0 V across the
+            // cap" seeded the BA283's Cin at 0 V instead of its true −1.03 V:
+            // the compile state was self-consistent (F(seed)=0) but NOT a steady
+            // state of the cap dynamics, so Cin charged over ~0.2 s and dragged
+            // the stage off the solved op (Q3 vbe 0.6417 → 0.663, ΔIc +46 %) —
+            // the cold-path twin of the `nodes{}`-seed Cin bug fixed in
+            // `apply_cap_seed`.
+            Some(0.0)
         } else if node == graph.vcc_node {
             graph
                 .supply_voltages
@@ -2130,14 +2141,23 @@ fn apply_bjt_dc_qpoint(
     //     `passive_one_ports[k]` (same build order).
     for (k, _) in reactive_edges.iter().enumerate() {
         if let (Some(&one_port), Some(&bk)) = (stage.passive_one_ports.get(k), passive_b.get(k)) {
-            // Seed the cap's *reflected wave* directly to `passive_b[k]` (the DC
-            // steady-state value the inversion assumed).  `wdf_set_incident` sets
-            // `wave_state = incident`, and `wdf_reflected` returns `wave_state`, so
-            // the first sample sees b_passive[k] = passive_b[k] exactly.  (The
-            // `CapacitorVoltage` setter instead yields 2·v on a fresh cap, which
-            // over-drives the first known_a and kicks the NR out of the active
-            // basin.)
-            one_port.wdf_set_incident(bk, &mut stage.passive_runtime_state);
+            // Pin the cap at its DC fixed point (`a = b = v`, previous_reflected
+            // = v): the first sample sees b_passive[k] = passive_b[k] AND the
+            // cap's stored voltage/history are steady-state-consistent — the
+            // same primitive the `op { nodes { … } }` seed path uses
+            // (`apply_cap_seed`), which is proven to HOLD over 48 000 samples.
+            // (`wdf_set_incident` left `previous_reflected` at the stale
+            // pre-seed value; the `CapacitorVoltage` setter yields 2·v on a
+            // fresh cap — both perturb the first samples.)
+            one_port.wdf_seed_dc_voltage(bk, &mut stage.passive_runtime_state);
+        }
+    }
+    // Re-read the actual reflected waves so the inversion below sees exactly the
+    // state the runtime will produce (mirrors `apply_cap_seed`; for resistor /
+    // non-stateful ports `wdf_reflected` is 0 rather than the analytic guess).
+    for (k, b) in passive_b.iter_mut().enumerate() {
+        if let Some(&one_port) = stage.passive_one_ports.get(k) {
+            *b = one_port.wdf_reflected(&stage.passive_runtime_state);
         }
     }
 
