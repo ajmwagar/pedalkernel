@@ -227,27 +227,25 @@ impl GummelPoonModel {
         };
 
         // --- Base charge Qb and its derivatives ---
-        // q1 = 1 + vbc/vaf + vbe/var
-        let q1 =
-            1.0 + if self.vaf.is_finite() {
-                vbc / self.vaf
-            } else {
-                0.0
-            } + if self.var.is_finite() {
-                vbe / self.var
-            } else {
-                0.0
-            };
-        let dq1_dvbe = if self.var.is_finite() {
-            1.0 / self.var
-        } else {
-            0.0
-        };
-        let dq1_dvbc = if self.vaf.is_finite() {
-            1.0 / self.vaf
-        } else {
-            0.0
-        };
+        // Early-effect factor, SPICE Gummel-Poon form:
+        //   q1 = 1 / (1 − vbc/VAF − vbe/VAR)
+        // (NOT the first-order linearization `1 + vbc/VAF + vbe/VAR`, which
+        // diverges from SPICE as |Vbc| approaches VAF — e.g. a BC184C at Vce≈19V
+        // has vbc/VAF≈−0.37, where the linear form over-predicts Ic by ~15% and
+        // walks the DC operating point off ngspice's. `d(q1)/dx = q1²·(1/A)`.)
+        let inv_vaf = if self.vaf.is_finite() { 1.0 / self.vaf } else { 0.0 };
+        let inv_var = if self.var.is_finite() { 1.0 / self.var } else { 0.0 };
+        // Denominator floored to a small positive value so deep saturation
+        // (Vbc>0 large) can never produce a zero/negative base charge (SPICE
+        // keeps qb bounded); in the forward-active region the floor is inactive.
+        let q1_denom_raw = 1.0 - vbc * inv_vaf - vbe * inv_var;
+        let q1_floored = q1_denom_raw < 0.1;
+        let q1_denom = if q1_floored { 0.1 } else { q1_denom_raw };
+        let q1 = 1.0 / q1_denom;
+        // Derivatives vanish where the denominator is floored (q1 held constant).
+        let q1_sq = if q1_floored { 0.0 } else { q1 * q1 };
+        let dq1_dvbe = q1_sq * inv_var;
+        let dq1_dvbc = q1_sq * inv_vaf;
 
         // q2 = IS*(exp_vbe-1)/ikf + IS*(exp_vbc-1)/ikr
         let q2_f = if self.ikf.is_finite() && self.ikf > 0.0 {
