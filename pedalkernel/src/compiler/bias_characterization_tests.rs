@@ -123,6 +123,76 @@ fn characterize_triode_12ax7_qpoint() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// (b') TRIODE unification probe — does the shared `solve_operating_point` /
+//      `TriodeSeed` path reproduce the per-type `solve_triode_dc_qpoint`?  This
+//      is the ko5g inc-3 migration gate: if the unified path lands the same
+//      Q-point, the per-type triode NR loop can delegate to it (unifying triodes
+//      onto the same solver core the BJT uses).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn probe_triode_unified_vs_per_type_qpoint() {
+    let graph = graph_of(TRIODE_12AX7);
+    let nl = NonlinearKind::Triode {
+        model_name: "12ax7".to_string(),
+        plate_node: node(&graph, "V1.plate"),
+        cathode_node: node(&graph, "V1.cathode"),
+        grid_node: Some(node(&graph, "V1.grid")),
+        parallel_count: 1,
+        is_vari_mu: false,
+    };
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+
+    // Per-type solver (current production path).
+    let per_type = super::bias::solve_triode_dc_qpoint(&[nl.clone()], &all_edges, &graph, 250.0)
+        .expect("per-type Q-point");
+
+    // Unified shared-core path via the BiasSeed trait.
+    let seed = super::bias::TriodeSeed {
+        nl_kind: &nl,
+        label: "V1".to_string(),
+        supply_voltage: 250.0,
+        parallel_count: 1,
+    };
+    let nb = super::bias::NetworkBias::default();
+    let unified = super::bias::solve_operating_point(&seed, &all_edges, &graph, &nb, 250.0)
+        .expect("unified Q-point");
+
+    eprintln!(
+        "TRIODE unify: per-type Vgk={:.6} Vpk={:.6} | unified Vgk(control)={:.6} Vpk(warm)={:.6}",
+        per_type.vgk, per_type.vpk, unified.control_bias, unified.output_warm_start
+    );
+
+    // The shared solver mathematically shares the SAME fixed point
+    // (v_ctrl = -Ia*Rk, v_out = VCC - Ia*Rp).  This probe records how close the
+    // two implementations land, so the inc-3 migration decision is evidence-based.
+    //
+    // FINDING (captured 2026-06-30, 804f91e6): with `TriodeSeed` matched to the
+    // per-type semantics (v_max = supply, parallel_count, set_vgk), the agreement
+    // is |dVgk| = 1.96 mV, |dVpk| = 131 mV.  The residual is INDEPENDENT of v_max
+    // (byte-identical with v_max=180 vs 250) — it is purely ALGORITHMIC: the
+    // shared `solve_operating_point` Newton step (residual in v_ctrl with an
+    // `i_load_est` degeneration-current approximation) converges to a slightly
+    // different point than the per-type Ia-relaxation loop.  So a straight
+    // delegation of the PRODUCTION path is NOT bit-for-bit behaviour-preserving;
+    // it would shift every MultiNL triode Q-point by ~2 mV Vgk / ~131 mV Vpk.
+    // To make the migration byte-identical, the shared solver's NR scheme must
+    // be aligned to the Ia-relaxation (or the per-type path re-baselined under a
+    // corpus re-validation).  That is the inc-3 migration prerequisite — see the
+    // module report; TriodeSeed is left production-ready but the call-site is NOT
+    // flipped in this pass (deliberate: avoids a tube-wide unvalidated shift).
+    let dvgk = (per_type.vgk - unified.control_bias).abs();
+    let dvpk = (per_type.vpk - unified.output_warm_start).abs();
+    eprintln!("TRIODE unify: |dVgk|={dvgk:.6} V  |dVpk|={dvpk:.6} V");
+
+    assert!(unified.control_bias < 0.0, "unified Vgk should be negative");
+    assert!(unified.output_warm_start > 0.0 && unified.output_warm_start < 250.0);
+    // Pin the measured algorithmic agreement (the migration prerequisite metric).
+    assert!(dvgk < 5e-3, "per-type vs unified Vgk diverge beyond 5 mV: {dvgk}");
+    assert!(dvpk < 0.20, "per-type vs unified Vpk diverge beyond 0.2 V: {dvpk}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // (a) BJT — synthetic 2N3904 common-emitter, divider-biased.  Pins the unified
 //     BJT nodal co-solve `solve_bjt_group_dc_qpoint` (the BA283 solver).
 // ─────────────────────────────────────────────────────────────────────────────

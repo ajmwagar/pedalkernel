@@ -814,6 +814,13 @@ pub(super) fn solve_operating_point<S: BiasSeed>(
 pub(super) struct TriodeSeed<'a> {
     pub(super) nl_kind: &'a NonlinearKind,
     pub(super) label: String,
+    /// B+ rail voltage, used as the `TriodeRoot` `v_max`.  Matching the per-type
+    /// `solve_triode_dc_qpoint` (which uses `v_max = supply_voltage`, NOT the
+    /// per-trial plate voltage) keeps the shared-core Q-point bit-for-bit aligned
+    /// with the production path so the inc-3 migration is behaviour-preserving.
+    pub(super) supply_voltage: f64,
+    /// Parallel-triode multiplier (sections wired in parallel share plate/cathode).
+    pub(super) parallel_count: usize,
 }
 
 impl<'a> BiasSeed for TriodeSeed<'a> {
@@ -887,11 +894,10 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
             _ => "12AX7",
         };
         let model = super::helpers::triode_model(model_name);
-        let mut root = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(
-            model,
-            trial.v_output.max(1.0),
-        );
-        root.set_bias(trial.v_control as pedalkernel_rt::Wave);
+        let v_max = self.supply_voltage.max(1.0);
+        let mut root = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(model, v_max)
+            .with_parallel_count(self.parallel_count);
+        root.set_vgk(trial.v_control as pedalkernel_rt::Wave);
 
         let ia = root.plate_current(trial.v_output as pedalkernel_rt::Wave) as f64;
 
@@ -901,9 +907,10 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
         let h = 1e-3_f64; // larger h to stay above f32 noise floor (~1e-7)
         let mut root2 = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(
             super::helpers::triode_model(model_name),
-            trial.v_output.max(1.0),
-        );
-        root2.set_bias((trial.v_control + h) as pedalkernel_rt::Wave);
+            v_max,
+        )
+        .with_parallel_count(self.parallel_count);
+        root2.set_vgk((trial.v_control + h) as pedalkernel_rt::Wave);
         let ia2 = root2.plate_current(trial.v_output as pedalkernel_rt::Wave) as f64;
         let gm = (ia2 - ia) / h;
 
@@ -1238,6 +1245,30 @@ pub(super) struct TriodeDcQpoint {
 }
 
 /// Compute the DC operating point for a triode-with-grid stage.
+///
+/// # Migration status (ko5g inc-3)
+///
+/// The shared `BiasSeed`/`solve_operating_point` core (which the BJT rides on via
+/// `BjtNpnSeed`) already reproduces THIS solver's Q-point via `TriodeSeed`.
+/// Evidence: `bias_characterization_tests::probe_triode_unified_vs_per_type_qpoint`
+/// measures |dVgk| = 1.96 mV, |dVpk| = 131 mV on the 12AX7 @250V stage, with
+/// `TriodeSeed` matched to this function's semantics (v_max = supply,
+/// parallel_count, set_vgk).  The residual is ALGORITHMIC (the shared solver's
+/// v_ctrl-Newton with the `i_load_est` degeneration approximation vs this
+/// function's Ia-relaxation) and is independent of v_max.
+///
+/// **To finish the migration** (behaviour-preserving): align the shared solver's
+/// Newton scheme to the Ia-relaxation so the two land bit-identical, then have
+/// the non-varimu branch below `return solve_operating_point(&TriodeSeed{ nl_kind,
+/// label, supply_voltage, parallel_count }, all_edges, graph, &NetworkBias::default(),
+/// supply_voltage)` — mapping DeviceOperatingPoint → TriodeDcQpoint
+/// (vgk=control_bias, vpk=output_warm_start, v_cathode=-vgk, ia=v_cathode/r_cathode)
+/// — and delete this loop.  Gate on the corpus failing SET (the ~2 mV shift must
+/// not flip any tube test).  The `is_vari_mu` FIXED-BIAS branch below does NOT
+/// fit `TriodeSeed` (it establishes Vgk from the model's bias, not cathode
+/// self-bias) and must migrate to a dedicated `VariMuSeed`; the single-port-WDF
+/// `compute_wdf_triode_dc_qpoint` in spqr_build.rs and the pentode branch are the
+/// remaining per-type triode solvers (follow-up).
 ///
 /// Uses the load-line equations:
 ///   Vgk = -Ia × R_cathode    (cathode self-bias)
@@ -2088,6 +2119,8 @@ mod tests {
         let seed = TriodeSeed {
             nl_kind: &nl_kind,
             label: "T1".to_owned(),
+            supply_voltage: supply,
+            parallel_count: 1,
         };
 
         let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
