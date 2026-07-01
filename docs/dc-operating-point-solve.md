@@ -196,7 +196,56 @@ HARD CONSTRAINT (documented regression trap): do **not** fold device small-signa
 Jacobians into the linear source term. With `F(op)=0` *and* the implicit caps
 (ρ<1), the op is a stable discrete fixed point ⇒ the DC servo becomes removable.
 
-### 2026-07-01 (latest) — DC-solve root: Early-effect model fix + residual localization
+### 2026-07-01 (final) — BA283 DC bias CLOSED (ΔIc 0.0%); AC gap localized to output loading
+
+The "base-current precision" hypothesis was tested and the DC gap fully closed —
+but the mechanism was NOT a 1-2µA Ib formulation error. Diagnostic-first
+(`pedalkernel-validate/tests/ba283_ib_diagnostic.rs`, permanent):
+
+1. **Ib diagnostic** (Layer 1/2): our Gummel-Poon Ib at ngspice's exact `.op`
+   junction voltages. The Ib EQUATIONS were already SPICE-exact (Ibe1/BF + ISE·
+   (exp(vbe/(NE·Vt))−1) + Ibc1/BR + ISC-term, no qb division; RB/RE/RC terminal
+   decomposition correct). The entire diff was **thermal voltage**: `vt: 0.02585`
+   (25 °C) vs ngspice's TEMP=TNOM=27 °C with CODATA-2018 constants ⇒
+   `Vt = 1.380649e-23·300.15/1.602176634e-19 ≈ 25.8649 mV`. With that Vt the
+   per-device diff collapses to |ΔIb| ≤ 0.0006 µA, |ΔIc| ≤ 0.001 % (gate was
+   0.2 µA). Fixed in `model_lookup::bjt_from_spice` (`SPICE_VT_27C`).
+2. **Deck-KCL audit + standalone deck DC solve** (Layer 3/4): with the exact
+   model, a 6-node Newton solve of the DECK's DC lands ngspice's op to <0.1 mV —
+   so the remaining compile/runtime offset was NETWORK, not device. Two bugs:
+   - `solve_bjt_group_dc_qpoint` stamped the pot RU1 at the FULL 4.7k track
+     (`Potentiometer::resistance()` = max_r) instead of position-scaled 2350
+     (the `make_leaf`/spqr_build 0.5 convention) → q-point ~4 mV off.
+   - `apply_bjt_dc_qpoint`'s `resolve()` treated the input node as floating ⇒
+     **Cin seeded + inverted at 0 V instead of −1.03 V**. F(seed) was
+     self-consistently 0 at compile but NOT a steady state of the cap dynamics:
+     Cin charged over ~0.2 s and dragged the stage from the exact q-point to the
+     starved root (Q3 0.6417→0.663, ΔIc +46/−75 %) — the cold-path twin of the
+     `nodes{}`-seed Cin bug fixed in `apply_cap_seed`. Fixed: in/out nodes
+     DC-reference ground; caps seeded with `wdf_seed_dc_voltage` (a=b=v) and
+     `passive_b` re-read from `wdf_reflected` (mirrors the proven hold path).
+
+**Result:** cold compile + silence, servo untouched OR `PK_SERVO_DISABLE=1`:
+Q3 Vbe pinned at 0.64167 bit-stable for 48 000 samples; `bias_accuracy` MATCH
+**ΔVbe 0.0000 V, ΔIc 0.0 %** on all three devices (verdict **BIAS OK**);
+F(ngspice_op) = 0.0001 V; ρ(Jcap) = 0.9994 < 1; deck-KCL at the settled root
+≤ 0.016 µA.
+
+**AC verdict — the THD gap is NOT bias/device/solver: it is the missing output
+load.** ngspice tran (0.1 V @ 1 kHz) shows the −16 dB THD comes from Q1/Q2 being
+driven into **cutoff clipping** every cycle (vbe1 swings +0.547→−0.152 V) by the
+10k load current demand through Cout. Our compiled BA283 puts Cout+RL in a
+downstream stage whose impedance never reflects back into the MultiNl stage —
+and ngspice with **RL=1G reproduces our sim to 3-4 decimals** (vbe swings
+identical; vout ±0.94 vs our ±0.92; THD −52.4 vs our −52.9 dB; fundamental 0.938
+vs 0.926 V). So the WDF engine is now quantitatively exact at the topology it
+simulates; the remaining `ac_accuracy` LEVEL +2.7 dB / ΔTHD ~37 dB / tilt ~4.8 dB
+is entirely the **cross-stage output-loading architecture gap** (same family as
+the LA-2A GAP F transformer step-down). Fix path: reflect the downstream stage's
+input impedance into the NL group (or fuse Cout/RL into it) — a compiler
+partitioning/boundary change, out of scope for the bias workstream.
+
+### 2026-07-01 (superseded) — DC-solve root: Early-effect model fix + residual localization
 
 Pursuing the remaining Layer-B gap (compile-time BJT DC solve lands Q3 over- /
 Q1-Q2 under-conducting, ΔIc 46-74% vs ngspice). Decisive diagnostics (temporary,

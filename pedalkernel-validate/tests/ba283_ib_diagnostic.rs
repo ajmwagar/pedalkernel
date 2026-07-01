@@ -296,6 +296,46 @@ fn ba283_our_root_deck_kcl_audit() {
         vcc - nd
     );
 
+    // ── AC drive probe: 0.1 V / 1 kHz, matching the ngspice tran measure ──
+    // ngspice reference (deck + VIN SIN(0 0.1 1k), window 1.0–1.005 s):
+    //   vbe3 0.6381…0.6497   vbe1 −0.152…0.547 (CUTOFF!)   vbe2 −0.131…0.438
+    //   vout −0.561…+0.756  → the −16 dB THD is Q1/Q2 cutoff clipping.
+    {
+        let mut mm: std::collections::BTreeMap<String, (f64, f64)> = Default::default();
+        let (mut vout_min, mut vout_max) = (f64::INFINITY, f64::NEG_INFINITY);
+        let sr = 48_000.0;
+        let n = (0.2 * sr) as usize;
+        for i in 0..n {
+            let x = 0.1 * (2.0 * std::f64::consts::PI * 1_000.0 * i as f64 / sr).sin();
+            let y = proc.process(x);
+            if i >= n - 240 {
+                // last 5 cycles
+                vout_min = vout_min.min(y);
+                vout_max = vout_max.max(y);
+                for st in proc.stages.iter() {
+                    if let Stage::MultiNl(mnl) = st {
+                        for d in mnl.device_op_points() {
+                            if d.ref_name.is_empty() {
+                                continue;
+                            }
+                            let e = mm
+                                .entry(d.ref_name.clone())
+                                .or_insert((f64::INFINITY, f64::NEG_INFINITY));
+                            e.0 = e.0.min(d.v_be);
+                            e.1 = e.1.max(d.v_be);
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("  AC drive probe (0.1 V @ 1 kHz, last 5 cycles):");
+        for (name, (lo, hi)) in &mm {
+            eprintln!("    {name}: vbe {lo:+.4} … {hi:+.4}");
+        }
+        eprintln!("    vout {vout_min:+.4} … {vout_max:+.4}");
+        eprintln!("    (ngspice: Q3 +0.6381…+0.6497  Q1 −0.1517…+0.5471  Q2 −0.1306…+0.4383  vout −0.5605…+0.7557)");
+    }
+
     // Deck KCL residuals (µA). Positive = current surplus into the node.
     let r_n1 = (vcc - n1) / 68_000.0 - ic3 - ib1;
     let r_nb1 = (nfb - nb1) / 56_000.0 - ib3;
@@ -306,6 +346,34 @@ fn ba283_our_root_deck_kcl_audit() {
     eprintln!("    nb1 (Rfb vs Ib3)         : {:+9.3}", r_nb1 * 1e6);
     eprintln!("    ne2 (Ie1 vs Ib2+R6)      : {:+9.3}", r_ne2 * 1e6);
     eprintln!("    nfb (R7+R6 in vs Rfb out): {:+9.3}", r_nfb * 1e6);
+
+    // ── Regression gates ────────────────────────────────────────────────────
+    // The cold-compiled, silence-settled op must BE ngspice's op (terminal),
+    // and our settled root must satisfy the deck's own KCL.
+    let ng = [
+        ("Q3", vbe3, 0.641667, ic3, 258.667e-6),
+        ("Q1", vbe1, 0.540152, ic1, 19.090e-6),
+        ("Q2", vbe2, 0.406306, ic2, 36.764e-6),
+    ];
+    for (name, vbe, vbe_ng, ic, ic_ng) in ng {
+        assert!(
+            (vbe - vbe_ng).abs() < 2e-3,
+            "{name} settled Vbe {vbe:.5} vs ngspice {vbe_ng:.5} (>2 mV) — cold DC root regressed"
+        );
+        assert!(
+            ((ic - ic_ng) / ic_ng).abs() < 0.02,
+            "{name} settled Ic {:.2} µA vs ngspice {:.2} µA (>2 %) — cold DC root regressed",
+            ic * 1e6,
+            ic_ng * 1e6
+        );
+    }
+    for (node, r) in [("n1", r_n1), ("nb1", r_nb1), ("ne2", r_ne2), ("nfb", r_nfb)] {
+        assert!(
+            r.abs() < 0.5e-6,
+            "deck-KCL at {node}: {:.3} µA (>0.5 µA) — settled root violates the deck network",
+            r * 1e6
+        );
+    }
 }
 
 /// Layer 4 — standalone deck DC solve with OUR device model.
