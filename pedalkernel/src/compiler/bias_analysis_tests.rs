@@ -21,7 +21,7 @@
 // or only DC supply?" No component-type special-casing.
 // ═══════════════════════════════════════════════════════════════════════════
 
-use super::bias_analysis::{classify_group_bias, GroupBiasKind};
+use super::bias::{classify_group_bias, GroupBiasKind};
 use super::graph::CircuitGraph;
 use super::signal_flow::find_flow_groups;
 use super::spqr_build::compile_via_spqr;

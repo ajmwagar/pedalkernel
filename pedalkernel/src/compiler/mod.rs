@@ -9,7 +9,6 @@
 
 mod bbd_lowering;
 mod bias;
-mod bias_analysis;
 mod bind;
 mod blockwise;
 mod build;

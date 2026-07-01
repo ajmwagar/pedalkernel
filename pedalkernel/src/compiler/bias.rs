@@ -4,12 +4,19 @@
 //! the per-type DC bias code spread across `spqr_build.rs`
 //! (`compute_wdf_triode_dc_qpoint`, `compute_wdf_bjt_dc_qpoint`, etc.).
 //!
-//! # Current status (ko5g.1)
+//! # Current status (ko5g.3)
 //!
-//! This bead is **additive only**.  The types and solver are defined here and
-//! verified by unit tests, but no call-site in `spqr_build.rs` / `blockwise.rs`
-//! / `general.rs` has been migrated yet.  Migrations happen in ko5g.3–ko5g.6.
-//! All existing compiler behaviour is therefore byte-identical after this bead.
+//! Migrated into this file: the flow-group bias classification + resistor-divider
+//! nodal solve (`classify_group_bias` / `solve_network_bias`, absorbed from the
+//! now-deleted `bias_analysis.rs`), the grouped-BJT nodal co-solve
+//! (`solve_bjt_group_dc_qpoint`, the BA283 fix-#1 solver with terminal/parasitic
+//! handling), and the per-type triode solve (`solve_triode_dc_qpoint`).
+//!
+//! Still per-type / not yet on the shared `BiasSeed`/`solve_operating_point`
+//! path: the single-port-WDF-root solvers in `spqr_build.rs`
+//! (`compute_wdf_triode_dc_qpoint`, `compute_wdf_bjt_dc_qpoint`,
+//! `compute_wdf_fet_dc_qpoint`) and the varimu/pentode branches inside
+//! `solve_triode_dc_qpoint`.  See the module TODO for the migration plan.
 //!
 //! # Architecture
 //!
@@ -21,7 +28,10 @@
 //! solve_operating_point(seed, topo, ctx) → DeviceOperatingPoint
 //!
 //! NetworkBias { dc_voltages: HashMap<NodeId, f64> }
-//!   └─ solve_network_bias(graph, group) → NetworkBias   (absorbs bias_analysis's divider)
+//!   └─ solve_network_bias(edges, graph) → NetworkBias   (the divider nodal solve)
+//!
+//! classify_group_bias(group, graph) → GroupBiasKind {SignalPath | StaticBias}
+//!   (absorbed from the former bias_analysis.rs, now deleted)
 //! ```
 //!
 //! # Resistor-locating strategy: cap-aware BFS
@@ -222,13 +232,14 @@ pub(super) struct DeviceOperatingPoint {
 /// DC voltages at all non-rail nodes in a static bias network.
 ///
 /// This is the compile-time result of running nodal analysis on a
-/// VCC→resistor-divider→GND subgraph.  It is conceptually equivalent to what
-/// `bias_analysis.rs::classify_group_bias` returns inside `GroupBiasKind::StaticBias`,
-/// but typed as a standalone value so downstream code (the triode/BJT solvers)
-/// can consume it without pattern-matching a flow-group enum.
+/// VCC→resistor-divider→GND subgraph.  It is the value carried inside
+/// `GroupBiasKind::StaticBias` (see `classify_group_bias` below), also exposed as
+/// a standalone type so downstream code (the triode/BJT solvers) can consume it
+/// without pattern-matching a flow-group enum.
 ///
-/// `bias_analysis.rs` is NOT deleted by this bead — the call-site swap that
-/// replaces it with `solve_network_bias` is deferred to ko5g.3.
+/// `solve_network_bias` is the single divider nodal solve: the old
+/// `bias_analysis.rs::compute_dc_voltages` was absorbed here (ko5g.3) and that
+/// file deleted.
 #[derive(Debug, Default, Clone)]
 pub(super) struct NetworkBias {
     /// DC voltage at each non-rail circuit node, as solved by MNA on the
@@ -392,6 +403,177 @@ pub(super) fn solve_network_bias(
     };
 
     NetworkBias { dc_voltages }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Flow-group bias classification (absorbed from bias_analysis.rs, ko5g.3)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Classifies each flow group as either a static DC bias network (supply-only
+// inputs → the resistor-divider DC operating point is computed at compile time
+// and the group is bypassed in the serial audio chain) or a signal path (has
+// audio-rate inputs and must be processed at runtime).  The divider nodal solve
+// is the unified `solve_network_bias` above — this section is now the single
+// home for the whole compile-time DC bias story.
+//
+// The detection is graph-level: "does this branch have an audio-rate input or
+// only DC supply?"  No component-type special-casing.
+
+/// Classification of a flow group's role in the circuit.
+#[derive(Debug)]
+pub(super) enum GroupBiasKind {
+    /// Group is on the audio signal path (in_node → ... → out_node).
+    /// Must be processed in the serial audio chain at runtime.
+    SignalPath,
+
+    /// Group is a static DC bias network (supply-only inputs).
+    /// DC voltages are computed at compile time from resistor dividers.
+    /// The group is bypassed in the serial audio chain.
+    ///
+    /// `dc_voltages` maps each non-rail junction node to its DC voltage.
+    StaticBias { dc_voltages: HashMap<NodeId, f64> },
+    // Future: DynamicModulation for sidechains, envelope followers, etc.
+}
+
+/// Classify a flow group as static bias, signal path, or dynamic modulation.
+///
+/// A group is **StaticBias** when every node it touches is either a supply rail
+/// or an interior node reachable ONLY through the group's own edges from supply
+/// rails — i.e. not reachable from `in_node`/`out_node` without passing through
+/// supply rails.  When StaticBias, computes the DC voltage at each interior
+/// junction node via nodal analysis of the resistor divider (`solve_network_bias`).
+pub(super) fn classify_group_bias(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+) -> GroupBiasKind {
+    // A group with any nonlinear edge is NEVER static bias.
+    // Diodes/transistors to ground are signal clippers, not DC references.
+    let has_nonlinear = group.all_edges().iter().any(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        comp.kind.is_nonlinear()
+    });
+    if has_nonlinear {
+        return GroupBiasKind::SignalPath;
+    }
+
+    let rail_set = build_rail_set(graph);
+
+    // Collect all nodes this group touches.
+    let group_nodes = collect_group_nodes(group, graph);
+
+    // Find the group's non-rail nodes (interior junction nodes).
+    let interior_nodes: HashSet<NodeId> = group_nodes
+        .iter()
+        .filter(|&&n| !rail_set.contains(&n))
+        .copied()
+        .collect();
+
+    // If the group has NO interior nodes, it's entirely on rails — skip it.
+    if interior_nodes.is_empty() {
+        return GroupBiasKind::StaticBias {
+            dc_voltages: HashMap::new(),
+        };
+    }
+
+    // Check if any interior node can reach in_node or out_node through
+    // non-supply, non-group-internal edges. If so, the group carries audio.
+    let reaches = interior_reaches_signal(&interior_nodes, &rail_set, graph, group);
+    #[cfg(test)]
+    {
+        let edge_names: Vec<_> = group
+            .all_edges()
+            .iter()
+            .map(|&eidx| {
+                let e = &graph.edges[eidx];
+                let comp = &graph.components[e.comp_idx];
+                format!("{}({:?}→{:?})", comp.id, e.node_a, e.node_b)
+            })
+            .collect();
+        let interior_names: Vec<_> = interior_nodes.iter().map(|n| format!("{n:?}")).collect();
+        eprintln!("  bias: edges={edge_names:?}");
+        eprintln!("    interior={interior_names:?}, rails={:?}, in={:?}, out={:?}, reaches_signal={reaches}",
+            rail_set.len(), graph.in_node, graph.out_node);
+    }
+    if reaches {
+        return GroupBiasKind::SignalPath;
+    }
+
+    // Static bias: compute DC voltages from the resistor divider.
+    let dc_voltages = compute_group_dc_voltages(group, graph);
+
+    GroupBiasKind::StaticBias { dc_voltages }
+}
+
+/// Collect all nodes touched by a group's edges.
+fn collect_group_nodes(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+) -> HashSet<NodeId> {
+    let mut nodes = HashSet::new();
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        nodes.insert(e.node_a);
+        nodes.insert(e.node_b);
+    }
+    nodes
+}
+
+/// Check if the group carries audio signal based on its own edge topology.
+///
+/// A group is static bias if EVERY edge in it has at least one rail terminal
+/// (interior↔rail only).  A group is on the signal path if ANY edge connects two
+/// non-rail nodes, OR any of its winding nodes is one end of a `Tight`
+/// coupled-link whose other end is non-rail (transformer primary↔secondary,
+/// consulted via the broker — no transformer special-casing here).
+fn interior_reaches_signal(
+    _interior_nodes: &HashSet<NodeId>,
+    rail_set: &HashSet<NodeId>,
+    graph: &CircuitGraph,
+    group: &super::signal_flow::FlowGroup,
+) -> bool {
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        let a_rail = rail_set.contains(&e.node_a);
+        let b_rail = rail_set.contains(&e.node_b);
+        if !a_rail && !b_rail {
+            // Edge between two non-rail nodes → carries signal
+            return true;
+        }
+    }
+
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        for node in [e.node_a, e.node_b] {
+            for other in super::boundary_rules::tight_coupled_neighbors(graph, node) {
+                if !rail_set.contains(&other) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Compute DC voltages at a static-bias group's interior junction nodes.
+///
+/// The resistor-divider DC solve is the unified `solve_network_bias`: it performs
+/// conductance-MNA Gaussian elimination and runs a rail-BFS to restrict the
+/// solved node set to interior nodes that have a DC path back to a rail through
+/// resistors (skipping cap-isolated floating signal-path nodes that would
+/// otherwise produce a singular matrix).  For genuine resistor dividers (the only
+/// case StaticBias is reached for) the BFS only ever removes nodes the old code
+/// would have failed on, so the returned voltages are unchanged.
+fn compute_group_dc_voltages(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+) -> HashMap<NodeId, f64> {
+    let supply_voltage = graph
+        .supply_voltages
+        .get(&graph.vcc_node)
+        .copied()
+        .unwrap_or(9.0);
+    solve_network_bias(&group.all_edges(), graph, supply_voltage).dc_voltages
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -961,15 +1143,13 @@ pub(super) fn find_load_resistor_bfs(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Linear system solver (Gaussian elimination, shared with bias_analysis.rs)
+// Linear system solver (Gaussian elimination)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Solve a small linear system Ax = b via Gaussian elimination with partial
 /// pivoting.  Returns `None` if the system is singular.
 ///
-/// This duplicates the private `solve_linear_system` in `bias_analysis.rs`.
-/// When ko5g.3 migrates the call-sites, the two can be unified; for now both
-/// exist so this bead stays additive-only and does not modify `bias_analysis.rs`.
+/// The single Gaussian-elimination routine for the compile-time DC bias solve.
 fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Option<Vec<f64>> {
     for col in 0..n {
         // Partial pivot
