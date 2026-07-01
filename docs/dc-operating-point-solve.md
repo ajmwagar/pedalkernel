@@ -105,6 +105,52 @@ sample (~1 NR step), not a global homotopy.
 - **Layer B — solve:** once A holds, add source stepping from 0 to the compile-time
   solve so it lands the right root; validate per-device against ngspice `.op`.
 
+### 2026-06-30 — the "curvature loss" is the DC bias, not the runtime embedding
+
+Investigation of the BA283 large-signal under-distortion (THD −36 vs ngspice
+−16 dB @1 kHz, h2 ~20 dB weak, ratio `dIc/(gm·dVbe)=0.547`). The hypothesis under
+test was that the **runtime WDF port embedding attenuates the reflected nonlinear
+wave** (`MultiNlStage`/grouped-NR). **Instrumented and DISPROVEN as a runtime
+solver bug:**
+
+- **NR converges exactly.** Per-sample grouped-NR over the drive cycle:
+  `iters ≤ 4`, `max_resid = 4.4e-5 V`, zero budget/adaptive-X2 skips. At tolerance
+  `1e-6…1e-4 V` the converged `(v, i)` satisfy the exact device + port equations,
+  so `b = v − Rp·i` uses the **true** Gummel-Poon current — no wave attenuation.
+- **Device model matches ngspice byte-for-byte** (`BC184C`/`2N3055` params in
+  `models/transistors.model` == the `.spice` deck `.MODEL` cards). Same topology,
+  same models, exact solve ⇒ the runtime cannot be the divergence source.
+
+The divergence is entirely the **quiescent DC operating point** (`bias_accuracy`):
+
+| dev | Vbe ours/ng | Vce ours/ng | Ic ours/ng | ΔIc |
+|-----|-------------|-------------|------------|-----|
+| Q3 (TR1 in) | 0.663 / 0.642 | 3.61 / 5.35 | 379 / 259 µA | **+46 %** |
+| Q1 (TR2 drv)| 0.498 / 0.540 | 19.8 / 18.8 | 5.0 / 19.1 µA | **−74 %** |
+| Q2 (TR3 out)| 0.376 / 0.406 | 19.9 / 19.2 | 12.1 / 36.7 µA | **−67 %** |
+
+Q3 (input) **over-conducts**; the output Darlington Q1/Q2 **starve**. `F(ngspice_op)`
+is ~40 mV/port — "small", but on an exp junction 40 mV ≈ 4.6× current, which *is*
+the ±50–70 % Ic error. So ngspice's op is **not** a fixed point of our DC eqns
+(§0), confirmed empirically: with the DC servo OFF the solver walks away and the
+stage collapses (AC level −38 dB). At the wrong bias the large-signal
+curvature/compression is ~10× too weak while small-signal nearly matches (a
+gm-starvation cancellation, per the servo note in `rigid/general.rs`).
+
+- **The DC servo masks, it does not fix.** Bracketed at 1 kHz: `k_p` OFF → level
+  collapses (−38 dB); `k_p=20` → THD −36; `k_p=200` → THD −50 (holding the bias
+  *harder* suppresses the drive-induced compression *further*). The rectified
+  bias excursion that generates the Class-A even harmonics is exactly what a
+  proportional DC spring rejects — so no `k_p` reproduces ngspice's −16 dB.
+- **The `0.547` ratio is a symptom of the wrong bias + servo hold**, not a
+  reflected-wave scaling. All three devices read <1 (0.547 / 0.743 / 0.789).
+
+**Verdict:** DEFER — not a clean localized runtime fix. Root cause = **Layer A**
+above (the DC-bias formulation / Norton `dc_bias` source term at the
+feedback-coupled base). Fix path unchanged: make `F(ngspice_op) ≈ 0`, then Layer B
+source-stepping. Do **not** tune `k_p`/`Rp` to move the AC metric — it masks a
+starved bias (tracked: bd `pedalkernel-opi6`).
+
 ## Primary sources
 
 - Ho/Ruehli/Brennan, MNA, IEEE TCAS 1975 — https://ieeexplore.ieee.org/document/1084079
