@@ -101,7 +101,9 @@ fn manifest() -> PathBuf {
 }
 
 fn deck_path(deck: &str) -> PathBuf {
-    manifest().join("spice-circuits").join(format!("{deck}.spice"))
+    manifest()
+        .join("spice-circuits")
+        .join(format!("{deck}.spice"))
 }
 
 fn golden_path(name: &str, freq: f64) -> PathBuf {
@@ -131,7 +133,9 @@ fn internal_input(freq: f64) -> (SpiceRunner, Vec<f64>) {
 /// NEVER WDF-bootstrapped — it is derived straight from the `.spice` deck.
 fn ngspice_window(circuit: &Circuit, freq: f64) -> Option<Vec<f64>> {
     let gp = golden_path(circuit.name, freq);
-    let force = std::env::var("PK_AC_BOOTSTRAP").map(|v| v == "1").unwrap_or(false);
+    let force = std::env::var("PK_AC_BOOTSTRAP")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     if gp.exists() && !force {
         return npy::read_f64(&gp).ok();
     }
@@ -355,7 +359,11 @@ fn ac_accuracy_dashboard() {
 
         // Structural gates (the metric must have COMPUTED, not a predetermined
         // verdict): a decisive grade, a full sweep, and per-harmonic data.
-        assert_ne!(r.verdict, ac_accuracy::AcVerdict::NoData, "BA283 must grade");
+        assert_ne!(
+            r.verdict,
+            ac_accuracy::AcVerdict::NoData,
+            "BA283 must grade"
+        );
         assert_eq!(r.response.len(), SWEEP.len(), "BA283 full sweep computed");
         assert_eq!(r.harmonics.len(), 4, "BA283 2nd–5th harmonics computed");
         assert!(r.gain_db.is_finite(), "BA283 level must be a real number");
