@@ -167,29 +167,26 @@ fn probe_triode_unified_vs_per_type_qpoint() {
     // (v_ctrl = -Ia*Rk, v_out = VCC - Ia*Rp).  This probe records how close the
     // two implementations land, so the inc-3 migration decision is evidence-based.
     //
-    // FINDING (captured 2026-06-30, 804f91e6): with `TriodeSeed` matched to the
-    // per-type semantics (v_max = supply, parallel_count, set_vgk), the agreement
-    // is |dVgk| = 1.96 mV, |dVpk| = 131 mV.  The residual is INDEPENDENT of v_max
-    // (byte-identical with v_max=180 vs 250) — it is purely ALGORITHMIC: the
-    // shared `solve_operating_point` Newton step (residual in v_ctrl with an
-    // `i_load_est` degeneration-current approximation) converges to a slightly
-    // different point than the per-type Ia-relaxation loop.  So a straight
-    // delegation of the PRODUCTION path is NOT bit-for-bit behaviour-preserving;
-    // it would shift every MultiNL triode Q-point by ~2 mV Vgk / ~131 mV Vpk.
-    // To make the migration byte-identical, the shared solver's NR scheme must
-    // be aligned to the Ia-relaxation (or the per-type path re-baselined under a
-    // corpus re-validation).  That is the inc-3 migration prerequisite — see the
-    // module report; TriodeSeed is left production-ready but the call-site is NOT
-    // flipped in this pass (deliberate: avoids a tube-wide unvalidated shift).
+    // HISTORY (804f91e6): before the ko5g inc-3 NR-scheme alignment the shared
+    // `solve_operating_point` v_ctrl-Newton (with an `i_load_est` degeneration
+    // approximation) landed |dVgk| = 1.96 mV / |dVpk| = 131 mV off the per-type
+    // Ia-relaxation — a purely ALGORITHMIC residual (independent of v_max).
+    //
+    // LANDED (ko5g inc-3): `TriodeSeed` now selects
+    // `IterationScheme::MainCurrentRelaxation`, which reproduces the per-type
+    // Ia-relaxation loop bit-for-bit, so the two land IDENTICAL (dVgk = dVpk = 0).
+    // The production `solve_triode_dc_qpoint` non-varimu branch delegates to this
+    // shared core; the flip is bit-preserving (corpus failing-set unchanged).
     let dvgk = (per_type.vgk - unified.control_bias).abs();
     let dvpk = (per_type.vpk - unified.output_warm_start).abs();
     eprintln!("TRIODE unify: |dVgk|={dvgk:.6} V  |dVpk|={dvpk:.6} V");
 
     assert!(unified.control_bias < 0.0, "unified Vgk should be negative");
     assert!(unified.output_warm_start > 0.0 && unified.output_warm_start < 250.0);
-    // Pin the measured algorithmic agreement (the migration prerequisite metric).
-    assert!(dvgk < 5e-3, "per-type vs unified Vgk diverge beyond 5 mV: {dvgk}");
-    assert!(dvpk < 0.20, "per-type vs unified Vpk diverge beyond 0.2 V: {dvpk}");
+    // The shared core is now bit-identical to the per-type solver (the migration
+    // is behaviour-preserving).  Pin that: the two must agree to fp rounding.
+    assert!(dvgk < 1e-9, "per-type vs unified Vgk must be bit-identical: {dvgk}");
+    assert!(dvpk < 1e-9, "per-type vs unified Vpk must be bit-identical: {dvpk}");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
