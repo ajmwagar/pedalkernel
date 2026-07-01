@@ -624,6 +624,34 @@ pub(super) struct TrialPoint {
     pub(super) v_output: f64,
 }
 
+/// How `solve_operating_point` drives the load-line to its fixed point.
+///
+/// Both schemes converge to the SAME mathematical fixed point
+/// (`v_ctrl = v_thevenin - i_ctrl·R_th - i_total·R_degen`, `v_out = v_rail -
+/// i_total·R_load`); they differ only in the iteration variable and update rule.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum IterationScheme {
+    /// Newton on the control-voltage residual.  The default; used by the BJT
+    /// divider path (`BjtNpnSeed`), which needs Newton's robustness against the
+    /// exponential Vbe stiffness.
+    ControlNewton,
+    /// Damped relaxation on the device **main current** (the triode Ia-relaxation).
+    ///
+    /// Bit-for-bit reproduces the legacy per-type `solve_triode_dc_qpoint` loop:
+    /// iterate `Ia`, recompute `Vgk = -Ia·Rk` and `Vpk = VCC - Ia·Rp` from that
+    /// same `Ia` each step, evaluate the model, relax `Ia ← Ia - damping·(Ia -
+    /// Ia_model)`.  This is what makes the ko5g inc-3 triode migration
+    /// behaviour-preserving: the `ControlNewton` scheme lands ~2 mV Vgk / ~131 mV
+    /// Vpk away on the 12AX7 stage (a purely algorithmic residual, independent of
+    /// v_max), which would shift every MultiNL triode Q-point.
+    MainCurrentRelaxation {
+        initial_i_main: f64,
+        damping: f64,
+        max_iter: usize,
+        tol: f64,
+    },
+}
+
 /// Device I-V response at a trial point.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct DeviceIv {
@@ -679,6 +707,15 @@ pub(super) trait BiasSeed {
     /// The Newton-Raphson solve starts here.  A good initial guess converges
     /// faster and avoids non-physical regions.
     fn initial_v_control(&self) -> f64;
+
+    /// Which iteration scheme `solve_operating_point` should use.
+    ///
+    /// Defaults to `ControlNewton` (the BJT-divider path).  The triode overrides
+    /// this to `MainCurrentRelaxation` so the shared solver reproduces the legacy
+    /// per-type Ia-relaxation Q-point bit-for-bit.
+    fn iteration_scheme(&self) -> IterationScheme {
+        IterationScheme::ControlNewton
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -712,6 +749,47 @@ pub(super) fn solve_operating_point<S: BiasSeed>(
 ) -> Result<DeviceOperatingPoint, BiasError> {
     let topo = seed.locate_bias_topology(edge_indices, graph, network_bias, supply_voltage)?;
 
+    // Both schemes converge to the same load-line fixed point and return the
+    // triple (v_control, i_total, v_output) at that point.
+    let (v_ctrl, i_total_final, v_output_final) = match seed.iteration_scheme() {
+        IterationScheme::ControlNewton => {
+            control_newton_solve(seed, &topo)
+        }
+        IterationScheme::MainCurrentRelaxation {
+            initial_i_main,
+            damping,
+            max_iter,
+            tol,
+        } => main_current_relaxation_solve(seed, &topo, initial_i_main, damping, max_iter, tol),
+    };
+
+    // Validate
+    if !v_ctrl.is_finite() || !v_output_final.is_finite() {
+        return Err(BiasError::NonPhysicalQpoint);
+    }
+
+    let degeneration_voltage = i_total_final * topo.r_degeneration;
+    let reactive_precharge = if let Some(degen_node) = topo.degeneration_node {
+        vec![(degen_node, degeneration_voltage)]
+    } else {
+        vec![]
+    };
+
+    Ok(DeviceOperatingPoint {
+        device_label: seed.device_label().to_owned(),
+        kind: seed.device_kind(),
+        control_bias: v_ctrl,
+        output_warm_start: v_output_final,
+        reactive_precharge,
+        v_max: topo.supply_voltage,
+    })
+}
+
+/// Newton on the control-voltage residual.  Returns `(v_control, i_total,
+/// v_output)` at the converged Q-point.  This is the original
+/// `solve_operating_point` inner loop, extracted verbatim so the BJT path is
+/// byte-identical.
+fn control_newton_solve<S: BiasSeed>(seed: &S, topo: &BiasTopology) -> (f64, f64, f64) {
     let mut v_ctrl = seed.initial_v_control();
 
     for _ in 0..80 {
@@ -782,26 +860,59 @@ pub(super) fn solve_operating_point<S: BiasSeed>(
     let i_total_final = (iv_final.i_main + iv_final.i_control).max(0.0);
     let v_output_final = (topo.v_load_rail - i_total_final * topo.r_load).max(0.0);
 
-    // Validate
-    if !v_ctrl.is_finite() || !v_output_final.is_finite() {
-        return Err(BiasError::NonPhysicalQpoint);
-    }
+    (v_ctrl, i_total_final, v_output_final)
+}
 
-    let degeneration_voltage = i_total_final * topo.r_degeneration;
-    let reactive_precharge = if let Some(degen_node) = topo.degeneration_node {
-        vec![(degen_node, degeneration_voltage)]
-    } else {
-        vec![]
+/// Damped relaxation on the device main current.  Returns `(v_control, i_total,
+/// v_output)` at the converged Q-point.
+///
+/// For the auto-biased triode (`v_control_thevenin = 0`, `r_control_thevenin =
+/// 0`, `i_control = 0`) this reduces to — and is bit-for-bit identical to — the
+/// legacy per-type `solve_triode_dc_qpoint` Ia-relaxation:
+///   `Vgk = -Ia·Rk`, `Vpk = max(VCC - Ia·Rp, 0)`, relax `Ia`.
+///
+/// `i_control` is carried lagged (one iteration behind) so the general case with
+/// a control-terminal current (Rth ≠ 0) still self-consistates; for the triode it
+/// stays exactly 0 throughout.
+fn main_current_relaxation_solve<S: BiasSeed>(
+    seed: &S,
+    topo: &BiasTopology,
+    initial_i_main: f64,
+    damping: f64,
+    max_iter: usize,
+    tol: f64,
+) -> (f64, f64, f64) {
+    let mut i_main = initial_i_main;
+    let mut i_control = 0.0_f64;
+
+    let eval = |i_main: f64, i_control: f64| -> (f64, f64, DeviceIv) {
+        let i_total = i_main + i_control;
+        let v_output = (topo.v_load_rail - i_total * topo.r_load).max(0.0);
+        let v_control = topo.v_control_thevenin
+            - i_control * topo.r_control_thevenin
+            - i_total * topo.r_degeneration;
+        let iv = seed.device_iv(TrialPoint {
+            v_control,
+            v_output,
+        });
+        (v_control, v_output, iv)
     };
 
-    Ok(DeviceOperatingPoint {
-        device_label: seed.device_label().to_owned(),
-        kind: seed.device_kind(),
-        control_bias: v_ctrl,
-        output_warm_start: v_output_final,
-        reactive_precharge,
-        v_max: topo.supply_voltage,
-    })
+    for _ in 0..max_iter {
+        let (_v_control, _v_output, iv) = eval(i_main, i_control);
+        let f = i_main - iv.i_main;
+        i_main = (i_main - f * damping).max(0.0);
+        i_control = iv.i_control;
+        if f.abs() < tol {
+            break;
+        }
+    }
+
+    // Final self-consistent evaluation at the converged current.
+    let (v_control, v_output, iv) = eval(i_main, i_control);
+    let _ = iv;
+    let i_total = i_main + i_control;
+    (v_control, i_total, v_output)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -932,6 +1043,17 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
 
     fn initial_v_control(&self) -> f64 {
         -1.0 // typical Vgk starting guess for a common-cathode triode
+    }
+
+    fn iteration_scheme(&self) -> IterationScheme {
+        // Reproduce the legacy per-type `solve_triode_dc_qpoint` loop bit-for-bit:
+        // initial Ia = 0.1 mA, 0.5 damping, 50 iters, 1 nA current tolerance.
+        IterationScheme::MainCurrentRelaxation {
+            initial_i_main: 1e-4,
+            damping: 0.5,
+            max_iter: 50,
+            tol: 1e-9,
+        }
     }
 }
 
