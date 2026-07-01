@@ -426,6 +426,55 @@ VIN v_in 0 PWL({pwl_data})
     pub fn config(&self) -> &SpiceConfig {
         &self.config
     }
+
+    /// Decimate an internal-rate signal (`sample_rate × oversample`) down to the
+    /// base `sample_rate` by taking every `oversample`-th sample.
+    ///
+    /// [`simulate`] returns at the INTERNAL rate (to match the oversampled main
+    /// runner).  The standalone `*_spice.rs` tests instead compare against a WDF
+    /// processor compiled at the BASE `sample_rate`, so their golden must be at
+    /// the base rate too — otherwise a 1 kHz golden tone carries `oversample×`
+    /// the samples-per-period of the WDF tone and the 1:1 comparison lines up two
+    /// signals at different rates (the bug this fixes).
+    pub fn decimate_to_base(&self, internal: &[f64]) -> Vec<f64> {
+        let k = self.config.oversample.max(1) as usize;
+        internal.iter().step_by(k).copied().collect()
+    }
+
+    /// Run a SETTLED steady-state simulation and return the MEASUREMENT window at
+    /// the base `sample_rate`.
+    ///
+    /// `input_internal` is the full stimulus at the internal rate covering
+    /// `settle_s + measure_s` seconds.  The circuit is simulated over that whole
+    /// span so coupling caps / bias networks reach steady state; the first
+    /// `settle_s` is then discarded and the remaining tail is decimated to the
+    /// base `sample_rate`.  The settle boundary is floored to a multiple of
+    /// `oversample` so the decimated grid stays phase-aligned with a WDF
+    /// processor warmed up by the same `settle_s`.
+    ///
+    /// The returned golden is at the base `sample_rate`: `len ≈ measure_s ×
+    /// sample_rate`, and a tone of frequency `f` has `sample_rate / f`
+    /// samples per period.
+    pub fn simulate_settled_window(
+        &self,
+        circuit_path: impl AsRef<Path>,
+        input_internal: &[f64],
+        output_node: &str,
+        settle_s: f64,
+    ) -> Result<Vec<f64>, SpiceError> {
+        let internal = self.simulate(circuit_path, input_internal, output_node)?;
+        let k = self.config.oversample.max(1) as usize;
+        // Floor the settle boundary to a multiple of the oversample factor so the
+        // decimation phase is identical to a base-rate WDF warmup.
+        let mut settle_internal = (settle_s * self.config.internal_rate()).round() as usize;
+        settle_internal -= settle_internal % k;
+        let tail: &[f64] = if settle_internal < internal.len() {
+            &internal[settle_internal..]
+        } else {
+            &internal[..]
+        };
+        Ok(self.decimate_to_base(tail))
+    }
 }
 
 fn single_sample_impulse(signal: &[f64]) -> Option<f64> {
@@ -456,6 +505,318 @@ fn generate_sample_hold_impulse_pwl(amplitude: f64, len: usize, dt: f64) -> Stri
     }
 
     pwl_points.join(" ")
+}
+
+// ============================================================================
+// DC operating-point (.op) extraction — the bias-accuracy golden source
+// ============================================================================
+
+/// One device's DC operating point as reported by ngspice's `.op` / `show`.
+///
+/// `vce`/`ic` are derived for BJTs from the `show` table:
+/// `vce = vbe − vbc`, `ic` is the collector current row. All voltages in volts,
+/// currents in amps. For PNP devices ngspice reports the junction-voltage
+/// magnitudes (positive `vbe`) with a negative `ic`; the values are stored
+/// verbatim so the caller controls sign convention.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct SpiceDeviceOp {
+    /// Device reference, uppercased (e.g. `Q1`, `Q3`).
+    pub device: String,
+    /// Model name (e.g. `QBC184C`, `QAC128`).
+    pub model: String,
+    /// Base–emitter voltage `vbe`, volts.
+    pub vbe: f64,
+    /// Collector–emitter voltage `vce = vbe − vbc`, volts.
+    pub vce: f64,
+    /// Collector current `ic`, amps.
+    pub ic: f64,
+    /// Base current `ib`, amps.
+    pub ib: f64,
+    /// Transconductance `gm`, siemens.
+    pub gm: f64,
+}
+
+/// A full ngspice `.op` snapshot: per-device operating points plus node voltages.
+///
+/// This is the **ngspice-derived golden** for the bias-accuracy dimension. It is
+/// serialized to `golden/op/<circuit>.json` and is never WDF-bootstrapped.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SpiceOpSnapshot {
+    /// Source deck name (file stem).
+    pub circuit: String,
+    /// Per-device operating points (BJTs), keyed by uppercased device ref.
+    pub devices: Vec<SpiceDeviceOp>,
+    /// DC node voltages (node name → volts).
+    pub nodes: std::collections::BTreeMap<String, f64>,
+}
+
+impl SpiceRunner {
+    /// Run ngspice `.op` on a standalone deck and capture the DC operating point.
+    ///
+    /// Composes the deck the same way [`Self::simulate`] does (stripping
+    /// standalone control/analysis directives), injects a quiescent `VIN v_in 0
+    /// DC 0` source, and runs an `.op` followed by `show` (per-device params) and
+    /// `print all` (node voltages). The `show` table is parsed into
+    /// [`SpiceDeviceOp`] records (`vce = vbe − vbc`, `ic` from the row).
+    ///
+    /// This is read-only and ngspice-derived — the resulting snapshot is the
+    /// golden the WDF DC bias is graded against.
+    pub fn operating_point(
+        &self,
+        circuit_path: impl AsRef<Path>,
+    ) -> Result<SpiceOpSnapshot, SpiceError> {
+        let circuit_path = circuit_path.as_ref();
+        if !circuit_path.exists() {
+            return Err(SpiceError::CircuitNotFound(
+                circuit_path.display().to_string(),
+            ));
+        }
+        let raw_body = std::fs::read_to_string(circuit_path)?;
+        let circuit_body = Self::strip_standalone_elements(&raw_body);
+
+        let netlist = format!(
+            r#"* PedalKernel DC operating-point extraction
+.TITLE OP — {stem}
+
+{circuit_body}
+
+* Quiescent input (DC bias point, no signal)
+VIN v_in 0 DC 0
+
+.OPTIONS GMIN=1e-12 RELTOL=1e-4 ABSTOL=1e-12 VNTOL=1e-9
+
+.CONTROL
+  op
+  show
+  print all
+  quit
+.ENDC
+
+.END
+"#,
+            stem = circuit_path.file_stem().unwrap().to_string_lossy(),
+            circuit_body = circuit_body,
+        );
+
+        let tmpdir = TempDir::new()?;
+        let netlist_path = tmpdir.path().join("op.spice");
+        std::fs::write(&netlist_path, &netlist)?;
+
+        let result = Command::new("ngspice")
+            .args(["-b", netlist_path.to_str().unwrap()])
+            .output()?;
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        if stderr.contains("no convergence") || stdout.contains("no convergence") {
+            return Err(SpiceError::ConvergenceFailed);
+        }
+        if !result.status.success() && stdout.trim().is_empty() {
+            return Err(SpiceError::ExecutionFailed(stderr.to_string()));
+        }
+
+        let stem = circuit_path.file_stem().unwrap().to_string_lossy().to_string();
+        // Map each BJT to its (collector, base, emitter) nodes from the netlist so
+        // the parser can report TERMINAL (node-difference) Vbe/Vce instead of the
+        // `show` table's INTRINSIC junction voltages. The two differ by the device
+        // parasitic IR drops (Ib·RB + Ie·RE); the WDF port sees the TERMINAL value,
+        // so that is what the bias-accuracy golden must store.
+        let bjt_nodes = parse_bjt_terminal_nodes(&raw_body);
+        parse_op_output(&stdout, stem, &bjt_nodes)
+    }
+}
+
+/// Parse `Qxxx nc nb ne model …` device lines from a SPICE deck, returning a map
+/// from the **uppercased** device ref to its `(collector, base, emitter)` node
+/// names (lowercased, matching ngspice's `print all` node keys).
+///
+/// Skips comment (`*`) and continuation (`+`) lines. Only the first three node
+/// tokens after the device name are read (BJT topology: C B E [substrate] model).
+fn parse_bjt_terminal_nodes(
+    deck: &str,
+) -> std::collections::HashMap<String, (String, String, String)> {
+    let mut map = std::collections::HashMap::new();
+    for line in deck.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('*') || t.starts_with('+') {
+            continue;
+        }
+        let parts: Vec<&str> = t.split_whitespace().collect();
+        // `Qname C B E model` → at least name + 3 nodes + model.
+        if parts.len() < 5 {
+            continue;
+        }
+        let name = parts[0];
+        if !name.starts_with('Q') && !name.starts_with('q') {
+            continue;
+        }
+        map.insert(
+            name.to_uppercase(),
+            (
+                parts[1].to_lowercase(),
+                parts[2].to_lowercase(),
+                parts[3].to_lowercase(),
+            ),
+        );
+    }
+    map
+}
+
+/// Parse the combined `show` + `print all` ngspice `.op` output.
+///
+/// `bjt_nodes` maps each BJT (uppercased ref) to its `(collector, base, emitter)`
+/// node names; when present, the device's reported `vbe`/`vce` are the TERMINAL
+/// node differences `v(base)−v(emitter)` / `v(collector)−v(emitter)` rather than
+/// the `show` table's intrinsic junction voltages.
+fn parse_op_output(
+    out: &str,
+    circuit: String,
+    bjt_nodes: &std::collections::HashMap<String, (String, String, String)>,
+) -> Result<SpiceOpSnapshot, SpiceError> {
+    // ── `show` device table ─────────────────────────────────────────────────
+    // ngspice prints one block per device type. A `device <name> <name>...`
+    // header names the columns; following `param val val ...` rows carry values.
+    // We accumulate per-column maps and keep only BJT-like columns (those that
+    // carry both `vbe` and `vbc`).
+    let mut cur_names: Vec<String> = Vec::new();
+    let mut cur_models: Vec<String> = Vec::new();
+    let mut cols: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    // device -> (param -> value)
+    let mut dev_params: Vec<(String, std::collections::HashMap<String, f64>)> = Vec::new();
+
+    let flush = |names: &mut Vec<String>,
+                 models: &mut Vec<String>,
+                 dev_params: &mut Vec<(String, std::collections::HashMap<String, f64>)>,
+                 collected: &mut std::collections::HashMap<String, f64>| {
+        // collected keys are "<col_idx>::<param>"
+        for (i, name) in names.iter().enumerate() {
+            let mut p = std::collections::HashMap::new();
+            for (k, v) in collected.iter() {
+                if let Some(rest) = k.strip_prefix(&format!("{i}::")) {
+                    p.insert(rest.to_string(), *v);
+                }
+            }
+            if let Some(m) = models.get(i) {
+                p.insert("__model_idx".to_string(), i as f64);
+            }
+            dev_params.push((name.clone(), p));
+        }
+        names.clear();
+        models.clear();
+        collected.clear();
+    };
+
+    let mut models_by_dev: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut nodes: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+
+    for line in out.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = t.split_whitespace().collect();
+
+        // Node-voltage lines from `print all`: `name = 1.234e+00`
+        if parts.len() == 3 && parts[1] == "=" {
+            if let Ok(v) = parts[2].parse::<f64>() {
+                // skip #branch currents — keep node voltages only
+                if !parts[0].contains("#branch") {
+                    nodes.insert(parts[0].to_string(), v);
+                }
+                continue;
+            }
+        }
+
+        // `device q2 q1 q3` header begins a new device block.
+        if parts[0] == "device" {
+            // flush previous block
+            if !cur_names.is_empty() {
+                flush(&mut cur_names, &mut cur_models, &mut dev_params, &mut cols);
+            }
+            cur_names = parts[1..].iter().map(|s| s.to_uppercase()).collect();
+            continue;
+        }
+        if parts[0] == "model" && !cur_names.is_empty() {
+            cur_models = parts[1..].iter().map(|s| s.to_string()).collect();
+            for (i, n) in cur_names.iter().enumerate() {
+                if let Some(m) = cur_models.get(i) {
+                    models_by_dev.insert(n.clone(), m.clone());
+                }
+            }
+            continue;
+        }
+        // value row: `vbe 0.40 0.53 0.60`
+        if !cur_names.is_empty() && parts.len() == cur_names.len() + 1 {
+            let param = parts[0].to_string();
+            let mut ok = true;
+            let mut vals = Vec::with_capacity(cur_names.len());
+            for raw in &parts[1..] {
+                match raw.parse::<f64>() {
+                    Ok(v) => vals.push(v),
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                for (i, v) in vals.into_iter().enumerate() {
+                    cols.insert(format!("{i}::{param}"), v);
+                }
+            }
+        }
+    }
+    if !cur_names.is_empty() {
+        flush(&mut cur_names, &mut cur_models, &mut dev_params, &mut cols);
+    }
+
+    let mut devices = Vec::new();
+    for (name, p) in dev_params {
+        // Keep only transistor columns (carry both vbe and vbc).
+        let (vbe_intrinsic, vbc_intrinsic) = match (p.get("vbe"), p.get("vbc")) {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => continue,
+        };
+        let ic = p.get("ic").copied().unwrap_or(0.0);
+        let ib = p.get("ib").copied().unwrap_or(0.0);
+        let gm = p.get("gm").copied().unwrap_or(0.0);
+
+        // Prefer TERMINAL node-difference voltages (what the WDF port sees). The
+        // `show` table's `vbe`/`vbc` are INTRINSIC junction voltages; they differ
+        // from the terminal values by the parasitic drops (Ib·RB + Ie·RE). Ground
+        // (node `0`, absent from `print all`) defaults to 0 V. Fall back to the
+        // intrinsic values when the device's nodes are unknown.
+        let (vbe, vce) = match bjt_nodes.get(&name) {
+            Some((c, b, e)) => {
+                let vc = nodes.get(c).copied().unwrap_or(0.0);
+                let vb = nodes.get(b).copied().unwrap_or(0.0);
+                let ve = nodes.get(e).copied().unwrap_or(0.0);
+                (vb - ve, vc - ve)
+            }
+            None => (vbe_intrinsic, vbe_intrinsic - vbc_intrinsic),
+        };
+        devices.push(SpiceDeviceOp {
+            model: models_by_dev.get(&name).cloned().unwrap_or_default(),
+            device: name,
+            vbe,
+            vce,
+            ic,
+            ib,
+            gm,
+        });
+    }
+    devices.sort_by(|a, b| a.device.cmp(&b.device));
+
+    if devices.is_empty() && nodes.is_empty() {
+        return Err(SpiceError::ParseError(
+            "no devices or nodes parsed from .op output".to_string(),
+        ));
+    }
+
+    Ok(SpiceOpSnapshot {
+        circuit,
+        devices,
+        nodes,
+    })
 }
 
 /// Generate golden references for a test circuit.

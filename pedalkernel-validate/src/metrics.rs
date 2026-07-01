@@ -98,6 +98,87 @@ pub fn peak_error_db(wdf: &[f64], reference: &[f64]) -> f64 {
     20.0 * (max_err / max_ref).log10()
 }
 
+// ===========================================================================
+// Steady-state, level-INDEPENDENT measurement
+//
+// `normalized_rms_error_db` is a DIFFERENCE metric: rms(wdf-ref)/rms(ref).  When
+// the two levels differ by a factor k it computes |k-1|, NOT shape — and worse,
+// when the WDF is far BELOW the golden (k→0) it reads ≈0 dB (because
+// rms(wdf-ref) ≈ rms(ref)), falsely implying "shapes match" while the WDF is
+// effectively silent.  These functions measure the magnitude of the test tone
+// directly so the true gain gap is visible and is immune to any DC pedestal.
+// ===========================================================================
+
+/// Mean (DC offset) of a signal.  Use as the AC-coupling / settle guard: an
+/// AC-coupled output that has reached steady state has |mean| ≈ 0.
+pub fn dc_offset(signal: &[f64]) -> f64 {
+    if signal.is_empty() {
+        return 0.0;
+    }
+    signal.iter().sum::<f64>() / signal.len() as f64
+}
+
+/// Single-bin DFT amplitude (peak, in signal units) of the component at exactly
+/// `freq_hz`.
+///
+/// Goertzel-style projection onto cos/sin at `freq_hz`.  The DC offset is
+/// removed first, so the result is the AC amplitude AT THE TEST FREQUENCY and is
+/// immune to any DC pedestal (a device sitting at its bias point) or slow drift
+/// baseline.  This is the steady-state level measurement that
+/// [`normalized_rms_error_db`] cannot provide.
+pub fn single_bin_amplitude(signal: &[f64], freq_hz: f64, sample_rate: f64) -> f64 {
+    let n = signal.len();
+    if n == 0 || sample_rate <= 0.0 {
+        return 0.0;
+    }
+    let mean = dc_offset(signal);
+    let w = 2.0 * std::f64::consts::PI * freq_hz / sample_rate;
+    let (mut re, mut im) = (0.0_f64, 0.0_f64);
+    for (i, &x) in signal.iter().enumerate() {
+        let a = w * i as f64;
+        let v = x - mean;
+        re += v * a.cos();
+        im += v * a.sin();
+    }
+    2.0 * (re * re + im * im).sqrt() / n as f64
+}
+
+/// Steady-state, level-independent AC gain ratio in dB at `freq_hz`:
+/// `20*log10(amp_wdf / amp_ref)`.  Positive = WDF louder than the reference.
+///
+/// Unlike [`normalized_rms_error_db`], this directly compares the magnitude of
+/// the test tone, so it reports the TRUE level gap even when one signal rides on
+/// a large DC bias or is far below the other.  Returns `-inf` when the reference
+/// tone is silent.
+pub fn ac_gain_db(wdf: &[f64], reference: &[f64], freq_hz: f64, sample_rate: f64) -> f64 {
+    let aw = single_bin_amplitude(wdf, freq_hz, sample_rate);
+    let ar = single_bin_amplitude(reference, freq_hz, sample_rate);
+    if ar < 1e-30 {
+        return f64::NEG_INFINITY;
+    }
+    20.0 * (aw / ar).log10()
+}
+
+/// AC-amplitude drift across a signal: dB difference between the single-bin
+/// amplitude of the SECOND half vs the FIRST half of `signal`.
+///
+/// ≈0 dB means the tone has SETTLED (steady state).  A large magnitude means the
+/// window is still inside a transient (e.g. a coupling cap still charging), so
+/// any gain/shape number taken on it is unreliable.  This is the programmatic
+/// guard that a measurement window is past the settling transient.
+pub fn ac_amplitude_drift_db(signal: &[f64], freq_hz: f64, sample_rate: f64) -> f64 {
+    let h = signal.len() / 2;
+    if h == 0 {
+        return 0.0;
+    }
+    let a1 = single_bin_amplitude(&signal[..h], freq_hz, sample_rate);
+    let a2 = single_bin_amplitude(&signal[h..], freq_hz, sample_rate);
+    if a1 < 1e-30 {
+        return f64::INFINITY;
+    }
+    20.0 * (a2 / a1).log10()
+}
+
 /// Compute THD (Total Harmonic Distortion) in dB.
 ///
 /// THD = 10 * log10(sum(harmonic_powers) / fundamental_power)
@@ -537,6 +618,556 @@ pub fn compare(
     }
 }
 
+// ============================================================================
+// DC operating-point (bias) accuracy metric
+// ============================================================================
+//
+// This module adds the missing *primary* validation axis for active circuits:
+// does our compile-time/settled DC bias agree with ngspice's `.op`? It answers
+// two distinct questions that map to the literature's Layer A / Layer B
+// (`docs/dc-operating-point-solve.md`):
+//
+//   1. **MATCH** (Layer B): per-device ΔVbe / ΔVce / ΔIc between OUR settled DC
+//      operating point and ngspice's `.op`. A large MATCH error with a small
+//      RESIDUAL is a *solver / root-selection* problem — our equations are right
+//      but the cold solve lands in the wrong basin.
+//
+//   2. **RESIDUAL** (Layer A): `F(ngspice_op)` — is ngspice's `.op` a zero of OUR
+//      DC equations? A large residual is a *formulation* bug — our bias math
+//      genuinely differs from spice, independent of which root we converge to.
+//
+// The metric is plain-numeric so it stays decoupled from `pedalkernel-rt` (which
+// is a dev-dependency only): the test harness reads the engine's per-device bias
+// and per-port residual and feeds them in here.
+pub mod op_point {
+    use crate::spice::SpiceDeviceOp;
+
+    /// Our (WDF) DC operating point for a single device, read at the engine's
+    /// settled bias. Sign convention is the engine's *port* convention; the
+    /// comparison normalizes against ngspice's junction-magnitude convention.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct DeviceBias {
+        /// Component reference, uppercased (e.g. `Q1`).
+        pub reference: String,
+        /// Base–emitter port voltage, volts.
+        pub vbe: f64,
+        /// Collector–emitter port voltage, volts.
+        pub vce: f64,
+        /// Collector current, amps.
+        pub ic: f64,
+    }
+
+    /// Per-device MATCH comparison (ours vs ngspice).
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct DeviceMatch {
+        pub reference: String,
+        pub model: String,
+        /// Our reading (Vbe, Vce, Ic).
+        pub ours: (f64, f64, f64),
+        /// ngspice `.op` (Vbe, Vce, Ic).
+        pub spice: (f64, f64, f64),
+        /// ΔVbe = ours − spice (volts), compared on junction magnitude.
+        pub d_vbe: f64,
+        /// ΔVce = ours − spice (volts), compared on magnitude.
+        pub d_vce: f64,
+        /// ΔIc as a percentage of |spice Ic| (∞-guarded: 0 when spice Ic ≈ 0).
+        pub d_ic_pct: f64,
+    }
+
+    /// Per-port DC-balance residual `F(ngspice_op)` (from
+    /// `MultiNlStage::op_seed_residual`, fed in as plain numbers).
+    #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+    pub struct PortResidual {
+        /// Static formulation residual `a − dc_bias − cap − nl − adapt` (volts).
+        pub residual: f64,
+        /// Full residual (includes the runtime DC servo); ≈ 0 at the engine's own
+        /// fixed point — calibrates the probe.
+        pub residual_full: f64,
+    }
+
+    /// Thresholds for grading the bias-accuracy dimension. Informative, not
+    /// punitive — tuned to localize Layer A vs Layer B, not to gate CI.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct OpPassCriteria {
+        /// ΔVbe warn threshold (volts). Default 10 mV.
+        pub vbe_warn_v: f64,
+        /// ΔVbe fail threshold (volts). Default 25 mV.
+        pub vbe_fail_v: f64,
+        /// ΔVce fail threshold (volts). Default 0.3 V.
+        pub vce_fail_v: f64,
+        /// ΔIc fail threshold (percent). Default 10 %.
+        pub ic_fail_pct: f64,
+        /// Static-residual threshold separating "formulation ≈ ok" from a
+        /// formulation bug (volts). Default 1.0 V — generous: a few-hundred-mV
+        /// residual against multi-volt rail swings means ngspice's `.op` is
+        /// *approximately* a fixed point of our equations (the BA283 lands here
+        /// at ≈ 0.63 V post-parasitic-fix).
+        pub residual_formulation_v: f64,
+    }
+
+    impl Default for OpPassCriteria {
+        fn default() -> Self {
+            Self {
+                vbe_warn_v: 0.010,
+                vbe_fail_v: 0.025,
+                vce_fail_v: 0.3,
+                ic_fail_pct: 10.0,
+                residual_formulation_v: 1.0,
+            }
+        }
+    }
+
+    /// The formulation-vs-solver verdict for one circuit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub enum Verdict {
+        /// Residual ≈ 0 AND MATCH within thresholds — bias is right.
+        BiasOk,
+        /// Residual ≈ 0 but MATCH off — ngspice's `.op` IS a fixed point of our
+        /// equations, but the cold solve converged to a different root.
+        /// (Layer B: solver / root-selection.)
+        FormulationOkSolverOff,
+        /// Residual far from 0 — ngspice's `.op` is NOT a fixed point of our
+        /// equations. (Layer A: formulation bug.)
+        FormulationBug,
+        /// No active devices / no residual ports — nothing to grade.
+        NoData,
+    }
+
+    impl Verdict {
+        pub fn label(&self) -> &'static str {
+            match self {
+                Verdict::BiasOk => "BIAS OK",
+                Verdict::FormulationOkSolverOff => "FORMULATION ~OK / SOLVER-OFF (Layer B)",
+                Verdict::FormulationBug => "FORMULATION BUG (Layer A)",
+                Verdict::NoData => "NO DATA",
+            }
+        }
+    }
+
+    /// Full bias-accuracy result for one circuit.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct OpPointResult {
+        pub circuit: String,
+        pub devices: Vec<DeviceMatch>,
+        /// Worst per-device readings (rolled up).
+        pub max_abs_d_vbe: f64,
+        pub max_abs_d_vce: f64,
+        pub max_abs_d_ic_pct: f64,
+        /// Worst static residual across ports (volts) — the formulation probe.
+        pub max_abs_residual: f64,
+        /// Worst full residual across ports (volts) — should be ≈ 0 (calibration).
+        pub max_abs_residual_full: f64,
+        pub n_residual_ports: usize,
+        pub verdict: Verdict,
+    }
+
+    impl OpPointResult {
+        /// True when MATCH is within all fail thresholds.
+        pub fn match_ok(&self, c: &OpPassCriteria) -> bool {
+            self.max_abs_d_vbe <= c.vbe_fail_v
+                && self.max_abs_d_vce <= c.vce_fail_v
+                && self.max_abs_d_ic_pct <= c.ic_fail_pct
+        }
+        /// True when the static residual is small enough to call the formulation
+        /// approximately correct.
+        pub fn formulation_ok(&self, c: &OpPassCriteria) -> bool {
+            self.max_abs_residual <= c.residual_formulation_v
+        }
+    }
+
+    /// Compute the per-device MATCH between our settled bias and ngspice `.op`.
+    ///
+    /// Devices are paired by uppercased reference. Comparison is on junction
+    /// magnitude (|Vbe|, |Vce|, |Ic|) so PNP/NPN and port-vs-node sign
+    /// conventions don't masquerade as errors.
+    pub fn match_devices(ours: &[DeviceBias], spice: &[SpiceDeviceOp]) -> Vec<DeviceMatch> {
+        let mut out = Vec::new();
+        for s in spice {
+            let key = s.device.to_uppercase();
+            let Some(o) = ours.iter().find(|d| d.reference.to_uppercase() == key) else {
+                continue;
+            };
+            let d_vbe = o.vbe.abs() - s.vbe.abs();
+            let d_vce = o.vce.abs() - s.vce.abs();
+            let d_ic_pct = if s.ic.abs() > 1e-12 {
+                100.0 * (o.ic.abs() - s.ic.abs()) / s.ic.abs()
+            } else {
+                0.0
+            };
+            out.push(DeviceMatch {
+                reference: o.reference.clone(),
+                model: s.model.clone(),
+                ours: (o.vbe, o.vce, o.ic),
+                spice: (s.vbe, s.vce, s.ic),
+                d_vbe,
+                d_vce,
+                d_ic_pct,
+            });
+        }
+        out
+    }
+
+    /// Assemble the full bias-accuracy result + verdict for one circuit.
+    pub fn evaluate(
+        circuit: &str,
+        ours: &[DeviceBias],
+        spice: &[SpiceDeviceOp],
+        residuals: &[PortResidual],
+        criteria: &OpPassCriteria,
+    ) -> OpPointResult {
+        let devices = match_devices(ours, spice);
+        let max_abs_d_vbe = devices.iter().map(|d| d.d_vbe.abs()).fold(0.0, f64::max);
+        let max_abs_d_vce = devices.iter().map(|d| d.d_vce.abs()).fold(0.0, f64::max);
+        let max_abs_d_ic_pct = devices.iter().map(|d| d.d_ic_pct.abs()).fold(0.0, f64::max);
+        let max_abs_residual = residuals.iter().map(|p| p.residual.abs()).fold(0.0, f64::max);
+        let max_abs_residual_full =
+            residuals.iter().map(|p| p.residual_full.abs()).fold(0.0, f64::max);
+
+        let mut result = OpPointResult {
+            circuit: circuit.to_string(),
+            devices,
+            max_abs_d_vbe,
+            max_abs_d_vce,
+            max_abs_d_ic_pct,
+            max_abs_residual,
+            max_abs_residual_full,
+            n_residual_ports: residuals.len(),
+            verdict: Verdict::NoData,
+        };
+
+        result.verdict = if result.devices.is_empty() && residuals.is_empty() {
+            Verdict::NoData
+        } else if !result.formulation_ok(criteria) {
+            Verdict::FormulationBug
+        } else if result.match_ok(criteria) {
+            Verdict::BiasOk
+        } else {
+            Verdict::FormulationOkSolverOff
+        };
+        result
+    }
+}
+
+// ============================================================================
+// AC-signal accuracy metric (the audio twin of the DC bias-accuracy dashboard)
+// ============================================================================
+//
+// The DC dashboard (`op_point`) grades the operating point; this module grades
+// the AC SIGNAL — WDF vs the ngspice-derived golden. Its whole reason to exist
+// is that `normalized_rms_error_db` DEGENERATES for a pure-gain-offset circuit:
+// when the WDF and golden differ only by a scalar level `k`, that difference
+// metric reads |k−1| (and → 0 dB as the WDF falls far below the golden), so it
+// can neither see the true level gap nor the shape. The BA283 is exactly such a
+// circuit (a clean Class-A gain block sitting at a fixed +2.42 dB level offset
+// with the DC servo on), so a single-bin gain scalar is all the old test could
+// honestly report.
+//
+// The fix here is to DECOMPOSE the AC error into orthogonal dimensions so each
+// is actually measured:
+//
+//   1. LEVEL   — `ac_gain_db` at the test tone (the scalar offset, e.g. +2.42).
+//   2. SHAPE   — gain-normalize the WDF (× golden_amp/wdf_amp) so the level is
+//                factored OUT, THEN measure `normalized_rms_error_db` (phase-
+//                sensitive, time domain) and `spectral_error_db` (phase-immune,
+//                magnitude) on the level-matched pair = the honest shape residual.
+//   3. HARMONICS — `thd_db(wdf)` vs `thd_db(golden)` (a ratio, inherently level-
+//                independent) plus per-harmonic (2nd–5th) magnitude error read in
+//                dBc (relative to the fundamental), which is also level-immune.
+//   4. RESPONSE — `ac_gain_db` across a frequency sweep. If the per-frequency
+//                gain is FLAT the error is a pure scalar (a level bug); if it is
+//                frequency-SHAPED it is a genuine response error.
+//
+// The verdict then states plainly whether the AC error is JUST the level offset
+// (shape/THD/response all clean ⇒ a flat scalar bug) or ALSO a shape / harmonic /
+// response error (⇒ more than one bug). Plain-numeric like `op_point`, so it
+// stays decoupled from `pedalkernel-rt`.
+pub mod ac_accuracy {
+    use super::{
+        ac_gain_db, normalized_rms_error_db, single_bin_amplitude, spectral_error_db, thd_db,
+    };
+    use serde::{Deserialize, Serialize};
+
+    /// Harmonic orders scored per-tone (2nd through 5th).
+    pub const HARMONIC_ORDERS: [usize; 4] = [2, 3, 4, 5];
+
+    /// A golden harmonic weaker than this (relative to the fundamental) is treated
+    /// as absent (below the simulator noise grass): its per-harmonic error is not
+    /// scored for the verdict, so ngspice noise bins don't masquerade as shape
+    /// error. −80 dBc sits above ngspice's typical noise grass yet below a real
+    /// diode/BJT harmonic.
+    pub const HARMONIC_FLOOR_DBC: f64 = -80.0;
+
+    /// One harmonic's level, WDF vs golden, expressed in dBc (relative to the
+    /// fundamental) so it is level-independent by construction.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct HarmonicError {
+        /// Harmonic order (2..=5).
+        pub order: usize,
+        /// WDF harmonic level relative to its own fundamental, dB.
+        pub wdf_dbc: f64,
+        /// Golden harmonic level relative to its own fundamental, dB.
+        pub golden_dbc: f64,
+        /// `|wdf_dbc − golden_dbc|`, the level-independent per-harmonic residual.
+        pub error_db: f64,
+        /// True when the GOLDEN harmonic is above [`HARMONIC_FLOOR_DBC`] (present,
+        /// not noise). Only scored harmonics feed the verdict.
+        pub scored: bool,
+    }
+
+    /// One frequency-sweep point: WDF-vs-golden AC gain at that frequency.
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct FreqPoint {
+        pub freq_hz: f64,
+        /// `ac_gain_db(wdf, golden)` at this frequency (WDF louder ⇒ positive).
+        pub gain_db: f64,
+    }
+
+    /// Thresholds for grading the AC dimensions. Informative (localizes which
+    /// dimension carries the error), not a hard CI gate.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AcThresholds {
+        /// A |gain| above this at the test tone counts as a LEVEL offset. 1 dB.
+        pub gain_warn_db: f64,
+        /// Gain-normalized RMS shape residual (dB) above which SHAPE is bad. The
+        /// residual is `20·log10(rms(wdf_norm − golden)/rms(golden))`, so −20 dB
+        /// (≈ 10 % shape difference) is the boundary. NOTE: this is phase-
+        /// SENSITIVE — a pure group-delay difference inflates it even when the
+        /// magnitude shape agrees; cross-check with `shape_spectral`.
+        pub shape_rms_fail_db: f64,
+        /// Gain-normalized, phase-IMMUNE in-band magnitude shape error (dB) above
+        /// which SHAPE is bad. 3 dB.
+        pub shape_spectral_fail_db: f64,
+        /// |THD_wdf − THD_golden| (dB) above which HARMONICS are bad. 6 dB.
+        pub thd_error_fail_db: f64,
+        /// Max per-harmonic dBc error above which HARMONICS are bad. 6 dB.
+        pub harmonic_fail_db: f64,
+        /// Response tilt (max−min gain across the sweep, dB) above which the error
+        /// is frequency-SHAPED (a RESPONSE error, not a flat scalar). 3 dB.
+        pub response_tilt_fail_db: f64,
+    }
+
+    impl Default for AcThresholds {
+        fn default() -> Self {
+            Self {
+                gain_warn_db: 1.0,
+                shape_rms_fail_db: -20.0,
+                shape_spectral_fail_db: 3.0,
+                thd_error_fail_db: 6.0,
+                harmonic_fail_db: 6.0,
+                response_tilt_fail_db: 3.0,
+            }
+        }
+    }
+
+    /// The AC-fidelity verdict for one circuit — which dimension carries the error.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum AcVerdict {
+        /// Level, shape, harmonics AND response all within thresholds.
+        Clean,
+        /// ONLY the level tone is off; shape + THD + response are all clean ⇒ the
+        /// AC error is a FLAT SCALAR (a pure-gain bug), the waveform shape matches.
+        LevelOnly,
+        /// The gain-normalized shape residual exceeds threshold ⇒ the waveform
+        /// shape itself differs (beyond a scalar level).
+        ShapeError,
+        /// THD or a per-harmonic level differs ⇒ the nonlinearity/harmonic content
+        /// differs (beyond a scalar level).
+        HarmonicError,
+        /// The per-frequency gain is not flat ⇒ a frequency-shaped RESPONSE error.
+        ResponseError,
+        /// No usable golden tone (silence) — nothing to grade.
+        NoData,
+    }
+
+    impl AcVerdict {
+        pub fn label(&self) -> &'static str {
+            match self {
+                AcVerdict::Clean => "AC OK",
+                AcVerdict::LevelOnly => "LEVEL-ONLY (flat scalar; shape clean)",
+                AcVerdict::ShapeError => "SHAPE ERROR (waveform differs)",
+                AcVerdict::HarmonicError => "HARMONIC ERROR (THD/harmonics differ)",
+                AcVerdict::ResponseError => "RESPONSE ERROR (frequency-shaped)",
+                AcVerdict::NoData => "NO DATA",
+            }
+        }
+    }
+
+    /// Full AC-accuracy result for one circuit.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct AcResult {
+        pub circuit: String,
+        /// Fundamental at which the level/shape/harmonic decomposition was taken.
+        pub test_freq_hz: f64,
+        /// LEVEL: `ac_gain_db(wdf, golden)` at the test tone (the scalar offset).
+        pub gain_db: f64,
+        /// WDF single-bin amplitude at the test tone (signal units).
+        pub wdf_amp: f64,
+        /// Golden single-bin amplitude at the test tone (signal units).
+        pub golden_amp: f64,
+        /// SHAPE (level factored out, phase-sensitive time domain), dB.
+        pub shape_rms_db: f64,
+        /// SHAPE (level factored out, phase-immune magnitude), dB.
+        pub shape_spectral_db: f64,
+        /// THD of the WDF tone, dB.
+        pub thd_wdf_db: f64,
+        /// THD of the golden tone, dB.
+        pub thd_golden_db: f64,
+        /// Per-harmonic (2nd–5th) dBc levels + error.
+        pub harmonics: Vec<HarmonicError>,
+        /// Frequency-response sweep (per-frequency WDF-vs-golden gain).
+        pub response: Vec<FreqPoint>,
+        /// Response tilt = max−min gain across the sweep, dB. ≈0 ⇒ flat (a scalar
+        /// level offset); large ⇒ frequency-shaped response error.
+        pub response_tilt_db: f64,
+        pub verdict: AcVerdict,
+    }
+
+    impl AcResult {
+        /// Worst per-harmonic error over SCORED harmonics (golden present).
+        pub fn max_harmonic_error_db(&self) -> f64 {
+            self.harmonics
+                .iter()
+                .filter(|h| h.scored)
+                .map(|h| h.error_db)
+                .fold(0.0, f64::max)
+        }
+
+        /// |THD_wdf − THD_golden|.
+        pub fn thd_error_db(&self) -> f64 {
+            (self.thd_wdf_db - self.thd_golden_db).abs()
+        }
+    }
+
+    /// One harmonic's level relative to the fundamental, in dBc, via single-bin
+    /// projection (DC-immune). Returns `NEG_INFINITY` if the fundamental is silent.
+    fn harmonic_dbc(signal: &[f64], fund_hz: f64, harm_hz: f64, sample_rate: f64) -> f64 {
+        let fund = single_bin_amplitude(signal, fund_hz, sample_rate);
+        if fund < 1e-30 {
+            return f64::NEG_INFINITY;
+        }
+        let harm = single_bin_amplitude(signal, harm_hz, sample_rate);
+        20.0 * (harm / fund).max(1e-12).log10()
+    }
+
+    /// Response tilt: max−min over the finite per-frequency gains.
+    pub fn response_tilt_db(response: &[FreqPoint]) -> f64 {
+        let finite: Vec<f64> = response
+            .iter()
+            .map(|p| p.gain_db)
+            .filter(|g| g.is_finite())
+            .collect();
+        if finite.len() < 2 {
+            return 0.0;
+        }
+        let max = finite.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min = finite.iter().cloned().fold(f64::INFINITY, f64::min);
+        max - min
+    }
+
+    /// Decompose the WDF-vs-golden AC error into level / shape / harmonics /
+    /// response and reach a verdict.
+    ///
+    /// `wdf` and `golden` are settled, same-rate, same-length, same-phase
+    /// windows of the SAME test tone at `test_freq_hz`. `response` is the
+    /// per-frequency gain sweep (may be empty; then RESPONSE is not graded).
+    pub fn evaluate(
+        circuit: &str,
+        wdf: &[f64],
+        golden: &[f64],
+        sample_rate: f64,
+        test_freq_hz: f64,
+        response: Vec<FreqPoint>,
+        th: &AcThresholds,
+    ) -> AcResult {
+        let n = wdf.len().min(golden.len());
+        let wdf = &wdf[..n];
+        let golden = &golden[..n];
+
+        let wdf_amp = single_bin_amplitude(wdf, test_freq_hz, sample_rate);
+        let golden_amp = single_bin_amplitude(golden, test_freq_hz, sample_rate);
+        let gain_db = ac_gain_db(wdf, golden, test_freq_hz, sample_rate);
+
+        // SHAPE: gain-normalize the WDF so the scalar level is factored OUT, then
+        // measure the residual. This is THE fix for the degeneracy — after
+        // normalization a pure level offset contributes nothing, so what remains
+        // is the honest shape difference.
+        let k = if wdf_amp > 1e-30 {
+            golden_amp / wdf_amp
+        } else {
+            0.0
+        };
+        let wdf_norm: Vec<f64> = wdf.iter().map(|&x| k * x).collect();
+        let shape_rms_db = normalized_rms_error_db(&wdf_norm, golden);
+        let shape_spectral_db = spectral_error_db(&wdf_norm, golden, sample_rate, None);
+
+        // HARMONICS: THD ratio (level-independent) + per-harmonic dBc.
+        let thd_wdf_db = thd_db(wdf, test_freq_hz, sample_rate, 10);
+        let thd_golden_db = thd_db(golden, test_freq_hz, sample_rate, 10);
+        let harmonics: Vec<HarmonicError> = HARMONIC_ORDERS
+            .iter()
+            .filter_map(|&order| {
+                let hf = order as f64 * test_freq_hz;
+                if hf >= sample_rate / 2.0 {
+                    return None;
+                }
+                let wdf_dbc = harmonic_dbc(wdf, test_freq_hz, hf, sample_rate);
+                let golden_dbc = harmonic_dbc(golden, test_freq_hz, hf, sample_rate);
+                let scored = golden_dbc > HARMONIC_FLOOR_DBC;
+                Some(HarmonicError {
+                    order,
+                    wdf_dbc,
+                    golden_dbc,
+                    error_db: (wdf_dbc - golden_dbc).abs(),
+                    scored,
+                })
+            })
+            .collect();
+
+        let response_tilt_db = response_tilt_db(&response);
+
+        let mut result = AcResult {
+            circuit: circuit.to_string(),
+            test_freq_hz,
+            gain_db,
+            wdf_amp,
+            golden_amp,
+            shape_rms_db,
+            shape_spectral_db,
+            thd_wdf_db,
+            thd_golden_db,
+            harmonics,
+            response,
+            response_tilt_db,
+            verdict: AcVerdict::NoData,
+        };
+
+        // Classify. Priority: a genuine shape/harmonic/response error outranks a
+        // pure level offset (which is the benign, expected BA283 signature).
+        let level_off = gain_db.abs() > th.gain_warn_db;
+        let shape_bad = shape_rms_db > th.shape_rms_fail_db
+            || shape_spectral_db > th.shape_spectral_fail_db;
+        let harm_bad = result.thd_error_db() > th.thd_error_fail_db
+            || result.max_harmonic_error_db() > th.harmonic_fail_db;
+        let resp_bad =
+            !result.response.is_empty() && response_tilt_db > th.response_tilt_fail_db;
+
+        result.verdict = if golden_amp < 1e-12 {
+            AcVerdict::NoData
+        } else if shape_bad {
+            AcVerdict::ShapeError
+        } else if harm_bad {
+            AcVerdict::HarmonicError
+        } else if resp_bad {
+            AcVerdict::ResponseError
+        } else if level_off {
+            AcVerdict::LevelOnly
+        } else {
+            AcVerdict::Clean
+        };
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +1177,93 @@ mod tests {
         let sig: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.1).sin()).collect();
         assert!(normalized_rms_error_db(&sig, &sig) < -100.0);
         assert!(peak_error_db(&sig, &sig) < -100.0);
+    }
+
+    #[test]
+    fn single_bin_amplitude_recovers_tone_level() {
+        let sr = 48000.0;
+        let amp = 0.7;
+        let sig: Vec<f64> = (0..48000)
+            .map(|i| amp * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        let a = single_bin_amplitude(&sig, 1000.0, sr);
+        assert!((a - amp).abs() < 1e-3, "expected ~{amp}, got {a}");
+    }
+
+    #[test]
+    fn single_bin_amplitude_is_immune_to_dc_pedestal() {
+        // A device output sitting on a +5 V DC bias with a small AC tone.
+        let sr = 48000.0;
+        let ac = 0.05;
+        let sig: Vec<f64> = (0..48000)
+            .map(|i| 5.0 + ac * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        let a = single_bin_amplitude(&sig, 1000.0, sr);
+        assert!((a - ac).abs() < 1e-3, "DC pedestal must not affect AC amplitude; got {a}");
+    }
+
+    /// The core point of the new metric: when the WDF is far BELOW the golden,
+    /// `normalized_rms_error_db` DEGENERATES to ~0 dB ("shape matches") while
+    /// `ac_gain_db` correctly reports the true ~-40 dB level gap.
+    #[test]
+    fn ac_gain_db_exposes_what_normalized_rms_hides() {
+        let sr = 48000.0;
+        let golden: Vec<f64> = (0..48000)
+            .map(|i| (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        // WDF is the same tone at 1% of the level (≈ -40 dB), e.g. an under-driven
+        // input port.
+        let wdf: Vec<f64> = golden.iter().map(|&x| 0.01 * x).collect();
+
+        let nrms = normalized_rms_error_db(&wdf, &golden);
+        let gain = ac_gain_db(&wdf, &golden, 1000.0, sr);
+
+        // normalized RMS reads ~0 dB (degenerate: rms(wdf-ref) ≈ rms(ref)).
+        assert!(
+            nrms.abs() < 1.0,
+            "normalized_rms_error_db is degenerate here (expected ~0 dB), got {nrms:.2}"
+        );
+        // ac_gain_db reports the real gap: 0.01 → -40 dB.
+        assert!(
+            (gain + 40.0).abs() < 0.5,
+            "ac_gain_db must report the true -40 dB gap, got {gain:.2}"
+        );
+    }
+
+    #[test]
+    fn ac_gain_db_doubling_is_plus_six_db_regardless_of_dc() {
+        let sr = 48000.0;
+        let golden: Vec<f64> = (0..48000)
+            .map(|i| 0.1 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        // WDF: double the AC amplitude AND add an unrelated DC bias.
+        let wdf: Vec<f64> = golden.iter().map(|&x| 3.3 + 2.0 * x).collect();
+        let gain = ac_gain_db(&wdf, &golden, 1000.0, sr);
+        assert!((gain - 6.02).abs() < 0.1, "2x AC → +6 dB, got {gain:.2}");
+    }
+
+    #[test]
+    fn ac_amplitude_drift_zero_for_steady_large_for_ramp() {
+        let sr = 48000.0;
+        // Steady tone → ~0 dB drift.
+        let steady: Vec<f64> = (0..48000)
+            .map(|i| (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin())
+            .collect();
+        assert!(
+            ac_amplitude_drift_db(&steady, 1000.0, sr).abs() < 0.2,
+            "steady tone must show ~0 dB drift"
+        );
+        // Amplitude ramp (transient): envelope grows from 0.1 to 1.0 over the
+        // window → second half is much louder than the first.
+        let n = 48000usize;
+        let ramp: Vec<f64> = (0..n)
+            .map(|i| {
+                let env = 0.1 + 0.9 * (i as f64 / n as f64);
+                env * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / sr).sin()
+            })
+            .collect();
+        let drift = ac_amplitude_drift_db(&ramp, 1000.0, sr);
+        assert!(drift > 3.0, "ramping (unsettled) tone must show large drift, got {drift:.2}");
     }
 
     #[test]
@@ -777,5 +1495,173 @@ mod tests {
             err > 20.0,
             "30 dB h2 level gap should produce > 20 dB spectral error, got {err:.1} dB."
         );
+    }
+
+    // ── op_point bias-accuracy metric (ngspice-free, synthetic) ──────────────
+    mod op_point_logic {
+        use crate::metrics::op_point::*;
+        use crate::spice::SpiceDeviceOp;
+
+        fn spice(dev: &str, vbe: f64, vce: f64, ic: f64) -> SpiceDeviceOp {
+            SpiceDeviceOp {
+                device: dev.into(),
+                model: "qmod".into(),
+                vbe,
+                vce,
+                ic,
+                ib: ic / 100.0,
+                gm: 0.03,
+            }
+        }
+        fn ours(reference: &str, vbe: f64, vce: f64, ic: f64) -> DeviceBias {
+            DeviceBias { reference: reference.into(), vbe, vce, ic }
+        }
+
+        #[test]
+        fn residual_near_zero_and_match_ok_is_bias_ok() {
+            let c = OpPassCriteria::default();
+            let r = evaluate(
+                "x",
+                &[ours("Q1", 0.6505, 1.10, 1.0e-3)],
+                &[spice("Q1", 0.650, 1.10, 1.0e-3)],
+                &[PortResidual { residual: 0.01, residual_full: 0.01 }],
+                &c,
+            );
+            assert_eq!(r.verdict, Verdict::BiasOk);
+            assert!(r.match_ok(&c) && r.formulation_ok(&c));
+        }
+
+        #[test]
+        fn residual_small_but_match_off_is_solver_off_layer_b() {
+            // The BA283 signature: ngspice's .op IS a fixed point (small residual)
+            // but our settled bias lands elsewhere (large ΔVbe / wrong Ic).
+            let c = OpPassCriteria::default();
+            let r = evaluate(
+                "ba283-like",
+                &[ours("Q1", 0.20, 19.9, 0.0)],
+                &[spice("Q1", 0.61, 5.35, 0.26e-3)],
+                &[PortResidual { residual: 0.027, residual_full: 0.027 }],
+                &c,
+            );
+            assert_eq!(r.verdict, Verdict::FormulationOkSolverOff);
+            assert!(r.formulation_ok(&c) && !r.match_ok(&c));
+        }
+
+        #[test]
+        fn large_residual_is_formulation_bug_layer_a() {
+            let c = OpPassCriteria::default();
+            let r = evaluate(
+                "y",
+                &[ours("Q1", 0.0, 0.0, 0.0)],
+                &[spice("Q1", 0.0, 0.0, 0.0)],
+                &[PortResidual { residual: 8.5, residual_full: 8.5 }],
+                &c,
+            );
+            assert_eq!(r.verdict, Verdict::FormulationBug);
+        }
+
+        #[test]
+        fn match_compares_on_magnitude_for_pnp() {
+            // PNP: our port Vbe is negative, ngspice reports positive magnitude.
+            let dm = match_devices(
+                &[ours("Q1", -0.62, -3.5, -1.0e-3)],
+                &[spice("Q1", 0.62, 3.5, -1.0e-3)],
+            );
+            assert_eq!(dm.len(), 1);
+            assert!(dm[0].d_vbe.abs() < 1e-9, "magnitude match ⇒ ΔVbe≈0");
+            assert!(dm[0].d_ic_pct.abs() < 1e-6);
+        }
+    }
+
+    // ── ac_accuracy AC-fidelity metric (ngspice-free, synthetic) ─────────────
+    mod ac_accuracy_logic {
+        use crate::metrics::ac_accuracy::*;
+
+        const SR: f64 = 48_000.0;
+        const F: f64 = 1_000.0;
+
+        /// A pure 1 kHz tone (+ optional harmonics) as a golden.
+        fn tone(amp: f64, h2: f64, h3: f64) -> Vec<f64> {
+            (0..48_000)
+                .map(|i| {
+                    let t = i as f64 / SR;
+                    amp * ((2.0 * std::f64::consts::PI * F * t).sin()
+                        + h2 * (2.0 * std::f64::consts::PI * 2.0 * F * t).sin()
+                        + h3 * (2.0 * std::f64::consts::PI * 3.0 * F * t).sin())
+                })
+                .collect()
+        }
+
+        /// THE core point: when the WDF differs from the golden ONLY by a scalar
+        /// level, the verdict must be LevelOnly — the +N dB is a flat scalar and
+        /// the gain-normalized shape residual is ~0 (what the degenerate
+        /// `normalized_rms_error_db` could never separate).
+        #[test]
+        fn pure_level_offset_is_level_only_and_shape_clean() {
+            let th = AcThresholds::default();
+            let golden = tone(0.1, 0.02, 0.005);
+            // WDF: same waveform SHAPE, +2.42 dB louder (the BA283 signature).
+            let k = 10f64.powf(2.42 / 20.0);
+            let wdf: Vec<f64> = golden.iter().map(|&x| k * x).collect();
+            // Flat frequency response (same +2.42 dB at every frequency).
+            let response: Vec<FreqPoint> = [50.0, 1000.0, 10000.0]
+                .iter()
+                .map(|&f| FreqPoint { freq_hz: f, gain_db: 2.42 })
+                .collect();
+
+            let r = evaluate("scaled", &wdf, &golden, SR, F, response, &th);
+            assert!((r.gain_db - 2.42).abs() < 0.05, "level = +2.42 dB, got {:.3}", r.gain_db);
+            // Gain factored out ⇒ shape residual collapses.
+            assert!(r.shape_rms_db < -60.0, "shape RMS must be clean, got {:.1}", r.shape_rms_db);
+            assert!(r.shape_spectral_db < 1.0, "shape spectral clean, got {:.2}", r.shape_spectral_db);
+            assert!(r.thd_error_db() < 1.0, "THD matches, got {:.2}", r.thd_error_db());
+            assert!(r.max_harmonic_error_db() < 1.0, "harmonics match, got {:.2}", r.max_harmonic_error_db());
+            assert!(r.response_tilt_db < 0.5, "response flat, got {:.2}", r.response_tilt_db);
+            assert_eq!(r.verdict, AcVerdict::LevelOnly);
+        }
+
+        /// A genuine shape difference (extra 2nd harmonic in the WDF) must NOT be
+        /// hidden by gain normalization — verdict Shape or Harmonic error.
+        #[test]
+        fn added_harmonic_is_not_level_only() {
+            let th = AcThresholds::default();
+            let golden = tone(0.1, 0.0, 0.0); // clean sine
+            let wdf = tone(0.1, 0.3, 0.0); // strong 2nd harmonic added
+            let r = evaluate("distorted", &wdf, &golden, SR, F, vec![], &th);
+            assert_ne!(r.verdict, AcVerdict::LevelOnly);
+            assert_ne!(r.verdict, AcVerdict::Clean);
+            assert!(
+                matches!(r.verdict, AcVerdict::ShapeError | AcVerdict::HarmonicError),
+                "added harmonic ⇒ Shape/Harmonic, got {:?}",
+                r.verdict
+            );
+        }
+
+        /// A frequency-SHAPED gain (flat level fine at 1 kHz, but tilted across the
+        /// sweep) must classify as ResponseError, not LevelOnly.
+        #[test]
+        fn frequency_shaped_response_is_response_error() {
+            let th = AcThresholds::default();
+            let golden = tone(0.1, 0.0, 0.0);
+            let wdf: Vec<f64> = golden.clone(); // identical at 1 kHz (level+shape clean)
+            let response: Vec<FreqPoint> = vec![
+                FreqPoint { freq_hz: 50.0, gain_db: -8.0 },
+                FreqPoint { freq_hz: 1000.0, gain_db: 0.0 },
+                FreqPoint { freq_hz: 10000.0, gain_db: 2.0 },
+            ];
+            let r = evaluate("tilted", &wdf, &golden, SR, F, response, &th);
+            assert!(r.response_tilt_db > 3.0, "tilt = {:.1} dB", r.response_tilt_db);
+            assert_eq!(r.verdict, AcVerdict::ResponseError);
+        }
+
+        /// Silence golden ⇒ NoData (no tone to grade against).
+        #[test]
+        fn silent_golden_is_no_data() {
+            let th = AcThresholds::default();
+            let golden = vec![0.0; 48_000];
+            let wdf = tone(0.1, 0.0, 0.0);
+            let r = evaluate("silent", &wdf, &golden, SR, F, vec![], &th);
+            assert_eq!(r.verdict, AcVerdict::NoData);
+        }
     }
 }

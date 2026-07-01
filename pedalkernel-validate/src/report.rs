@@ -481,6 +481,285 @@ impl ValidationReport {
     }
 }
 
+// ============================================================================
+// DC bias-accuracy dashboard section
+// ============================================================================
+
+/// Render the bias-accuracy table for a set of per-circuit op-point results.
+///
+/// Produces a `circuit × device × (Vbe / Vce / Ic: ours / ngspice / Δ)` table
+/// plus, per circuit, the worst DC-balance residual `F(ngspice_op)` and the
+/// formulation-vs-solver verdict. Returns the rendered string (so tests can
+/// print AND assert on it).
+pub fn render_bias_accuracy(
+    results: &[crate::metrics::op_point::OpPointResult],
+    criteria: &crate::metrics::op_point::OpPassCriteria,
+) -> String {
+    use crate::metrics::op_point::Verdict;
+    use std::fmt::Write as _;
+    use tabled::settings::Style;
+    use tabled::{Table, Tabled};
+
+    #[derive(Tabled)]
+    struct BiasRow {
+        circuit: String,
+        device: String,
+        model: String,
+        #[tabled(rename = "Vbe ours")]
+        vbe_ours: String,
+        #[tabled(rename = "Vbe ng")]
+        vbe_ng: String,
+        #[tabled(rename = "ΔVbe")]
+        d_vbe: String,
+        #[tabled(rename = "Vce ours")]
+        vce_ours: String,
+        #[tabled(rename = "Vce ng")]
+        vce_ng: String,
+        #[tabled(rename = "ΔVce")]
+        d_vce: String,
+        #[tabled(rename = "Ic ours")]
+        ic_ours: String,
+        #[tabled(rename = "Ic ng")]
+        ic_ng: String,
+        #[tabled(rename = "ΔIc%")]
+        d_ic: String,
+    }
+
+    fn fmt_i(a: f64) -> String {
+        if a.abs() >= 1e-3 {
+            format!("{:.3}mA", a * 1e3)
+        } else {
+            format!("{:.1}µA", a * 1e6)
+        }
+    }
+
+    let mut rows = Vec::new();
+    for r in results {
+        if r.devices.is_empty() {
+            rows.push(BiasRow {
+                circuit: r.circuit.clone(),
+                device: "(no BJT devices)".to_string(),
+                model: "-".into(),
+                vbe_ours: "-".into(),
+                vbe_ng: "-".into(),
+                d_vbe: "-".into(),
+                vce_ours: "-".into(),
+                vce_ng: "-".into(),
+                d_vce: "-".into(),
+                ic_ours: "-".into(),
+                ic_ng: "-".into(),
+                d_ic: "-".into(),
+            });
+        }
+        for (i, d) in r.devices.iter().enumerate() {
+            let flag = if d.d_vbe.abs() > criteria.vbe_fail_v {
+                "!"
+            } else if d.d_vbe.abs() > criteria.vbe_warn_v {
+                "~"
+            } else {
+                ""
+            };
+            rows.push(BiasRow {
+                circuit: if i == 0 { r.circuit.clone() } else { String::new() },
+                device: d.reference.clone(),
+                model: d.model.clone(),
+                vbe_ours: format!("{:+.4}", d.ours.0),
+                vbe_ng: format!("{:+.4}", d.spice.0),
+                d_vbe: format!("{:+.4}{}", d.d_vbe, flag),
+                vce_ours: format!("{:+.3}", d.ours.1),
+                vce_ng: format!("{:+.3}", d.spice.1),
+                d_vce: format!("{:+.3}", d.d_vce),
+                ic_ours: fmt_i(d.ours.2),
+                ic_ng: fmt_i(d.spice.2),
+                d_ic: format!("{:+.1}", d.d_ic_pct),
+            });
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str("\n══════════════════════ DC BIAS ACCURACY (WDF vs ngspice .op) ══════════════════════\n");
+    out.push_str(
+        "  MATCH = our settled DC bias vs ngspice .op (Layer B / solver-root).\n  \
+         ΔVbe flags: '~' warn >",
+    );
+    let _ = write!(
+        out,
+        "{:.0}mV, '!' fail >{:.0}mV; |ΔVce| fail >{:.2}V; |ΔIc| fail >{:.0}%.\n",
+        criteria.vbe_warn_v * 1e3,
+        criteria.vbe_fail_v * 1e3,
+        criteria.vce_fail_v,
+        criteria.ic_fail_pct,
+    );
+    if !rows.is_empty() {
+        let mut table = Table::new(rows);
+        table.with(Style::rounded());
+        let _ = write!(out, "{}\n", table);
+    }
+
+    // Per-circuit residual + verdict roll-up.
+    out.push_str(
+        "\n  RESIDUAL = F(ngspice_op): is ngspice's .op a fixed point of OUR DC equations?\n  \
+         (residual ≈ 0 ⇒ formulation ok → Layer B; residual ≫ 0 ⇒ formulation bug → Layer A)\n",
+    );
+    for r in results {
+        let mark = match r.verdict {
+            Verdict::BiasOk => "✓",
+            Verdict::FormulationOkSolverOff => "→B",
+            Verdict::FormulationBug => "→A",
+            Verdict::NoData => "·",
+        };
+        let _ = write!(
+            out,
+            "  [{mark}] {:<22} max|resid|={:>7.4}V  (full={:.2e}V, {} ports)  \
+             max ΔVbe={:.4}V ΔVce={:.3}V ΔIc={:.1}%  ⇒ {}\n",
+            r.circuit,
+            r.max_abs_residual,
+            r.max_abs_residual_full,
+            r.n_residual_ports,
+            r.max_abs_d_vbe,
+            r.max_abs_d_vce,
+            r.max_abs_d_ic_pct,
+            r.verdict.label(),
+        );
+    }
+    out.push_str("═══════════════════════════════════════════════════════════════════════════════════\n");
+    out
+}
+
+// ============================================================================
+// AC-signal accuracy dashboard section (the audio twin of the bias dashboard)
+// ============================================================================
+
+/// Render the AC-accuracy table for a set of per-circuit results.
+///
+/// Mirrors [`render_bias_accuracy`], but for the AC SIGNAL instead of the DC
+/// operating point. One summary row per circuit — LEVEL (`gain@f`), the
+/// gain-normalized SHAPE residual (rms + phase-immune spectral), THD (WDF vs
+/// ngspice) and its Δ, the response tilt (max−min gain across the sweep), and the
+/// verdict — followed by the per-harmonic breakdown and the full frequency sweep.
+/// Returns the rendered string so tests can print AND assert on it.
+pub fn render_ac_accuracy(
+    results: &[crate::metrics::ac_accuracy::AcResult],
+    th: &crate::metrics::ac_accuracy::AcThresholds,
+) -> String {
+    use crate::metrics::ac_accuracy::AcVerdict;
+    use std::fmt::Write as _;
+    use tabled::settings::Style;
+    use tabled::{Table, Tabled};
+
+    #[derive(Tabled)]
+    struct AcRow {
+        circuit: String,
+        #[tabled(rename = "gain@f")]
+        gain: String,
+        #[tabled(rename = "shape rms")]
+        shape_rms: String,
+        #[tabled(rename = "shape spec")]
+        shape_spec: String,
+        #[tabled(rename = "THD wdf")]
+        thd_wdf: String,
+        #[tabled(rename = "THD ng")]
+        thd_ng: String,
+        #[tabled(rename = "ΔTHD")]
+        d_thd: String,
+        #[tabled(rename = "resp tilt")]
+        tilt: String,
+        verdict: String,
+    }
+
+    let mut rows = Vec::new();
+    for r in results {
+        let mark = match r.verdict {
+            AcVerdict::Clean => "✓",
+            AcVerdict::LevelOnly => "≈",
+            AcVerdict::ShapeError => "!S",
+            AcVerdict::HarmonicError => "!H",
+            AcVerdict::ResponseError => "!R",
+            AcVerdict::NoData => "·",
+        };
+        rows.push(AcRow {
+            circuit: format!("{mark} {}", r.circuit),
+            gain: format!("{:+.2}dB", r.gain_db),
+            shape_rms: format!("{:.1}dB", r.shape_rms_db),
+            shape_spec: format!("{:.1}dB", r.shape_spectral_db),
+            thd_wdf: format!("{:.1}", r.thd_wdf_db),
+            thd_ng: format!("{:.1}", r.thd_golden_db),
+            d_thd: format!("{:.1}", r.thd_error_db()),
+            tilt: format!("{:.2}dB", r.response_tilt_db),
+            verdict: r.verdict.label().to_string(),
+        });
+    }
+
+    let mut out = String::new();
+    out.push_str("\n══════════════════════ AC SIGNAL ACCURACY (WDF vs ngspice golden) ══════════════════════\n");
+    let _ = write!(
+        out,
+        "  LEVEL = ac_gain@f (scalar offset).  SHAPE = gain-normalized residual (rms time-domain,\n  \
+         spec = phase-immune magnitude, in-band).  THD ratio is level-independent.  \n  \
+         resp tilt = max−min gain across the sweep (≈0 ⇒ flat scalar; ≫0 ⇒ frequency-shaped).\n  \
+         flags: '≈' level-only (shape clean); '!S' shape; '!H' harmonic; '!R' response.  \n  \
+         thresholds: |gain|>{:.1}dB=level, shape_rms>{:.0}dB, shape_spec>{:.0}dB, ΔTHD>{:.0}dB, \
+         harm>{:.0}dB, tilt>{:.0}dB.\n",
+        th.gain_warn_db,
+        th.shape_rms_fail_db,
+        th.shape_spectral_fail_db,
+        th.thd_error_fail_db,
+        th.harmonic_fail_db,
+        th.response_tilt_fail_db,
+    );
+    if !rows.is_empty() {
+        let mut table = Table::new(rows);
+        table.with(Style::rounded());
+        let _ = write!(out, "{}\n", table);
+    }
+
+    // Per-harmonic breakdown (2nd–5th, dBc) + full sweep, per circuit.
+    for r in results {
+        let _ = write!(
+            out,
+            "\n  [{}] {} @ {:.0} Hz  —  {}\n",
+            match r.verdict {
+                AcVerdict::Clean => "✓",
+                AcVerdict::LevelOnly => "≈",
+                AcVerdict::ShapeError => "!S",
+                AcVerdict::HarmonicError => "!H",
+                AcVerdict::ResponseError => "!R",
+                AcVerdict::NoData => "·",
+            },
+            r.circuit,
+            r.test_freq_hz,
+            r.verdict.label(),
+        );
+        out.push_str("    harmonics (dBc, wdf / ng / Δ): ");
+        if r.harmonics.is_empty() {
+            out.push_str("(none)");
+        }
+        for h in &r.harmonics {
+            let note = if h.scored { "" } else { "·" };
+            let _ = write!(
+                out,
+                "h{}={:.1}/{:.1}/{:.1}{}  ",
+                h.order, h.wdf_dbc, h.golden_dbc, h.error_db, note
+            );
+        }
+        out.push('\n');
+        if !r.response.is_empty() {
+            out.push_str("    response gain vs freq: ");
+            for p in &r.response {
+                let g = if p.gain_db.is_finite() {
+                    format!("{:+.2}", p.gain_db)
+                } else {
+                    "n/a".to_string()
+                };
+                let _ = write!(out, "{:.0}Hz={}dB  ", p.freq_hz, g);
+            }
+            let _ = write!(out, " (tilt {:.2} dB)\n", r.response_tilt_db);
+        }
+    }
+    out.push_str("══════════════════════════════════════════════════════════════════════════════════════\n");
+    out
+}
+
 /// Get a simple timestamp without pulling in chrono.
 fn chrono_lite_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

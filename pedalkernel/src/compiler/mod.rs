@@ -9,7 +9,6 @@
 
 mod bbd_lowering;
 mod bias;
-mod bias_analysis;
 mod bind;
 mod blockwise;
 mod build;
@@ -68,6 +67,8 @@ pub use warnings::{check_voltage_compatibility, VoltageWarning, WarningSeverity}
 mod bias_analysis_tests;
 #[cfg(test)]
 mod bias_application_tests;
+#[cfg(test)]
+mod bias_characterization_tests;
 #[cfg(test)]
 mod bind_tests;
 #[cfg(test)]

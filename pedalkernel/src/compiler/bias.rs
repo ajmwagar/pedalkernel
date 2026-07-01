@@ -4,12 +4,19 @@
 //! the per-type DC bias code spread across `spqr_build.rs`
 //! (`compute_wdf_triode_dc_qpoint`, `compute_wdf_bjt_dc_qpoint`, etc.).
 //!
-//! # Current status (ko5g.1)
+//! # Current status (ko5g.3)
 //!
-//! This bead is **additive only**.  The types and solver are defined here and
-//! verified by unit tests, but no call-site in `spqr_build.rs` / `blockwise.rs`
-//! / `general.rs` has been migrated yet.  Migrations happen in ko5g.3–ko5g.6.
-//! All existing compiler behaviour is therefore byte-identical after this bead.
+//! Migrated into this file: the flow-group bias classification + resistor-divider
+//! nodal solve (`classify_group_bias` / `solve_network_bias`, absorbed from the
+//! now-deleted `bias_analysis.rs`), the grouped-BJT nodal co-solve
+//! (`solve_bjt_group_dc_qpoint`, the BA283 fix-#1 solver with terminal/parasitic
+//! handling), and the per-type triode solve (`solve_triode_dc_qpoint`).
+//!
+//! Still per-type / not yet on the shared `BiasSeed`/`solve_operating_point`
+//! path: the single-port-WDF-root solvers in `spqr_build.rs`
+//! (`compute_wdf_triode_dc_qpoint`, `compute_wdf_bjt_dc_qpoint`,
+//! `compute_wdf_fet_dc_qpoint`) and the varimu/pentode branches inside
+//! `solve_triode_dc_qpoint`.  See the module TODO for the migration plan.
 //!
 //! # Architecture
 //!
@@ -21,7 +28,10 @@
 //! solve_operating_point(seed, topo, ctx) → DeviceOperatingPoint
 //!
 //! NetworkBias { dc_voltages: HashMap<NodeId, f64> }
-//!   └─ solve_network_bias(graph, group) → NetworkBias   (absorbs bias_analysis's divider)
+//!   └─ solve_network_bias(edges, graph) → NetworkBias   (the divider nodal solve)
+//!
+//! classify_group_bias(group, graph) → GroupBiasKind {SignalPath | StaticBias}
+//!   (absorbed from the former bias_analysis.rs, now deleted)
 //! ```
 //!
 //! # Resistor-locating strategy: cap-aware BFS
@@ -222,13 +232,14 @@ pub(super) struct DeviceOperatingPoint {
 /// DC voltages at all non-rail nodes in a static bias network.
 ///
 /// This is the compile-time result of running nodal analysis on a
-/// VCC→resistor-divider→GND subgraph.  It is conceptually equivalent to what
-/// `bias_analysis.rs::classify_group_bias` returns inside `GroupBiasKind::StaticBias`,
-/// but typed as a standalone value so downstream code (the triode/BJT solvers)
-/// can consume it without pattern-matching a flow-group enum.
+/// VCC→resistor-divider→GND subgraph.  It is the value carried inside
+/// `GroupBiasKind::StaticBias` (see `classify_group_bias` below), also exposed as
+/// a standalone type so downstream code (the triode/BJT solvers) can consume it
+/// without pattern-matching a flow-group enum.
 ///
-/// `bias_analysis.rs` is NOT deleted by this bead — the call-site swap that
-/// replaces it with `solve_network_bias` is deferred to ko5g.3.
+/// `solve_network_bias` is the single divider nodal solve: the old
+/// `bias_analysis.rs::compute_dc_voltages` was absorbed here (ko5g.3) and that
+/// file deleted.
 #[derive(Debug, Default, Clone)]
 pub(super) struct NetworkBias {
     /// DC voltage at each non-rail circuit node, as solved by MNA on the
@@ -392,6 +403,177 @@ pub(super) fn solve_network_bias(
     };
 
     NetworkBias { dc_voltages }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Flow-group bias classification (absorbed from bias_analysis.rs, ko5g.3)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Classifies each flow group as either a static DC bias network (supply-only
+// inputs → the resistor-divider DC operating point is computed at compile time
+// and the group is bypassed in the serial audio chain) or a signal path (has
+// audio-rate inputs and must be processed at runtime).  The divider nodal solve
+// is the unified `solve_network_bias` above — this section is now the single
+// home for the whole compile-time DC bias story.
+//
+// The detection is graph-level: "does this branch have an audio-rate input or
+// only DC supply?"  No component-type special-casing.
+
+/// Classification of a flow group's role in the circuit.
+#[derive(Debug)]
+pub(super) enum GroupBiasKind {
+    /// Group is on the audio signal path (in_node → ... → out_node).
+    /// Must be processed in the serial audio chain at runtime.
+    SignalPath,
+
+    /// Group is a static DC bias network (supply-only inputs).
+    /// DC voltages are computed at compile time from resistor dividers.
+    /// The group is bypassed in the serial audio chain.
+    ///
+    /// `dc_voltages` maps each non-rail junction node to its DC voltage.
+    StaticBias { dc_voltages: HashMap<NodeId, f64> },
+    // Future: DynamicModulation for sidechains, envelope followers, etc.
+}
+
+/// Classify a flow group as static bias, signal path, or dynamic modulation.
+///
+/// A group is **StaticBias** when every node it touches is either a supply rail
+/// or an interior node reachable ONLY through the group's own edges from supply
+/// rails — i.e. not reachable from `in_node`/`out_node` without passing through
+/// supply rails.  When StaticBias, computes the DC voltage at each interior
+/// junction node via nodal analysis of the resistor divider (`solve_network_bias`).
+pub(super) fn classify_group_bias(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+) -> GroupBiasKind {
+    // A group with any nonlinear edge is NEVER static bias.
+    // Diodes/transistors to ground are signal clippers, not DC references.
+    let has_nonlinear = group.all_edges().iter().any(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        comp.kind.is_nonlinear()
+    });
+    if has_nonlinear {
+        return GroupBiasKind::SignalPath;
+    }
+
+    let rail_set = build_rail_set(graph);
+
+    // Collect all nodes this group touches.
+    let group_nodes = collect_group_nodes(group, graph);
+
+    // Find the group's non-rail nodes (interior junction nodes).
+    let interior_nodes: HashSet<NodeId> = group_nodes
+        .iter()
+        .filter(|&&n| !rail_set.contains(&n))
+        .copied()
+        .collect();
+
+    // If the group has NO interior nodes, it's entirely on rails — skip it.
+    if interior_nodes.is_empty() {
+        return GroupBiasKind::StaticBias {
+            dc_voltages: HashMap::new(),
+        };
+    }
+
+    // Check if any interior node can reach in_node or out_node through
+    // non-supply, non-group-internal edges. If so, the group carries audio.
+    let reaches = interior_reaches_signal(&interior_nodes, &rail_set, graph, group);
+    #[cfg(test)]
+    {
+        let edge_names: Vec<_> = group
+            .all_edges()
+            .iter()
+            .map(|&eidx| {
+                let e = &graph.edges[eidx];
+                let comp = &graph.components[e.comp_idx];
+                format!("{}({:?}→{:?})", comp.id, e.node_a, e.node_b)
+            })
+            .collect();
+        let interior_names: Vec<_> = interior_nodes.iter().map(|n| format!("{n:?}")).collect();
+        eprintln!("  bias: edges={edge_names:?}");
+        eprintln!("    interior={interior_names:?}, rails={:?}, in={:?}, out={:?}, reaches_signal={reaches}",
+            rail_set.len(), graph.in_node, graph.out_node);
+    }
+    if reaches {
+        return GroupBiasKind::SignalPath;
+    }
+
+    // Static bias: compute DC voltages from the resistor divider.
+    let dc_voltages = compute_group_dc_voltages(group, graph);
+
+    GroupBiasKind::StaticBias { dc_voltages }
+}
+
+/// Collect all nodes touched by a group's edges.
+fn collect_group_nodes(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+) -> HashSet<NodeId> {
+    let mut nodes = HashSet::new();
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        nodes.insert(e.node_a);
+        nodes.insert(e.node_b);
+    }
+    nodes
+}
+
+/// Check if the group carries audio signal based on its own edge topology.
+///
+/// A group is static bias if EVERY edge in it has at least one rail terminal
+/// (interior↔rail only).  A group is on the signal path if ANY edge connects two
+/// non-rail nodes, OR any of its winding nodes is one end of a `Tight`
+/// coupled-link whose other end is non-rail (transformer primary↔secondary,
+/// consulted via the broker — no transformer special-casing here).
+fn interior_reaches_signal(
+    _interior_nodes: &HashSet<NodeId>,
+    rail_set: &HashSet<NodeId>,
+    graph: &CircuitGraph,
+    group: &super::signal_flow::FlowGroup,
+) -> bool {
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        let a_rail = rail_set.contains(&e.node_a);
+        let b_rail = rail_set.contains(&e.node_b);
+        if !a_rail && !b_rail {
+            // Edge between two non-rail nodes → carries signal
+            return true;
+        }
+    }
+
+    for &eidx in group.all_edges().iter() {
+        let e = &graph.edges[eidx];
+        for node in [e.node_a, e.node_b] {
+            for other in super::boundary_rules::tight_coupled_neighbors(graph, node) {
+                if !rail_set.contains(&other) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Compute DC voltages at a static-bias group's interior junction nodes.
+///
+/// The resistor-divider DC solve is the unified `solve_network_bias`: it performs
+/// conductance-MNA Gaussian elimination and runs a rail-BFS to restrict the
+/// solved node set to interior nodes that have a DC path back to a rail through
+/// resistors (skipping cap-isolated floating signal-path nodes that would
+/// otherwise produce a singular matrix).  For genuine resistor dividers (the only
+/// case StaticBias is reached for) the BFS only ever removes nodes the old code
+/// would have failed on, so the returned voltages are unchanged.
+fn compute_group_dc_voltages(
+    group: &super::signal_flow::FlowGroup,
+    graph: &CircuitGraph,
+) -> HashMap<NodeId, f64> {
+    let supply_voltage = graph
+        .supply_voltages
+        .get(&graph.vcc_node)
+        .copied()
+        .unwrap_or(9.0);
+    solve_network_bias(&group.all_edges(), graph, supply_voltage).dc_voltages
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -632,6 +814,13 @@ pub(super) fn solve_operating_point<S: BiasSeed>(
 pub(super) struct TriodeSeed<'a> {
     pub(super) nl_kind: &'a NonlinearKind,
     pub(super) label: String,
+    /// B+ rail voltage, used as the `TriodeRoot` `v_max`.  Matching the per-type
+    /// `solve_triode_dc_qpoint` (which uses `v_max = supply_voltage`, NOT the
+    /// per-trial plate voltage) keeps the shared-core Q-point bit-for-bit aligned
+    /// with the production path so the inc-3 migration is behaviour-preserving.
+    pub(super) supply_voltage: f64,
+    /// Parallel-triode multiplier (sections wired in parallel share plate/cathode).
+    pub(super) parallel_count: usize,
 }
 
 impl<'a> BiasSeed for TriodeSeed<'a> {
@@ -705,11 +894,10 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
             _ => "12AX7",
         };
         let model = super::helpers::triode_model(model_name);
-        let mut root = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(
-            model,
-            trial.v_output.max(1.0),
-        );
-        root.set_bias(trial.v_control as pedalkernel_rt::Wave);
+        let v_max = self.supply_voltage.max(1.0);
+        let mut root = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(model, v_max)
+            .with_parallel_count(self.parallel_count);
+        root.set_vgk(trial.v_control as pedalkernel_rt::Wave);
 
         let ia = root.plate_current(trial.v_output as pedalkernel_rt::Wave) as f64;
 
@@ -719,9 +907,10 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
         let h = 1e-3_f64; // larger h to stay above f32 noise floor (~1e-7)
         let mut root2 = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(
             super::helpers::triode_model(model_name),
-            trial.v_output.max(1.0),
-        );
-        root2.set_bias((trial.v_control + h) as pedalkernel_rt::Wave);
+            v_max,
+        )
+        .with_parallel_count(self.parallel_count);
+        root2.set_vgk((trial.v_control + h) as pedalkernel_rt::Wave);
         let ia2 = root2.plate_current(trial.v_output as pedalkernel_rt::Wave) as f64;
         let gm = (ia2 - ia) / h;
 
@@ -961,15 +1150,13 @@ pub(super) fn find_load_resistor_bfs(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Linear system solver (Gaussian elimination, shared with bias_analysis.rs)
+// Linear system solver (Gaussian elimination)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Solve a small linear system Ax = b via Gaussian elimination with partial
 /// pivoting.  Returns `None` if the system is singular.
 ///
-/// This duplicates the private `solve_linear_system` in `bias_analysis.rs`.
-/// When ko5g.3 migrates the call-sites, the two can be unified; for now both
-/// exist so this bead stays additive-only and does not modify `bias_analysis.rs`.
+/// The single Gaussian-elimination routine for the compile-time DC bias solve.
 fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Option<Vec<f64>> {
     for col in 0..n {
         // Partial pivot
@@ -1058,6 +1245,30 @@ pub(super) struct TriodeDcQpoint {
 }
 
 /// Compute the DC operating point for a triode-with-grid stage.
+///
+/// # Migration status (ko5g inc-3)
+///
+/// The shared `BiasSeed`/`solve_operating_point` core (which the BJT rides on via
+/// `BjtNpnSeed`) already reproduces THIS solver's Q-point via `TriodeSeed`.
+/// Evidence: `bias_characterization_tests::probe_triode_unified_vs_per_type_qpoint`
+/// measures |dVgk| = 1.96 mV, |dVpk| = 131 mV on the 12AX7 @250V stage, with
+/// `TriodeSeed` matched to this function's semantics (v_max = supply,
+/// parallel_count, set_vgk).  The residual is ALGORITHMIC (the shared solver's
+/// v_ctrl-Newton with the `i_load_est` degeneration approximation vs this
+/// function's Ia-relaxation) and is independent of v_max.
+///
+/// **To finish the migration** (behaviour-preserving): align the shared solver's
+/// Newton scheme to the Ia-relaxation so the two land bit-identical, then have
+/// the non-varimu branch below `return solve_operating_point(&TriodeSeed{ nl_kind,
+/// label, supply_voltage, parallel_count }, all_edges, graph, &NetworkBias::default(),
+/// supply_voltage)` — mapping DeviceOperatingPoint → TriodeDcQpoint
+/// (vgk=control_bias, vpk=output_warm_start, v_cathode=-vgk, ia=v_cathode/r_cathode)
+/// — and delete this loop.  Gate on the corpus failing SET (the ~2 mV shift must
+/// not flip any tube test).  The `is_vari_mu` FIXED-BIAS branch below does NOT
+/// fit `TriodeSeed` (it establishes Vgk from the model's bias, not cathode
+/// self-bias) and must migrate to a dedicated `VariMuSeed`; the single-port-WDF
+/// `compute_wdf_triode_dc_qpoint` in spqr_build.rs and the pentode branch are the
+/// remaining per-type triode solvers (follow-up).
 ///
 /// Uses the load-line equations:
 ///   Vgk = -Ia × R_cathode    (cathode self-bias)
@@ -1244,6 +1455,66 @@ pub(super) fn solve_triode_dc_qpoint(
 /// excluded but the BJT-terminal rails are included so the caller can resolve
 /// ports), or `None` if the group has no BJTs, the system is singular, the solve
 /// fails to converge, or the result is non-physical.
+//
+// ── Parasitic-resistance internal-voltage fixed point ───────────────────────
+// Mirror of the runtime `BjtTwoPort::eval` constants (pedalkernel-rt
+// elements/nonlinear/bjt.rs). 0.5 damping keeps the map a contraction even when
+// the undamped loop gain `d(i·R)/dv` exceeds 1 for large RB.
+const BJT_PARASITIC_DAMP: f64 = 0.5;
+const BJT_PARASITIC_TOL: f64 = 1e-9;
+const BJT_PARASITIC_MAX_ITER: usize = 40;
+
+/// Gummel-Poon collector/base currents from **terminal** (node-difference) port
+/// voltages, applying the device's parasitic ohmic drops (RB·Ib, RE·Ie, RC·Ic)
+/// exactly as the runtime [`pedalkernel_rt::elements::BjtTwoPort`]`::eval` does.
+///
+/// The intrinsic `GummelPoonModel::currents(vbe, vbc)` takes *junction* voltages;
+/// feeding it the raw terminal node difference (omitting the parasitic drops)
+/// biases a high-RB input transistor at the intrinsic-Vbe operating point — for
+/// the BA283 TR1 (QBC184C, RB=500 Ω) that is the under-conducting ~half-current
+/// point, because Ic is exponential in Vbe and the omitted `Ib·RB` ≈ 33 mV maps
+/// to ~2× collector current. The compile-time DC solve must therefore apply the
+/// SAME terminal→internal map as runtime so the baked `dc_bias` is a true fixed
+/// point of the runtime balance (no compile-vs-runtime divergence).
+///
+/// `vbe_term`/`vbc_term` are NPN-normalized (the caller applies the device sign
+/// before calling and re-applies it to the returned currents), so the damped
+/// Picard runs in the same normalized space as the runtime `eval`.
+fn bjt_currents_terminal(model: &GummelPoonModel, vbe_term: f64, vbc_term: f64) -> (f64, f64) {
+    let rb = model.rb as f64;
+    let re = model.re as f64;
+    let rc = model.rc as f64;
+    let currents = |vbe: f64, vbc: f64| -> (f64, f64) {
+        let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc as pedalkernel_rt::Wave);
+        (ic as f64, ib as f64)
+    };
+    if rb + re + rc <= 0.0 {
+        // No parasitics: terminal voltages ARE the junction voltages.
+        return currents(vbe_term, vbc_term);
+    }
+    // Damped fixed point on the internal junction voltages:
+    //   v_int = v_term − i(v_int)·R   (vbc = vbe − vce throughout)
+    let vce_term = vbe_term - vbc_term;
+    let mut vbe_int = vbe_term;
+    let mut vce_int = vce_term;
+    for _ in 0..BJT_PARASITIC_MAX_ITER {
+        let vbc_int = vbe_int - vce_int;
+        let (ic, ib) = currents(vbe_int, vbc_int);
+        let ie_out = ic + ib;
+        let vbe_t = vbe_term - ib * rb - ie_out * re;
+        let vce_t = vce_term - ic * rc - ie_out * re;
+        let dvbe = BJT_PARASITIC_DAMP * (vbe_t - vbe_int);
+        let dvce = BJT_PARASITIC_DAMP * (vce_t - vce_int);
+        vbe_int += dvbe;
+        vce_int += dvce;
+        if dvbe.abs() + dvce.abs() < BJT_PARASITIC_TOL {
+            break;
+        }
+    }
+    let vbc_int = vbe_int - vce_int;
+    currents(vbe_int, vbc_int)
+}
+
 pub(super) fn solve_bjt_group_dc_qpoint(
     nl_kinds: &[NonlinearKind],
     all_edges: &[usize],
@@ -1437,9 +1708,11 @@ pub(super) fn solve_bjt_group_dc_qpoint(
                 let vbe = sign * (vb_ - ve_);
                 let vbc = sign * (vb_ - vc_);
 
-                let (ic, ib_) =
-                    model.currents(vbe as pedalkernel_rt::Wave, vbc as pedalkernel_rt::Wave);
-                let (ic, ib_) = (sign * ic as f64, sign * ib_ as f64);
+                // Apply the SAME parasitic terminal→internal map as runtime
+                // `BjtTwoPort::eval` (see `bjt_currents_terminal`): the node
+                // voltages are TERMINAL, not intrinsic-junction.
+                let (ic, ib_) = bjt_currents_terminal(model, vbe, vbc);
+                let (ic, ib_) = (sign * ic, sign * ib_);
                 // Terminal currents flowing INTO the device (leaving the node):
                 //   base: +Ib, collector: +Ic, emitter: -(Ib+Ic)
                 let term = [(b.base, ib_), (b.collector, ic), (b.emitter, -(ib_ + ic))];
@@ -1468,9 +1741,8 @@ pub(super) fn solve_bjt_group_dc_qpoint(
                     }
                     let vbe_p = sign * (vbn - ven);
                     let vbc_p = sign * (vbn - vcn);
-                    let (icp, ibp) = model
-                        .currents(vbe_p as pedalkernel_rt::Wave, vbc_p as pedalkernel_rt::Wave);
-                    let (icp, ibp) = (sign * icp as f64, sign * ibp as f64);
+                    let (icp, ibp) = bjt_currents_terminal(model, vbe_p, vbc_p);
+                    let (icp, ibp) = (sign * icp, sign * ibp);
                     let dterm = [
                         (b.base, (ibp - ib_) / h),
                         (b.collector, (icp - ic) / h),
@@ -1847,6 +2119,8 @@ mod tests {
         let seed = TriodeSeed {
             nl_kind: &nl_kind,
             label: "T1".to_owned(),
+            supply_voltage: supply,
+            parallel_count: 1,
         };
 
         let all_edges: Vec<usize> = (0..graph.edges.len()).collect();

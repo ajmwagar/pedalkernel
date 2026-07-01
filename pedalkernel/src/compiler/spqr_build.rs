@@ -342,7 +342,7 @@ pub fn compile_via_spqr_with_options(
     // chain — they still process and meter, but don't overwrite the signal.
     let group_bias: Vec<_> = feedback_groups
         .iter()
-        .map(|g| super::bias_analysis::classify_group_bias(g, &graph))
+        .map(|g| super::bias::classify_group_bias(g, &graph))
         .collect();
 
     // Build a map from node → DC bias voltage across all StaticBias groups.
@@ -350,7 +350,7 @@ pub fn compile_via_spqr_with_options(
     let mut bias_node_voltages: std::collections::BTreeMap<super::graph::NodeId, f64> =
         std::collections::BTreeMap::new();
     for kind in &group_bias {
-        if let super::bias_analysis::GroupBiasKind::StaticBias { dc_voltages } = kind {
+        if let super::bias::GroupBiasKind::StaticBias { dc_voltages } = kind {
             bias_node_voltages.extend(dc_voltages);
         }
     }
@@ -583,7 +583,7 @@ pub fn compile_via_spqr_with_options(
         let is_detector_bypass = is_delayed_detector_group(group, &graph, &detector_seed_nodes);
         let is_bypass = ((matches!(
             group_bias[gi],
-            super::bias_analysis::GroupBiasKind::StaticBias { .. }
+            super::bias::GroupBiasKind::StaticBias { .. }
         ) || is_nonlinear_modulator_group(group, &graph))
             && !has_signal_transformer)
             || is_detector_bypass;
@@ -2972,9 +2972,23 @@ pub(super) fn build_spqr_stage_with_options(
             // multivibrators). Without asymmetric initial conditions, the NR solver
             // can trap at the symmetric DC fixed point and produce no oscillation.
             if let RootKind::Bjt(ref mut bjt) = root {
-                if let Some(hint) = init_hints.iter().find(|h| h.device_label == comp.id) {
-                    let crate::dsl::InitState::Named(ref state_name) = hint.state;
-                    let vce = bjt_hint_vce(state_name, supply_voltage, bjt.is_pnp);
+                // Node-voltage seeds key on circuit nodes, not BJT refs — skip
+                // them here (they seed reactive ports, not this BjtRoot).
+                if let Some(hint) = init_hints.iter().find(|h| {
+                    h.device_label == comp.id
+                        && !matches!(h.state, crate::dsl::InitState::NodeVoltage { .. })
+                }) {
+                    let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+                    let vce = match &hint.state {
+                        crate::dsl::InitState::Named(state_name) => {
+                            bjt_hint_vce(state_name, supply_voltage, bjt.is_pnp)
+                        }
+                        // Explicit `op { }` seed: warm-start the single-port WDF
+                        // BjtRoot at the supplied collector-emitter voltage.
+                        crate::dsl::InitState::Explicit { vce, .. } => sign * *vce,
+                        // Filtered out above; unreachable.
+                        crate::dsl::InitState::NodeVoltage { .. } => 0.0,
+                    };
                     bjt.set_initial_prev_v(vce);
                 }
             }

@@ -86,6 +86,91 @@ fn build_general_mna_from_edges_inner(
     // Step 1: Collect unique MNA nodes
     let mut node_set = collect_mna_nodes(all_edges, graph);
 
+    // Step 1b: Input-coupling-network inclusion (pedalkernel adapted-input-port).
+    //
+    // The WDF adapted (voltage-source) input port injects the signal at
+    // `graph.in_node`. For a cap-coupled discrete amp the global input is the
+    // OUTER plate of an input coupling cap (e.g. BA283 `Cin.a`), which is NOT a
+    // member of this group's MNA — the coupling cap is a boundary edge that was
+    // stripped during signal-flow partitioning. Injection then falls back to the
+    // amplifier's base node, BYPASSING the input coupling cap + series base
+    // resistor and injecting with a placeholder source impedance.
+    //
+    // Fix (Option B): pull the source node + its coupling cap INTO the group. We
+    // locate the single passive (cap/resistor) edge that bridges `graph.in_node`
+    // to a node already in this MNA, add `graph.in_node` as an MNA node, and add
+    // that bridge edge to the passive edge set so it is stamped as a reactive
+    // (or resistive) WDF port. The adapted VS port then lands at the TRUE source
+    // node with the source's own (low) impedance, and the WDF scatters
+    // source -> Cin -> Rin -> base by construction — correct for ANY input
+    // network, not just a lumped series resistor.
+    let mut passive_edges_owned: Vec<usize> = all_edges.to_vec();
+    let mut input_coupling_included = false;
+    if !node_set.contains(&graph.in_node)
+        && graph.in_node != graph.gnd_node
+        && graph.in_node != graph.vcc_node
+    {
+        let edge_set: HashSet<usize> = all_edges.iter().copied().collect();
+        // The bridge edge: incident to in_node, other terminal already in MNA,
+        // and a 2-terminal passive (capacitor preferred — the coupling cap).
+        let bridge = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(eidx, e)| {
+                !edge_set.contains(eidx)
+                    && (e.node_a == graph.in_node || e.node_b == graph.in_node)
+            })
+            .filter_map(|(eidx, e)| {
+                let other = if e.node_a == graph.in_node {
+                    e.node_b
+                } else {
+                    e.node_a
+                };
+                if !node_set.contains(&other) {
+                    return None;
+                }
+                let comp = &graph.components[e.comp_idx];
+                // Only coupling caps / series resistors — never an active device.
+                let is_passive_bridge =
+                    comp.kind.capacitance().is_some() || comp.kind.resistance().is_some();
+                is_passive_bridge.then_some(eidx)
+            })
+            // Prefer a capacitor (the DC-blocking coupling cap) if several exist.
+            .min_by_key(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                if comp.kind.capacitance().is_some() {
+                    0
+                } else {
+                    1
+                }
+            });
+        if let Some(bridge_eidx) = bridge {
+            node_set.push(graph.in_node);
+            passive_edges_owned.push(bridge_eidx);
+            input_coupling_included = true;
+        }
+    }
+    let passive_edges: &[usize] = &passive_edges_owned;
+
+    // Adapted (input voltage-source) port reference resistance = the source's own
+    // (low/known) impedance. When we pulled the true global source node + its
+    // coupling cap into the group (`input_coupling_included`), the adapted port
+    // sits at the actual signal source, which is near-ideal (low Z) — use a small
+    // line-source impedance instead of the legacy 1 kΩ placeholder, so the WDF
+    // input divider (source -> Cin -> Rin -> base) is not artificially loaded.
+    // Inter-stage / boundary-fallback adapted ports keep the legacy 1 kΩ (their
+    // true driving-point impedance is the upstream stage, not a known source), so
+    // no existing non-cap-coupled circuit changes.
+    let adapted_source_r: f64 = if input_coupling_included {
+        std::env::var("PK_RADAPT")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(50.0)
+    } else {
+        1000.0
+    };
+
     let diode_ladder_filter = differential_diode_ladder_component_filter(all_edges, graph);
 
     // Step 2: Classify NL devices (also returns component labels for hint matching)
@@ -174,7 +259,7 @@ fn build_general_mna_from_edges_inner(
         .collect();
 
     let (mut mna, reactive_edges, variable_resistor_candidates) = stamp_passive_edges(
-        all_edges,
+        passive_edges,
         &nl_edge_set,
         graph,
         &node_to_mna,
@@ -192,8 +277,9 @@ fn build_general_mna_from_edges_inner(
         graph,
         &node_to_mna,
         n_nl,
-        all_edges,
+        passive_edges,
         effective_rate,
+        adapted_source_r,
     );
     let n_passive = passive_children.len();
     let extract_output_node_id = find_output_extract_node(all_edges, &node_set, graph);
@@ -291,6 +377,7 @@ fn build_general_mna_from_edges_inner(
         extract_output_nodes,
         &nl_comp_labels,
         init_hints,
+        adapted_source_r,
     )?;
 
     // Step 9: DC Q-point pre-charge for triode-with-grid stages.
@@ -344,7 +431,193 @@ fn build_general_mna_from_edges_inner(
         );
     }
 
+    // Step 11: explicit `op { }` operating-point seed (pedalkernel — seed-and-hold).
+    //
+    // This is the AUTHORITATIVE warm-start override: it runs LAST, after the
+    // engine's own `apply_bjt_dc_qpoint` (which otherwise sets `v_prev` from the
+    // engine's homotopy DC solve). It overrides ONLY the NR warm-start
+    // (`v_prev` / `initial_v_prev` / `v_prev_2`) at the named device's ports and
+    // deliberately leaves the stage's DC source term (`dc_bias` / `dc_qpoint_v`)
+    // exactly as the engine computed it.
+    //
+    // That is the whole point: the stage's `dc_bias` defines WHERE the runtime
+    // NR fixed point sits. Seeding `v_prev` at an externally-supplied operating
+    // point (e.g. ngspice's `.op`) and then running silence answers a precise
+    // question — does the NR HOLD the seed (the seed IS a root of the engine's
+    // residual ⇒ bias math agrees, cold-solve is a basin/root-selection issue)
+    // or WALK back to the engine's own root (the seed is NOT a root ⇒ the
+    // engine's bias math genuinely differs from spice). Re-deriving `dc_bias`
+    // from the seed would force it to be a fixed point and make the test vacuous,
+    // so we do not.
+    apply_op_seed(&mut stage, init_hints, &nl_comp_labels);
+
+    // Step 12: reactive-port (capacitor) seed from `op { nodes { ... } }`.
+    // Seeds each WDF capacitor's stored DC voltage to `V(node_a) − V(node_b)`
+    // from the supplied node-voltage map, completing a FULL operating-point seed
+    // (device ports via Step 11 + cap voltages here). No-op without node hints.
+    apply_cap_seed(&mut stage, init_hints, &reactive_edges, graph);
+
     Ok(stage)
+}
+
+/// Step 12 helper: seed reactive (capacitor) one-port voltages from the
+/// `op { nodes { ... } }` node-voltage map.
+///
+/// `reactive_edges[k]` is 1:1 with `stage.passive_one_ports[k]` (both built in
+/// the same order by `build_wdf_ports`). For each capacitor, the stored DC
+/// voltage is `V(node_a) − V(node_b)`, read from the node-voltage hints keyed by
+/// `.pedal` node NAME (a pin name like `Q3.base`, or a reserved node like
+/// `in`/`vcc`). Ground defaults to 0 V. Caps whose terminals are not both in the
+/// map are left at their existing (engine-DC-solved) state.
+///
+/// This is the reusable cap half of a full operating-point seed: a future
+/// compile-time DC solver can call the same path with its solved node vector.
+/// No-op when no `NodeVoltage` hints are present (byte-identical to before).
+fn apply_cap_seed(
+    stage: &mut MultiNlStage,
+    init_hints: &[crate::dsl::InitHint],
+    reactive_edges: &[(usize, OnePortKind)],
+    graph: &CircuitGraph,
+) {
+    use std::collections::HashMap;
+    // name → DC voltage, from the node-voltage hints only.
+    let mut name_v: HashMap<&str, f64> = HashMap::new();
+    for h in init_hints {
+        if let crate::dsl::InitState::NodeVoltage { v } = &h.state {
+            name_v.insert(h.device_label.as_str(), *v);
+        }
+    }
+    if name_v.is_empty() {
+        return;
+    }
+
+    // Resolve to NodeId → voltage via the graph's pin-name map.
+    let mut node_v: HashMap<NodeId, f64> = HashMap::new();
+    for (name, v) in &name_v {
+        if let Some(&nid) = graph.node_names.get(*name) {
+            node_v.insert(nid, *v);
+        } else {
+            eprintln!("[cap-seed] node name {name:?} not found in graph — ignored");
+        }
+    }
+
+    let voltage_at = |node: NodeId| -> Option<f64> {
+        if node == graph.gnd_node {
+            Some(0.0)
+        } else {
+            node_v.get(&node).copied()
+        }
+    };
+
+    for (k, (eidx, kind)) in reactive_edges.iter().enumerate() {
+        if !matches!(kind, OnePortKind::Capacitor(_)) {
+            continue;
+        }
+        let e = &graph.edges[*eidx];
+        let (Some(va), Some(vb)) = (voltage_at(e.node_a), voltage_at(e.node_b)) else {
+            continue;
+        };
+        let v_cap = va - vb;
+        if let Some(&one_port) = stage.passive_one_ports.get(k) {
+            let seeded =
+                one_port.wdf_seed_dc_voltage(v_cap as pedalkernel_rt::Wave, &mut stage.passive_runtime_state);
+            if seeded {
+                eprintln!(
+                    "[cap-seed] reactive port {k} (edge {eidx}): V = {va:.4} − {vb:.4} = {v_cap:+.4} V"
+                );
+            }
+        }
+    }
+}
+
+/// Step 11 helper: apply explicit `op { }` operating-point seeds as the final
+/// NR warm-start, overriding `v_prev` / `initial_v_prev` / `v_prev_2` only.
+///
+/// Maps each `InitState::Explicit` device label to its BJT device group's port
+/// offsets (`off` = base-emitter port, `off + 1` = collector-emitter port) and
+/// writes the seeded `Vbe` / `Vce` (sign-flipped for PNP). Leaves `dc_bias`,
+/// `dc_qpoint_v`, and every passive cap state untouched. Devices without an
+/// explicit hint, and `Named` hints, are skipped. No-op when there are no
+/// explicit hints (the common case ⇒ byte-identical).
+fn apply_op_seed(
+    stage: &mut MultiNlStage,
+    init_hints: &[crate::dsl::InitHint],
+    nl_comp_labels: &[String],
+) {
+    let has_explicit = init_hints
+        .iter()
+        .any(|h| matches!(h.state, crate::dsl::InitState::Explicit { .. }));
+    if !has_explicit {
+        return;
+    }
+    let Some(dg) = stage.device_groups.as_ref() else {
+        return;
+    };
+    // Snapshot (offset, is_pnp) per group before mutably borrowing the stage's
+    // warm-start vectors.
+    let mut seeds: Vec<(usize, f64, f64)> = Vec::new();
+    for (g, group) in dg.groups.iter().enumerate() {
+        let NlDeviceGroupKind::BjtTwoPort(bjt) = group else {
+            continue;
+        };
+        let label = nl_comp_labels.get(g).map(|s| s.as_str()).unwrap_or("");
+        let Some(hint) = init_hints.iter().find(|h| h.device_label == label) else {
+            continue;
+        };
+        let crate::dsl::InitState::Explicit { vbe, vce } = &hint.state else {
+            continue;
+        };
+        let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+        seeds.push((dg.offsets[g], sign * *vbe, sign * *vce));
+    }
+    let n_nl = stage.n_nl;
+    for (off, vbe, vce) in seeds {
+        for (port, v) in [(off, vbe), (off + 1, vce)] {
+            if port >= n_nl {
+                continue;
+            }
+            let w = v as pedalkernel_rt::Wave;
+            stage.v_prev[port] = w;
+            stage.initial_v_prev[port] = w;
+            stage.v_prev_2[port] = w;
+        }
+        eprintln!(
+            "[op-seed/hold] port {off}: Vbe={:.4} Vce={:.4} (v_prev overridden post-apply_bjt_dc_qpoint)",
+            vbe, vce
+        );
+    }
+
+    // Self-validation: the op{} seed is, by construction, an externally-supplied
+    // operating point. Compute and report the per-port WDF DC balance residual
+    // F(seed) = a − dc_bias − cap − nl right here, as a byproduct of seeding.
+    // A nonzero residual proves the seed is NOT a fixed point of OUR DC equations
+    // (a formulation bug), and the four-term breakdown localizes which term is
+    // off. Always emitted when an explicit op{} seed is present; also honors
+    // PK_OP_RESIDUAL=1 for ad-hoc probing.
+    //
+    // NOTE: at this compile-time call the reactive (cap) ports are at their
+    // freshly-built state, not yet DC-settled, so the `cap` column reflects the
+    // initial wave state. For a DC-consistent cap term, settle silence first and
+    // re-read via `MultiNlStage::op_seed_residual` (the ba283_seed_and_hold test
+    // does exactly this).
+    let report = has_explicit
+        || std::env::var("PK_OP_RESIDUAL").map(|v| v == "1").unwrap_or(false);
+    if report {
+        let ports = stage.op_seed_residual();
+        eprintln!(
+            "[op-seed/residual] per-port WDF DC balance residual F(seed)=a-dc_bias-cap-nl \
+             (nonzero ⇒ seed is NOT a fixed point of our DC eqns ⇒ formulation bug):"
+        );
+        let mut max_r = 0.0f64;
+        for (i, p) in ports.iter().enumerate() {
+            max_r = max_r.max(p.residual.abs());
+            eprintln!(
+                "  port {i:2}: a={:+.4} dc_bias={:+.4} cap={:+.4} nl={:+.4} adapt={:+.4} servo={:+.4}  i_dev={:+.3e}  static_r={:+.4} V",
+                p.a, p.dc_bias, p.cap, p.nl, p.adapted, p.servo, p.i_device, p.residual
+            );
+        }
+        eprintln!("[op-seed/residual] max|static residual| = {max_r:.4} V");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -751,6 +1024,7 @@ fn build_wdf_ports(
     n_nl: usize,
     edge_indices: &[usize],
     effective_rate: f64,
+    r_adapted: f64,
 ) -> (
     Vec<WdfPort>,
     Vec<WdfPortTerminals>,
@@ -758,7 +1032,6 @@ fn build_wdf_ports(
     Vec<f64>,
 ) {
     let r_nl_default = 1000.0;
-    let r_adapted = 1000.0;
     let mut ports = Vec::with_capacity(n_nl + reactive_edges.len() + 1);
     let mut port_node_pairs = Vec::new();
     let mut nl_port_resistances = vec![r_nl_default; n_nl];
@@ -1254,11 +1527,11 @@ fn assemble_multi_nl_stage(
     extract_output_nodes: Option<WdfPortTerminals>,
     nl_comp_labels: &[String],
     init_hints: &[crate::dsl::InitHint],
+    r_adapted: f64,
 ) -> Result<MultiNlStage, String> {
     let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
     let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
     let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
-    let r_adapted = 1000.0;
     let extract_coeffs = extract_output_nodes.map(|out| {
         let (out_pos, out_neg) = out.as_tuple();
         mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
@@ -1336,24 +1609,56 @@ fn assemble_multi_nl_stage(
         if let Some(ref dg) = device_groups {
             for (g, group) in dg.groups.iter().enumerate() {
                 let label = nl_comp_labels.get(g).map(|s| s.as_str()).unwrap_or("");
-                let hint = init_hints.iter().find(|h| h.device_label == label);
+                // Node-voltage seeds key on circuit nodes, not device refs — they
+                // seed reactive ports (apply_cap_seed), never this BJT warm-start.
+                let hint = init_hints.iter().find(|h| {
+                    h.device_label == label
+                        && !matches!(h.state, crate::dsl::InitState::NodeVoltage { .. })
+                });
                 let Some(hint) = hint else { continue };
                 let off = dg.offsets[g];
                 if let NlDeviceGroupKind::BjtTwoPort(bjt) = group {
                     let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
-                    let crate::dsl::InitState::Named(ref state_name) = hint.state;
-                    let (vbe, vce) = resolve_bjt_init_state(state_name, supply_voltage);
-                    if off < n_nl {
-                        initial_v[off] = sign * vbe;
+                    match &hint.state {
+                        crate::dsl::InitState::Named(state_name) => {
+                            let (vbe, vce) = resolve_bjt_init_state(state_name, supply_voltage);
+                            if off < n_nl {
+                                initial_v[off] = sign * vbe;
+                            }
+                            if off + 1 < n_nl {
+                                initial_v[off + 1] = sign * vce;
+                            }
+                            // Named states are the asymmetric-oscillator seed path:
+                            // engaging the DC ramp protects the seed across reset().
+                            any_hint_applied = true;
+                            eprintln!(
+                                "[init-hint] {label}: {state_name} → Vbe={:.3}, Vce={:.3} (sign={sign})",
+                                vbe, vce
+                            );
+                        }
+                        crate::dsl::InitState::Explicit { vbe, vce } => {
+                            // Explicit `op { }` operating-point seed: a steady-state
+                            // warm-start (the opposite of an oscillator asymmetry), so
+                            // it deliberately does NOT set `any_hint_applied` and the
+                            // stage keeps `dc_ramp = 0` (full DC excitation at t=0,
+                            // mirroring ngspice's `.op`-then-`.tran`). This only sets
+                            // the build-time `initial_v`; the authoritative override
+                            // that survives `apply_bjt_dc_qpoint` is `apply_op_seed`
+                            // (Step 11 in build_general_mna_from_edges_inner).
+                            if off < n_nl {
+                                initial_v[off] = sign * *vbe;
+                            }
+                            if off + 1 < n_nl {
+                                initial_v[off + 1] = sign * *vce;
+                            }
+                            eprintln!(
+                                "[op-seed] {label}: Vbe={:.4}, Vce={:.4} (sign={sign})",
+                                vbe, vce
+                            );
+                        }
+                        // Filtered out of the `find` above; unreachable here.
+                        crate::dsl::InitState::NodeVoltage { .. } => {}
                     }
-                    if off + 1 < n_nl {
-                        initial_v[off + 1] = sign * vce;
-                    }
-                    any_hint_applied = true;
-                    eprintln!(
-                        "[init-hint] {label}: {state_name} → Vbe={:.3}, Vce={:.3} (sign={sign})",
-                        vbe, vce
-                    );
                 }
             }
         }
@@ -1817,48 +2122,72 @@ fn apply_bjt_dc_qpoint(
     stage.dc_qpoint_passive_b = passive_b;
     stage.apply_dc_qpoint_seed();
 
-    // 2d. PHYSICS-DERIVED DC SERVO — GATED OFF BY DEFAULT (opt-in: PK_SERVO_ENABLE).
+    // 2d. PHYSICS-DERIVED DC SERVO — ON BY DEFAULT for this dc_qpoint-seeded,
+    //     multi-BJT DC-coupled-feedback path (opt-out: PK_SERVO_DISABLE).
     //
     //     The seeded conducting operating point is an exact single-step NR fixed
     //     point but is DYNAMICALLY UNSTABLE in the per-sample cap-coupled dynamics
-    //     — the runtime slides to the starved (cutoff) fixed point.  This is a
-    //     slow, proportional DC-restoring servo on the controlling (Vbe) ports,
-    //     run at the bias network's natural bandwidth `f_c ≈ 1/(2π·τ)` with
-    //     `τ = max_k (R_thévenin · C)` over the circuit's reactive elements (see
-    //     `dominant_bias_tau`).  The rate FALLS OUT of the circuit's R/C — it is
-    //     NOT a hardcoded constant.  The LP coefficient `α = dt/τ` rejects the
-    //     audio swing so the servo senses only the slow DC drift; the proportional
-    //     gain `k_p` restores the op-point without the windup / limit-cycle a pure
-    //     integrator suffers around the unstable fixed point.
+    //     — without the servo the runtime slides to the starved (cutoff) fixed
+    //     point.  This is a slow, proportional DC-restoring servo on the
+    //     controlling (Vbe) ports, run at the bias network's natural bandwidth
+    //     `f_c ≈ 1/(2π·τ)` with `τ = max_k (R_thévenin · C)` over the circuit's
+    //     reactive elements (see `dominant_bias_tau`).  The rate FALLS OUT of the
+    //     circuit's R/C — it is NOT a hardcoded constant.  The LP coefficient
+    //     `α = dt/τ` rejects the audio swing so the servo senses only the slow DC
+    //     drift; the proportional gain `k_p` restores the op-point without the
+    //     windup / limit-cycle a pure integrator suffers around the unstable fixed
+    //     point.
     //
-    //     STATUS (pedalkernel-oz1z): the servo PROVABLY works in a narrow regime —
-    //     with the LOCAL feedback-cap τ (Cfb·R ≈ 26 µs) and k_p ≈ 20 it re-conducts
-    //     the BA283 Darlington (TR2 from cutoff → Vbe≈0.66, all three BJTs in the
-    //     active region) and holds it STABLY over a multi-second buffer, lifting
-    //     the level from −31 dB to ≈−13 dB.  BUT the conducting fixed point's basin
-    //     is KNIFE-EDGE: only k_p ≈ 20–22 lands it; k_p ≤ 18 or ≥ 40 collapse to a
-    //     different (single-BJT-cutoff) wrong fixed point.  No fixed, circuit-
-    //     derived gain robustly closes it to ~0 dB across amplitude / fs / circuit,
-    //     so a per-port Vbe proportional servo is NOT shippable as a default
-    //     (it would regress robustness on the very topology it targets).  Gated
-    //     OFF so all goldens stay byte-identical; the machinery is preserved for
-    //     the next iteration (the deeper fix is the engine-adapted-input-port /
-    //     685e loop-gain layer, not a bias servo).  See bd pedalkernel-oz1z.
+    //     STATUS (BA283 runtime-stability fix): fix #1 — the compile-time DC solve
+    //     now applies the BJT parasitic drops (804f91e6, TR1 122→258 µA) — DISSOLVED
+    //     the old knife-edge.  With the CORRECT (fully-conducting) seed the servo is
+    //     ROBUST: a k_p sweep 8→45 ALL hold the op-point (drift 0.000, settled), and
+    //     the BA283 seed-and-hold goes WALK→HOLD.  The old note (only k_p 20–22
+    //     lands, collapses otherwise) was a property of the UNDER-CONDUCTING seed,
+    //     not the servo.  The servo's job is STABILITY — hold the seeded op-point —
+    //     NOT gain: as k_p→∞ it holds ever closer to the true seed and the gain
+    //     asymptotes to ~+2.8 dB.  We therefore KEEP the bias-hold default k_p = 20
+    //     (holds near the seed, gain ~+2.4 dB) and do NOT trim k_p toward 0 dB —
+    //     reading 0 dB requires k_p≈6, which holds a STARVED bias whose lower gm
+    //     cancels a real small-signal error.  That residual is BUG #3 below, a
+    //     loop-gain-layer problem, NOT a bias/stability one.  Scoped: this block
+    //     only runs when `solve_bjt_group_dc_qpoint` returned a seed (multi-BJT
+    //     group) and only pins ports whose seed is a conducting Si Vbe — so
+    //     non-feedback / single-BJT / degenerate groups are untouched and their
+    //     goldens stay byte-identical.  Verified: `cargo test -p pedalkernel --lib`
+    //     failing set is byte-identical with the servo ON vs OFF (no lib-corpus
+    //     circuit reaches this path; BA283 lives in pedalkernel-pro).
+    //
+    //     BUG #3 (LOGGED RESIDUAL — next workstream, NOT fixed here): at the CORRECT
+    //     operating point there is a ~+2.8 dB small-signal gain error (the BA283
+    //     `ba283_wdf_vs_spice` reads ~+2.4 dB with the k_p=20 hold, asymptoting to
+    //     ~+2.8 dB as k_p→∞).  ba283_runtime_nr confirms the mechanism: the realized
+    //     dIc/(gm·dVbe) ratio ≈ 0.55 at the correct bias — the transconductance /
+    //     loop gain is not fully realized.  This is the engine-adapted-input-port /
+    //     loop-gain layer the servo's author flagged (685e) — NOT something k_p
+    //     should paper over.  Do NOT tune k_p to hide it; fix the loop-gain layer
+    //     instead.  Tracked: bd pedalkernel-opi6.
     let mut tau = dominant_bias_tau(reactive_edges, node_dc, graph);
     if let Ok(s) = std::env::var("PK_SERVO_TAU") {
         if let Ok(v) = s.parse::<f64>() {
             tau = v;
         }
     }
-    let servo_enabled = std::env::var("PK_SERVO_ENABLE").is_ok();
+    // Default ON for this dc_qpoint-seeded multi-BJT feedback path (see STATUS).
+    // `PK_SERVO_DISABLE` forces it OFF; `PK_SERVO_ENABLE` is still honored as an
+    // explicit opt-in (no-op now that on-by-default, kept for compatibility).
+    let servo_enabled = std::env::var("PK_SERVO_DISABLE").is_err();
     if servo_enabled && tau > 0.0 {
         let fs = stage.passive_sample_rate.max(1.0) as f64;
         // Low-pass coefficient α = dt/τ for the slow op-point DC estimate.
         let alpha = (1.0 / (tau * fs)).clamp(1e-7, 0.5);
-        // Proportional DC-restoring gain.  The default (≈20) is the value that
-        // lands the BA283 conducting-Darlington basin at the local Cfb τ; it is a
-        // research default (the basin is knife-edge — see the STATUS note above),
-        // overridable via PK_SERVO_KP.
+        // Proportional DC-restoring gain.  k_p = 20 is the BIAS-HOLD default: it
+        // holds the seeded conducting op-point near the true seed (gain ~+2.4 dB).
+        // It is NOT a gain-trim — with fix #1's correct seed the whole k_p 8→45
+        // band holds (drift 0.000), so 20 is a robust hold value, not a knife-edge
+        // pick.  Do NOT lower it toward ~6 to read 0 dB: that holds a STARVED bias
+        // and hides BUG #3 (the ~+2.8 dB loop-gain residual).  Overridable via
+        // PK_SERVO_KP.
         let mut k_p = 20.0_f64;
         if let Ok(s) = std::env::var("PK_SERVO_KP") {
             if let Ok(v) = s.parse::<f64>() {
