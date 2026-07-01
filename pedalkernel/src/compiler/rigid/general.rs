@@ -2122,48 +2122,72 @@ fn apply_bjt_dc_qpoint(
     stage.dc_qpoint_passive_b = passive_b;
     stage.apply_dc_qpoint_seed();
 
-    // 2d. PHYSICS-DERIVED DC SERVO — GATED OFF BY DEFAULT (opt-in: PK_SERVO_ENABLE).
+    // 2d. PHYSICS-DERIVED DC SERVO — ON BY DEFAULT for this dc_qpoint-seeded,
+    //     multi-BJT DC-coupled-feedback path (opt-out: PK_SERVO_DISABLE).
     //
     //     The seeded conducting operating point is an exact single-step NR fixed
     //     point but is DYNAMICALLY UNSTABLE in the per-sample cap-coupled dynamics
-    //     — the runtime slides to the starved (cutoff) fixed point.  This is a
-    //     slow, proportional DC-restoring servo on the controlling (Vbe) ports,
-    //     run at the bias network's natural bandwidth `f_c ≈ 1/(2π·τ)` with
-    //     `τ = max_k (R_thévenin · C)` over the circuit's reactive elements (see
-    //     `dominant_bias_tau`).  The rate FALLS OUT of the circuit's R/C — it is
-    //     NOT a hardcoded constant.  The LP coefficient `α = dt/τ` rejects the
-    //     audio swing so the servo senses only the slow DC drift; the proportional
-    //     gain `k_p` restores the op-point without the windup / limit-cycle a pure
-    //     integrator suffers around the unstable fixed point.
+    //     — without the servo the runtime slides to the starved (cutoff) fixed
+    //     point.  This is a slow, proportional DC-restoring servo on the
+    //     controlling (Vbe) ports, run at the bias network's natural bandwidth
+    //     `f_c ≈ 1/(2π·τ)` with `τ = max_k (R_thévenin · C)` over the circuit's
+    //     reactive elements (see `dominant_bias_tau`).  The rate FALLS OUT of the
+    //     circuit's R/C — it is NOT a hardcoded constant.  The LP coefficient
+    //     `α = dt/τ` rejects the audio swing so the servo senses only the slow DC
+    //     drift; the proportional gain `k_p` restores the op-point without the
+    //     windup / limit-cycle a pure integrator suffers around the unstable fixed
+    //     point.
     //
-    //     STATUS (pedalkernel-oz1z): the servo PROVABLY works in a narrow regime —
-    //     with the LOCAL feedback-cap τ (Cfb·R ≈ 26 µs) and k_p ≈ 20 it re-conducts
-    //     the BA283 Darlington (TR2 from cutoff → Vbe≈0.66, all three BJTs in the
-    //     active region) and holds it STABLY over a multi-second buffer, lifting
-    //     the level from −31 dB to ≈−13 dB.  BUT the conducting fixed point's basin
-    //     is KNIFE-EDGE: only k_p ≈ 20–22 lands it; k_p ≤ 18 or ≥ 40 collapse to a
-    //     different (single-BJT-cutoff) wrong fixed point.  No fixed, circuit-
-    //     derived gain robustly closes it to ~0 dB across amplitude / fs / circuit,
-    //     so a per-port Vbe proportional servo is NOT shippable as a default
-    //     (it would regress robustness on the very topology it targets).  Gated
-    //     OFF so all goldens stay byte-identical; the machinery is preserved for
-    //     the next iteration (the deeper fix is the engine-adapted-input-port /
-    //     685e loop-gain layer, not a bias servo).  See bd pedalkernel-oz1z.
+    //     STATUS (BA283 runtime-stability fix): fix #1 — the compile-time DC solve
+    //     now applies the BJT parasitic drops (804f91e6, TR1 122→258 µA) — DISSOLVED
+    //     the old knife-edge.  With the CORRECT (fully-conducting) seed the servo is
+    //     ROBUST: a k_p sweep 8→45 ALL hold the op-point (drift 0.000, settled), and
+    //     the BA283 seed-and-hold goes WALK→HOLD.  The old note (only k_p 20–22
+    //     lands, collapses otherwise) was a property of the UNDER-CONDUCTING seed,
+    //     not the servo.  The servo's job is STABILITY — hold the seeded op-point —
+    //     NOT gain: as k_p→∞ it holds ever closer to the true seed and the gain
+    //     asymptotes to ~+2.8 dB.  We therefore KEEP the bias-hold default k_p = 20
+    //     (holds near the seed, gain ~+2.4 dB) and do NOT trim k_p toward 0 dB —
+    //     reading 0 dB requires k_p≈6, which holds a STARVED bias whose lower gm
+    //     cancels a real small-signal error.  That residual is BUG #3 below, a
+    //     loop-gain-layer problem, NOT a bias/stability one.  Scoped: this block
+    //     only runs when `solve_bjt_group_dc_qpoint` returned a seed (multi-BJT
+    //     group) and only pins ports whose seed is a conducting Si Vbe — so
+    //     non-feedback / single-BJT / degenerate groups are untouched and their
+    //     goldens stay byte-identical.  Verified: `cargo test -p pedalkernel --lib`
+    //     failing set is byte-identical with the servo ON vs OFF (no lib-corpus
+    //     circuit reaches this path; BA283 lives in pedalkernel-pro).
+    //
+    //     BUG #3 (LOGGED RESIDUAL — next workstream, NOT fixed here): at the CORRECT
+    //     operating point there is a ~+2.8 dB small-signal gain error (the BA283
+    //     `ba283_wdf_vs_spice` reads ~+2.4 dB with the k_p=20 hold, asymptoting to
+    //     ~+2.8 dB as k_p→∞).  ba283_runtime_nr confirms the mechanism: the realized
+    //     dIc/(gm·dVbe) ratio ≈ 0.55 at the correct bias — the transconductance /
+    //     loop gain is not fully realized.  This is the engine-adapted-input-port /
+    //     loop-gain layer the servo's author flagged (685e) — NOT something k_p
+    //     should paper over.  Do NOT tune k_p to hide it; fix the loop-gain layer
+    //     instead.  Tracked: bd pedalkernel-opi6.
     let mut tau = dominant_bias_tau(reactive_edges, node_dc, graph);
     if let Ok(s) = std::env::var("PK_SERVO_TAU") {
         if let Ok(v) = s.parse::<f64>() {
             tau = v;
         }
     }
-    let servo_enabled = std::env::var("PK_SERVO_ENABLE").is_ok();
+    // Default ON for this dc_qpoint-seeded multi-BJT feedback path (see STATUS).
+    // `PK_SERVO_DISABLE` forces it OFF; `PK_SERVO_ENABLE` is still honored as an
+    // explicit opt-in (no-op now that on-by-default, kept for compatibility).
+    let servo_enabled = std::env::var("PK_SERVO_DISABLE").is_err();
     if servo_enabled && tau > 0.0 {
         let fs = stage.passive_sample_rate.max(1.0) as f64;
         // Low-pass coefficient α = dt/τ for the slow op-point DC estimate.
         let alpha = (1.0 / (tau * fs)).clamp(1e-7, 0.5);
-        // Proportional DC-restoring gain.  The default (≈20) is the value that
-        // lands the BA283 conducting-Darlington basin at the local Cfb τ; it is a
-        // research default (the basin is knife-edge — see the STATUS note above),
-        // overridable via PK_SERVO_KP.
+        // Proportional DC-restoring gain.  k_p = 20 is the BIAS-HOLD default: it
+        // holds the seeded conducting op-point near the true seed (gain ~+2.4 dB).
+        // It is NOT a gain-trim — with fix #1's correct seed the whole k_p 8→45
+        // band holds (drift 0.000), so 20 is a robust hold value, not a knife-edge
+        // pick.  Do NOT lower it toward ~6 to read 0 dB: that holds a STARVED bias
+        // and hides BUG #3 (the ~+2.8 dB loop-gain residual).  Overridable via
+        // PK_SERVO_KP.
         let mut k_p = 20.0_f64;
         if let Ok(s) = std::env::var("PK_SERVO_KP") {
             if let Ok(v) = s.parse::<f64>() {
