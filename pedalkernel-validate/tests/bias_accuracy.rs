@@ -425,11 +425,23 @@ fn bias_accuracy_dashboard() {
         // The metric must have paired all three BJTs and produced residual ports.
         assert_eq!(r.devices.len(), 3, "BA283 should pair Q1/Q2/Q3 vs ngspice");
         assert_eq!(r.n_residual_ports, 6, "BA283 has 3 BJTs × 2 ports");
-        // BA283's MATCH is known-off (TR1 starved); the dashboard must see it.
+        // The BA283 MATCH is CLOSED (cold-path DC solve lands AND holds
+        // ngspice's op exactly, cdce13b4): ΔVbe = 0.0000 V, ΔIc = 0.0 %. This
+        // used to assert the opposite ("MATCH should be clearly off", the old
+        // TR1-starved state) — that canary predated the closure and had gone
+        // stale. LOCK the closed state with the same bounds as the permanent
+        // ba283_ib_diagnostic gates (Vbe < 2 mV, Ic < 2 %).
         assert!(
-            r.max_abs_d_vbe > criteria.vbe_fail_v,
-            "BA283 MATCH should be clearly off (max ΔVbe={:.4}V)",
+            r.max_abs_d_vbe < 0.002,
+            "BA283 DC bias regressed: max ΔVbe={:.4}V (gate: < 2 mV; the closed \
+             state reads 0.0000 V)",
             r.max_abs_d_vbe
+        );
+        assert!(
+            r.max_abs_d_ic_pct < 2.0,
+            "BA283 DC bias regressed: max ΔIc={:.1}% (gate: < 2 %; the closed \
+             state reads 0.0 %)",
+            r.max_abs_d_ic_pct
         );
         // Part 2 (stiff-cap fold branch, `apply_cap_seed` self-consistency fix):
         // the cap-seeded residual is now the TRUE formulation residual ≈ 0.04 V,
@@ -452,17 +464,17 @@ fn bias_accuracy_dashboard() {
              — a value near 0.6 V means the dc_bias↔cap-seed inconsistency regressed",
             r.max_abs_residual
         );
-        // With the seed now self-consistent the formulation-SOURCE bug is resolved;
-        // the residual localizes to Layer B (the solver still lands a bias whose
-        // MATCH is ~46-73% off ngspice — the remaining Q1/Q2 starvation the fold's
-        // source-stepping targets, NOT a dc_bias-source error).
+        // With the seed self-consistent AND the solver landing/holding ngspice's
+        // op exactly (cdce13b4), the verdict is BIAS OK — both the formulation
+        // and the root are correct. (The old `FormulationOkSolverOff` lock was
+        // the intermediate state before the cold-path solve closed the root.)
         assert_eq!(
             r.verdict,
-            op_point::Verdict::FormulationOkSolverOff,
-            "BA283 should now localize to Layer B (solver/root); its cap-seeded \
-             residual {:.4} V is below the {:.2} V formulation threshold",
+            op_point::Verdict::BiasOk,
+            "BA283 should read BIAS OK (closed DC op); cap-seeded residual \
+             {:.4} V, max ΔVbe {:.4} V",
             r.max_abs_residual,
-            criteria.residual_formulation_v,
+            r.max_abs_d_vbe,
         );
     } else {
         eprintln!("  (BA283 pro pedal absent — verdict gate skipped)");
