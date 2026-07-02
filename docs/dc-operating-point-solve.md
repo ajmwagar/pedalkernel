@@ -105,6 +105,222 @@ sample (~1 NR step), not a global homotopy.
 - **Layer B — solve:** once A holds, add source stepping from 0 to the compile-time
   solve so it lands the right root; validate per-device against ngspice `.op`.
 
+### 2026-07-01 — the op is a discrete-time REPELLER; confirmed cause + cure design
+
+Follow-up to the map-Jacobian probe (`ba283_persample_map_jacobian`,
+`PK_BA283_JMAP=1`). The probe linearizes the WDF per-sample map at ngspice's
+correct op (servo OFF, full `op{}`+`nodes{}` seed) and prints the cap-state
+Jacobian `Jcap`; offline `numpy.linalg.eig` gives the spectral radius **ρ**.
+
+**Baseline reproduced (this branch):** `ρ(Jcap) = 2743`, dominant eigenvector on
+**Cmil (0.67) ⊕ Ccmp (0.74)** (the 220p/330p HF caps around TR1's Miller loop);
+the other two caps are benign (Cfb small; Cin = 10µF gives λ ≈ 1.000, a marginal
+coupling-cap mode). One-sample drift of the seeded op ≈ 4.7 V; static per-port
+DC-balance residual `max|F(seed)| = 0.0404 V` at the TR1-collector port. So the
+correct op is a **stable fixed point of the continuous circuit but a repeller of
+the WDF sample-to-sample map**, localized to the two stiff HF caps.
+
+**Mechanism, pinned to code (confirmed, not hypothesised):**
+
+- A WDF capacitor is a *wave unit delay*: `wdf_reflected` returns
+  `wave_cache[slot].wave_state` = the previous incident `a[n−1]`
+  (`pedalkernel-rt/src/boundary_math.rs:225-231`), with reference resistance
+  `Rp = 1/(2·fs·C)` (`boundary_math.rs:138`) — trapezoidal. For Cmil 220p that is
+  ~52 kΩ; Ccmp 330p ~34 kΩ.
+- In `MultiNlStage::process` the caps are treated **semi-explicitly**: each sample
+  reads `b_passive[k] = wdf_reflected(...)` (the delayed `a[n−1]`) and feeds it as
+  a **fixed** term into `known_a[i]` via `s_nl_passive`
+  (`pedalkernel-rt/src/stage.rs:6383-6429`). The grouped-NR
+  (`solver.rs::multi_port_nr_solve_grouped_into`) solves **only the BJT device
+  port voltages** — the caps are *not* unknowns. After the solve, scatter-down
+  gives the new incident `a`, and `wdf_set_incident` stores `wave_state = a`
+  (`stage.rs:6620-6622`).
+- Net: the map `wave_state[n] → wave_state[n+1]` closes a **z⁻¹ (wave delay)**
+  around TR1's high-gm common-emitter Miller feedback. With the two stiff caps'
+  huge `Rp` sitting on that high-impedance node, the discrete loop gain is > 1 →
+  `ρ = 2743`. This is the classic "delay-in-the-loop" instability.
+
+**Why the earlier Backward-Euler damping only reached ρ ≈ 261 (10×, insufficient):**
+softening the cap's discretization constant while it *remains a delayed wave
+source feeding `known_a`* leaves the z⁻¹ in the loop — it only lowers the gain,
+it does not remove the pole. The delay must be **removed**, i.e. the stiff caps
+must be solved *simultaneously* with the devices.
+
+**Cure — Part 1, implicit stiff-cap fold (runtime-feasible; NO adaptor rebuild):**
+
+Move the stiff caps (`C < 1 nF`) out of the delayed `passive_one_ports` set and
+into the grouped-NR as **coupled unknowns with a linear Backward-Euler companion
+device**: `i_c(v) = G_c·(v − v_prev)`, `G_c = C·fs_eff`, `di/dv = G_c`. Key point
+that makes this tractable without rebuilding the R-adaptor scattering `S`:
+
+- The cap's **reference resistance may stay at the existing `1/(2·fs·C)`** — a WDF
+  port's reference resistance only scales its wave variables; the *solved* node
+  voltage `v_c` and current `i_c` are physically correct BE values regardless of
+  the reference `Rp`. So the fold is a **port re-partition** ([NL ∪ stiff] become
+  the solved set), not a new `S`.
+- Because `G_c` now enters the Newton Jacobian **at sample n** (solved with the
+  BJTs), the stiff conductance is *in the loop instantaneously* → the discrete
+  pole moves to the stable continuous location. The z⁻¹ survives only on the
+  companion source `I_eq = G_c·v_prev`, wrapped by the stabilizing conductance ⇒
+  ρ expected < 1.
+
+Concrete implementation surface:
+
+1. **Extended system** size `m = n_nl + n_stiff`. The solver needs the `S`
+   sub-blocks over the *stiff rows* too — `S[stiff][nl]`, `S[stiff][stiff]`,
+   `S[stiff][other_passive]`, `S[stiff][adapted]` — which `MultiNlStage` does
+   **not** currently retain (only the `n_nl` rows: `s_nl`, `s_nl_passive`,
+   `s_nl_adapted`, `stage.rs:4686-4693`). Either (a) retain the extra rows at
+   build time from the full matrix before `from_full_matrix`, or (b) reconstruct
+   raw `S` at runtime from `RTypeAdaptor.power_scattering` + `sqrt_r`/`inv_sqrt_r`
+   (`tree.rs:207-214`, currently private — add accessors; confirm the adaptor's
+   port ordering is `[NL, passive, (vcc?), adapted]`, the same order
+   `from_full_matrix` assumes).
+2. **New solver path** `multi_port_nr_solve_grouped_with_caps_into` (or append a
+   `LinearCapCompanion` 1-port `NlDeviceGroupIv` after the real device groups).
+   Keep it a *separate* function reached only when stiff caps are present ⇒ the
+   whole non-BA283 corpus stays byte-identical.
+3. **State**: keep `v_c` in the cap's existing `wave_cache[slot].wave_state`
+   (re-interpreted as `v_prev`), updated to the solved `v_c` after the NR. This
+   leaves the map-Jacobian probe's cap enumeration unchanged, so re-running
+   `PK_BA283_JMAP=1` measures the *new* map's ρ directly (before→after
+   comparable).
+4. **Gate**: a multi-BJT (≥2 BJT device groups) DC-coupled-feedback group that
+   contains ≥1 stiff cap (`C < 1 nF`). Non-matching stages take the existing
+   path. Verify byte-identical corpus with the gate off.
+
+**Cure — Part 2, bias reformulation (unchanged direction):** make `F(ngspice_op) =
+0` by fixing the Norton `dc_bias` source-term extraction at the feedback-coupled
+base (localized by the probe residual to the TR1 collector / Q3 base, R2-56k).
+HARD CONSTRAINT (documented regression trap): do **not** fold device small-signal
+Jacobians into the linear source term. With `F(op)=0` *and* the implicit caps
+(ρ<1), the op is a stable discrete fixed point ⇒ the DC servo becomes removable.
+
+### 2026-07-01 (final) — BA283 DC bias CLOSED (ΔIc 0.0%); AC gap localized to output loading
+
+The "base-current precision" hypothesis was tested and the DC gap fully closed —
+but the mechanism was NOT a 1-2µA Ib formulation error. Diagnostic-first
+(`pedalkernel-validate/tests/ba283_ib_diagnostic.rs`, permanent):
+
+1. **Ib diagnostic** (Layer 1/2): our Gummel-Poon Ib at ngspice's exact `.op`
+   junction voltages. The Ib EQUATIONS were already SPICE-exact (Ibe1/BF + ISE·
+   (exp(vbe/(NE·Vt))−1) + Ibc1/BR + ISC-term, no qb division; RB/RE/RC terminal
+   decomposition correct). The entire diff was **thermal voltage**: `vt: 0.02585`
+   (25 °C) vs ngspice's TEMP=TNOM=27 °C with CODATA-2018 constants ⇒
+   `Vt = 1.380649e-23·300.15/1.602176634e-19 ≈ 25.8649 mV`. With that Vt the
+   per-device diff collapses to |ΔIb| ≤ 0.0006 µA, |ΔIc| ≤ 0.001 % (gate was
+   0.2 µA). Fixed in `model_lookup::bjt_from_spice` (`SPICE_VT_27C`).
+2. **Deck-KCL audit + standalone deck DC solve** (Layer 3/4): with the exact
+   model, a 6-node Newton solve of the DECK's DC lands ngspice's op to <0.1 mV —
+   so the remaining compile/runtime offset was NETWORK, not device. Two bugs:
+   - `solve_bjt_group_dc_qpoint` stamped the pot RU1 at the FULL 4.7k track
+     (`Potentiometer::resistance()` = max_r) instead of position-scaled 2350
+     (the `make_leaf`/spqr_build 0.5 convention) → q-point ~4 mV off.
+   - `apply_bjt_dc_qpoint`'s `resolve()` treated the input node as floating ⇒
+     **Cin seeded + inverted at 0 V instead of −1.03 V**. F(seed) was
+     self-consistently 0 at compile but NOT a steady state of the cap dynamics:
+     Cin charged over ~0.2 s and dragged the stage from the exact q-point to the
+     starved root (Q3 0.6417→0.663, ΔIc +46/−75 %) — the cold-path twin of the
+     `nodes{}`-seed Cin bug fixed in `apply_cap_seed`. Fixed: in/out nodes
+     DC-reference ground; caps seeded with `wdf_seed_dc_voltage` (a=b=v) and
+     `passive_b` re-read from `wdf_reflected` (mirrors the proven hold path).
+
+**Result:** cold compile + silence, servo untouched OR `PK_SERVO_DISABLE=1`:
+Q3 Vbe pinned at 0.64167 bit-stable for 48 000 samples; `bias_accuracy` MATCH
+**ΔVbe 0.0000 V, ΔIc 0.0 %** on all three devices (verdict **BIAS OK**);
+F(ngspice_op) = 0.0001 V; ρ(Jcap) = 0.9994 < 1; deck-KCL at the settled root
+≤ 0.016 µA.
+
+**AC verdict — the THD gap is NOT bias/device/solver: it is the missing output
+load.** ngspice tran (0.1 V @ 1 kHz) shows the −16 dB THD comes from Q1/Q2 being
+driven into **cutoff clipping** every cycle (vbe1 swings +0.547→−0.152 V) by the
+10k load current demand through Cout. Our compiled BA283 puts Cout+RL in a
+downstream stage whose impedance never reflects back into the MultiNl stage —
+and ngspice with **RL=1G reproduces our sim to 3-4 decimals** (vbe swings
+identical; vout ±0.94 vs our ±0.92; THD −52.4 vs our −52.9 dB; fundamental 0.938
+vs 0.926 V). So the WDF engine is now quantitatively exact at the topology it
+simulates; the remaining `ac_accuracy` LEVEL +2.7 dB / ΔTHD ~37 dB / tilt ~4.8 dB
+is entirely the **cross-stage output-loading architecture gap** (same family as
+the LA-2A GAP F transformer step-down). Fix path: reflect the downstream stage's
+input impedance into the NL group (or fuse Cout/RL into it) — a compiler
+partitioning/boundary change, out of scope for the bias workstream.
+
+### 2026-07-01 (superseded) — DC-solve root: Early-effect model fix + residual localization
+
+Pursuing the remaining Layer-B gap (compile-time BJT DC solve lands Q3 over- /
+Q1-Q2 under-conducting, ΔIc 46-74% vs ngspice). Decisive diagnostics (temporary,
+now removed):
+
+1. **Model vs ngspice at ngspice's exact op** (`bjt_currents_terminal` at the
+   `.op` voltages): our Ic matched ngspice to 1-13%. The 13% (BC184C @ Vce=18.8)
+   traced to the **base-charge Early factor being linearized**:
+   `q1 = 1 + vbc/VAF + vbe/VAR` instead of SPICE's `q1 = 1/(1 − vbc/VAF − vbe/VAR)`.
+   At vbc/VAF≈−0.37 the linear form over-predicts Ic ~15%. **Fixed** (commit
+   `fix(bjt): SPICE Gummel-Poon base-charge q1`): all three devices now match
+   ngspice Ic to ~1%; corpus lib failure set byte-identical (79); BA283 fold
+   ρ=0.9994 and servo-OFF hold (ΔVbe 0.0054V) preserved; cap-seeded residual
+   0.0402→0.0344V.
+
+2. **Nodal KCL residual at ngspice's node voltages** (`solve_bjt_group_dc_qpoint`,
+   `PK_DC_DIAG_NODES`): after the q1 fix, ngspice's op is a **~2µA root** of our
+   nodal equations (the resistor network — incl. RU1 4.7k pot as a single a-b edge
+   and Rfb 56k — is complete and correct; the earlier "1mA" output-node imbalance
+   was a diagnostic node-mapping artifact at R7's midpoint). Our solve converges to
+   a TRUE root (KCL 2.5e-11) that sits ~40mV away, starving the Q1/Q2 Darlington.
+
+**Why it's not fully closed:** the residual is dominated by **base-current
+(ISE/ISC recombination)** — BC184C runs β≈2-6 here, so Ib is recombination- not
+transport-dominated — and a ~1-2µA Ib discrepancy is amplified by the **56k (Rfb)
+/ 68k (R3) bias resistors** and the shunt feedback into the ~40mV node offset (a
+2µA error × 56k ≈ 110mV). Matching ngspice's bias to <10% ΔIc therefore requires
+matching the base current to <~0.2µA — a base-current-recombination calibration
+that is a deeper, global-BJT change with regression risk, deferred. The collector
+model and the nodal formulation are now correct; the gap is base-current precision.
+
+### 2026-07-01 (later) — LANDED: implicit stiff-cap fold + seed self-consistency → ρ<1
+
+Both parts implemented and validated against the probe. **ρ(Jcap) = 0.9994 < 1**
+(was 2743). The dominant eigenvalues collapsed from `[2743, −312, 154, 0.9998]` to
+`[0.002, 0.014, 0.881, 0.9994]`: the Cmil ⊕ Ccmp stiff modes are gone; the surviving
+0.9994 is the benign Cin coupling-cap mode (the marginal `λ≈1.000` the baseline
+already had).
+
+- **Part 1 — implicit fold** (`pedalkernel-rt/src/stage.rs`): `StiffCapFold` +
+  `CapCompanion` + `solve_stiff_fold`. Stiff caps (`C<1 nF`: Cmil 220p, Ccmp 330p)
+  are re-partitioned out of the delayed `passive_one_ports` set into the grouped-NR
+  as 1-port Backward-Euler companions `i_c=G_c·(v−v_prev)`, `G_c=1/(2·R_c)`, solved
+  coupled with the BJTs. The R-adaptor `S` is NOT rebuilt — the full standard `S` is
+  reconstructed from the adaptor (`RTypeAdaptor::scattering_matrix`) and sliced into
+  the extended `[NL ∪ stiff]` system reusing the existing
+  `multi_port_nr_solve_grouped_into`. Gated to ≥2 BJT groups + ≥1 stiff cap; every
+  other stage takes the byte-identical legacy path. `v_c` is kept in the cap's
+  `wave_state` slot so the probe stays before/after comparable.
+- **Part 2 — seed self-consistency** (`pedalkernel/src/compiler/rigid/general.rs`,
+  `apply_cap_seed`): the blocker was NOT the fold but that the probe seeds caps HOT
+  to ngspice's `nodes{}` voltages while `dc_bias` was derived (`apply_dc_qpoint_seed`)
+  against the compiler's own DC cap solve `dc_qpoint_passive_b`, whose **input
+  coupling cap Cin sat COLD at 0 V instead of its real −1.03 V**. That inconsistency
+  injected ~0.6 V of spurious `known_a` residual (`F(seed)=0.615` in BOTH the legacy
+  and folded paths) so the grouped-NR could not converge at the seeded op — and
+  folding caps into a NON-converging NR *amplified* ρ (2743→23611). The fix
+  re-points `dc_qpoint_passive_b` at the seeded (ngspice) cap waves and re-runs the
+  wave-domain Norton inversion → `F(ngspice_op)` drops **0.615 → 0.0402 V** (uses
+  only `i(v*)`, no small-signal Jacobians; fires only when `nodes{}` is present, so
+  production/corpus is byte-identical). This is the Part-2 directive (fix the Norton
+  `dc_bias` source so the op is a fixed point), realized as removing a cap-seed↔bias
+  inconsistency rather than new source math.
+
+**Gate results:** ρ=0.9994 (✓<1); **servo-OFF hold: HOLDS**, max|ΔVbe|=0.0064 V over
+48000 samples (was 4.73 V drift) ⇒ servo removable; **AC LEVEL +2.40 dB** (was
+−25.13); **bias residual 0.0402 V** (Layer A→B); **corpus 1050/79 unregressed**
+(79 = baseline, no fold/seed-related failures). **Still open (Layer B / deeper):**
+AC **THD −36 vs −16 dB** and **tilt 5 dB**, and bias **MATCH ΔIc 46-73%** (Q1/Q2
+starved vs ngspice) — the compiler's own BJT DC solve (`dc_qpoint_v`) still lands a
+root ~0.04 V off ngspice's device operating point; the fold makes that op *stable*
+and the seed *self-consistent*, but closing ΔIc needs the compile-time DC solve to
+match ngspice (source-stepping / a better group DC solve), not the runtime map. Do
+not tune `Rp`/`k_p`/BE-damping to move THD; that masks.
+
 ### 2026-06-30 — the "curvature loss" is the DC bias, not the runtime embedding
 
 Investigation of the BA283 large-signal under-distortion (THD −36 vs ngspice

@@ -425,29 +425,56 @@ fn bias_accuracy_dashboard() {
         // The metric must have paired all three BJTs and produced residual ports.
         assert_eq!(r.devices.len(), 3, "BA283 should pair Q1/Q2/Q3 vs ngspice");
         assert_eq!(r.n_residual_ports, 6, "BA283 has 3 BJTs × 2 ports");
-        // BA283's MATCH is known-off (TR1 starved); the dashboard must see it.
+        // The BA283 MATCH is CLOSED (cold-path DC solve lands AND holds
+        // ngspice's op exactly, cdce13b4): ΔVbe = 0.0000 V, ΔIc = 0.0 %. This
+        // used to assert the opposite ("MATCH should be clearly off", the old
+        // TR1-starved state) — that canary predated the closure and had gone
+        // stale. LOCK the closed state with the same bounds as the permanent
+        // ba283_ib_diagnostic gates (Vbe < 2 mV, Ic < 2 %).
         assert!(
-            r.max_abs_d_vbe > criteria.vbe_fail_v,
-            "BA283 MATCH should be clearly off (max ΔVbe={:.4}V)",
+            r.max_abs_d_vbe < 0.002,
+            "BA283 DC bias regressed: max ΔVbe={:.4}V (gate: < 2 mV; the closed \
+             state reads 0.0000 V)",
             r.max_abs_d_vbe
         );
-        // The cap-seeded residual must be the HONEST ≈ 0.615 V (Q3 Vbe dominant),
-        // NOT the old cold-cap ≈ 0.04 V. Guard the range so a regression back to
-        // the cold-cap contamination (or a runaway) is caught.
         assert!(
-            (0.4..1.0).contains(&r.max_abs_residual),
-            "BA283 cap-seeded residual should be ≈ 0.615 V (Q3 Vbe dominant), got {:.4} V \
-             — a value near 0.04 V means the caps sat COLD (nodes{{}} seed missing)",
+            r.max_abs_d_ic_pct < 2.0,
+            "BA283 DC bias regressed: max ΔIc={:.1}% (gate: < 2 %; the closed \
+             state reads 0.0 %)",
+            r.max_abs_d_ic_pct
+        );
+        // Part 2 (stiff-cap fold branch, `apply_cap_seed` self-consistency fix):
+        // the cap-seeded residual is now the TRUE formulation residual ≈ 0.04 V,
+        // NOT the old 0.615 V. The 0.615 V was an ARTIFACT: the caps were seeded
+        // HOT to ngspice's node voltages, but `dc_bias` was still derived against
+        // the compiler's own DC cap solve (`dc_qpoint_passive_b`), whose input
+        // coupling cap Cin sat COLD at 0 V instead of its real −1.03 V. That
+        // inconsistency injected ~0.6 V of spurious `known_a` residual and stopped
+        // the grouped-NR from converging at the seeded op. Re-pointing
+        // `dc_qpoint_passive_b` at the seeded (ngspice) cap waves and re-running
+        // the wave-domain Norton inversion makes `F(ngspice_op) ≈ 0` — exactly the
+        // Part-2 directive (fix the `dc_bias` source so the op is a fixed point),
+        // using only `i(v*)` (no small-signal Jacobians). Guard the low band so a
+        // regression that RE-introduces the inconsistency (residual jumps back to
+        // ~0.6 V) or a runaway is caught.
+        assert!(
+            r.max_abs_residual < 0.15,
+            "BA283 cap-seeded residual should be the TRUE formulation residual \
+             ≈ 0.04 V after the Part-2 seed self-consistency fix, got {:.4} V \
+             — a value near 0.6 V means the dc_bias↔cap-seed inconsistency regressed",
             r.max_abs_residual
         );
-        // And with that honest residual it must localize to Layer A (formulation).
+        // With the seed self-consistent AND the solver landing/holding ngspice's
+        // op exactly (cdce13b4), the verdict is BIAS OK — both the formulation
+        // and the root are correct. (The old `FormulationOkSolverOff` lock was
+        // the intermediate state before the cold-path solve closed the root.)
         assert_eq!(
             r.verdict,
-            op_point::Verdict::FormulationBug,
-            "BA283 should localize to Layer A (formulation); its true cap-seeded \
-             residual {:.4} V exceeds the {:.2} V formulation threshold",
+            op_point::Verdict::BiasOk,
+            "BA283 should read BIAS OK (closed DC op); cap-seeded residual \
+             {:.4} V, max ΔVbe {:.4} V",
             r.max_abs_residual,
-            criteria.residual_formulation_v,
+            r.max_abs_d_vbe,
         );
     } else {
         eprintln!("  (BA283 pro pedal absent — verdict gate skipped)");

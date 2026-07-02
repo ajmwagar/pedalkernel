@@ -546,6 +546,29 @@ impl RTypeAdaptor {
     pub fn port_resistances(&self) -> Vec<crate::Wave> {
         self.sqrt_r.iter().map(|sr| sr * sr).collect()
     }
+
+    /// Reconstruct the **standard** (non-power-normalized) scattering matrix
+    /// `S[i][j]` (row-major, `num_ports × num_ports`).
+    ///
+    /// Inverse of the power normalization applied in [`RTypeAdaptor::new`]:
+    /// `S̅[i][j] = S[i][j]·√(R_j/R_i)` ⇒ `S[i][j] = S̅[i][j]·√(R_i/R_j)`
+    /// `= power_scattering[i][j]·sqrt_r[i]·inv_sqrt_r[j]`.
+    ///
+    /// This is the same matrix `MultiNlScattering::from_full_matrix` slices, so
+    /// the port ordering is `[NL, passive, (vcc?), adapted]` with the adapted
+    /// port last. Used by the stiff-cap fold to retain the passive rows that
+    /// the NL-only sub-blocks discard.
+    #[must_use]
+    pub fn scattering_matrix(&self) -> Vec<crate::Wave> {
+        let n = self.num_ports;
+        let mut s = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                s[i * n + j] = self.power_scattering[i * n + j] * self.sqrt_r[i] * self.inv_sqrt_r[j];
+            }
+        }
+        s
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -509,6 +509,7 @@ fn apply_cap_seed(
         }
     };
 
+    let mut any_seeded = false;
     for (k, (eidx, kind)) in reactive_edges.iter().enumerate() {
         if !matches!(kind, OnePortKind::Capacitor(_)) {
             continue;
@@ -522,11 +523,35 @@ fn apply_cap_seed(
             let seeded =
                 one_port.wdf_seed_dc_voltage(v_cap as pedalkernel_rt::Wave, &mut stage.passive_runtime_state);
             if seeded {
+                any_seeded = true;
                 eprintln!(
                     "[cap-seed] reactive port {k} (edge {eidx}): V = {va:.4} − {vb:.4} = {v_cap:+.4} V"
                 );
             }
         }
+    }
+
+    // Make the seed SELF-CONSISTENT (Part 2 for the seeded op): `dc_bias` was
+    // derived (`apply_dc_qpoint_seed`) against the compiler's own DC cap solve
+    // (`dc_qpoint_passive_b`). Overriding the cap wave_state to ngspice's
+    // node voltages without re-deriving `dc_bias` leaves a spurious residual
+    // `Σ_k s_nl_passive[i][k]·(b_ngspice[k] − b_compiler[k])` in the per-sample
+    // `known_a` — e.g. the input coupling cap Cin resolves to 0 V in the
+    // compiler solve but −1.03 V in ngspice, injecting ~0.6 V of bogus residual
+    // that prevents the grouped-NR from converging at the seeded op. Re-point
+    // `dc_qpoint_passive_b` at the seeded (ngspice) cap reflected waves and
+    // re-run the wave-domain inversion so the Norton `dc_bias` source term makes
+    // `F(ngspice_op) ≈ 0`. Uses only `i(v*)` (no device small-signal Jacobians),
+    // per the documented hard constraint. Only fires when `nodes{}` is present,
+    // so production (no seed) is byte-identical.
+    if any_seeded && stage.dc_qpoint_v.is_some() && !stage.dc_qpoint_passive_b.is_empty() {
+        let n_pb = stage.dc_qpoint_passive_b.len();
+        for k in 0..n_pb {
+            if let Some(&one_port) = stage.passive_one_ports.get(k) {
+                stage.dc_qpoint_passive_b[k] = one_port.wdf_reflected(&stage.passive_runtime_state);
+            }
+        }
+        stage.apply_dc_qpoint_seed();
     }
 }
 
@@ -1784,6 +1809,7 @@ fn assemble_multi_nl_stage(
         dc_servo_v_lp: Vec::new(),
         dc_servo_corr: Vec::new(),
         dc_servo_mask: Vec::new(),
+        stiff_fold: None,
     })
 }
 
@@ -2070,6 +2096,17 @@ fn apply_bjt_dc_qpoint(
     let resolve = |node: NodeId| -> Option<f64> {
         if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
             Some(0.0)
+        } else if node == graph.in_node || node == graph.out_node {
+            // AC-coupled I/O: the source / load network DC-references ground, so
+            // a coupling cap facing `in`/`out` charges to the full interior DC
+            // voltage.  Treating the input node as "floating ⇒ 0 V across the
+            // cap" seeded the BA283's Cin at 0 V instead of its true −1.03 V:
+            // the compile state was self-consistent (F(seed)=0) but NOT a steady
+            // state of the cap dynamics, so Cin charged over ~0.2 s and dragged
+            // the stage off the solved op (Q3 vbe 0.6417 → 0.663, ΔIc +46 %) —
+            // the cold-path twin of the `nodes{}`-seed Cin bug fixed in
+            // `apply_cap_seed`.
+            Some(0.0)
         } else if node == graph.vcc_node {
             graph
                 .supply_voltages
@@ -2104,14 +2141,23 @@ fn apply_bjt_dc_qpoint(
     //     `passive_one_ports[k]` (same build order).
     for (k, _) in reactive_edges.iter().enumerate() {
         if let (Some(&one_port), Some(&bk)) = (stage.passive_one_ports.get(k), passive_b.get(k)) {
-            // Seed the cap's *reflected wave* directly to `passive_b[k]` (the DC
-            // steady-state value the inversion assumed).  `wdf_set_incident` sets
-            // `wave_state = incident`, and `wdf_reflected` returns `wave_state`, so
-            // the first sample sees b_passive[k] = passive_b[k] exactly.  (The
-            // `CapacitorVoltage` setter instead yields 2·v on a fresh cap, which
-            // over-drives the first known_a and kicks the NR out of the active
-            // basin.)
-            one_port.wdf_set_incident(bk, &mut stage.passive_runtime_state);
+            // Pin the cap at its DC fixed point (`a = b = v`, previous_reflected
+            // = v): the first sample sees b_passive[k] = passive_b[k] AND the
+            // cap's stored voltage/history are steady-state-consistent — the
+            // same primitive the `op { nodes { … } }` seed path uses
+            // (`apply_cap_seed`), which is proven to HOLD over 48 000 samples.
+            // (`wdf_set_incident` left `previous_reflected` at the stale
+            // pre-seed value; the `CapacitorVoltage` setter yields 2·v on a
+            // fresh cap — both perturb the first samples.)
+            one_port.wdf_seed_dc_voltage(bk, &mut stage.passive_runtime_state);
+        }
+    }
+    // Re-read the actual reflected waves so the inversion below sees exactly the
+    // state the runtime will produce (mirrors `apply_cap_seed`; for resistor /
+    // non-stateful ports `wdf_reflected` is 0 rather than the analytic guess).
+    for (k, b) in passive_b.iter_mut().enumerate() {
+        if let Some(&one_port) = stage.passive_one_ports.get(k) {
+            *b = one_port.wdf_reflected(&stage.passive_runtime_state);
         }
     }
 
@@ -2122,13 +2168,13 @@ fn apply_bjt_dc_qpoint(
     stage.dc_qpoint_passive_b = passive_b;
     stage.apply_dc_qpoint_seed();
 
-    // 2d. PHYSICS-DERIVED DC SERVO — ON BY DEFAULT for this dc_qpoint-seeded,
-    //     multi-BJT DC-coupled-feedback path (opt-out: PK_SERVO_DISABLE).
+    // 2d. PHYSICS-DERIVED DC SERVO — OFF BY DEFAULT since the output-load
+    //     fusion (opt-in: PK_SERVO_ENABLE; PK_SERVO_DISABLE still forces off).
     //
-    //     The seeded conducting operating point is an exact single-step NR fixed
-    //     point but is DYNAMICALLY UNSTABLE in the per-sample cap-coupled dynamics
-    //     — without the servo the runtime slides to the starved (cutoff) fixed
-    //     point.  This is a slow, proportional DC-restoring servo on the
+    //     HISTORY: the servo was introduced when the seeded conducting operating
+    //     point was DYNAMICALLY UNSTABLE in the per-sample cap-coupled dynamics
+    //     — without it the runtime slid to the starved (cutoff) fixed point.
+    //     It is a slow, proportional DC-restoring servo on the
     //     controlling (Vbe) ports, run at the bias network's natural bandwidth
     //     `f_c ≈ 1/(2π·τ)` with `τ = max_k (R_thévenin · C)` over the circuit's
     //     reactive elements (see `dominant_bias_tau`).  The rate FALLS OUT of the
@@ -2137,6 +2183,26 @@ fn apply_bjt_dc_qpoint(
     //     drift; the proportional gain `k_p` restores the op-point without the
     //     windup / limit-cycle a pure integrator suffers around the unstable fixed
     //     point.
+    //
+    //     WHY THE DEFAULT FLIPPED TO OFF (output-load-fusion branch):
+    //     (a) The stability job is done at the ROOT: the cold-path DC solve now
+    //         lands AND holds ngspice's op exactly — the seed-and-hold probe is
+    //         bit-stable over 48 000 samples with the servo OFF, and the
+    //         per-sample map Jacobian is contractive (ρ = 0.9998 < 1, incl. the
+    //         fused Cout·RL pole).  The knife-edge the servo guarded against no
+    //         longer exists.
+    //     (b) With the output load FUSED into the stage (trailing-output-group
+    //         fusion in spqr_build), the servo actively SUPPRESSES PHYSICS: the
+    //         loaded class-A stage clips by cutoff under large swing, and the
+    //         clipping-rectified DC component on Vbe — a real behavior ngspice
+    //         shows — looks like "drift" to the servo, which corrects it and
+    //         linearizes the amp.  A/B vs the LOADED ngspice golden (identical
+    //         fused topology): servo ON reads THD −30.3 dB / LEVEL +2.24 dB /
+    //         tilt 4.32 dB; servo OFF reads THD −16.4 vs golden −16.1 dB
+    //         (Δ 0.4 dB), LEVEL −0.05 dB, tilt 0.79 dB across 50 Hz–10 kHz.
+    //         There is no such control loop in the physical circuit; keeping it
+    //         on by default trades a solved stability problem for a real
+    //         large-signal fidelity error.
     //
     //     STATUS (BA283 runtime-stability fix): fix #1 — the compile-time DC solve
     //     now applies the BJT parasitic drops (804f91e6, TR1 122→258 µA) — DISSOLVED
@@ -2173,10 +2239,13 @@ fn apply_bjt_dc_qpoint(
             tau = v;
         }
     }
-    // Default ON for this dc_qpoint-seeded multi-BJT feedback path (see STATUS).
-    // `PK_SERVO_DISABLE` forces it OFF; `PK_SERVO_ENABLE` is still honored as an
-    // explicit opt-in (no-op now that on-by-default, kept for compatibility).
-    let servo_enabled = std::env::var("PK_SERVO_DISABLE").is_err();
+    // Default OFF for this dc_qpoint-seeded multi-BJT feedback path (see WHY THE
+    // DEFAULT FLIPPED above): the hold is bit-stable without it and it suppresses
+    // the real load-induced op-point dynamics.  `PK_SERVO_ENABLE` opts back in
+    // (stability belt for experiments); `PK_SERVO_DISABLE` still forces it off
+    // and wins over both.
+    let servo_enabled =
+        std::env::var("PK_SERVO_ENABLE").is_ok() && std::env::var("PK_SERVO_DISABLE").is_err();
     if servo_enabled && tau > 0.0 {
         let fs = stage.passive_sample_rate.max(1.0) as f64;
         // Low-pass coefficient α = dt/τ for the slow op-point DC estimate.

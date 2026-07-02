@@ -383,12 +383,26 @@ fn ba283_runtime_nr() {
             dic,
             ratio
         );
-        // (2) Transconductance IS applied: for any group with a meaningful swing,
-        // dIc tracks gm·dVbe (ratio ≈ 1). This is the core BA283 verdict.
-        if dvbe.abs() > 1e-4 && gm_avg.abs() > 1e-6 {
+        // (2) Transconductance IS applied: for any group with a meaningful
+        // SMALL-SIGNAL swing, dIc tracks gm·dVbe (ratio ≈ 1). This is the core
+        // BA283 verdict — but the linear relation is only physics for
+        // |dVbe| ≲ 2·Vt ≈ 52 mV. Since the output-load fusion the stage drives
+        // its real 10k load and the 0.1 V stimulus legitimately swings the
+        // 2N3055 output device ~0.5 V through CUTOFF per cycle (the loaded
+        // ngspice golden shows the same clipping, THD −16 dB); evaluating
+        // gm·dVbe across an exponential clip is meaningless there. Large-swing
+        // devices are exempted here and covered by `ac_accuracy` (per-harmonic
+        // WDF-vs-ngspice match) instead.
+        if dvbe.abs() > 1e-4 && dvbe.abs() < 0.052 && gm_avg.abs() > 1e-6 {
             assert!(
                 (ratio - 1.0).abs() < 0.35,
                 "group {g}: dIc does not track gm·dVbe (ratio={ratio:.3}) — transconductance NOT applied"
+            );
+        } else if dvbe.abs() >= 0.052 {
+            eprintln!(
+                "    (group {g}: dVbe={dvbe:.3} V exceeds the small-signal window — \
+                 large-swing/clipping regime, gm-linearity check not applicable; \
+                 fidelity gated by ac_accuracy THD instead)"
             );
         }
     }
@@ -743,6 +757,309 @@ fn ba283_seed_and_hold() {
     }
 
     assert!(!seed_recs.is_empty(), "no MultiNl BJT groups captured — wiring/labels wrong");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// BA283 PER-SAMPLE MAP JACOBIAN — stability analysis of the op-point repeller.
+//
+// ANALYSIS PROBE (no engine fix). Default-OFF and byte-identical to normal runs:
+// the whole body is gated behind `PK_BA283_JMAP=1`, so unset it is a no-op that
+// touches nothing. It also SKIPS when the pro `.pedal` is absent (CI).
+//
+// # What it builds
+//
+// The established fact (see `ba283_seed_and_hold`) is that ngspice's correct
+// operating point, seeded EXACTLY (op{} device ports + nodes{} cap voltages,
+// servo OFF), satisfies the within-sample grouped-NR to machine zero yet the
+// per-sample discrete-time map slides OFF it in one sample. So the correct op is
+// a STABLE fixed point of the continuous circuit but a REPELLER of the WDF's
+// sample-to-sample map. This probe LINEARIZES that map at the correct op.
+//
+// State = the reactive-port (capacitor) WDF memory `wave_state` (the reflected
+// wave carried across the sample boundary; at DC a=b=Vcap). BA283 has 5 caps:
+// Cin, Cmil (220p), Ccmp (330p), Cfb (4n7), Cout. For each cap state we apply a
+// small central-difference perturbation, run ONE `process(0.0)` (grouped-NR +
+// cap-update), and read the resulting cap states → one column of the 5×5 map
+// Jacobian J (state[n] → state[n+1]). A fresh, fully-seeded processor is rebuilt
+// for every perturbation so the NR warm-start (v_prev/v_prev_2) is pinned at the
+// correct op each time — this isolates the cap→cap reduced map.
+//
+// It ALSO builds an EXTENDED Jacobian over (caps ⊕ v_prev ⊕ v_prev_2), i.e. the
+// caps PLUS the grouped-NR warm-start memory, to test whether the |λ|>1 pole
+// lives in the pure cap dynamics or only appears once the frozen-Newton
+// warm-start is carried forward (deliverable #4: which discretization is
+// responsible).
+//
+// The matrices are printed Python-ready; eigen-decomposition is done offline with
+// numpy (no linalg dep in this crate). Honest by construction: it also prints
+// M(x0) − x0 (the raw one-sample drift of the seeded op) and the conditioning.
+//
+// Run:
+//   PK_BA283_JMAP=1 cargo test -p pedalkernel-validate --test neve1073_spice \
+//     ba283_persample_map_jacobian -- --nocapture
+#[test]
+fn ba283_persample_map_jacobian() {
+    use pedalkernel_rt::processor::Stage;
+
+    if std::env::var("PK_BA283_JMAP").is_err() {
+        // Default-off: byte-identical no-op probe.
+        return;
+    }
+    // Established analysis condition: DC servo OFF (the correct op is the object
+    // of study; the servo is the candidate fix, not part of the bare map).
+    std::env::set_var("PK_SERVO_DISABLE", "1");
+
+    let source = skip_if_missing!(load_pro_pedal_sub(PRO_PATH), PRO_PATH);
+    // FULL operating-point seed: device ports (op{}) + cap voltages (nodes{}).
+    let seeded_src = inject_op_block_full(&source, true);
+
+    // Build a fresh processor pinned at the correct op (caps + v_prev = ngspice).
+    let build = || {
+        let def = parse_pedal_file(&seeded_src).expect("parse seeded BA283");
+        let mut proc = compile_pedal(&def, SR).expect("compile seeded BA283");
+        proc.set_control("Gain", 0.5);
+        proc
+    };
+
+    // ── Enumerate cap coordinates: (stage_idx, slot, C, name) ────────────────
+    // Name by capacitance; the two 10µF caps (Cin, Cout) are split by seed sign
+    // (Cin ≈ −1.03 V, Cout ≈ +4.80 V).
+    let proc0 = build();
+    struct Coord {
+        stage: usize,
+        slot: usize,
+        cap_f: f64,
+        name: String,
+    }
+    let mut coords: Vec<Coord> = Vec::new();
+    for (si, st) in proc0.stages.iter().enumerate() {
+        let Stage::MultiNl(mnl) = st else { continue };
+        for op in mnl.passive_one_ports.iter() {
+            if op.type_tag() != "capacitor" {
+                continue;
+            }
+            let Some(slot) = op.state_slot() else { continue };
+            let cap_f = op.physical_value() as f64;
+            let v = mnl.passive_runtime_state.wave_cache[slot.0].wave_state as f64;
+            let name = if (cap_f - 220e-12).abs() < 1e-13 {
+                "Cmil".to_string()
+            } else if (cap_f - 330e-12).abs() < 1e-13 {
+                "Ccmp".to_string()
+            } else if (cap_f - 4.7e-9).abs() < 1e-11 {
+                "Cfb".to_string()
+            } else if v < 0.0 {
+                "Cin".to_string()
+            } else {
+                "Cout".to_string()
+            };
+            coords.push(Coord { stage: si, slot: slot.0, cap_f, name });
+        }
+    }
+    eprintln!("\n  ═══ BA283 per-sample map Jacobian (correct op, servo OFF) ═══");
+    eprintln!("  reactive cap states found: {}", coords.len());
+    for (i, c) in coords.iter().enumerate() {
+        eprintln!(
+            "    x[{i}] = {:<5} C={:.3e}F  stage={} slot={}",
+            c.name, c.cap_f, c.stage, c.slot
+        );
+    }
+    assert!(!coords.is_empty(), "no reactive cap states enumerated");
+
+    // State accessors (cap `wave_state` = the cross-sample WDF memory).
+    let read_caps = |proc: &pedalkernel::compiler::CompiledPedal| -> Vec<f64> {
+        coords
+            .iter()
+            .map(|c| {
+                if let Stage::MultiNl(m) = &proc.stages[c.stage] {
+                    m.passive_runtime_state.wave_cache[c.slot].wave_state as f64
+                } else {
+                    unreachable!()
+                }
+            })
+            .collect()
+    };
+    let set_cap = |proc: &mut pedalkernel::compiler::CompiledPedal, i: usize, v: f64| {
+        let c = &coords[i];
+        if let Stage::MultiNl(m) = &mut proc.stages[c.stage] {
+            m.passive_runtime_state.wave_cache[c.slot].wave_state = v as pedalkernel_rt::Wave;
+        }
+    };
+
+    // v_prev / v_prev_2 accessors (grouped-NR warm-start memory). Flattened over
+    // all MultiNl stages in order.
+    let read_vprev = |proc: &pedalkernel::compiler::CompiledPedal, second: bool| -> Vec<f64> {
+        let mut out = Vec::new();
+        for st in proc.stages.iter() {
+            if let Stage::MultiNl(m) = st {
+                let v = if second { &m.v_prev_2 } else { &m.v_prev };
+                for &x in v.iter() {
+                    out.push(x as f64);
+                }
+            }
+        }
+        out
+    };
+    let set_vprev = |proc: &mut pedalkernel::compiler::CompiledPedal, second: bool, j: usize, v: f64| {
+        let mut idx = 0usize;
+        for st in proc.stages.iter_mut() {
+            if let Stage::MultiNl(m) = st {
+                let vv = if second { &mut m.v_prev_2 } else { &mut m.v_prev };
+                for x in vv.iter_mut() {
+                    if idx == j {
+                        *x = v as pedalkernel_rt::Wave;
+                        return;
+                    }
+                    idx += 1;
+                }
+            }
+        }
+    };
+
+    // ── Baseline x0 and one-sample drift M(x0) − x0 (repeller evidence) ──────
+    let x0 = read_caps(&proc0);
+    let vprev0 = read_vprev(&proc0, false);
+    let vprev20 = read_vprev(&proc0, true);
+    let n_cap = x0.len();
+    let n_vp = vprev0.len();
+
+    let mut drift_proc = build();
+    // Verify fresh-build determinism: caps must match proc0 exactly.
+    let x0b = read_caps(&drift_proc);
+    let build_det = x0
+        .iter()
+        .zip(&x0b)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    drift_proc.process(0.0);
+    let x1 = read_caps(&drift_proc);
+    eprintln!("\n  fresh-build determinism max|Δ| = {build_det:.3e} (want ~0)");
+    eprintln!("  one-sample cap drift  M(x0) − x0  (repeller if nonzero & growing):");
+    for i in 0..n_cap {
+        eprintln!(
+            "    Δ{:<5} = {:+.6e}   (x0 = {:+.6})",
+            coords[i].name, x1[i] - x0[i], x0[i]
+        );
+    }
+    let drift_norm = (0..n_cap)
+        .map(|i| (x1[i] - x0[i]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    eprintln!("  ||M(x0) − x0||₂ = {drift_norm:.6e}");
+
+    // ── Central-difference Jacobian columns ──────────────────────────────────
+    // Full extended state ordering: [caps(n_cap), v_prev(n_vp), v_prev_2(n_vp)].
+    let dim = n_cap + 2 * n_vp;
+    // Perturbation size: caps O(1-5V), v_prev O(0.4-19V). Use a modest absolute
+    // step; also probe a 10× step to check linearity/conditioning.
+    let base_states: Vec<f64> = x0
+        .iter()
+        .cloned()
+        .chain(vprev0.iter().cloned())
+        .chain(vprev20.iter().cloned())
+        .collect();
+
+    let apply_state = |proc: &mut pedalkernel::compiler::CompiledPedal, k: usize, v: f64| {
+        if k < n_cap {
+            set_cap(proc, k, v);
+        } else if k < n_cap + n_vp {
+            set_vprev(proc, false, k - n_cap, v);
+        } else {
+            set_vprev(proc, true, k - n_cap - n_vp, v);
+        }
+    };
+    let read_full = |proc: &pedalkernel::compiler::CompiledPedal| -> Vec<f64> {
+        let mut out = read_caps(proc);
+        out.extend(read_vprev(proc, false));
+        out.extend(read_vprev(proc, true));
+        out
+    };
+
+    // ── ε-sweep on the 4-cap block (smoothness / conditioning check) ─────────
+    // If the spectral radius is stable across decades of ε, the huge Jacobian is
+    // a genuine (stiff) derivative; if it swings wildly, the map is non-smooth
+    // (BJT-NR branch switch) and the "eigenvalue" is ill-defined — reported
+    // honestly either way.
+    eprintln!("\n  === PYEPS_BEGIN ===");
+    for &e in &[1e-2_f64, 1e-3, 1e-4, 1e-5, 1e-6] {
+        let mut jc = vec![vec![0.0f64; n_cap]; n_cap];
+        for k in 0..n_cap {
+            let mut pp = build();
+            set_cap(&mut pp, k, x0[k] + e);
+            pp.process(0.0);
+            let sp = read_caps(&pp);
+            let mut pm = build();
+            set_cap(&mut pm, k, x0[k] - e);
+            pm.process(0.0);
+            let sm = read_caps(&pm);
+            for r in 0..n_cap {
+                jc[r][k] = (sp[r] - sm[r]) / (2.0 * e);
+            }
+        }
+        eprint!("Jeps_{e:e} = [");
+        for r in 0..n_cap {
+            eprint!("[");
+            for c in 0..n_cap {
+                eprint!("{:.10e}, ", jc[r][c]);
+            }
+            eprint!("], ");
+        }
+        eprintln!("]");
+    }
+    eprintln!("  === PYEPS_END ===");
+
+    let eps = 1e-4_f64;
+    // Build the full extended Jacobian J[dim][dim]: column k = ∂state'/∂state_k.
+    let mut jac = vec![vec![0.0f64; dim]; dim];
+    for k in 0..dim {
+        let mut pp = build();
+        apply_state(&mut pp, k, base_states[k] + eps);
+        pp.process(0.0);
+        let sp = read_full(&pp);
+
+        let mut pm = build();
+        apply_state(&mut pm, k, base_states[k] - eps);
+        pm.process(0.0);
+        let sm = read_full(&pm);
+
+        for r in 0..dim {
+            jac[r][k] = (sp[r] - sm[r]) / (2.0 * eps);
+        }
+    }
+
+    // Emit Python-ready matrices. The 5×5 cap block is the primary deliverable;
+    // the full extended matrix is the frozen-Newton robustness check.
+    let labels: Vec<String> = coords
+        .iter()
+        .map(|c| c.name.clone())
+        .chain((0..n_vp).map(|j| format!("vprev{j}")))
+        .chain((0..n_vp).map(|j| format!("vprev2_{j}")))
+        .collect();
+    eprintln!("\n  === PYJAC_BEGIN ===");
+    eprintln!("n_cap = {n_cap}");
+    eprintln!("dim = {dim}");
+    eprintln!("labels = {labels:?}");
+    eprint!("Jcap = [");
+    for r in 0..n_cap {
+        eprint!("[");
+        for c in 0..n_cap {
+            eprint!("{:.12e}, ", jac[r][c]);
+        }
+        eprint!("], ");
+    }
+    eprintln!("]");
+    eprint!("Jfull = [");
+    for r in 0..dim {
+        eprint!("[");
+        for c in 0..dim {
+            eprint!("{:.12e}, ", jac[r][c]);
+        }
+        eprint!("], ");
+    }
+    eprintln!("]");
+    eprintln!("  === PYJAC_END ===");
+    eprintln!(
+        "\n  NOTE: run the printed Jcap/Jfull through numpy.linalg.eig offline; |λ|>1 = repeller."
+    );
 }
 
 /// Prove the skip mechanism works when the pro repo is absent.
