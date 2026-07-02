@@ -383,12 +383,26 @@ fn ba283_runtime_nr() {
             dic,
             ratio
         );
-        // (2) Transconductance IS applied: for any group with a meaningful swing,
-        // dIc tracks gm·dVbe (ratio ≈ 1). This is the core BA283 verdict.
-        if dvbe.abs() > 1e-4 && gm_avg.abs() > 1e-6 {
+        // (2) Transconductance IS applied: for any group with a meaningful
+        // SMALL-SIGNAL swing, dIc tracks gm·dVbe (ratio ≈ 1). This is the core
+        // BA283 verdict — but the linear relation is only physics for
+        // |dVbe| ≲ 2·Vt ≈ 52 mV. Since the output-load fusion the stage drives
+        // its real 10k load and the 0.1 V stimulus legitimately swings the
+        // 2N3055 output device ~0.5 V through CUTOFF per cycle (the loaded
+        // ngspice golden shows the same clipping, THD −16 dB); evaluating
+        // gm·dVbe across an exponential clip is meaningless there. Large-swing
+        // devices are exempted here and covered by `ac_accuracy` (per-harmonic
+        // WDF-vs-ngspice match) instead.
+        if dvbe.abs() > 1e-4 && dvbe.abs() < 0.052 && gm_avg.abs() > 1e-6 {
             assert!(
                 (ratio - 1.0).abs() < 0.35,
                 "group {g}: dIc does not track gm·dVbe (ratio={ratio:.3}) — transconductance NOT applied"
+            );
+        } else if dvbe.abs() >= 0.052 {
+            eprintln!(
+                "    (group {g}: dVbe={dvbe:.3} V exceeds the small-signal window — \
+                 large-swing/clipping regime, gm-linearity check not applicable; \
+                 fidelity gated by ac_accuracy THD instead)"
             );
         }
     }

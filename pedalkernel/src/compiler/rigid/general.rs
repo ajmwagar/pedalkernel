@@ -2168,13 +2168,13 @@ fn apply_bjt_dc_qpoint(
     stage.dc_qpoint_passive_b = passive_b;
     stage.apply_dc_qpoint_seed();
 
-    // 2d. PHYSICS-DERIVED DC SERVO — ON BY DEFAULT for this dc_qpoint-seeded,
-    //     multi-BJT DC-coupled-feedback path (opt-out: PK_SERVO_DISABLE).
+    // 2d. PHYSICS-DERIVED DC SERVO — OFF BY DEFAULT since the output-load
+    //     fusion (opt-in: PK_SERVO_ENABLE; PK_SERVO_DISABLE still forces off).
     //
-    //     The seeded conducting operating point is an exact single-step NR fixed
-    //     point but is DYNAMICALLY UNSTABLE in the per-sample cap-coupled dynamics
-    //     — without the servo the runtime slides to the starved (cutoff) fixed
-    //     point.  This is a slow, proportional DC-restoring servo on the
+    //     HISTORY: the servo was introduced when the seeded conducting operating
+    //     point was DYNAMICALLY UNSTABLE in the per-sample cap-coupled dynamics
+    //     — without it the runtime slid to the starved (cutoff) fixed point.
+    //     It is a slow, proportional DC-restoring servo on the
     //     controlling (Vbe) ports, run at the bias network's natural bandwidth
     //     `f_c ≈ 1/(2π·τ)` with `τ = max_k (R_thévenin · C)` over the circuit's
     //     reactive elements (see `dominant_bias_tau`).  The rate FALLS OUT of the
@@ -2183,6 +2183,26 @@ fn apply_bjt_dc_qpoint(
     //     drift; the proportional gain `k_p` restores the op-point without the
     //     windup / limit-cycle a pure integrator suffers around the unstable fixed
     //     point.
+    //
+    //     WHY THE DEFAULT FLIPPED TO OFF (output-load-fusion branch):
+    //     (a) The stability job is done at the ROOT: the cold-path DC solve now
+    //         lands AND holds ngspice's op exactly — the seed-and-hold probe is
+    //         bit-stable over 48 000 samples with the servo OFF, and the
+    //         per-sample map Jacobian is contractive (ρ = 0.9998 < 1, incl. the
+    //         fused Cout·RL pole).  The knife-edge the servo guarded against no
+    //         longer exists.
+    //     (b) With the output load FUSED into the stage (trailing-output-group
+    //         fusion in spqr_build), the servo actively SUPPRESSES PHYSICS: the
+    //         loaded class-A stage clips by cutoff under large swing, and the
+    //         clipping-rectified DC component on Vbe — a real behavior ngspice
+    //         shows — looks like "drift" to the servo, which corrects it and
+    //         linearizes the amp.  A/B vs the LOADED ngspice golden (identical
+    //         fused topology): servo ON reads THD −30.3 dB / LEVEL +2.24 dB /
+    //         tilt 4.32 dB; servo OFF reads THD −16.4 vs golden −16.1 dB
+    //         (Δ 0.4 dB), LEVEL −0.05 dB, tilt 0.79 dB across 50 Hz–10 kHz.
+    //         There is no such control loop in the physical circuit; keeping it
+    //         on by default trades a solved stability problem for a real
+    //         large-signal fidelity error.
     //
     //     STATUS (BA283 runtime-stability fix): fix #1 — the compile-time DC solve
     //     now applies the BJT parasitic drops (804f91e6, TR1 122→258 µA) — DISSOLVED
@@ -2219,10 +2239,13 @@ fn apply_bjt_dc_qpoint(
             tau = v;
         }
     }
-    // Default ON for this dc_qpoint-seeded multi-BJT feedback path (see STATUS).
-    // `PK_SERVO_DISABLE` forces it OFF; `PK_SERVO_ENABLE` is still honored as an
-    // explicit opt-in (no-op now that on-by-default, kept for compatibility).
-    let servo_enabled = std::env::var("PK_SERVO_DISABLE").is_err();
+    // Default OFF for this dc_qpoint-seeded multi-BJT feedback path (see WHY THE
+    // DEFAULT FLIPPED above): the hold is bit-stable without it and it suppresses
+    // the real load-induced op-point dynamics.  `PK_SERVO_ENABLE` opts back in
+    // (stability belt for experiments); `PK_SERVO_DISABLE` still forces it off
+    // and wins over both.
+    let servo_enabled =
+        std::env::var("PK_SERVO_ENABLE").is_ok() && std::env::var("PK_SERVO_DISABLE").is_err();
     if servo_enabled && tau > 0.0 {
         let fs = stage.passive_sample_rate.max(1.0) as f64;
         // Low-pass coefficient α = dt/τ for the slow op-point DC estimate.
