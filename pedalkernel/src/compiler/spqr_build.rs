@@ -652,8 +652,63 @@ pub fn compile_via_spqr_with_options(
             let bias_v_max =
                 compute_bias_v_max_for_group(group, &graph, &bias_node_voltages, supply_voltage);
 
+            // ── Output-load fusion (BA283-class, narrow + gated) ──────────
+            // A multi-BJT DC-coupled-feedback group about to be built as ONE
+            // general-MNA stage (the dc_qpoint path) never feels a load placed
+            // in a downstream stage — downstream impedance does not reflect
+            // back into this stage's scattering. Fuse the trailing output
+            // group (coupling cap + grounded load at the global `out`) into
+            // this build so the load-current demand is part of the solved
+            // network. See `trailing_output_load_group_for_fusion` for the
+            // full predicate (gated exactly like the dc_qpoint seed + servo;
+            // everything else is byte-identical).
+            let mut build_edges = group.all_edges();
+            let fused_output_group = trailing_output_load_group_for_fusion(
+                gi,
+                &feedback_groups,
+                &graph,
+                supply_voltage,
+                &cut_edges,
+            );
+            if let Some(src_gi) = fused_output_group {
+                let extra = feedback_groups[src_gi].all_edges();
+                #[cfg(test)]
+                {
+                    let names: Vec<&str> = extra
+                        .iter()
+                        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.as_str())
+                        .collect();
+                    eprintln!(
+                        "  [compile] group {gi}: fused trailing output load group {src_gi} \
+                         {names:?} into multi-BJT DC-feedback MNA"
+                    );
+                }
+                for eidx in extra {
+                    if !build_edges.contains(&eidx) {
+                        build_edges.push(eidx);
+                    }
+                }
+            }
+            // Refresh the stage label / comp ids so the fused stage owns the
+            // load components (stage_comp_ids drives later stage lookups).
+            let (group_label, group_comp_ids) = if fused_output_group.is_some() {
+                let mut names: Vec<String> = build_edges
+                    .iter()
+                    .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                    .collect();
+                names.sort();
+                names.dedup();
+                #[cfg(debug_assertions)]
+                let label = names.join(",");
+                #[cfg(not(debug_assertions))]
+                let label = String::new();
+                (label, names)
+            } else {
+                (group_label, group_comp_ids)
+            };
+
             let mut built = build_rigid_from_group_with_hints(
-                group.all_edges(),
+                build_edges,
                 &graph,
                 sample_rate,
                 Some(group),
@@ -917,6 +972,34 @@ pub fn compile_via_spqr_with_options(
                 is_bypass,
                 group_comp_ids.clone()
             );
+
+            // Output-load fusion: the trailing `{Cout, RL}` group was already
+            // built as its own passive stage (non-feedback groups build
+            // first). Its components are now solved INSIDE the fused MNA —
+            // remove the standalone stage so the load isn't applied twice
+            // (same consumption mechanism as blockwise coupling above).
+            if let Some(src_gi) = fused_output_group {
+                let mut src_ids: Vec<String> = feedback_groups[src_gi]
+                    .all_edges()
+                    .iter()
+                    .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                    .collect();
+                src_ids.sort();
+                src_ids.dedup();
+                // Exclude the fused stage just pushed (last index).
+                for idx in (0..stages.len().saturating_sub(1)).rev() {
+                    if stage_comp_ids[idx] == src_ids {
+                        #[cfg(test)]
+                        eprintln!(
+                            "  [compile] group {gi}: removed standalone trailing \
+                             output stage {idx} ({src_ids:?}) — consumed by fusion"
+                        );
+                        stages.remove(idx);
+                        stage_comp_ids.remove(idx);
+                        break;
+                    }
+                }
+            }
         } else if is_pot_divider_group(group, &graph) {
             #[cfg(test)]
             eprintln!("  → POT DIVIDER group: {:?}", group.all_edges());
@@ -4603,6 +4686,180 @@ fn merge_cross_reactive_groups_into_active_groups(
         idx += 1;
         keep
     });
+}
+
+/// Output-load fusion gate (BA283-class, narrow): find the TRAILING OUTPUT
+/// GROUP — the passive `{Cout, RL}` flow group carrying the amplifier's load —
+/// for a multi-BJT DC-coupled-feedback group about to be built as ONE
+/// general-MNA (`MultiNl`) stage.
+///
+/// WHY: signal-flow partitioning places the output coupling cap + load in a
+/// DOWNSTREAM stage, and a downstream WDF stage's input impedance never
+/// reflects back into this stage's scattering — the amplifier solves against
+/// an open circuit and the load-current demand (which produces the loaded
+/// golden's cutoff clipping in circuits like the BA283) never reaches the
+/// junctions. ngspice with RL=1G reproduces the unloaded WDF to 3–4 decimals:
+/// the engine is exact at the topology it simulates; the topology was wrong.
+/// Fusing the trailing group into the stage's MNA makes the load part of the
+/// solved network: the coupling cap stays a normal DELAYED reactive port (it
+/// is NOT stiff-folded), the load resistor lands in the G matrix, and the
+/// output extraction moves to the global `out` node
+/// (`find_output_extract_node` prefers a `node_set` member). DC is unaffected
+/// by construction: the cap blocks DC, the DC solve sees the load node only
+/// through the grounded resistor (v(out) = 0), and the cap's DC seed charges
+/// to the amplifier's output-node voltage exactly like every other coupling
+/// cap in `apply_bjt_dc_qpoint`.
+///
+/// GATED exactly like the consolidated dc_qpoint seed + servo
+/// (`apply_bjt_dc_qpoint`): the target's NL devices must be ≥2 true
+/// 3-terminal BJTs and NOTHING else (the `all_resolved` ∧ `n_bjt ≥ 2` shape),
+/// and `solve_bjt_group_dc_qpoint` must actually produce the op-point seed.
+/// The call site sits AFTER the blockwise fallback, so blockwise-built groups
+/// never reach it — every production stage outside this path is
+/// byte-identical. `PK_OUTPUT_FUSE_DISABLE` is the opt-out escape hatch,
+/// mirroring `PK_SERVO_DISABLE`.
+///
+/// The trailing group itself must be EXACTLY: one coupling cap bridging a
+/// target-group node to the global `out`, plus ≥1 grounded fixed load
+/// resistors at `out` — nothing else (no pots, no actives, no second cap).
+///
+/// Returns the trailing group's index, or `None` when the gate fails.
+fn trailing_output_load_group_for_fusion(
+    target_gi: usize,
+    groups: &[super::signal_flow::FlowGroup],
+    graph: &super::graph::CircuitGraph,
+    supply_voltage: f64,
+    cut_edges: &super::boundary_rules::DelayedCutSet,
+) -> Option<usize> {
+    use super::classify::NonlinearKind;
+    use super::component::EdgeKind;
+
+    // Opt-out escape hatch, mirroring PK_SERVO_DISABLE.
+    if std::env::var("PK_OUTPUT_FUSE_DISABLE").is_ok() {
+        return None;
+    }
+
+    let target = &groups[target_gi];
+    let out = graph.out_node;
+    if out == graph.gnd_node || out == graph.vcc_node {
+        return None;
+    }
+    let is_gnd =
+        |n: super::graph::NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+
+    // Target node set; the global `out` must NOT already be inside (there must
+    // BE a trailing group to fuse).
+    let mut target_nodes = std::collections::HashSet::new();
+    for &eidx in &target.all_edges() {
+        let e = &graph.edges[eidx];
+        target_nodes.insert(e.node_a);
+        target_nodes.insert(e.node_b);
+    }
+    if target_nodes.contains(&out) {
+        return None;
+    }
+
+    // GATE 1 (device shape): every NL device in the target is a true
+    // 3-terminal BJT (base != collector) and there are at least two — the
+    // exact shape `apply_bjt_dc_qpoint` requires before it engages the
+    // consolidated seed + servo (`all_resolved` ∧ `n_bjt >= 2`).
+    let mut nl_kinds: Vec<NonlinearKind> = Vec::new();
+    let mut seen_comps: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &eidx in &target.all_edges() {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Nonlinear {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        if !seen_comps.insert(e.comp_idx) {
+            continue;
+        }
+        let comp = &graph.components[e.comp_idx];
+        let (kind, _) = comp.kind.classify_nonlinear(
+            &comp.id,
+            e.node_a,
+            e.node_b,
+            graph.gnd_node,
+            &graph.node_names,
+        )?;
+        let is_three_terminal_bjt = matches!(
+            &kind,
+            NonlinearKind::BjtNpn { base_node, collector_node, .. }
+            | NonlinearKind::BjtPnp { base_node, collector_node, .. }
+                if base_node != collector_node
+        );
+        if !is_three_terminal_bjt {
+            return None;
+        }
+        nl_kinds.push(kind);
+    }
+    if nl_kinds.len() < 2 {
+        return None;
+    }
+
+    // The trailing output group: a passive group that is EXACTLY one coupling
+    // cap (target-node -> out) plus grounded fixed load resistor(s) at out.
+    let mut found: Option<usize> = None;
+    for (src_gi, source) in groups.iter().enumerate() {
+        if src_gi == target_gi || !source.active_edges.is_empty() {
+            continue;
+        }
+        let edges = source.all_edges();
+        if edges.len() < 2 {
+            continue;
+        }
+        // Phase 2a: never fuse across a broker-cut boundary.
+        if edges.iter().any(|eidx| cut_edges.cuts.contains_key(eidx)) {
+            continue;
+        }
+        let mut bridge_found = false;
+        let mut n_loads = 0usize;
+        let mut shape_ok = true;
+        for &eidx in &edges {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            let touches_out = e.node_a == out || e.node_b == out;
+            match graph.effective_edge_kind(eidx) {
+                // The output coupling cap: `out` on one side, a target-group
+                // node on the other. Exactly one.
+                EdgeKind::Reactive
+                    if comp.kind.capacitance().is_some() && touches_out && !bridge_found =>
+                {
+                    let interior = if e.node_a == out { e.node_b } else { e.node_a };
+                    if target_nodes.contains(&interior) {
+                        bridge_found = true;
+                    } else {
+                        shape_ok = false;
+                    }
+                }
+                // A grounded fixed load resistor at `out` (not a pot).
+                EdgeKind::Linear
+                    if comp.kind.resistance().is_some()
+                        && !comp.kind.is_pot()
+                        && touches_out
+                        && (is_gnd(e.node_a) || is_gnd(e.node_b)) =>
+                {
+                    n_loads += 1;
+                }
+                _ => {
+                    shape_ok = false;
+                }
+            }
+            if !shape_ok {
+                break;
+            }
+        }
+        if shape_ok && bridge_found && n_loads >= 1 {
+            found = Some(src_gi);
+            break;
+        }
+    }
+    let src_gi = found?;
+
+    // GATE 2 (the dc_qpoint path itself): the compile-time nonlinear DC solve
+    // must produce the op-point seed for this group — the same call the
+    // general-MNA builder makes before `apply_bjt_dc_qpoint` engages.
+    super::bias::solve_bjt_group_dc_qpoint(&nl_kinds, &target.all_edges(), graph, supply_voltage)
+        .map(|_| src_gi)
 }
 
 fn can_absorb_cross_reactive_passives(
