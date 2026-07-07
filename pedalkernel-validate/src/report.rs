@@ -482,6 +482,201 @@ impl ValidationReport {
 }
 
 // ============================================================================
+// Boundary-load decision table (compile-time output-boundary analysis)
+// ============================================================================
+
+use pedalkernel_rt::processor::{
+    BoundaryLoadBinding, BoundaryLoadDisposition, BoundaryLoadSummary,
+};
+
+/// Engineering-notation formatter for component values (`10µF`, `10kΩ`).
+fn si_value(value: f64, unit: &str) -> String {
+    if !value.is_finite() {
+        return format!("{value}{unit}");
+    }
+    let a = value.abs();
+    let (scale, prefix) = if a == 0.0 {
+        (1.0, "")
+    } else if a >= 1e6 {
+        (1e-6, "M")
+    } else if a >= 1e3 {
+        (1e-3, "k")
+    } else if a >= 1.0 {
+        (1.0, "")
+    } else if a >= 1e-3 {
+        (1e3, "m")
+    } else if a >= 1e-6 {
+        (1e6, "µ")
+    } else if a >= 1e-9 {
+        (1e9, "n")
+    } else {
+        (1e12, "p")
+    };
+    let scaled = value * scale;
+    let s = if (scaled - scaled.round()).abs() < 5e-3 {
+        format!("{}", scaled.round() as i64)
+    } else {
+        format!("{scaled:.2}")
+    };
+    format!("{s}{prefix}{unit}")
+}
+
+/// Compact human-readable boundary-load MODEL summary — kind + element values +
+/// component ids, e.g. `SeriesCapIntoLoad{10µF → 10kΩ; Cout,RL}`.
+pub fn format_boundary_model(m: &BoundaryLoadSummary) -> String {
+    match m {
+        BoundaryLoadSummary::Unloaded => "Unloaded".to_string(),
+        BoundaryLoadSummary::GroundedResistive {
+            r_total,
+            component_ids,
+        } => format!(
+            "GroundedResistive{{{}; {}}}",
+            si_value(*r_total, "Ω"),
+            component_ids.join(",")
+        ),
+        BoundaryLoadSummary::SeriesCapIntoLoad {
+            c,
+            r_total,
+            component_ids,
+        } => format!(
+            "SeriesCapIntoLoad{{{} → {}; {}}}",
+            si_value(*c, "F"),
+            si_value(*r_total, "Ω"),
+            component_ids.join(",")
+        ),
+        BoundaryLoadSummary::PassiveNetwork { component_ids } => {
+            format!("PassiveNetwork{{{}}}", component_ids.join(","))
+        }
+    }
+}
+
+/// Compact human-readable boundary-load DISPOSITION — `FusedUpstream` or
+/// `Unloaded{reason}` (namespaced reasons: `env:*`, `gate:*`, `analysis:*`).
+pub fn format_boundary_disposition(d: &BoundaryLoadDisposition) -> String {
+    match d {
+        BoundaryLoadDisposition::FusedUpstream => "FusedUpstream".to_string(),
+        BoundaryLoadDisposition::Unloaded { reason } => format!("Unloaded{{{reason}}}"),
+    }
+}
+
+/// WSL/NaN triage flag: `Some(flag)` when a circuit's OUTPUT boundary is left
+/// electrically open — either an analyzed boundary whose disposition is
+/// `Unloaded{reason}`, or an EMPTY table (no feedback group ever reached the
+/// general-MNA call site, e.g. the whole pedal compiled via blockwise/other
+/// paths — the boundary was never even analyzed). The two absence modes are
+/// surfaced DISTINCTLY because they need different fixes (widen the policy vs
+/// widen the analysis coverage).
+///
+/// WHY this flag rides next to the bias verdict: unloaded output boundaries and
+/// marginal op-points travel together — the stage solves against an open
+/// circuit, so the compile-time op-point never feels the load-current demand,
+/// and the resulting bias sits closer to cutoff/rail than the real circuit's.
+/// Live cases: Klon Centaur (renders +16 dBFS over on macOS and NaN-flushes to
+/// silence on x86/WSL), ProCo RAT, Pultec — all with silently-unloaded output
+/// boundaries. This table is the triage lever for the ~76 corpus failures.
+pub fn unloaded_output_flag(loads: &[BoundaryLoadBinding]) -> Option<String> {
+    if loads
+        .iter()
+        .any(|b| b.disposition == BoundaryLoadDisposition::FusedUpstream)
+    {
+        return None; // Output boundary load is fused into the upstream solve.
+    }
+    if loads.is_empty() {
+        return Some(
+            "⚠ OUTPUT BOUNDARY UNANALYZED: empty table — no feedback group reached the \
+             general-MNA call site (blockwise/other compile paths)"
+                .to_string(),
+        );
+    }
+    let mut reasons: Vec<&str> = loads
+        .iter()
+        .filter_map(|b| match &b.disposition {
+            BoundaryLoadDisposition::Unloaded { reason } => Some(reason.as_str()),
+            BoundaryLoadDisposition::FusedUpstream => None,
+        })
+        .collect();
+    reasons.sort_unstable();
+    reasons.dedup();
+    Some(format!(
+        "⚠ OUTPUT BOUNDARY UNLOADED: {}",
+        reasons.join(", ")
+    ))
+}
+
+/// Render the compact per-circuit boundary-load decision table: one row per
+/// analyzed stage output boundary (model + disposition), one explicit
+/// `no-analysis (empty table)` row per circuit whose table is EMPTY (that
+/// absence is itself a triage signal, distinct from `Unloaded{reason}`), and a
+/// trailing flag line per circuit whose output boundary is open (see
+/// [`unloaded_output_flag`]).
+pub fn render_boundary_loads(circuits: &[(String, Vec<BoundaryLoadBinding>)]) -> String {
+    use std::fmt::Write as _;
+    use tabled::settings::Style;
+    use tabled::{Table, Tabled};
+
+    #[derive(Tabled)]
+    struct BoundaryRow {
+        circuit: String,
+        stage: String,
+        #[tabled(rename = "boundary node")]
+        node: String,
+        #[tabled(rename = "load model")]
+        model: String,
+        disposition: String,
+    }
+
+    let mut rows = Vec::new();
+    for (circuit, loads) in circuits {
+        if loads.is_empty() {
+            rows.push(BoundaryRow {
+                circuit: circuit.clone(),
+                stage: "-".into(),
+                node: "-".into(),
+                model: "-".into(),
+                disposition: "no-analysis (empty table)".into(),
+            });
+            continue;
+        }
+        for (i, b) in loads.iter().enumerate() {
+            rows.push(BoundaryRow {
+                circuit: if i == 0 { circuit.clone() } else { String::new() },
+                stage: if b.upstream_stage == usize::MAX {
+                    "?".into()
+                } else {
+                    b.upstream_stage.to_string()
+                },
+                node: b.boundary_node.to_string(),
+                model: format_boundary_model(&b.model),
+                disposition: format_boundary_disposition(&b.disposition),
+            });
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(
+        "\n────────────────── BOUNDARY-LOAD DECISION TABLE (compile-time) ──────────────────\n  \
+         What hangs downstream of each stage's OUTPUT boundary and what the compiler did.\n  \
+         `Unloaded{reason}` = analyzed, declined (boundary left open — stage solves into an\n  \
+         open circuit). `no-analysis (empty table)` = no feedback group reached the\n  \
+         general-MNA call site at all (blockwise/other paths) — a DISTINCT triage signal.\n",
+    );
+    if !rows.is_empty() {
+        let mut table = Table::new(rows);
+        table.with(Style::rounded());
+        let _ = write!(out, "{}\n", table);
+    }
+    for (circuit, loads) in circuits {
+        if let Some(flag) = unloaded_output_flag(loads) {
+            let _ = write!(out, "  {circuit}: {flag}\n");
+        }
+    }
+    out.push_str(
+        "──────────────────────────────────────────────────────────────────────────────────\n",
+    );
+    out
+}
+
+// ============================================================================
 // DC bias-accuracy dashboard section
 // ============================================================================
 
@@ -491,9 +686,17 @@ impl ValidationReport {
 /// plus, per circuit, the worst DC-balance residual `F(ngspice_op)` and the
 /// formulation-vs-solver verdict. Returns the rendered string (so tests can
 /// print AND assert on it).
+///
+/// `boundary_loads` maps circuit name → its compile-time boundary-load table
+/// (`CompiledPedal::boundary_loads`). Every circuit whose OUTPUT boundary is
+/// left open — `Unloaded{reason}` rows or an EMPTY table — gets a triage flag
+/// rendered directly under its verdict line (see [`unloaded_output_flag`] for
+/// the rationale: unloaded boundaries and marginal op-points travel together).
+/// Circuits absent from the map (e.g. pro pedal not compiled) are not flagged.
 pub fn render_bias_accuracy(
     results: &[crate::metrics::op_point::OpPointResult],
     criteria: &crate::metrics::op_point::OpPassCriteria,
+    boundary_loads: &BTreeMap<String, Vec<BoundaryLoadBinding>>,
 ) -> String {
     use crate::metrics::op_point::Verdict;
     use std::fmt::Write as _;
@@ -621,6 +824,13 @@ pub fn render_bias_accuracy(
             r.max_abs_d_ic_pct,
             r.verdict.label(),
         );
+        // WSL/NaN triage: an open output boundary rides RIGHT NEXT TO the bias
+        // verdict — the two travel together (see `unloaded_output_flag`).
+        if let Some(loads) = boundary_loads.get(&r.circuit) {
+            if let Some(flag) = unloaded_output_flag(loads) {
+                let _ = write!(out, "        {flag}\n");
+            }
+        }
     }
     out.push_str("═══════════════════════════════════════════════════════════════════════════════════\n");
     out

@@ -48,7 +48,7 @@ use pedalkernel::dsl::parse_pedal_file;
 use pedalkernel::PedalProcessor;
 use pedalkernel_validate::metrics::ac_accuracy::{self, AcThresholds, FreqPoint};
 use pedalkernel_validate::pro_pedal::load_pro_pedal_sub;
-use pedalkernel_validate::report::render_ac_accuracy;
+use pedalkernel_validate::report::{render_ac_accuracy, render_boundary_loads};
 use pedalkernel_validate::spice::{SpiceConfig, SpiceRunner};
 use pedalkernel_validate::{metrics, npy};
 use std::f64::consts::PI;
@@ -203,8 +203,28 @@ fn wdf_window(circuit: &Circuit, source: &str, freq: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Compile once (no settling) and read the compile-time boundary-load decision
+/// table off `CompiledPedal::boundary_loads` — what hangs downstream of each
+/// stage's output boundary and whether the compiler fused it or left it open.
+fn boundary_loads_of(
+    circuit: &Circuit,
+    source: &str,
+) -> Vec<pedalkernel_rt::processor::BoundaryLoadBinding> {
+    let def = parse_pedal_file(source).unwrap_or_else(|e| panic!("parse {}: {e}", circuit.name));
+    let proc =
+        compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile {}: {e}", circuit.name));
+    proc.boundary_loads.clone()
+}
+
 /// Evaluate one circuit: returns `None` when its golden or pedal is unavailable.
-fn evaluate_circuit(circuit: &Circuit, th: &AcThresholds) -> Option<ac_accuracy::AcResult> {
+/// The second tuple element is the circuit's compile-time boundary-load table.
+fn evaluate_circuit(
+    circuit: &Circuit,
+    th: &AcThresholds,
+) -> Option<(
+    ac_accuracy::AcResult,
+    Vec<pedalkernel_rt::processor::BoundaryLoadBinding>,
+)> {
     // Generate/load ALL sweep goldens first (from the public deck — this succeeds
     // even for the Pro BA283 with no `.pedal` present, so the goldens get written
     // and committed regardless).
@@ -221,6 +241,9 @@ fn evaluate_circuit(circuit: &Circuit, th: &AcThresholds) -> Option<ac_accuracy:
 
     // WDF side (skipped for an absent Pro pedal).
     let source = load_source(circuit)?;
+
+    // Compile-time boundary-load decision table (printed with the dashboard).
+    let boundary = boundary_loads_of(circuit, &source);
 
     // Frequency-response sweep: per-frequency WDF-vs-golden AC gain.
     let mut response = Vec::new();
@@ -239,14 +262,9 @@ fn evaluate_circuit(circuit: &Circuit, th: &AcThresholds) -> Option<ac_accuracy:
     }
 
     let (wdf, golden) = main.expect("TEST_FREQ (1 kHz) must be in the sweep");
-    Some(ac_accuracy::evaluate(
-        circuit.name,
-        &wdf,
-        &golden,
-        SR,
-        TEST_FREQ,
-        response,
-        th,
+    Some((
+        ac_accuracy::evaluate(circuit.name, &wdf, &golden, SR, TEST_FREQ, response, th),
+        boundary,
     ))
 }
 
@@ -255,9 +273,11 @@ fn ac_accuracy_dashboard() {
     let th = AcThresholds::default();
     let mut results = Vec::new();
     let mut ba283: Option<ac_accuracy::AcResult> = None;
+    let mut boundary: Vec<(String, Vec<pedalkernel_rt::processor::BoundaryLoadBinding>)> =
+        Vec::new();
 
     for circuit in CIRCUITS {
-        let Some(res) = evaluate_circuit(circuit, &th) else {
+        let Some((res, loads)) = evaluate_circuit(circuit, &th) else {
             eprintln!("  skip {} (golden/pedal unavailable)", circuit.name);
             continue;
         };
@@ -265,6 +285,7 @@ fn ac_accuracy_dashboard() {
             ba283 = Some(res.clone());
         }
         results.push(res);
+        boundary.push((circuit.name.to_string(), loads));
     }
 
     if results.is_empty() {
@@ -274,6 +295,10 @@ fn ac_accuracy_dashboard() {
 
     let table = render_ac_accuracy(&results, &th);
     println!("{table}");
+
+    // Boundary-load decision table: what hangs off each circuit's output
+    // boundary and what the compiler did about it (fused vs silently open).
+    println!("{}", render_boundary_loads(&boundary));
 
     // ── si_fb_amp: the public, always-on CI coverage ─────────────────────────
     // (Discrete two-BJT feedback amp — the public BA283 proxy.) It must produce a
