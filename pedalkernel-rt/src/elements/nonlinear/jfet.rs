@@ -10,8 +10,8 @@ use super::mosfet::MosfetModel;
 use super::solver::{newton_raphson_solve, LEAKAGE_CONDUCTANCE};
 use crate::elements::WdfRoot;
 
-/// Thermal voltage at room temperature (26.85°C / 300K).
-const VT: crate::Wave = 0.02585;
+/// Thermal voltage at the ngspice default temperature (27 °C / 300.15 K).
+const VT: crate::Wave = crate::SPICE_VT_27C;
 
 // ---------------------------------------------------------------------------
 // JFET Models

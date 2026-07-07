@@ -1366,7 +1366,7 @@ mod tests {
 
         // gm = Iabc / (2*Vt)
         let gm = root.transconductance();
-        let expected = root.iabc() / (2.0 * 25.85e-3);
+        let expected = root.iabc() / (2.0 * crate::SPICE_VT_27C);
         assert!(
             (gm - expected).abs() < 1e-6,
             "Transconductance: gm={gm}, expected={expected}"

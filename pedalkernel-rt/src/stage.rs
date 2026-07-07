@@ -3015,7 +3015,9 @@ impl WdfStage {
     pub fn apply_thermal(&mut self, state: &crate::thermal::ThermalState) {
         // Diode roots: modulate Is and n_vt.
         if let Some(base) = &self.base_diode_model {
-            let ideality_ratio = base.n_vt / 0.02585; // n factor (ideality * Vt_ref)
+            // n factor: presets store n_vt = N * SPICE_VT_27C, so dividing by
+            // the SAME constant recovers the exact ideality N by construction.
+            let ideality_ratio = base.n_vt / crate::SPICE_VT_27C;
             match &mut self.root {
                 RootKind::DiodePair(dp) => {
                     dp.model.is = base.is * state.is_multiplier;

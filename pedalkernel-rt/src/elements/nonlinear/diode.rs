@@ -5,6 +5,7 @@
 
 use super::solver::{newton_raphson_solve, NlDeviceIv};
 use crate::elements::WdfRoot;
+use crate::SPICE_VT_27C;
 
 // ---------------------------------------------------------------------------
 // Wright Omega function — D'Angelo ω₃ approximation
@@ -370,7 +371,7 @@ impl DiodeModel {
         // 1N4148 datasheet: Is ≈ 2.52nA, n ≈ 1.752, Rs ≈ 0.568Ω
         Self {
             is: 2.52e-9,
-            n_vt: 1.752 * 25.85e-3,
+            n_vt: 1.752 * SPICE_VT_27C,
             rs: 0.568, // SPICE: RS=0.568
         }
     }
@@ -380,7 +381,7 @@ impl DiodeModel {
     pub fn _1n914() -> Self {
         Self {
             is: 3.44e-9,
-            n_vt: 1.80 * 25.85e-3,
+            n_vt: 1.80 * SPICE_VT_27C,
             rs: 0.64, // Slightly higher Rs than 1N4148
         }
     }
@@ -390,7 +391,7 @@ impl DiodeModel {
     pub fn _1n4148() -> Self {
         Self {
             is: 2.52e-9,
-            n_vt: 1.752 * 25.85e-3,
+            n_vt: 1.752 * SPICE_VT_27C,
             rs: 0.568, // SPICE: RS=0.568
         }
     }
@@ -400,7 +401,7 @@ impl DiodeModel {
     pub fn _1n4001() -> Self {
         Self {
             is: 14.11e-9,
-            n_vt: 1.984 * 25.85e-3,
+            n_vt: 1.984 * SPICE_VT_27C,
             rs: 0.1, // Lower Rs for rectifier
         }
     }
@@ -409,7 +410,7 @@ impl DiodeModel {
     pub fn germanium() -> Self {
         Self {
             is: 1e-6,
-            n_vt: 1.3 * 25.85e-3,
+            n_vt: 1.3 * SPICE_VT_27C,
             rs: 3.0, // Higher Rs for germanium
         }
     }
@@ -419,7 +420,7 @@ impl DiodeModel {
     pub fn _1n34a() -> Self {
         Self {
             is: 2.0e-6,
-            n_vt: 1.25 * 25.85e-3,
+            n_vt: 1.25 * SPICE_VT_27C,
             rs: 2.5,
         }
     }
@@ -429,7 +430,7 @@ impl DiodeModel {
     pub fn _oa90() -> Self {
         Self {
             is: 0.8e-6,
-            n_vt: 1.35 * 25.85e-3,
+            n_vt: 1.35 * SPICE_VT_27C,
             rs: 4.0, // Higher Rs for glass diode
         }
     }
@@ -445,10 +446,11 @@ impl DiodeModel {
     /// red LED uses Is=9.4e-14, N=3.73, Rs=2.1.
     pub fn led() -> Self {
         // Red LED: Vf ≈ 1.7V at 10mA, n=3.5
-        // Verified: 1.7 = 3.5 * 0.02585 * ln(0.01 / 1e-13) → 1.7 ≈ 0.0905 * 18.42 ≈ 1.67V ✓
+        // Verified: 1.7 = 3.5 * SPICE_VT_27C * ln(0.01 / 1e-13)
+        //   → 1.7 ≈ (3.5 * 0.0258649) * 18.42 ≈ 0.0905 * 18.42 ≈ 1.67V ✓
         Self {
             is: 1e-13,
-            n_vt: 3.5 * 25.85e-3,
+            n_vt: 3.5 * SPICE_VT_27C,
             rs: 2.0,
         }
     }
@@ -460,7 +462,7 @@ impl DiodeModel {
         // 1N5817/1N5818 family: Is ≈ 1µA, n ≈ 1.05, Rs ≈ 0.1Ω
         Self {
             is: 1e-6,
-            n_vt: 1.05 * 25.85e-3,
+            n_vt: 1.05 * SPICE_VT_27C,
             rs: 0.1,
         }
     }
@@ -473,10 +475,11 @@ impl DiodeModel {
     /// Green LED — higher Vf ≈ 2.1V for even more headroom.
     pub fn led_green() -> Self {
         // Green LEDs have wider bandgap (GaP), Vf ≈ 2.1V at 10mA
-        // Verified: 2.1 = 3.5 * 0.02585 * ln(0.01 / 1e-15) → 2.1 ≈ 0.0905 * 23.03 ≈ 2.08V ✓
+        // Verified: 2.1 = 3.5 * SPICE_VT_27C * ln(0.01 / 1e-15)
+        //   → 2.1 ≈ (3.5 * 0.0258649) * 23.03 ≈ 0.0905 * 23.03 ≈ 2.08V ✓
         Self {
             is: 1e-15,
-            n_vt: 3.5 * 25.85e-3,
+            n_vt: 3.5 * SPICE_VT_27C,
             rs: 2.5,
         }
     }
@@ -534,9 +537,9 @@ impl ZenerModel {
         Self {
             vz,
             is_fwd: 2.52e-9,
-            n_vt_fwd: 1.752 * 25.85e-3,
+            n_vt_fwd: 1.752 * SPICE_VT_27C,
             is_rev: 1e-12,
-            n_vt_rev: 0.5 * 25.85e-3, // Sharp knee
+            n_vt_rev: 0.5 * SPICE_VT_27C, // Sharp knee
             rz,
         }
     }

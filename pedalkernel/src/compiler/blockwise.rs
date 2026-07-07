@@ -2465,7 +2465,7 @@ pub(super) fn try_build_blockwise(
         // Compute a fallback 1/gm from bias: I = (V_supply - V_be) / R_bias.
         // Individual blocks below prefer their own bias leg because cascaded
         // diode ladders often use different bias resistors per rung.
-        let vt = 0.02585; // thermal voltage at 25°C
+        let vt = pedalkernel_rt::SPICE_VT_27C; // thermal voltage at ngspice default 27°C
         let v_be = 0.6; // typical forward bias
                         // Find the typical R_bias value from coupling edges
         let r_bias_value = coupling_edges
