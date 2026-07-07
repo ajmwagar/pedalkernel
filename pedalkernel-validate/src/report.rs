@@ -663,11 +663,11 @@ pub fn render_boundary_loads(circuits: &[(String, Vec<BoundaryLoadBinding>)]) ->
     if !rows.is_empty() {
         let mut table = Table::new(rows);
         table.with(Style::rounded());
-        let _ = write!(out, "{}\n", table);
+        let _ = writeln!(out, "{}", table);
     }
     for (circuit, loads) in circuits {
         if let Some(flag) = unloaded_output_flag(loads) {
-            let _ = write!(out, "  {circuit}: {flag}\n");
+            let _ = writeln!(out, "  {circuit}: {flag}");
         }
     }
     out.push_str(
@@ -828,7 +828,7 @@ pub fn render_bias_accuracy(
         // verdict — the two travel together (see `unloaded_output_flag`).
         if let Some(loads) = boundary_loads.get(&r.circuit) {
             if let Some(flag) = unloaded_output_flag(loads) {
-                let _ = write!(out, "        {flag}\n");
+                let _ = writeln!(out, "        {flag}");
             }
         }
     }

@@ -211,8 +211,7 @@ fn boundary_loads_of(
     source: &str,
 ) -> Vec<pedalkernel_rt::processor::BoundaryLoadBinding> {
     let def = parse_pedal_file(source).unwrap_or_else(|e| panic!("parse {}: {e}", circuit.name));
-    let proc =
-        compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile {}: {e}", circuit.name));
+    let proc = compile_pedal(&def, SR).unwrap_or_else(|e| panic!("compile {}: {e}", circuit.name));
     proc.boundary_loads.clone()
 }
 

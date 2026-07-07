@@ -64,10 +64,7 @@ fn ba283_output_boundary_fuses_series_cap_into_load() {
     let proc = compile_source("neve1073_ba283", &source);
     println!(
         "{}",
-        render_boundary_loads(&[(
-            "neve1073_ba283".to_string(),
-            proc.boundary_loads.clone()
-        )])
+        render_boundary_loads(&[("neve1073_ba283".to_string(), proc.boundary_loads.clone())])
     );
 
     assert_eq!(
@@ -108,10 +105,7 @@ fn fuzz_face_pnp_output_boundary_documents_unloaded_reality() {
     let proc = compile_public("circuits/active/fuzz_face_pnp.pedal");
     println!(
         "{}",
-        render_boundary_loads(&[(
-            "fuzz_face_pnp".to_string(),
-            proc.boundary_loads.clone()
-        )])
+        render_boundary_loads(&[("fuzz_face_pnp".to_string(), proc.boundary_loads.clone())])
     );
 
     assert_eq!(
@@ -226,8 +220,7 @@ fn corpus_boundary_load_sweep() {
             .unwrap_or(path)
             .display()
             .to_string();
-        let source = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        let source = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
         // Fast compile: K-tables skipped (runtime-only precompute; stage
         // routing and the boundary decision are unaffected).
         let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
