@@ -328,8 +328,7 @@ pub(super) fn analyze_trailing_output_load(
 
     // Pass 2: visibility fallback — a richer passive network at `out`.
     for (src_gi, edges) in &candidates {
-        if let Some((boundary_node, model)) =
-            classify_passive_network(edges, &target_nodes, graph)
+        if let Some((boundary_node, model)) = classify_passive_network(edges, &target_nodes, graph)
         {
             return Some(TrailingOutputLoad {
                 group: *src_gi,
@@ -528,8 +527,8 @@ fn classify_series_cap_into_pot_load(
             let top0 = if e0.node_a == w { e0.node_b } else { e0.node_a };
             let top1 = if e1.node_a == w { e1.node_b } else { e1.node_a };
             // Track top at the load node, track bottom grounded.
-            let track_ok = (top0 == load_node && is_gnd(top1))
-                || (top1 == load_node && is_gnd(top0));
+            let track_ok =
+                (top0 == load_node && is_gnd(top1)) || (top1 == load_node && is_gnd(top0));
             if !track_ok {
                 return None;
             }
@@ -733,11 +732,13 @@ fn boundary_node_dc_isolated(
             continue;
         }
         let comp = &graph.components[e.comp_idx];
-        let other = if e.node_a == boundary { e.node_b } else { e.node_a };
+        let other = if e.node_a == boundary {
+            e.node_b
+        } else {
+            e.node_a
+        };
         let ok = comp.kind.capacitance().is_some()
-            || (comp.kind.resistance().is_some()
-                && !comp.kind.is_pot()
-                && other == graph.gnd_node);
+            || (comp.kind.resistance().is_some() && !comp.kind.is_pot() && other == graph.gnd_node);
         if !ok {
             return Err(REASON_DC_COUPLED_POT);
         }
@@ -1194,7 +1195,11 @@ mod tests {
                 assert_eq!(pot_id, "RL");
                 assert!((r_pot - 10e3).abs() < 1e-6, "RL track = 10k, got {r_pot}");
                 assert_eq!(*r_fixed, None, "the pot is the only grounded element");
-                assert_eq!(edges.len(), 2, "trailing group = {{Cout, RL rheostat edge}}");
+                assert_eq!(
+                    edges.len(),
+                    2,
+                    "trailing group = {{Cout, RL rheostat edge}}"
+                );
             }
             other => panic!("expected SeriesCapIntoPotLoad, got {other:?}"),
         }
@@ -1249,11 +1254,7 @@ mod tests {
                 assert_eq!(pot_id, "VOL");
                 assert_eq!(
                     component_ids,
-                    vec![
-                        "Cout".to_string(),
-                        "Rload".to_string(),
-                        "VOL".to_string()
-                    ]
+                    vec!["Cout".to_string(), "Rload".to_string(), "VOL".to_string()]
                 );
             }
             other => panic!("expected SeriesCapIntoPotLoad summary, got {other:?}"),
