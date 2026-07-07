@@ -11,6 +11,7 @@ mod bbd_lowering;
 mod bias;
 mod bind;
 mod blockwise;
+mod boundary_load;
 mod build;
 mod calibrate;
 mod classify;
