@@ -2021,4 +2021,338 @@ mod tests {
             .get(name)
             .unwrap_or_else(|| panic!("no node named {name}"))
     }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Transformer-secondary load reflection (GAP F / lkf1.4)
+    // ────────────────────────────────────────────────────────────────────
+
+    /// The LA-2A `T_out` shape (GAP F positive fixture): CE amp cap-coupled
+    /// into a 10:1 output transformer whose grounded-secondary hot end is the
+    /// global `out` with a 1 kΩ load. The transformer + coupling cap form
+    /// their own all-passive flow group; {RL} splits into a separate group
+    /// (the windings couple magnetically, not conductively).
+    ///
+    /// ngspice truth for this exact circuit (coupled inductors k=0.99,
+    /// 1 kHz): transformer-stage transfer 0.1021×; before the reflection the
+    /// chain measured +26 dB high.
+    const XFMR_OUT_AMP: &str = r#"
+        pedal "xfmr out amp" { supply 9V
+            components {
+                Cin:  cap(10u, electrolytic)
+                Rb1:  resistor(100k)
+                Rb2:  resistor(22k)
+                Q1:   npn(2n3904)
+                Rc:   resistor(4.7k)
+                Re:   resistor(1k)
+                Ce:   cap(100u, electrolytic)
+                Cout: cap(10u, electrolytic)
+                T1:   transformer(10:1, 2H)
+                RL:   resistor(1k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> Q1.base, Rb1.b, Rb2.a
+                vcc -> Rb1.a, Rc.a
+                Rc.b -> Q1.collector, Cout.a
+                Q1.emitter -> Re.a, Ce.a
+                Re.b -> gnd
+                Ce.b -> gnd
+                Rb2.b -> gnd
+                Cout.b -> T1.a
+                T1.b -> gnd
+                T1.c -> out, RL.a
+                T1.d -> gnd
+                RL.b -> gnd
+            }
+        }"#;
+
+    /// Collector-fed output transformer (single-ended output stage): the
+    /// primary edge is CLAIMED into the BJT's group, so the transformer group
+    /// is NOT all-passive — the shape analyzes but the policy gate declines
+    /// (reflecting into an active stage's tree is out of this bead's scope).
+    const XFMR_COLLECTOR_AMP: &str = r#"
+        pedal "xfmr collector amp" { supply 9V
+            components {
+                Cin: cap(10u, electrolytic)
+                Rb1: resistor(100k)
+                Rb2: resistor(22k)
+                Q1:  npn(2n3904)
+                Re:  resistor(1k)
+                Ce:  cap(100u, electrolytic)
+                T1:  transformer(10:1, 2H)
+                RL:  resistor(1k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> Q1.base, Rb1.b, Rb2.a
+                vcc -> Rb1.a, T1.a
+                T1.b -> Q1.collector
+                Q1.emitter -> Re.a, Ce.a
+                Re.b -> gnd
+                Ce.b -> gnd
+                Rb2.b -> gnd
+                T1.c -> out, RL.a
+                T1.d -> gnd
+                RL.b -> gnd
+            }
+        }"#;
+
+    /// Same as the positive fixture but the load is a POT — not the fixed
+    /// grounded-resistor load shape; analysis must decline.
+    const XFMR_POT_LOAD: &str = r#"
+        pedal "xfmr pot load" { supply 9V
+            components {
+                Cin:  cap(10u, electrolytic)
+                Rb1:  resistor(100k)
+                Rb2:  resistor(22k)
+                Q1:   npn(2n3904)
+                Rc:   resistor(4.7k)
+                Re:   resistor(1k)
+                Ce:   cap(100u, electrolytic)
+                Cout: cap(10u, electrolytic)
+                T1:   transformer(10:1, 2H)
+                RL:   pot(10k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> Q1.base, Rb1.b, Rb2.a
+                vcc -> Rb1.a, Rc.a
+                Rc.b -> Q1.collector, Cout.a
+                Q1.emitter -> Re.a, Ce.a
+                Re.b -> gnd
+                Ce.b -> gnd
+                Rb2.b -> gnd
+                Cout.b -> T1.a
+                T1.b -> gnd
+                T1.c -> out, RL.a
+                RL.w -> gnd
+                RL.b -> gnd
+            }
+        }"#;
+
+    /// Mid-chain transformer: the secondary hot end feeds a downstream RC
+    /// network, NOT the global `out` — outside the output-transformer family;
+    /// analysis must decline.
+    const XFMR_MID_CHAIN: &str = r#"
+        pedal "xfmr mid chain" { supply 9V
+            components {
+                Cin:  cap(10u, electrolytic)
+                Rb1:  resistor(100k)
+                Rb2:  resistor(22k)
+                Q1:   npn(2n3904)
+                Rc:   resistor(4.7k)
+                Re:   resistor(1k)
+                Ce:   cap(100u, electrolytic)
+                Cout: cap(10u, electrolytic)
+                T1:   transformer(10:1, 2H)
+                Rs:   resistor(1k)
+                RL:   resistor(10k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> Q1.base, Rb1.b, Rb2.a
+                vcc -> Rb1.a, Rc.a
+                Rc.b -> Q1.collector, Cout.a
+                Q1.emitter -> Re.a, Ce.a
+                Re.b -> gnd
+                Ce.b -> gnd
+                Rb2.b -> gnd
+                Cout.b -> T1.a
+                T1.b -> gnd
+                T1.c -> Rs.a
+                T1.d -> gnd
+                Rs.b -> RL.a, out
+                RL.b -> gnd
+            }
+        }"#;
+
+    /// Index of the flow group holding the transformer's primary edge.
+    fn transformer_group_index(groups: &[FlowGroup], graph: &CircuitGraph) -> usize {
+        groups
+            .iter()
+            .position(|g| {
+                g.all_edges().iter().any(|&eidx| {
+                    graph.components[graph.edges[eidx].comp_idx]
+                        .kind
+                        .is_transformer()
+                })
+            })
+            .expect("fixture should have a transformer-owning group")
+    }
+
+    #[test]
+    fn xfmr_out_amp_analyzes_to_secondary_load() {
+        let (graph, groups, cut_edges) = groups_for(XFMR_OUT_AMP);
+        let target_gi = transformer_group_index(&groups, &graph);
+
+        let load = analyze_transformer_secondary_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("output-transformer shape should analyze to a secondary load");
+
+        assert_eq!(load.turns_ratio, 10.0, "10:1 → n = 10");
+        assert!(
+            (load.r_reflected - 100_000.0).abs() < 1e-6,
+            "n²·RL = 100·1k, got {}",
+            load.r_reflected
+        );
+        // Boundary node = the secondary hot end == global `out`.
+        assert_eq!(load.boundary_node, graph.out_node);
+        assert_eq!(
+            *graph.node_names.get("T1.c").expect("T1.c node"),
+            graph.out_node
+        );
+        match &load.model {
+            BoundaryLoadModel::GroundedResistive { r_total, edges } => {
+                assert!((r_total - 1_000.0).abs() < 1e-9, "RL = 1k, got {r_total}");
+                assert_eq!(edges.len(), 1, "load group = {{RL}}");
+            }
+            other => panic!("expected GroundedResistive, got {other:?}"),
+        }
+        // The load group is a different group than the transformer group.
+        assert_ne!(load.load_group, target_gi);
+
+        // Passive transformer group passes the policy gate.
+        assert_eq!(
+            gate_transformer_reflection(&groups[target_gi], &graph),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn collector_fed_transformer_declines_gate_with_reason() {
+        let (graph, groups, cut_edges) = groups_for(XFMR_COLLECTOR_AMP);
+        let target_gi = transformer_group_index(&groups, &graph);
+
+        // The shape itself analyzes (transformer + grounded-R load at out)...
+        assert!(
+            analyze_transformer_secondary_load(target_gi, &groups, &graph, &cut_edges).is_some(),
+            "analysis is shape-only; the collector-fed fixture still has T1 + RL"
+        );
+        // ...but the transformer lives in the BJT's (active) group — declined.
+        assert_eq!(
+            gate_transformer_reflection(&groups[target_gi], &graph),
+            Err("gate:transformer-stage-not-passive")
+        );
+    }
+
+    #[test]
+    fn pot_load_declines_transformer_analysis() {
+        let (graph, groups, cut_edges) = groups_for(XFMR_POT_LOAD);
+        let target_gi = transformer_group_index(&groups, &graph);
+        assert_eq!(
+            analyze_transformer_secondary_load(target_gi, &groups, &graph, &cut_edges),
+            None,
+            "a pot across the secondary is not the fixed grounded-R load shape"
+        );
+    }
+
+    #[test]
+    fn mid_chain_secondary_declines_transformer_analysis() {
+        let (graph, groups, cut_edges) = groups_for(XFMR_MID_CHAIN);
+        let target_gi = transformer_group_index(&groups, &graph);
+        assert_eq!(
+            analyze_transformer_secondary_load(target_gi, &groups, &graph, &cut_edges),
+            None,
+            "a secondary feeding a mid-chain network (hot end != out) must decline"
+        );
+    }
+
+    #[test]
+    fn broker_cut_load_edge_declines_transformer_analysis() {
+        let (graph, groups, mut cut_edges) = groups_for(XFMR_OUT_AMP);
+        let target_gi = transformer_group_index(&groups, &graph);
+
+        // Sanity: without the cut, the shape analyzes.
+        assert!(
+            analyze_transformer_secondary_load(target_gi, &groups, &graph, &cut_edges).is_some()
+        );
+
+        // Synthesize a broker cut on the load edge — never fuse across a
+        // delayed-coupling boundary.
+        cut_edges.cuts.insert(
+            edge_index_of(&graph, "RL"),
+            super::super::boundary_rules::Directive::NonMergeCut,
+        );
+        assert_eq!(
+            analyze_transformer_secondary_load(target_gi, &groups, &graph, &cut_edges),
+            None
+        );
+    }
+
+    #[test]
+    fn compiled_xfmr_out_amp_reflects_and_consumes_load_stage() {
+        let pedal = crate::dsl::parse_pedal_file(XFMR_OUT_AMP).expect("parse failed");
+        let options = super::super::compile::CompileOptions {
+            skip_k_tables: true,
+            ..Default::default()
+        };
+        let compiled =
+            super::super::spqr_build::compile_via_spqr_with_options(&pedal, 48_000.0, options)
+                .expect("compile failed");
+
+        assert_eq!(
+            compiled.boundary_loads.len(),
+            1,
+            "one analyzed transformer boundary expected, got {:?}",
+            compiled.boundary_loads
+        );
+        let binding = &compiled.boundary_loads[0];
+        match &binding.disposition {
+            pedalkernel_rt::processor::BoundaryLoadDisposition::ReflectedThroughTransformer {
+                turns_ratio,
+                r_reflected,
+            } => {
+                assert_eq!(*turns_ratio, 10.0);
+                assert!((r_reflected - 100_000.0).abs() < 1e-6);
+            }
+            other => panic!("expected ReflectedThroughTransformer, got {other:?}"),
+        }
+        match &binding.model {
+            BoundaryLoadSummary::GroundedResistive {
+                r_total,
+                component_ids,
+            } => {
+                assert!((r_total - 1_000.0).abs() < 1e-9);
+                assert_eq!(component_ids, &["RL".to_string()]);
+            }
+            other => panic!("expected GroundedResistive summary, got {other:?}"),
+        }
+        assert_eq!(binding.boundary_node, graph_node(&pedal, "T1.c"));
+        // The upstream stage resolved to the fused primary-side WDF stage.
+        assert!(
+            binding.upstream_stage < compiled.stages.len(),
+            "upstream_stage should resolve, got {}",
+            binding.upstream_stage
+        );
+        assert!(matches!(
+            compiled.stages[binding.upstream_stage],
+            super::super::compiled::Stage::Wdf(_)
+        ));
+        // De-duplication: the standalone {RL} stage was consumed — amp stage +
+        // fused transformer stage only.
+        assert_eq!(
+            compiled.stages.len(),
+            2,
+            "standalone RL load stage must be consumed by the reflection"
+        );
+    }
+
+    #[test]
+    fn compiled_collector_fed_records_declined_reason() {
+        let pedal = crate::dsl::parse_pedal_file(XFMR_COLLECTOR_AMP).expect("parse failed");
+        let options = super::super::compile::CompileOptions {
+            skip_k_tables: true,
+            ..Default::default()
+        };
+        let compiled =
+            super::super::spqr_build::compile_via_spqr_with_options(&pedal, 48_000.0, options)
+                .expect("compile failed");
+
+        assert_eq!(compiled.boundary_loads.len(), 1);
+        match &compiled.boundary_loads[0].disposition {
+            pedalkernel_rt::processor::BoundaryLoadDisposition::Unloaded { reason } => {
+                assert_eq!(reason, "gate:transformer-stage-not-passive");
+            }
+            other => panic!("expected declined Unloaded disposition, got {other:?}"),
+        }
+    }
 }
