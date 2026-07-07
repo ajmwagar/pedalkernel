@@ -391,6 +391,12 @@ pub fn compile_via_spqr_with_options(
     let mut stage_comp_ids: Vec<Vec<String>> = Vec::new();
     let mut bkm_consumed_comp_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Component ids of transformer-SECONDARY load groups consumed by the
+    // transformer-reflection fusion (their edges are solved inside the fused
+    // primary-side PassiveRType MNA). Groups made entirely of these ids are
+    // skipped — the magnetic-coupling analogue of `bkm_consumed_comp_ids`.
+    let mut xfmr_consumed_comp_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     // Boundary-load decision table rows recorded during stage building;
     // resolved to final stage indices after the last stage sort.
     let mut pending_boundary_loads: Vec<super::boundary_load::PendingBoundaryLoad> = Vec::new();
@@ -565,6 +571,15 @@ pub fn compile_via_spqr_with_options(
         {
             #[cfg(test)]
             eprintln!("  → group {gi} already consumed by BKM coupling");
+            continue;
+        }
+        if !group_comp_ids.is_empty()
+            && group_comp_ids
+                .iter()
+                .all(|id| xfmr_consumed_comp_ids.contains(id))
+        {
+            #[cfg(test)]
+            eprintln!("  → group {gi} already consumed by transformer-secondary reflection");
             continue;
         }
 
@@ -1589,6 +1604,159 @@ pub fn compile_via_spqr_with_options(
 
                 if built_feedforward {
                     continue;
+                }
+            }
+
+            // ── Transformer-secondary load reflection (GAP F, narrow + gated) ──
+            // A transformer's PRIMARY-side stage never feels a load on its
+            // SECONDARY: the windings couple magnetically (`coupled_nodes`),
+            // not conductively, so the loaded secondary always splits into its
+            // own flow group. The primary-side solve then terminates the
+            // transformer with an OPEN secondary (bare magnetizing branch) and
+            // the standalone load stage divides by an arbitrary source
+            // resistance — measured +20…+26 dB vs ngspice on the CE → 10:1 OT
+            // → 1 kΩ probes (the LA-2A GAP F step-down family).
+            //
+            // Fix: fuse the secondary load-group edges into THIS group's build
+            // and lower via `build_passive_rtype_stage`. Its MNA stamps the
+            // full transformer skeleton (DCR + leakage + magnetizing/JA core +
+            // ideal turns-ratio branch) with REAL secondary nodes, so the load
+            // current flows through the turns-ratio stamp and the primary
+            // feels `n²·R` — the reflection is performed by the same model
+            // that matches the ngspice coupled-inductor fixtures to ~−90 dB
+            // when transformer and load share a stage. The standalone load
+            // stage is consumed (skip-set + built-stage removal) so the load
+            // is never applied twice. ANALYSIS (the exact recognized shape)
+            // and POLICY (passive-only target, `PK_XFMR_REFLECT_DISABLE`
+            // opt-out) live in `boundary_load`; the decision — reflected or
+            // declined — is recorded on `CompiledPedal::boundary_loads`.
+            {
+                let xfmr_analysis = super::boundary_load::analyze_transformer_secondary_load(
+                    gi,
+                    &feedback_groups,
+                    &graph,
+                    &cut_edges,
+                );
+                if let Some(load) = xfmr_analysis {
+                    let mut fused: Option<(WdfStage, Vec<usize>)> = None;
+                    let disposition =
+                        match super::boundary_load::gate_transformer_reflection(group, &graph) {
+                            Ok(()) => {
+                                let mut fused_edges = group_edges.clone();
+                                for &eidx in load.model.edges() {
+                                    if !fused_edges.contains(&eidx) {
+                                        fused_edges.push(eidx);
+                                    }
+                                }
+                                match build_passive_rtype_stage(
+                                    &fused_edges,
+                                    &graph,
+                                    sample_rate,
+                                    &bias_node_voltages,
+                                ) {
+                                    Some(wdf) => {
+                                        #[cfg(test)]
+                                        eprintln!(
+                                            "  [compile] group {gi}: reflected transformer-secondary \
+                                             load group {} (n={}, r_reflected={:.1}) into primary-side \
+                                             PassiveRType MNA",
+                                            load.load_group, load.turns_ratio, load.r_reflected
+                                        );
+                                        fused = Some((wdf, fused_edges));
+                                        super::boundary_load::LoadDisposition::ReflectedThroughTransformer {
+                                            consumed_group: load.load_group,
+                                            turns_ratio: load.turns_ratio,
+                                            r_reflected: load.r_reflected,
+                                        }
+                                    }
+                                    // Lowering failed (degenerate terminals) — leave
+                                    // the boundary open and fall through to the
+                                    // normal build path; nothing is consumed.
+                                    None => super::boundary_load::LoadDisposition::Unloaded {
+                                        reason: "gate:passive-rtype-lowering-failed",
+                                    },
+                                }
+                            }
+                            Err(reason) => {
+                                super::boundary_load::LoadDisposition::Unloaded { reason }
+                            }
+                        };
+                    if let Some((wdf, fused_edges)) = fused {
+                        // Fused stage owns the load components: refresh label /
+                        // comp ids so later stage lookups see them.
+                        let mut fused_comp_ids: Vec<String> = fused_edges
+                            .iter()
+                            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                            .collect();
+                        fused_comp_ids.sort();
+                        fused_comp_ids.dedup();
+                        #[cfg(debug_assertions)]
+                        let fused_label = fused_comp_ids.join(",");
+                        #[cfg(not(debug_assertions))]
+                        let fused_label = String::new();
+                        push_stage!(
+                            BuiltStage::Wdf(wdf),
+                            group_flow_distances[gi],
+                            fused_label,
+                            is_bypass,
+                            fused_comp_ids.clone()
+                        );
+
+                        // Consume the standalone load group: skip it if it has
+                        // not built yet; remove its stage if it already has
+                        // (non-feedback build order is group-enumeration order,
+                        // so both orders occur). Same de-duplication contract
+                        // as the C1 trailing-output fusion.
+                        let mut load_ids: Vec<String> = load
+                            .model
+                            .edges()
+                            .iter()
+                            .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                            .collect();
+                        load_ids.sort();
+                        load_ids.dedup();
+                        for id in &load_ids {
+                            xfmr_consumed_comp_ids.insert(id.clone());
+                        }
+                        // Exclude the fused stage just pushed (last index).
+                        for idx in (0..stages.len().saturating_sub(1)).rev() {
+                            if stage_comp_ids[idx] == load_ids {
+                                #[cfg(test)]
+                                eprintln!(
+                                    "  [compile] group {gi}: removed standalone secondary-load \
+                                     stage {idx} ({load_ids:?}) — consumed by transformer \
+                                     reflection"
+                                );
+                                stages.remove(idx);
+                                stage_comp_ids.remove(idx);
+                                break;
+                            }
+                        }
+                        pending_boundary_loads.push(super::boundary_load::PendingBoundaryLoad {
+                            stage_key: fused_comp_ids
+                                .iter()
+                                .min()
+                                .cloned()
+                                .unwrap_or_else(|| "~".to_string()),
+                            boundary_node: load.boundary_node,
+                            model: load.model.summarize(&graph),
+                            disposition: disposition.summarize(),
+                        });
+                        continue;
+                    }
+                    // Analyzed but declined (gate / lowering failure): record
+                    // the row for the dashboard and fall through to the normal
+                    // build path — byte-identical behavior.
+                    pending_boundary_loads.push(super::boundary_load::PendingBoundaryLoad {
+                        stage_key: group_comp_ids
+                            .iter()
+                            .min()
+                            .cloned()
+                            .unwrap_or_else(|| "~".to_string()),
+                        boundary_node: load.boundary_node,
+                        model: load.model.summarize(&graph),
+                        disposition: disposition.summarize(),
+                    });
                 }
             }
 

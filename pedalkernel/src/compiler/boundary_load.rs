@@ -195,14 +195,31 @@ pub(super) enum LoadDisposition {
     /// Nothing done — boundary left open, with the reason (gate name / env
     /// opt-out / shape mismatch / no load found), for dashboards and triage.
     Unloaded { reason: &'static str },
+    /// Transformer-SECONDARY load fused into the transformer's PRIMARY-side
+    /// stage (the load edges join the solved MNA that carries the full
+    /// transformer skeleton, so the primary feels `n² · Z_secondary`); the
+    /// standalone downstream load stage was consumed.
+    ReflectedThroughTransformer {
+        consumed_group: usize,
+        /// `n = N_primary / N_secondary`.
+        turns_ratio: f64,
+        /// Load resistance as seen from the primary: `n² · r_total`.
+        r_reflected: f64,
+    },
 }
 
 impl LoadDisposition {
-    /// The flow-group index consumed by fusion, if any.
+    /// The flow-group index consumed by BA283-class output fusion, if any.
+    ///
+    /// Deliberately `None` for [`LoadDisposition::ReflectedThroughTransformer`]:
+    /// the transformer-reflection call site (spqr_build non-feedback arm) owns
+    /// its own consumption bookkeeping (skip-set + built-stage removal), while
+    /// this accessor feeds only the feedback-arm C1 fusion consumption.
     pub(super) fn fused_group(&self) -> Option<usize> {
         match self {
             LoadDisposition::FusedUpstream { consumed_group } => Some(*consumed_group),
             LoadDisposition::Unloaded { .. } => None,
+            LoadDisposition::ReflectedThroughTransformer { .. } => None,
         }
     }
 
@@ -212,6 +229,14 @@ impl LoadDisposition {
             LoadDisposition::FusedUpstream { .. } => BoundaryLoadDisposition::FusedUpstream,
             LoadDisposition::Unloaded { reason } => BoundaryLoadDisposition::Unloaded {
                 reason: (*reason).to_string(),
+            },
+            LoadDisposition::ReflectedThroughTransformer {
+                turns_ratio,
+                r_reflected,
+                ..
+            } => BoundaryLoadDisposition::ReflectedThroughTransformer {
+                turns_ratio: *turns_ratio,
+                r_reflected: *r_reflected,
             },
         }
     }
@@ -822,6 +847,194 @@ pub(super) fn gate_ba283_fusion(
         return Err("gate:no-dc-qpoint-seed");
     }
 
+    Ok(())
+}
+
+/// Result of [`analyze_transformer_secondary_load`]: a transformer whose
+/// PRIMARY-side edge lives in the target group and whose SECONDARY winding
+/// carries a recognized load network in a *different* flow group.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct TransformerSecondaryLoad {
+    /// Index (into the flow-group slice) of the secondary-side load group.
+    pub load_group: usize,
+    /// Turns ratio `n = N_primary / N_secondary` (10:1 step-down → 10.0).
+    pub turns_ratio: f64,
+    /// The secondary hot node the load hangs off (`T.c` == the global `out`).
+    pub boundary_node: NodeId,
+    /// The load resistance as seen from the PRIMARY winding: `n² · r_total`.
+    pub r_reflected: f64,
+    /// What hangs across the secondary winding.
+    pub model: BoundaryLoadModel,
+}
+
+/// ANALYSIS ONLY — find a SECONDARY-side load group magnetically downstream of
+/// the transformer whose primary edge lives in `target_gi` (the GAP F /
+/// LA-2A output-transformer family).
+///
+/// WHY a dedicated analysis: a transformer contributes only its PRIMARY
+/// winding as a conductive `graph.edges` entry — the secondary side couples
+/// through `coupled_nodes` (magnetic flux), never an edge. Flow-group
+/// formation walks conductive edges only, so a loaded secondary always splits
+/// into its own group and compiles as a standalone stage fed through the
+/// impedance-blind sample chain: the primary-side solve terminates the
+/// transformer with its bare magnetizing branch (an open secondary), and the
+/// load stage divides by an arbitrary source resistance. Measured on the CE →
+/// 10:1 OT → 1 kΩ probes: +20 dB (collector-fed) / +26 dB (cap-coupled) vs
+/// ngspice.
+///
+/// The recognized shape is deliberately EXACT (the C1 discipline):
+/// * the target group holds exactly ONE transformer component — a plain
+///   two-port (no tertiary winding), finite positive turns ratio;
+/// * its secondary cold end (`T.d`) is grounded and its hot end (`T.c`) IS
+///   the global `out` (the output-transformer family: LA-2A `T_out`, Pultec
+///   output, the SPICE step-down fixtures) and does not touch the target
+///   group;
+/// * a different, fully passive flow group hangs off `T.c` consisting of
+///   NOTHING but grounded fixed (non-pot) load resistors — no caps, no pots,
+///   no actives — and none of its edges are broker-cut (`DelayedCutSet`).
+///
+/// No device gate, no env check here — that is POLICY
+/// ([`gate_transformer_reflection`]). Returns `None` when the shape is not
+/// recognized.
+pub(super) fn analyze_transformer_secondary_load(
+    target_gi: usize,
+    groups: &[FlowGroup],
+    graph: &CircuitGraph,
+    cut_edges: &DelayedCutSet,
+) -> Option<TransformerSecondaryLoad> {
+    let out = graph.out_node;
+    if out == graph.gnd_node || out == graph.vcc_node {
+        return None;
+    }
+    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+
+    // Exactly one transformer component in the target group (its primary edge).
+    let target = &groups[target_gi];
+    let mut xfmr_comp: Option<usize> = None;
+    for &eidx in &target.all_edges() {
+        let comp_idx = graph.edges[eidx].comp_idx;
+        if graph.components[comp_idx].kind.is_transformer() {
+            match xfmr_comp {
+                None => xfmr_comp = Some(comp_idx),
+                Some(prev) if prev == comp_idx => {}
+                Some(_) => return None, // two transformers — ambiguous shape
+            }
+        }
+    }
+    let comp_idx = xfmr_comp?;
+    let comp = &graph.components[comp_idx];
+    let cfg = comp.kind.transformer_config()?;
+    if cfg.has_tertiary() {
+        return None;
+    }
+    let n = cfg.turns_ratio;
+    if !(n.is_finite() && n > 0.0) {
+        return None;
+    }
+
+    // Secondary winding terminals: cold end grounded, hot end == global `out`.
+    let sec_pos = *graph.node_names.get(&format!("{}.c", comp.id))?;
+    let sec_neg = *graph.node_names.get(&format!("{}.d", comp.id))?;
+    if !is_gnd(sec_neg) || sec_pos != out || is_gnd(sec_pos) {
+        return None;
+    }
+    // The hot secondary node must live strictly downstream of the target
+    // group (no target edge may already touch it).
+    for &eidx in &target.all_edges() {
+        let e = &graph.edges[eidx];
+        if e.node_a == sec_pos || e.node_b == sec_pos {
+            return None;
+        }
+    }
+
+    // The load group: a passive group of NOTHING but grounded fixed (non-pot)
+    // load resistors at the secondary hot node.
+    for (src_gi, source) in groups.iter().enumerate() {
+        if src_gi == target_gi || !source.active_edges.is_empty() {
+            continue;
+        }
+        let edges = source.all_edges();
+        if edges.is_empty() {
+            continue;
+        }
+        // Never fuse across a broker-cut (delayed-coupling) boundary.
+        if edges.iter().any(|eidx| cut_edges.cuts.contains_key(eidx)) {
+            continue;
+        }
+        let mut load_conductance = 0.0f64;
+        let mut shape_ok = true;
+        for &eidx in &edges {
+            let e = &graph.edges[eidx];
+            let load_comp = &graph.components[e.comp_idx];
+            let touches_sec = e.node_a == sec_pos || e.node_b == sec_pos;
+            match graph.effective_edge_kind(eidx) {
+                EdgeKind::Linear
+                    if load_comp.kind.resistance().is_some()
+                        && !load_comp.kind.is_pot()
+                        && touches_sec
+                        && (is_gnd(e.node_a) || is_gnd(e.node_b)) =>
+                {
+                    if let Some(r) = load_comp.kind.resistance() {
+                        if r > 0.0 {
+                            load_conductance += 1.0 / r;
+                        }
+                    }
+                }
+                _ => {
+                    shape_ok = false;
+                }
+            }
+            if !shape_ok {
+                break;
+            }
+        }
+        if shape_ok && load_conductance > 0.0 {
+            let r_total = 1.0 / load_conductance;
+            return Some(TransformerSecondaryLoad {
+                load_group: src_gi,
+                turns_ratio: n,
+                boundary_node: sec_pos,
+                r_reflected: n * n * r_total,
+                model: BoundaryLoadModel::GroundedResistive { r_total, edges },
+            });
+        }
+    }
+    None
+}
+
+/// POLICY gate for transformer-secondary load reflection.
+///
+/// The reflection lowers the fused (transformer + load) group via
+/// `build_passive_rtype_stage`, whose MNA carries the full transformer
+/// skeleton (DCR + leakage + magnetizing/JA core + ideal turns-ratio stamp) —
+/// the same machinery that matches the ngspice coupled-inductor fixtures to
+/// ~−90 dB when transformer and load share a stage. That builder is
+/// passive-only, so the target group must be fully passive (a transformer
+/// claimed INTO an active device's group — e.g. an OT primary in a collector
+/// branch — is out of scope here and stays declined-with-reason for the
+/// dashboard).
+///
+/// * `PK_XFMR_REFLECT_DISABLE` is the opt-out escape hatch, mirroring
+///   `PK_OUTPUT_FUSE_DISABLE`.
+pub(super) fn gate_transformer_reflection(
+    target: &FlowGroup,
+    graph: &CircuitGraph,
+) -> Result<(), &'static str> {
+    // Opt-out escape hatch, mirroring PK_OUTPUT_FUSE_DISABLE.
+    if std::env::var("PK_XFMR_REFLECT_DISABLE").is_ok() {
+        return Err("env:PK_XFMR_REFLECT_DISABLE");
+    }
+    if !target.active_edges.is_empty() {
+        return Err("gate:transformer-stage-not-passive");
+    }
+    for &eidx in &target.all_edges() {
+        if !graph.components[graph.edges[eidx].comp_idx]
+            .kind
+            .is_passive()
+        {
+            return Err("gate:transformer-stage-not-passive");
+        }
+    }
     Ok(())
 }
 
