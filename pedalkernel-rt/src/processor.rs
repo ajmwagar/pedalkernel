@@ -973,6 +973,86 @@ pub struct InternalPortBinding {
     pub prev_value: crate::Wave,
 }
 
+/// Serializable summary of what the compiler's boundary-load ANALYSIS found
+/// hanging electrically downstream of a stage boundary node.
+///
+/// This is the dashboard-facing flattening of the compiler-internal
+/// `BoundaryLoadModel` (pedalkernel `compiler/boundary_load.rs`): component id
+/// strings + element values only — compile-time edge indices never leave the
+/// compiler. Purely descriptive: nothing in the runtime reads it.
+///
+/// WHY this table exists (the BA283 evidence): downstream impedance never
+/// reflects back into an upstream stage's scattering, so stages solve against
+/// an open circuit. ngspice with RL=1G reproduces the unloaded WDF to 3–4
+/// decimals — the engine was exact at the topology it simulated; the topology
+/// was wrong. Fusing the `Cout→RL` output network into the BA283's solved MNA
+/// closed the loaded-AC gap to LEVEL −0.05 dB / ΔTHD 0.4 dB / tilt 0.79 dB.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BoundaryLoadSummary {
+    /// Nothing recognized downstream (or analysis declined) — boundary is open.
+    Unloaded,
+    /// Grounded resistive load(s) directly at the boundary node.
+    GroundedResistive {
+        /// Effective (parallel) load resistance in ohms.
+        r_total: f64,
+        /// Netlist component ids of the load network, sorted.
+        component_ids: Vec<String>,
+    },
+    /// One series coupling cap into grounded resistive load(s) — the classic
+    /// `Cout→RL` output network (the BA283 shape).
+    SeriesCapIntoLoad {
+        /// Coupling capacitance in farads.
+        c: f64,
+        /// Effective (parallel) load resistance in ohms.
+        r_total: f64,
+        /// Netlist component ids of the load network, sorted.
+        component_ids: Vec<String>,
+    },
+    /// General passive network (future widening; analysis may emit this, no
+    /// policy consumes it yet).
+    PassiveNetwork {
+        /// Netlist component ids of the network, sorted.
+        component_ids: Vec<String>,
+    },
+}
+
+/// Serializable POLICY OUTCOME: what the compiler did about an analyzed
+/// boundary load. Dashboard/triage counterpart of the compiler-internal
+/// `LoadDisposition`.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum BoundaryLoadDisposition {
+    /// The load edges were fused into the upstream stage's solved network and
+    /// the standalone downstream stage was consumed (removed).
+    FusedUpstream,
+    /// Nothing was done — the boundary is left open, with the reason
+    /// (gate name / env opt-out / shape mismatch / no load found).
+    Unloaded { reason: String },
+}
+
+/// One row of the compile-time boundary-load decision table: what hangs off a
+/// stage's output boundary (`model`) and what the compiler did about it
+/// (`disposition`). Recorded for every analyzed boundary — including declined
+/// ones — so dashboards can surface unloaded output boundaries (Klon/RAT/
+/// Pultec WSL/NaN triage) without recompiling.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct BoundaryLoadBinding {
+    /// Index into `CompiledPedal::stages` of the upstream stage whose output
+    /// boundary was analyzed. `usize::MAX` if the stage could not be resolved
+    /// after final stage ordering (should not happen in practice).
+    pub upstream_stage: usize,
+    /// Circuit-graph node id the analyzed load hangs off (the upstream stage's
+    /// output boundary node; the coupling cap's stage-side node for
+    /// `SeriesCapIntoLoad`). The global `out` node when no load was found.
+    pub boundary_node: usize,
+    /// What the analysis found downstream of `boundary_node`.
+    pub model: BoundaryLoadSummary,
+    /// What the compiler did about it.
+    pub disposition: BoundaryLoadDisposition,
+}
+
 /// Compiler-synthesized DETECTOR → photocoupler-LED coupling (Phase 3) — the
 /// actual gain-reduction loop closure of a cross-network feedback detector
 /// (the LA-2A `EL_drive.b -> PC1.led` light path).
@@ -1754,6 +1834,13 @@ pub struct CompiledPedal {
     /// Not user-overridable; written/read entirely inside `process()`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub internal_ports: Vec<InternalPortBinding>,
+    /// Compile-time boundary-load decision table (analysis + policy outcome
+    /// per analyzed stage boundary). Purely descriptive — the runtime never
+    /// reads it; dashboards and triage tooling do. Empty when no boundary was
+    /// analyzed (currently only the output boundary of multi-BJT DC-feedback
+    /// MNA stages is analyzed; see `compiler/boundary_load.rs`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub boundary_loads: Vec<BoundaryLoadBinding>,
     /// Compiler-synthesized DETECTOR → photocoupler-LED coupling (Phase 3) — the
     /// gain-reduction loop closure for a cross-network feedback detector
     /// (LA-2A). `None` for every other circuit (envelope-follower opto levelers
