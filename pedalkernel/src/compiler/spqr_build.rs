@@ -2236,6 +2236,34 @@ pub fn compile_via_spqr_with_options(
     };
     compiled.set_supply_voltage(supply_voltage);
 
+    // Boundary-load decision table diagnostic (bead pedalkernel-lkf1.2) —
+    // cfg(test)-gated like the other `[compile]` prints; purely additive, no
+    // behavior. One line per analyzed output boundary so a silently-Unloaded
+    // boundary is a visible, greppable fact with its reason. An EMPTY table is
+    // itself a triage signal (no feedback group reached the general-MNA call
+    // site — e.g. the whole pedal compiled via blockwise/other paths), distinct
+    // from a populated row with `Unloaded{reason}`.
+    #[cfg(test)]
+    {
+        if compiled.boundary_loads.is_empty() {
+            eprintln!(
+                "  [compile] boundary-load table: EMPTY — no feedback group reached the \
+                 general-MNA call site (output boundary unanalyzed)"
+            );
+        }
+        for b in &compiled.boundary_loads {
+            let stage = if b.upstream_stage == usize::MAX {
+                "?".to_string()
+            } else {
+                b.upstream_stage.to_string()
+            };
+            eprintln!(
+                "  [compile] boundary-load: stage {stage} @ node {} — {:?} ⇒ {:?}",
+                b.boundary_node, b.model, b.disposition
+            );
+        }
+    }
+
     // Bind pot controls to their stages (WDF, IIR, MultiNl).
     super::spqr_control::bind_controls(pedal, &mut compiled);
 
