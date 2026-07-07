@@ -678,7 +678,7 @@ pub fn compile_via_spqr_with_options(
             );
             let load_disposition = match &boundary_analysis {
                 Some(load) => {
-                    match super::boundary_load::gate_ba283_fusion(group, &graph, supply_voltage) {
+                    match super::boundary_load::gate_fusion(load, group, &graph, supply_voltage) {
                         Ok(()) => super::boundary_load::LoadDisposition::FusedUpstream {
                             consumed_group: load.group,
                         },
