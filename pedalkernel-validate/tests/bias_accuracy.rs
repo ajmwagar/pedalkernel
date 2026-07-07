@@ -57,7 +57,7 @@ use pedalkernel_rt::processor::Stage;
 use pedalkernel_rt::stage::NlDeviceGroupKind;
 use pedalkernel_validate::metrics::op_point::{self, DeviceBias, OpPassCriteria, PortResidual};
 use pedalkernel_validate::pro_pedal::load_pro_pedal_sub;
-use pedalkernel_validate::report::render_bias_accuracy;
+use pedalkernel_validate::report::{render_bias_accuracy, render_boundary_loads};
 use pedalkernel_validate::spice::{SpiceConfig, SpiceOpSnapshot, SpiceRunner};
 use std::path::PathBuf;
 
@@ -352,6 +352,10 @@ fn bias_accuracy_dashboard() {
     let criteria = OpPassCriteria::default();
     let mut results = Vec::new();
     let mut ba283: Option<op_point::OpPointResult> = None;
+    // Compile-time boundary-load decision table per circuit (for the boundary
+    // table print + the unloaded-output triage flag next to each verdict).
+    let mut boundary: Vec<(String, Vec<pedalkernel_rt::processor::BoundaryLoadBinding>)> =
+        Vec::new();
 
     for circuit in CIRCUITS {
         let Some(snap) = ngspice_op(circuit) else {
@@ -365,6 +369,7 @@ fn bias_accuracy_dashboard() {
         // MATCH: the engine's OWN cold-solve settled bias (no seed).
         let match_proc = compile_settle(circuit, &source);
         let ours = wdf_device_bias(&match_proc);
+        boundary.push((circuit.name.to_string(), match_proc.boundary_loads.clone()));
 
         // RESIDUAL: op{}-seed each device at ngspice's .op AND seed the caps via
         // the `nodes { }` sub-block. At compile the engine initializes v_prev AND
@@ -387,8 +392,13 @@ fn bias_accuracy_dashboard() {
         return;
     }
 
-    let table = render_bias_accuracy(&results, &criteria);
+    let boundary_map: std::collections::BTreeMap<_, _> = boundary.iter().cloned().collect();
+    let table = render_bias_accuracy(&results, &criteria, &boundary_map);
     println!("{table}");
+
+    // Boundary-load decision table: what hangs off each circuit's output
+    // boundary and what the compiler did about it (fused vs silently open).
+    println!("{}", render_boundary_loads(&boundary));
 
     // ── BA283 verdict gate (the known circuit) ───────────────────────────────
     // BA283 is the calibration circuit: we KNOW its bias is wrong (TR1 starves),
