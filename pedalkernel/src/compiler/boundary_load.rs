@@ -1737,8 +1737,12 @@ mod tests {
         );
     }
 
-    /// TEMPORARY fleet diagnostic (lkf1.3 data-first): dump per-group shape
-    /// data for the 8 `no-trailing-output-load` example pedals. Run with
+    /// Fleet diagnostic (ignored; lkf1.3 data-first tool): dump per-group
+    /// shape data — group composition, trailing-load analysis, and the fusion
+    /// gate verdict — for the example pedals whose output boundaries were
+    /// open at the C2 sweep. This is the group-level view the compiled
+    /// `boundary_loads` table cannot show (it built the lkf1.3 shape catalog;
+    /// keep it for the lkf1.5 blockwise-recording work). Run with
     /// `cargo test -p pedalkernel --lib boundary_load::tests::dump_fleet -- --nocapture --ignored`
     #[test]
     #[ignore]
