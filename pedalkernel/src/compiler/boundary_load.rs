@@ -1028,11 +1028,17 @@ pub(super) fn gate_transformer_reflection(
         return Err("gate:transformer-stage-not-passive");
     }
     for &eidx in &target.all_edges() {
-        if !graph.components[graph.edges[eidx].comp_idx]
-            .kind
-            .is_passive()
-        {
+        let kind = &graph.components[graph.edges[eidx].comp_idx].kind;
+        if !kind.is_passive() {
             return Err("gate:transformer-stage-not-passive");
+        }
+        // Pots are passive, but the generic-arm lowering FILTERS pot-divider
+        // halves out of `group_edges` before the stage build — a fused build
+        // from that filtered set would silently drop the pot (and its control
+        // binding). Decline until pot-aware fusion exists (the lkf1.3
+        // wiper-divider machinery is the template).
+        if kind.is_pot() {
+            return Err("gate:pot-in-transformer-stage");
         }
     }
     Ok(())
@@ -2130,6 +2136,45 @@ mod tests {
             }
         }"#;
 
+    /// A POT in the transformer's own (passive) group — series rheostat
+    /// between the coupling cap and the primary. The shape still analyzes
+    /// (the LOAD group is a plain grounded R), but the policy gate must
+    /// decline: the generic-arm lowering filters pot halves out of
+    /// `group_edges`, so a fused build would silently drop the pot and its
+    /// control binding.
+    const XFMR_POT_IN_STAGE: &str = r#"
+        pedal "xfmr pot in stage" { supply 9V
+            components {
+                Cin:  cap(10u, electrolytic)
+                Rb1:  resistor(100k)
+                Rb2:  resistor(22k)
+                Q1:   npn(2n3904)
+                Rc:   resistor(4.7k)
+                Re:   resistor(1k)
+                Ce:   cap(100u, electrolytic)
+                Cout: cap(10u, electrolytic)
+                Lvl:  pot(10k)
+                T1:   transformer(10:1, 2H)
+                RL:   resistor(1k)
+            }
+            nets {
+                in -> Cin.a
+                Cin.b -> Q1.base, Rb1.b, Rb2.a
+                vcc -> Rb1.a, Rc.a
+                Rc.b -> Q1.collector, Cout.a
+                Q1.emitter -> Re.a, Ce.a
+                Re.b -> gnd
+                Ce.b -> gnd
+                Rb2.b -> gnd
+                Cout.b -> Lvl.a
+                Lvl.w -> T1.a
+                T1.b -> gnd
+                T1.c -> out, RL.a
+                T1.d -> gnd
+                RL.b -> gnd
+            }
+        }"#;
+
     /// Mid-chain transformer: the secondary hot end feeds a downstream RC
     /// network, NOT the global `out` — outside the output-transformer family;
     /// analysis must decline.
@@ -2242,6 +2287,24 @@ mod tests {
             analyze_transformer_secondary_load(target_gi, &groups, &graph, &cut_edges),
             None,
             "a pot across the secondary is not the fixed grounded-R load shape"
+        );
+    }
+
+    #[test]
+    fn pot_in_transformer_group_declines_gate_with_reason() {
+        let (graph, groups, cut_edges) = groups_for(XFMR_POT_IN_STAGE);
+        let target_gi = transformer_group_index(&groups, &graph);
+
+        // The load side is still the plain grounded-R shape...
+        assert!(
+            analyze_transformer_secondary_load(target_gi, &groups, &graph, &cut_edges).is_some(),
+            "grounded-R load shape analyzes regardless of the pot upstream"
+        );
+        // ...but a pot inside the transformer's group must decline the gate
+        // (fused lowering would drop the filtered pot halves).
+        assert_eq!(
+            gate_transformer_reflection(&groups[target_gi], &graph),
+            Err("gate:pot-in-transformer-stage")
         );
     }
 

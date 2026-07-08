@@ -1638,8 +1638,21 @@ pub fn compile_via_spqr_with_options(
                     &cut_edges,
                 );
                 if let Some(load) = xfmr_analysis {
+                    // A load group can only be consumed ONCE. Two transformers
+                    // whose secondaries share a single load group (pathological
+                    // but constructible) must not both fuse it — the second
+                    // fusion would stamp the load edges into two stages
+                    // (double loading) with no standalone stage left to remove.
+                    let load_already_consumed = load.model.edges().iter().any(|&eidx| {
+                        xfmr_consumed_comp_ids
+                            .contains(&graph.components[graph.edges[eidx].comp_idx].id)
+                    });
                     let mut fused: Option<(WdfStage, Vec<usize>)> = None;
-                    let disposition =
+                    let disposition = if load_already_consumed {
+                        super::boundary_load::LoadDisposition::Unloaded {
+                            reason: "gate:load-group-already-consumed",
+                        }
+                    } else {
                         match super::boundary_load::gate_transformer_reflection(group, &graph) {
                             Ok(()) => {
                                 let mut fused_edges = group_edges.clone();
@@ -1680,7 +1693,8 @@ pub fn compile_via_spqr_with_options(
                             Err(reason) => {
                                 super::boundary_load::LoadDisposition::Unloaded { reason }
                             }
-                        };
+                        }
+                    };
                     if let Some((wdf, fused_edges)) = fused {
                         // Fused stage owns the load components: refresh label /
                         // comp ids so later stage lookups see them.
@@ -2511,10 +2525,8 @@ pub fn compile_via_spqr_with_options(
                             break;
                         }
                         // Fallback: PassiveRType MNA superposition injection.
-                        if wdf.register_port_vs_injection(
-                            &port_binding.name,
-                            port_binding.node_id,
-                        ) {
+                        if wdf.register_port_vs_injection(&port_binding.name, port_binding.node_id)
+                        {
                             port_binding.stage_idx = si;
                             #[cfg(test)]
                             eprintln!(
@@ -5669,7 +5681,13 @@ fn compute_wdf_fet_dc_qpoint(
         let source_voltage = source_rail_voltage + ids * source_resistance;
         let vgs = gate_voltage - source_voltage;
         let vds = drain_voltage - source_voltage;
-        (vgs, vds, drain_voltage, source_voltage, model_current(vgs, vds))
+        (
+            vgs,
+            vds,
+            drain_voltage,
+            source_voltage,
+            model_current(vgs, vds),
+        )
     };
 
     let residual = |ids: f64| -> f64 {
@@ -5921,13 +5939,19 @@ fn compute_wdf_bjt_dc_qpoint(
     let vbc_active = -1.0_f64;
     let mut vbe = 0.65_f64;
     for _ in 0..60 {
-        let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
+        let (ic, ib) = model.currents(
+            vbe as pedalkernel_rt::Wave,
+            vbc_active as pedalkernel_rt::Wave,
+        );
         let (ic, ib) = (ic, ib);
         let ie = ic + ib;
         let f = v_drive - ib * rth - vbe - ie * re;
         // df/dVbe via finite difference on the device currents.
         let h = 1e-4;
-        let (ic2, ib2) = model.currents((vbe + h) as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
+        let (ic2, ib2) = model.currents(
+            (vbe + h) as pedalkernel_rt::Wave,
+            vbc_active as pedalkernel_rt::Wave,
+        );
         let (ic2, ib2) = (ic2, ib2);
         let df = -((ib2 - ib) / h) * rth - 1.0 - ((ic2 + ib2 - ie) / h) * re;
         if df.abs() < 1e-18 {
@@ -5952,7 +5976,10 @@ fn compute_wdf_bjt_dc_qpoint(
     // pre-seed `prev_v` so the WDF/NR solve cold-starts AT the Q-point instead of
     // 0 V, eliminating the bias-settling startup transient (ngspice runs a `.op`
     // before `.tran`).  Falls back to half-rail when RC is absent.
-    let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc_active as pedalkernel_rt::Wave);
+    let (ic, ib) = model.currents(
+        vbe as pedalkernel_rt::Wave,
+        vbc_active as pedalkernel_rt::Wave,
+    );
     let ie = ic + ib;
     let rc = find_r_to_rail(_collector_node, graph.vcc_node);
     let vcc = supply_voltage.abs();
