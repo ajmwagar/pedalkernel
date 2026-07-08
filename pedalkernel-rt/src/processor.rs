@@ -1015,6 +1015,40 @@ pub enum BoundaryLoadSummary {
         /// Netlist component ids of the network, sorted.
         component_ids: Vec<String>,
     },
+    /// One series coupling cap into a POT-bearing grounded output network at
+    /// the global `out` — the volume-pot load family (lkf1.3): pot rheostat
+    /// to ground, or pot divider whose wiper is the `out` tap (directly or
+    /// through one series resistor), plus optional fixed grounded resistors
+    /// at the load node.
+    ///
+    /// NOTE (schema, bead pedalkernel-sxz2): new variants are appended at the
+    /// END of this enum so postcard tags of pre-existing variants stay stable
+    /// (old cached blobs still deserialize with new code).
+    SeriesCapIntoPotLoad {
+        /// Coupling capacitance in farads.
+        c: f64,
+        /// Netlist component id of the pot (the variable load element).
+        pot_id: String,
+        /// Pot track (end-to-end) resistance in ohms.
+        r_pot: f64,
+        /// Effective (parallel) FIXED grounded resistance at the load node,
+        /// `None` when the pot is the only grounded element.
+        r_fixed: Option<f64>,
+        /// Netlist component ids of the load network, sorted.
+        component_ids: Vec<String>,
+    },
+    /// A 3-terminal pot divider hanging DIRECTLY off the boundary node (no
+    /// coupling cap in the trailing group): track top at the boundary node,
+    /// wiper is the global `out` tap, track bottom grounded — the
+    /// fulltone_ocd `Volume` shape.
+    PotDividerAtOut {
+        /// Netlist component id of the pot.
+        pot_id: String,
+        /// Pot track (end-to-end) resistance in ohms.
+        r_pot: f64,
+        /// Netlist component ids of the load network, sorted.
+        component_ids: Vec<String>,
+    },
 }
 
 /// Serializable POLICY OUTCOME: what the compiler did about an analyzed

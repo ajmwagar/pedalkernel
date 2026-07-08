@@ -547,6 +547,37 @@ pub fn format_boundary_model(m: &BoundaryLoadSummary) -> String {
         BoundaryLoadSummary::PassiveNetwork { component_ids } => {
             format!("PassiveNetwork{{{}}}", component_ids.join(","))
         }
+        BoundaryLoadSummary::SeriesCapIntoPotLoad {
+            c,
+            pot_id,
+            r_pot,
+            r_fixed,
+            component_ids,
+        } => {
+            let load = match r_fixed {
+                Some(rf) => format!(
+                    "{pot_id}:{} pot ∥ {}",
+                    si_value(*r_pot, "Ω"),
+                    si_value(*rf, "Ω")
+                ),
+                None => format!("{pot_id}:{} pot", si_value(*r_pot, "Ω")),
+            };
+            format!(
+                "SeriesCapIntoPotLoad{{{} → {}; {}}}",
+                si_value(*c, "F"),
+                load,
+                component_ids.join(",")
+            )
+        }
+        BoundaryLoadSummary::PotDividerAtOut {
+            pot_id,
+            r_pot,
+            component_ids,
+        } => format!(
+            "PotDividerAtOut{{{pot_id}:{} pot; {}}}",
+            si_value(*r_pot, "Ω"),
+            component_ids.join(",")
+        ),
     }
 }
 

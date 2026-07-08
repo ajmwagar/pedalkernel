@@ -53,6 +53,20 @@ use super::signal_flow::FlowGroup;
 /// (boundary is open, or the boundary shape is not recognized).
 pub(super) const REASON_NO_TRAILING_LOAD: &str = "analysis:no-trailing-output-load";
 
+/// Disposition reason: the analyzed shape is recognized (visible in the
+/// table) but no fusion policy is validated for it — left open, safe in
+/// production (lkf1.3 scope guard). Today: `PassiveNetwork` trailing groups
+/// (tone stacks bundled with the output network — tube_screamer, big_muff,
+/// proco_rat, blues_driver).
+pub(super) const REASON_UNVALIDATED_SHAPE: &str = "gate:unvalidated-shape";
+
+/// Disposition reason: a `PotDividerAtOut` load hangs off a boundary node
+/// that is NOT DC-isolated within the target group (some target edge at the
+/// node is neither a capacitor nor a grounded fixed resistor). Fusing would
+/// shift the compile-time DC op-point the dc_qpoint seed was solved without,
+/// so the policy declines.
+pub(super) const REASON_DC_COUPLED_POT: &str = "gate:dc-coupled-pot-load";
+
 /// ANALYSIS: what hangs electrically downstream of a stage boundary node.
 ///
 /// Compiler-internal — `edges` are indices into `graph.edges` and are only
@@ -65,7 +79,7 @@ pub(super) enum BoundaryLoadModel {
     #[allow(dead_code)] // emitted by future boundary analyses; summary-side used today
     Unloaded,
     /// Grounded resistive load(s) directly at the boundary node.
-    #[allow(dead_code)] // future widening (pot loads at `out`, lkf1.3)
+    #[allow(dead_code)] // future widening (direct fixed-R loads, no cap)
     GroundedResistive { r_total: f64, edges: Vec<usize> },
     /// One series coupling cap into grounded resistive load(s) — the classic
     /// `Cout→RL` output network (the BA283 shape).
@@ -74,10 +88,33 @@ pub(super) enum BoundaryLoadModel {
         r_total: f64,
         edges: Vec<usize>,
     },
-    /// General passive network (future widening; analysis may emit it, no
-    /// policy consumes it yet).
-    #[allow(dead_code)]
+    /// General passive network — recognized for table visibility (the
+    /// tone-stack-bundled trailing groups of tube_screamer / big_muff /
+    /// proco_rat / blues_driver); no fusion policy consumes it
+    /// ([`REASON_UNVALIDATED_SHAPE`]).
     PassiveNetwork { edges: Vec<usize> },
+    /// One series coupling cap into a POT-bearing grounded output network at
+    /// the global `out` (lkf1.3): pot rheostat to ground, or pot divider
+    /// whose wiper is the `out` tap (directly or through one series
+    /// resistor), plus optional fixed grounded resistors at the load node.
+    SeriesCapIntoPotLoad {
+        c: f64,
+        pot_id: String,
+        r_pot: f64,
+        /// Parallel fixed grounded resistance at the load node (`None` when
+        /// the pot is the only grounded element).
+        r_fixed: Option<f64>,
+        edges: Vec<usize>,
+    },
+    /// A 3-terminal pot divider hanging DIRECTLY off the boundary node (no
+    /// coupling cap in the trailing group): track top at the boundary node,
+    /// wiper is the global `out` tap, track bottom grounded — the
+    /// fulltone_ocd `Volume` shape.
+    PotDividerAtOut {
+        pot_id: String,
+        r_pot: f64,
+        edges: Vec<usize>,
+    },
 }
 
 impl BoundaryLoadModel {
@@ -88,6 +125,8 @@ impl BoundaryLoadModel {
             BoundaryLoadModel::GroundedResistive { edges, .. } => edges,
             BoundaryLoadModel::SeriesCapIntoLoad { edges, .. } => edges,
             BoundaryLoadModel::PassiveNetwork { edges } => edges,
+            BoundaryLoadModel::SeriesCapIntoPotLoad { edges, .. } => edges,
+            BoundaryLoadModel::PotDividerAtOut { edges, .. } => edges,
         }
     }
 
@@ -119,6 +158,28 @@ impl BoundaryLoadModel {
                 }
             }
             BoundaryLoadModel::PassiveNetwork { edges } => BoundaryLoadSummary::PassiveNetwork {
+                component_ids: component_ids(edges),
+            },
+            BoundaryLoadModel::SeriesCapIntoPotLoad {
+                c,
+                pot_id,
+                r_pot,
+                r_fixed,
+                edges,
+            } => BoundaryLoadSummary::SeriesCapIntoPotLoad {
+                c: *c,
+                pot_id: pot_id.clone(),
+                r_pot: *r_pot,
+                r_fixed: *r_fixed,
+                component_ids: component_ids(edges),
+            },
+            BoundaryLoadModel::PotDividerAtOut {
+                pot_id,
+                r_pot,
+                edges,
+            } => BoundaryLoadSummary::PotDividerAtOut {
+                pot_id: pot_id.clone(),
+                r_pot: *r_pot,
                 component_ids: component_ids(edges),
             },
         }
@@ -170,18 +231,37 @@ pub(super) struct TrailingOutputLoad {
 }
 
 /// ANALYSIS ONLY — find the TRAILING OUTPUT GROUP downstream of `target_gi`'s
-/// output boundary: the passive `{Cout, RL}` flow group carrying the
-/// amplifier's load.
+/// output boundary: the passive flow group carrying the amplifier's load at
+/// the global `out`.
 ///
-/// The trailing group must be EXACTLY: one coupling cap bridging a
-/// target-group node to the global `out`, plus ≥1 grounded fixed (non-pot)
-/// load resistors at `out` — nothing else (no pots, no actives, no second
-/// cap), and no broker-cut (Phase 2a `DelayedCutSet`) edges: never fuse across
-/// a delayed-coupling boundary.
+/// Recognized shapes (per-shape gated predicates; catalog: lkf1.3 fleet
+/// sweep 2026-07-07):
+///
+/// * [`BoundaryLoadModel::SeriesCapIntoLoad`] — EXACTLY one coupling cap
+///   bridging a target-group node to the global `out`, plus ≥1 grounded
+///   fixed (non-pot) load resistors at `out` — nothing else (the BA283
+///   shape; kept byte-identical);
+/// * [`BoundaryLoadModel::SeriesCapIntoPotLoad`] — one coupling cap from a
+///   target-group node into a load node carrying exactly one pot (rheostat
+///   to ground, or divider whose wiper is `out` directly or through one
+///   series fixed resistor) plus optional grounded fixed resistors;
+/// * [`BoundaryLoadModel::PotDividerAtOut`] — the trailing group IS one
+///   3-terminal pot: track top at a target-group node, wiper = `out`, track
+///   bottom grounded (the fulltone_ocd `Volume` shape);
+/// * [`BoundaryLoadModel::PassiveNetwork`] — fallback VISIBILITY model for a
+///   richer passive trailing group at `out` (attached to the target, with at
+///   least one grounded shunt element). Policy never fuses it
+///   ([`REASON_UNVALIDATED_SHAPE`]).
+///
+/// Candidate trailing groups are passive (no active edges), have ≥2 edges,
+/// touch the global `out`, and contain no broker-cut (Phase 2a
+/// `DelayedCutSet`) edges: never fuse across a delayed-coupling boundary.
+/// Fusable shapes are searched over ALL candidates before the
+/// `PassiveNetwork` fallback so visibility never shadows a fusable load.
 ///
 /// No device-shape gate, no DC solve, no env check here — that is POLICY
-/// ([`gate_ba283_fusion`]). Returns `None` when the boundary is open or the
-/// shape is not recognized.
+/// ([`gate_fusion`]). Returns `None` when the boundary is open or no shape is
+/// recognized.
 pub(super) fn analyze_trailing_output_load(
     target_gi: usize,
     groups: &[FlowGroup],
@@ -193,7 +273,6 @@ pub(super) fn analyze_trailing_output_load(
     if out == graph.gnd_node || out == graph.vcc_node {
         return None;
     }
-    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
 
     // Target node set; the global `out` must NOT already be inside (there must
     // BE a trailing group to fuse).
@@ -207,79 +286,464 @@ pub(super) fn analyze_trailing_output_load(
         return None;
     }
 
-    // The trailing output group: a passive group that is EXACTLY one coupling
-    // cap (target-node -> out) plus grounded fixed load resistor(s) at out.
-    for (src_gi, source) in groups.iter().enumerate() {
-        if src_gi == target_gi || !source.active_edges.is_empty() {
-            continue;
-        }
-        let edges = source.all_edges();
-        if edges.len() < 2 {
-            continue;
-        }
-        // Phase 2a: never fuse across a broker-cut boundary.
-        if edges.iter().any(|eidx| cut_edges.cuts.contains_key(eidx)) {
-            continue;
-        }
-        let mut bridge: Option<(NodeId, f64)> = None; // (stage-side node, C)
-        let mut load_conductance = 0.0f64;
-        let mut n_loads = 0usize;
-        let mut shape_ok = true;
-        for &eidx in &edges {
-            let e = &graph.edges[eidx];
-            let comp = &graph.components[e.comp_idx];
-            let touches_out = e.node_a == out || e.node_b == out;
-            match graph.effective_edge_kind(eidx) {
-                // The output coupling cap: `out` on one side, a target-group
-                // node on the other. Exactly one.
-                EdgeKind::Reactive
-                    if comp.kind.capacitance().is_some() && touches_out && bridge.is_none() =>
-                {
-                    let interior = if e.node_a == out { e.node_b } else { e.node_a };
-                    if target_nodes.contains(&interior) {
-                        bridge = Some((interior, comp.kind.capacitance().unwrap_or(0.0)));
-                    } else {
-                        shape_ok = false;
-                    }
-                }
-                // A grounded fixed load resistor at `out` (not a pot).
-                EdgeKind::Linear
-                    if comp.kind.resistance().is_some()
-                        && !comp.kind.is_pot()
-                        && touches_out
-                        && (is_gnd(e.node_a) || is_gnd(e.node_b)) =>
-                {
-                    n_loads += 1;
-                    if let Some(r) = comp.kind.resistance() {
-                        if r > 0.0 {
-                            load_conductance += 1.0 / r;
-                        }
-                    }
-                }
-                _ => {
-                    shape_ok = false;
-                }
+    // Candidate trailing groups: passive, ≥2 edges, touching the global
+    // `out`, no broker-cut edges.
+    let candidates: Vec<(usize, Vec<usize>)> = groups
+        .iter()
+        .enumerate()
+        .filter_map(|(src_gi, source)| {
+            if src_gi == target_gi || !source.active_edges.is_empty() {
+                return None;
             }
-            if !shape_ok {
-                break;
+            let edges = source.all_edges();
+            if edges.len() < 2 {
+                return None;
             }
+            // Phase 2a: never fuse across a broker-cut boundary.
+            if edges.iter().any(|eidx| cut_edges.cuts.contains_key(eidx)) {
+                return None;
+            }
+            let touches_out = edges.iter().any(|&eidx| {
+                let e = &graph.edges[eidx];
+                e.node_a == out || e.node_b == out
+            });
+            touches_out.then_some((src_gi, edges))
+        })
+        .collect();
+
+    // Pass 1: exact fusable shapes.
+    for (src_gi, edges) in &candidates {
+        if let Some((boundary_node, model)) =
+            classify_series_cap_into_fixed_load(edges, &target_nodes, graph)
+                .or_else(|| classify_series_cap_into_pot_load(edges, &target_nodes, graph))
+                .or_else(|| classify_pot_divider_at_out(edges, &target_nodes, graph))
+        {
+            return Some(TrailingOutputLoad {
+                group: *src_gi,
+                boundary_node,
+                model,
+            });
         }
-        if shape_ok && n_loads >= 1 {
-            if let Some((boundary_node, c)) = bridge {
-                let r_total = if load_conductance > 0.0 {
-                    1.0 / load_conductance
-                } else {
-                    f64::INFINITY
-                };
-                return Some(TrailingOutputLoad {
-                    group: src_gi,
-                    boundary_node,
-                    model: BoundaryLoadModel::SeriesCapIntoLoad { c, r_total, edges },
-                });
-            }
+    }
+
+    // Pass 2: visibility fallback — a richer passive network at `out`.
+    for (src_gi, edges) in &candidates {
+        if let Some((boundary_node, model)) = classify_passive_network(edges, &target_nodes, graph)
+        {
+            return Some(TrailingOutputLoad {
+                group: *src_gi,
+                boundary_node,
+                model,
+            });
         }
     }
     None
+}
+
+/// The classic BA283 `Cout→RL` shape: EXACTLY one coupling cap
+/// (target-node → out) plus grounded fixed (non-pot) load resistor(s) at
+/// `out`, nothing else. Logic kept byte-identical to the pre-lkf1.3 scan.
+fn classify_series_cap_into_fixed_load(
+    edges: &[usize],
+    target_nodes: &std::collections::HashSet<NodeId>,
+    graph: &CircuitGraph,
+) -> Option<(NodeId, BoundaryLoadModel)> {
+    let out = graph.out_node;
+    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+
+    let mut bridge: Option<(NodeId, f64)> = None; // (stage-side node, C)
+    let mut load_conductance = 0.0f64;
+    let mut n_loads = 0usize;
+    for &eidx in edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let touches_out = e.node_a == out || e.node_b == out;
+        match graph.effective_edge_kind(eidx) {
+            // The output coupling cap: `out` on one side, a target-group
+            // node on the other. Exactly one.
+            EdgeKind::Reactive
+                if comp.kind.capacitance().is_some() && touches_out && bridge.is_none() =>
+            {
+                let interior = if e.node_a == out { e.node_b } else { e.node_a };
+                if target_nodes.contains(&interior) {
+                    bridge = Some((interior, comp.kind.capacitance().unwrap_or(0.0)));
+                } else {
+                    return None;
+                }
+            }
+            // A grounded fixed load resistor at `out` (not a pot).
+            EdgeKind::Linear
+                if comp.kind.resistance().is_some()
+                    && !comp.kind.is_pot()
+                    && touches_out
+                    && (is_gnd(e.node_a) || is_gnd(e.node_b)) =>
+            {
+                n_loads += 1;
+                if let Some(r) = comp.kind.resistance() {
+                    if r > 0.0 {
+                        load_conductance += 1.0 / r;
+                    }
+                }
+            }
+            _ => {
+                return None;
+            }
+        }
+    }
+    if n_loads < 1 {
+        return None;
+    }
+    let (boundary_node, c) = bridge?;
+    let r_total = if load_conductance > 0.0 {
+        1.0 / load_conductance
+    } else {
+        f64::INFINITY
+    };
+    Some((
+        boundary_node,
+        BoundaryLoadModel::SeriesCapIntoLoad {
+            c,
+            r_total,
+            edges: edges.to_vec(),
+        },
+    ))
+}
+
+/// Pot track resistance for the component behind a graph edge, `None` if the
+/// component is not a pot.
+fn pot_track_resistance(graph: &CircuitGraph, comp_idx: usize) -> Option<f64> {
+    let comp = &graph.components[comp_idx];
+    comp.kind
+        .as_any()
+        .downcast_ref::<super::components::Potentiometer>()
+        .map(|p| p.max_r)
+}
+
+/// True when any edge OUTSIDE `group_edges` touches one of `nodes` — the
+/// trailing network's interior must be exclusive to the group, otherwise the
+/// one-port load model (and its consumption by fusion) would orphan a
+/// neighbor. Applied to the NEW pot shapes only; the BA283 fixed-R scan is
+/// kept byte-identical.
+fn interior_nodes_shared_outside(
+    group_edges: &[usize],
+    nodes: &[NodeId],
+    graph: &CircuitGraph,
+) -> bool {
+    let edge_set: std::collections::HashSet<usize> = group_edges.iter().copied().collect();
+    graph.edges.iter().enumerate().any(|(eidx, e)| {
+        !edge_set.contains(&eidx) && (nodes.contains(&e.node_a) || nodes.contains(&e.node_b))
+    })
+}
+
+/// `Cout → {pot (+ fixed Rs)}` — one coupling cap from a target-group node
+/// into a load node, exactly one pot:
+///
+/// * rheostat: one pot edge `load_node ↔ gnd` with `load_node == out`
+///   (wiper strapped to an end terminal);
+/// * divider: two pot half-edges sharing the wiper node `W`, track top at
+///   `load_node`, track bottom grounded, with `W == out` (tube_screamer /
+///   big_muff sub-shape) or `W → out` through EXACTLY one series fixed
+///   resistor (proco_rat / blues_driver sub-shape);
+///
+/// plus optional grounded fixed resistors at `load_node`, nothing else.
+fn classify_series_cap_into_pot_load(
+    edges: &[usize],
+    target_nodes: &std::collections::HashSet<NodeId>,
+    graph: &CircuitGraph,
+) -> Option<(NodeId, BoundaryLoadModel)> {
+    let out = graph.out_node;
+    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+
+    let mut bridge: Option<(NodeId, NodeId, f64)> = None; // (stage-side, load node, C)
+    let mut pot_comp: Option<usize> = None;
+    let mut pot_edges: Vec<usize> = Vec::new();
+    let mut fixed_gnd: Vec<(NodeId, f64)> = Vec::new(); // (hang node, R)
+    let mut series_r: Vec<(NodeId, NodeId)> = Vec::new(); // non-grounded fixed Rs
+    for &eidx in edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        match graph.effective_edge_kind(eidx) {
+            EdgeKind::Reactive if comp.kind.capacitance().is_some() && bridge.is_none() => {
+                // The coupling cap bridges a target node to the load node.
+                let (t, l) = if target_nodes.contains(&e.node_a)
+                    && !target_nodes.contains(&e.node_b)
+                {
+                    (e.node_a, e.node_b)
+                } else if target_nodes.contains(&e.node_b) && !target_nodes.contains(&e.node_a) {
+                    (e.node_b, e.node_a)
+                } else {
+                    return None;
+                };
+                if is_gnd(l) {
+                    return None;
+                }
+                bridge = Some((t, l, comp.kind.capacitance().unwrap_or(0.0)));
+            }
+            EdgeKind::Linear if comp.kind.is_pot() => {
+                match pot_comp {
+                    None => pot_comp = Some(e.comp_idx),
+                    Some(ci) if ci == e.comp_idx => {}
+                    Some(_) => return None, // exactly one pot
+                }
+                pot_edges.push(eidx);
+            }
+            EdgeKind::Linear if comp.kind.resistance().is_some() => {
+                if is_gnd(e.node_a) || is_gnd(e.node_b) {
+                    let hang = if is_gnd(e.node_a) { e.node_b } else { e.node_a };
+                    fixed_gnd.push((hang, comp.kind.resistance().unwrap_or(0.0)));
+                } else {
+                    series_r.push((e.node_a, e.node_b));
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    let (boundary_node, load_node, c) = bridge?;
+    let pot_ci = pot_comp?;
+    let pot_id = graph.components[pot_ci].id.clone();
+    let r_pot = pot_track_resistance(graph, pot_ci)?;
+
+    // Pot topology: rheostat (1 edge) or divider (2 half-edges).
+    let mut interior_nodes: Vec<NodeId> = vec![load_node];
+    match pot_edges.len() {
+        1 => {
+            // Rheostat directly at `out`: load_node == out, pot to ground.
+            let e = &graph.edges[pot_edges[0]];
+            let ok = load_node == out
+                && ((e.node_a == load_node && is_gnd(e.node_b))
+                    || (e.node_b == load_node && is_gnd(e.node_a)));
+            if !ok || !series_r.is_empty() {
+                return None;
+            }
+        }
+        2 => {
+            // Divider: half-edges share the wiper node W.
+            let e0 = &graph.edges[pot_edges[0]];
+            let e1 = &graph.edges[pot_edges[1]];
+            let w = [e0.node_a, e0.node_b]
+                .into_iter()
+                .find(|&n| n == e1.node_a || n == e1.node_b)?;
+            let top0 = if e0.node_a == w { e0.node_b } else { e0.node_a };
+            let top1 = if e1.node_a == w { e1.node_b } else { e1.node_a };
+            // Track top at the load node, track bottom grounded.
+            let track_ok =
+                (top0 == load_node && is_gnd(top1)) || (top1 == load_node && is_gnd(top0));
+            if !track_ok {
+                return None;
+            }
+            if w == out {
+                if !series_r.is_empty() {
+                    return None;
+                }
+            } else {
+                // Wiper reaches `out` through exactly one series fixed R.
+                let [(sa, sb)] = series_r.as_slice() else {
+                    return None;
+                };
+                let series_ok = (*sa == w && *sb == out) || (*sb == w && *sa == out);
+                if !series_ok {
+                    return None;
+                }
+            }
+            interior_nodes.push(w);
+        }
+        _ => return None,
+    }
+
+    // Fixed grounded resistors must hang off the load node.
+    let mut fixed_conductance = 0.0f64;
+    for &(hang, r) in &fixed_gnd {
+        if hang != load_node {
+            return None;
+        }
+        if r > 0.0 {
+            fixed_conductance += 1.0 / r;
+        }
+    }
+    let r_fixed = (fixed_conductance > 0.0).then(|| 1.0 / fixed_conductance);
+
+    // Exclusivity: the trailing network's interior (load node, wiper, out)
+    // must not be shared with edges outside the group.
+    if !interior_nodes.contains(&out) {
+        interior_nodes.push(out);
+    }
+    if interior_nodes_shared_outside(edges, &interior_nodes, graph) {
+        return None;
+    }
+
+    Some((
+        boundary_node,
+        BoundaryLoadModel::SeriesCapIntoPotLoad {
+            c,
+            pot_id,
+            r_pot,
+            r_fixed,
+            edges: edges.to_vec(),
+        },
+    ))
+}
+
+/// The trailing group IS one 3-terminal pot divider: track top at a
+/// target-group node, wiper = the global `out`, track bottom grounded (the
+/// fulltone_ocd `Volume` shape — the coupling cap and fixed load live INSIDE
+/// the target group there).
+fn classify_pot_divider_at_out(
+    edges: &[usize],
+    target_nodes: &std::collections::HashSet<NodeId>,
+    graph: &CircuitGraph,
+) -> Option<(NodeId, BoundaryLoadModel)> {
+    let out = graph.out_node;
+    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+
+    let [e0i, e1i] = edges else {
+        return None;
+    };
+    let (e0, e1) = (&graph.edges[*e0i], &graph.edges[*e1i]);
+    if e0.comp_idx != e1.comp_idx {
+        return None;
+    }
+    let comp = &graph.components[e0.comp_idx];
+    if !comp.kind.is_pot() {
+        return None;
+    }
+    // Shared node = wiper; must be the global `out`.
+    let w = [e0.node_a, e0.node_b]
+        .into_iter()
+        .find(|&n| n == e1.node_a || n == e1.node_b)?;
+    if w != out {
+        return None;
+    }
+    let free0 = if e0.node_a == w { e0.node_b } else { e0.node_a };
+    let free1 = if e1.node_a == w { e1.node_b } else { e1.node_a };
+    let boundary = if target_nodes.contains(&free0) && is_gnd(free1) {
+        free0
+    } else if target_nodes.contains(&free1) && is_gnd(free0) {
+        free1
+    } else {
+        return None;
+    };
+    // Exclusivity on the wiper/out node.
+    if interior_nodes_shared_outside(edges, &[out], graph) {
+        return None;
+    }
+    let r_pot = pot_track_resistance(graph, e0.comp_idx)?;
+    Some((
+        boundary,
+        BoundaryLoadModel::PotDividerAtOut {
+            pot_id: comp.id.clone(),
+            r_pot,
+            edges: edges.to_vec(),
+        },
+    ))
+}
+
+/// Fallback VISIBILITY model: a passive trailing group at `out` that attaches
+/// to the target group and contains at least one grounded shunt element (a
+/// series-only branch to `out` is an open circuit, not a load — e.g. the
+/// phase90 `R10 → C_out → out` branch stays unrecognized). Policy never fuses
+/// this shape; the row documents WHAT hangs off the boundary.
+fn classify_passive_network(
+    edges: &[usize],
+    target_nodes: &std::collections::HashSet<NodeId>,
+    graph: &CircuitGraph,
+) -> Option<(NodeId, BoundaryLoadModel)> {
+    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+    let mut boundary: Option<NodeId> = None;
+    let mut has_gnd = false;
+    for &eidx in edges {
+        let e = &graph.edges[eidx];
+        if boundary.is_none() {
+            if target_nodes.contains(&e.node_a) {
+                boundary = Some(e.node_a);
+            } else if target_nodes.contains(&e.node_b) {
+                boundary = Some(e.node_b);
+            }
+        }
+        if is_gnd(e.node_a) || is_gnd(e.node_b) {
+            has_gnd = true;
+        }
+    }
+    let boundary = boundary?;
+    if !has_gnd {
+        return None;
+    }
+    Some((
+        boundary,
+        BoundaryLoadModel::PassiveNetwork {
+            edges: edges.to_vec(),
+        },
+    ))
+}
+
+/// POLICY: may the analyzed trailing load fuse into the upstream stage's
+/// general-MNA build? Dispatches per MODEL shape (lkf1.3):
+///
+/// * `SeriesCapIntoLoad` — the BA283 gate, unchanged;
+/// * `SeriesCapIntoPotLoad` — same device-shape + dc_qpoint gate. DC is
+///   unaffected by construction exactly like the fixed-R case: the coupling
+///   cap blocks DC and every trailing element is grounded, so `v(load) = 0`
+///   at DC and the dc_qpoint seed solved WITHOUT the load stays valid. The
+///   pot lands in the fused stage as a variable-G element
+///   (`stamp_passive_edges` → `VariableResistorCandidate` → `pot_children`),
+///   so `set_control` re-stamps the fused G matrix and re-derives scattering
+///   + extraction — the same path as any in-stage pot;
+/// * `PotDividerAtOut` — same gate PLUS the boundary node must be DC-isolated
+///   inside the target group (every target edge at the node is a capacitor or
+///   a grounded fixed resistor), otherwise fusing the pot's DC path to ground
+///   would shift the op-point the seed was solved without
+///   ([`REASON_DC_COUPLED_POT`]);
+/// * `PassiveNetwork` (and anything else) — never fused
+///   ([`REASON_UNVALIDATED_SHAPE`]): recognized for the decision table only.
+pub(super) fn gate_fusion(
+    load: &TrailingOutputLoad,
+    target: &FlowGroup,
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Result<(), &'static str> {
+    match &load.model {
+        BoundaryLoadModel::SeriesCapIntoLoad { .. }
+        | BoundaryLoadModel::SeriesCapIntoPotLoad { .. } => {
+            gate_ba283_fusion(target, graph, supply_voltage)
+        }
+        BoundaryLoadModel::PotDividerAtOut { .. } => {
+            gate_ba283_fusion(target, graph, supply_voltage)?;
+            boundary_node_dc_isolated(load.boundary_node, target, graph)
+        }
+        BoundaryLoadModel::Unloaded
+        | BoundaryLoadModel::GroundedResistive { .. }
+        | BoundaryLoadModel::PassiveNetwork { .. } => Err(REASON_UNVALIDATED_SHAPE),
+    }
+}
+
+/// DC-safety check for [`BoundaryLoadModel::PotDividerAtOut`]: every TARGET
+/// edge incident on the boundary node must be a capacitor or a fixed (non-pot)
+/// resistor to the TRUE ground node (AC-ground rails carry DC, so they do not
+/// qualify). Then the node sits at 0 V DC with or without the pot's resistive
+/// path to ground, and the fusion cannot shift the dc_qpoint seed.
+fn boundary_node_dc_isolated(
+    boundary: NodeId,
+    target: &FlowGroup,
+    graph: &CircuitGraph,
+) -> Result<(), &'static str> {
+    for &eidx in &target.all_edges() {
+        let e = &graph.edges[eidx];
+        if e.node_a != boundary && e.node_b != boundary {
+            continue;
+        }
+        let comp = &graph.components[e.comp_idx];
+        let other = if e.node_a == boundary {
+            e.node_b
+        } else {
+            e.node_a
+        };
+        let ok = comp.kind.capacitance().is_some()
+            || (comp.kind.resistance().is_some() && !comp.kind.is_pot() && other == graph.gnd_node);
+        if !ok {
+            return Err(REASON_DC_COUPLED_POT);
+        }
+    }
+    Ok(())
 }
 
 /// POLICY gate for BA283-class output-load fusion — gated exactly like the
@@ -464,8 +928,9 @@ mod tests {
             }
         }"#;
 
-    /// Trailing group holds a POT at `out` instead of a fixed load resistor —
-    /// analysis must decline the shape (pot loads are lkf1.3 scope).
+    /// Trailing group holds a POT RHEOSTAT at `out` instead of a fixed load
+    /// resistor (wiper strapped to the grounded end) — the simplest
+    /// pot-bearing load shape (lkf1.3).
     const POT_LOAD_AMP: &str = r#"
         pedal "pot load amp" { supply 9V
             components {
@@ -494,6 +959,127 @@ mod tests {
                 Cout.b -> RL.a, out
                 RL.w -> gnd
                 RL.b -> gnd
+            }
+        }"#;
+
+    /// TWO_BJT amp + `Cout → {Rload ∥ VOL divider}`, wiper = the global
+    /// `out` (the tube_screamer / big_muff / fulltone_ocd output family on a
+    /// BA283-class target). The `{Cout, Rload}` sub-network cross-reactive-
+    /// merges INTO the feedback group (it does not touch `out`), leaving the
+    /// pot as its own trailing divider group — the `PotDividerAtOut` shape
+    /// with a cap-isolated (DC-safe) boundary node.
+    const POT_DIVIDER_LOAD_AMP: &str = r#"
+        pedal "pot divider load amp" { supply 9V
+            components {
+                Cin:   cap(10u, electrolytic)
+                Rpd:   resistor(1M)
+                Rc1:   resistor(33k)
+                Q1:    npn(2n3904)
+                Rf:    resistor(470k)
+                Rc2:   resistor(5.6k)
+                Q2:    npn(2n3904)
+                Re2:   resistor(1k)
+                Cout:  cap(10u, electrolytic)
+                Rload: resistor(100k)
+                VOL:   pot(100k)
+            }
+            nets {
+                in -> Cin.a, Rpd.a
+                Rpd.b -> gnd
+                Cin.b -> Q1.base, Rf.b
+                vcc -> Rc1.a
+                Rc1.b -> Q1.collector, Rf.a, Q2.base
+                Q1.emitter -> gnd
+                vcc -> Rc2.a
+                Rc2.b -> Q2.collector, Cout.a
+                Q2.emitter -> Re2.a
+                Re2.b -> gnd
+                Cout.b -> Rload.a, VOL.a
+                Rload.b -> gnd
+                VOL.w -> out
+                VOL.b -> gnd
+            }
+            controls {
+                VOL.position -> "Volume" [1.0, 0.0] = 0.5
+            }
+        }"#;
+
+    /// TWO_BJT amp + `Cout → {Rload ∥ VOL divider}`, wiper → series R → `out`
+    /// (the proco_rat / blues_driver output family). The whole trailing
+    /// network touches `out`, so it stays ONE passive group —
+    /// `SeriesCapIntoPotLoad` with the series wiper resistor.
+    const POT_WIPER_SERIES_R_LOAD_AMP: &str = r#"
+        pedal "pot wiper series r load amp" { supply 9V
+            components {
+                Cin:   cap(10u, electrolytic)
+                Rpd:   resistor(1M)
+                Rc1:   resistor(33k)
+                Q1:    npn(2n3904)
+                Rf:    resistor(470k)
+                Rc2:   resistor(5.6k)
+                Q2:    npn(2n3904)
+                Re2:   resistor(1k)
+                Cout:  cap(10u, electrolytic)
+                Rload: resistor(100k)
+                VOL:   pot(100k)
+                Rw:    resistor(1k)
+            }
+            nets {
+                in -> Cin.a, Rpd.a
+                Rpd.b -> gnd
+                Cin.b -> Q1.base, Rf.b
+                vcc -> Rc1.a
+                Rc1.b -> Q1.collector, Rf.a, Q2.base
+                Q1.emitter -> gnd
+                vcc -> Rc2.a
+                Rc2.b -> Q2.collector, Cout.a
+                Q2.emitter -> Re2.a
+                Re2.b -> gnd
+                Cout.b -> Rload.a, VOL.a
+                Rload.b -> gnd
+                VOL.w -> Rw.a
+                VOL.b -> gnd
+                Rw.b -> out
+            }
+            controls {
+                VOL.position -> "Volume" [1.0, 0.0] = 0.5
+            }
+        }"#;
+
+    /// A pot divider hanging DIRECTLY off Q2's collector — the boundary node
+    /// carries DC (Rc2 to VCC + the collector itself), so the
+    /// `PotDividerAtOut` POLICY must decline with
+    /// [`REASON_DC_COUPLED_POT`] even though the ANALYSIS recognizes the
+    /// shape.
+    const POT_DIVIDER_DC_COUPLED_AMP: &str = r#"
+        pedal "pot divider dc coupled amp" { supply 9V
+            components {
+                Cin:  cap(10u, electrolytic)
+                Rpd:  resistor(1M)
+                Rc1:  resistor(33k)
+                Q1:   npn(2n3904)
+                Rf:   resistor(470k)
+                Rc2:  resistor(5.6k)
+                Q2:   npn(2n3904)
+                Re2:  resistor(1k)
+                VOL:  pot(100k)
+            }
+            nets {
+                in -> Cin.a, Rpd.a
+                Rpd.b -> gnd
+                Cin.b -> Q1.base, Rf.b
+                vcc -> Rc1.a
+                Rc1.b -> Q1.collector, Rf.a, Q2.base
+                Q1.emitter -> gnd
+                vcc -> Rc2.a
+                Rc2.b -> Q2.collector, VOL.a
+                Q2.emitter -> Re2.a
+                Re2.b -> gnd
+                VOL.w -> out
+                VOL.b -> gnd
+            }
+            controls {
+                VOL.position -> "Volume" [1.0, 0.0] = 0.5
             }
         }"#;
 
@@ -582,14 +1168,148 @@ mod tests {
         );
     }
 
+    /// lkf1.3: the pot RHEOSTAT load (wiper strapped to ground) is now a
+    /// recognized fusable shape. (Pre-lkf1.3 this fixture locked the DECLINE;
+    /// the widening flipped it by design.)
     #[test]
-    fn pot_in_load_group_declines_analysis() {
+    fn pot_rheostat_load_analyzes_and_passes_gate() {
         let (graph, groups, cut_edges) = groups_for(POT_LOAD_AMP);
         let target_gi = feedback_group_index(&groups);
+        let load = analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("pot rheostat at out should analyze to SeriesCapIntoPotLoad");
+
+        let nout = *graph
+            .node_names
+            .get("Q2.collector")
+            .expect("Q2.collector node");
+        assert_eq!(load.boundary_node, nout);
+        match &load.model {
+            BoundaryLoadModel::SeriesCapIntoPotLoad {
+                c,
+                pot_id,
+                r_pot,
+                r_fixed,
+                edges,
+            } => {
+                assert!((c - 10e-6).abs() < 1e-9, "Cout = 10u, got {c}");
+                assert_eq!(pot_id, "RL");
+                assert!((r_pot - 10e3).abs() < 1e-6, "RL track = 10k, got {r_pot}");
+                assert_eq!(*r_fixed, None, "the pot is the only grounded element");
+                assert_eq!(
+                    edges.len(),
+                    2,
+                    "trailing group = {{Cout, RL rheostat edge}}"
+                );
+            }
+            other => panic!("expected SeriesCapIntoPotLoad, got {other:?}"),
+        }
+        // POLICY: a 2-BJT dc_qpoint target may fuse the pot load (DC-safe by
+        // construction: the coupling cap blocks DC).
         assert_eq!(
-            analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges),
-            None,
-            "a pot in the trailing group is not the fixed-load shape"
+            gate_fusion(&load, &groups[target_gi], &graph, 9.0),
+            Ok(()),
+            "pot-bearing trailing group should pass the fusion gate on a BA283-class target"
+        );
+    }
+
+    /// lkf1.3: pot DIVIDER load, wiper = the global `out` (tube_screamer /
+    /// big_muff / fulltone_ocd family), plus a fixed 100k pulldown.
+    #[test]
+    fn pot_divider_load_analyzes_and_passes_gate() {
+        let (graph, groups, cut_edges) = groups_for(POT_DIVIDER_LOAD_AMP);
+        let target_gi = feedback_group_index(&groups);
+        let load = analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("pot divider at out should analyze to SeriesCapIntoPotLoad");
+
+        match &load.model {
+            BoundaryLoadModel::SeriesCapIntoPotLoad {
+                c,
+                pot_id,
+                r_pot,
+                r_fixed,
+                edges,
+            } => {
+                assert!((c - 10e-6).abs() < 1e-9);
+                assert_eq!(pot_id, "VOL");
+                assert!((r_pot - 100e3).abs() < 1e-6);
+                let rf = r_fixed.expect("Rload = 100k pulldown should be modeled");
+                assert!((rf - 100e3).abs() < 1e-3, "r_fixed = 100k, got {rf}");
+                assert_eq!(
+                    edges.len(),
+                    4,
+                    "trailing group = {{Cout, Rload, VOL aw, VOL wb}}"
+                );
+            }
+            other => panic!("expected SeriesCapIntoPotLoad, got {other:?}"),
+        }
+        assert_eq!(gate_fusion(&load, &groups[target_gi], &graph, 9.0), Ok(()));
+
+        // Serializable summary carries the pot id + component ids.
+        match load.model.summarize(&graph) {
+            BoundaryLoadSummary::SeriesCapIntoPotLoad {
+                pot_id,
+                component_ids,
+                ..
+            } => {
+                assert_eq!(pot_id, "VOL");
+                assert_eq!(
+                    component_ids,
+                    vec!["Cout".to_string(), "Rload".to_string(), "VOL".to_string()]
+                );
+            }
+            other => panic!("expected SeriesCapIntoPotLoad summary, got {other:?}"),
+        }
+    }
+
+    /// lkf1.3: pot divider whose wiper reaches `out` through one series fixed
+    /// resistor (proco_rat / blues_driver family).
+    #[test]
+    fn pot_wiper_series_r_load_analyzes_and_passes_gate() {
+        let (graph, groups, cut_edges) = groups_for(POT_WIPER_SERIES_R_LOAD_AMP);
+        let target_gi = feedback_group_index(&groups);
+        let load = analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("wiper→series-R→out should analyze to SeriesCapIntoPotLoad");
+        match &load.model {
+            BoundaryLoadModel::SeriesCapIntoPotLoad { pot_id, edges, .. } => {
+                assert_eq!(pot_id, "VOL");
+                assert_eq!(
+                    edges.len(),
+                    5,
+                    "trailing group = {{Cout, Rload, VOL aw, VOL wb, Rw}}"
+                );
+            }
+            other => panic!("expected SeriesCapIntoPotLoad, got {other:?}"),
+        }
+        assert_eq!(gate_fusion(&load, &groups[target_gi], &graph, 9.0), Ok(()));
+    }
+
+    /// lkf1.3 negative: a pot divider hanging DIRECTLY off a DC-carrying node
+    /// (Q2's collector, no coupling cap). ANALYSIS recognizes the
+    /// `PotDividerAtOut` shape; POLICY must decline — fusing the pot's DC
+    /// path to ground would shift the op-point the dc_qpoint seed was solved
+    /// without.
+    #[test]
+    fn dc_coupled_pot_divider_analyzes_but_policy_declines() {
+        let (graph, groups, cut_edges) = groups_for(POT_DIVIDER_DC_COUPLED_AMP);
+        let target_gi = feedback_group_index(&groups);
+        let load = analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("pot divider directly at the collector should analyze");
+        match &load.model {
+            BoundaryLoadModel::PotDividerAtOut { pot_id, r_pot, .. } => {
+                assert_eq!(pot_id, "VOL");
+                assert!((r_pot - 100e3).abs() < 1e-6);
+            }
+            other => panic!("expected PotDividerAtOut, got {other:?}"),
+        }
+        let nout = *graph
+            .node_names
+            .get("Q2.collector")
+            .expect("Q2.collector node");
+        assert_eq!(load.boundary_node, nout);
+        assert_eq!(
+            gate_fusion(&load, &groups[target_gi], &graph, 9.0),
+            Err(REASON_DC_COUPLED_POT),
+            "a DC-carrying boundary node must decline PotDividerAtOut fusion"
         );
     }
 
@@ -710,6 +1430,371 @@ mod tests {
                 );
             }
             other => panic!("expected Unloaded disposition, got {other:?}"),
+        }
+    }
+
+    // ── Fleet reality locks (lkf1.3): the widened analysis against the REAL
+    // example pedals. These document CURRENT REALITY — when routing or the
+    // policy gate changes, update the locks honestly. ──────────────────────
+
+    fn example_source(rel: &str) -> String {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/pedals")
+            .join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"))
+    }
+
+    fn feedback_group_containing<'g>(
+        groups: &'g [FlowGroup],
+        graph: &CircuitGraph,
+        comp_id: &str,
+    ) -> usize {
+        groups
+            .iter()
+            .position(|g| {
+                g.has_feedback()
+                    && g.all_edges()
+                        .iter()
+                        .any(|&e| graph.components[graph.edges[e].comp_idx].id == comp_id)
+            })
+            .unwrap_or_else(|| panic!("no feedback group containing {comp_id}"))
+    }
+
+    /// fulltone_ocd: the `Volume` pot IS the trailing group (its coupling cap
+    /// `C5` + fixed load `R7` cross-reactive-merged into the MOSFET clipper
+    /// group), wiper wired directly to `out` — the real-world
+    /// `PotDividerAtOut` instance. The boundary node is cap-isolated (the
+    /// dc-safety check passes), but the target group carries MOSFETs, so the
+    /// device-shape gate declines: analysis-recognized, policy-declined,
+    /// visible in the table, safe in production.
+    #[test]
+    fn fulltone_ocd_volume_analyzes_pot_divider_at_out_but_gate_declines() {
+        let src = example_source("overdrive/fulltone_ocd.pedal");
+        let (graph, groups, cut_edges) = groups_for(&src);
+        let target_gi = feedback_group_containing(&groups, &graph, "M1");
+
+        let load = analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("OCD Volume divider should be recognized (lkf1.3)");
+        match &load.model {
+            BoundaryLoadModel::PotDividerAtOut { pot_id, r_pot, .. } => {
+                assert_eq!(pot_id, "Volume");
+                assert!((r_pot - 100e3).abs() < 1e-6, "Volume = 100k, got {r_pot}");
+            }
+            other => panic!("expected PotDividerAtOut, got {other:?}"),
+        }
+
+        // The boundary node (C5.b) is DC-isolated inside the target group —
+        // the dc-safety half of the policy would pass...
+        assert_eq!(
+            boundary_node_dc_isolated(load.boundary_node, &groups[target_gi], &graph),
+            Ok(()),
+            "OCD boundary node is cap-isolated (C5) with a grounded fixed R (R7)"
+        );
+        // ...but the device-shape gate declines (MOSFET clippers, not BJTs).
+        assert_eq!(
+            gate_fusion(&load, &groups[target_gi], &graph, 9.0),
+            Err("gate:non-bjt-nonlinear"),
+            "OCD target is a MOSFET group — current reality is policy-declined"
+        );
+    }
+
+    /// tube_screamer: the trailing group bundles the whole Tone stack with
+    /// the Level pot — recognized as the `PassiveNetwork` VISIBILITY model
+    /// (what hangs off the boundary is now in the table), never fused
+    /// (`gate:unvalidated-shape`).
+    #[test]
+    fn tube_screamer_output_network_analyzes_passive_network_visibility() {
+        let src = example_source("overdrive/tube_screamer.pedal");
+        let (graph, groups, cut_edges) = groups_for(&src);
+        let target_gi = feedback_group_containing(&groups, &graph, "U2");
+
+        let load = analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("tube_screamer tone/level network should be visible (lkf1.3)");
+        match load.model.summarize(&graph) {
+            BoundaryLoadSummary::PassiveNetwork { component_ids } => {
+                assert!(
+                    component_ids.contains(&"Level".to_string())
+                        && component_ids.contains(&"Tone".to_string()),
+                    "the visibility model should name the tone/level network, got {component_ids:?}"
+                );
+            }
+            other => panic!("expected PassiveNetwork summary, got {other:?}"),
+        }
+        assert_eq!(
+            gate_fusion(&load, &groups[target_gi], &graph, 9.0),
+            Err(REASON_UNVALIDATED_SHAPE),
+            "PassiveNetwork is visibility-only — no fusion policy is validated for it"
+        );
+    }
+
+    /// proco_rat (live WSL/NaN triage case): same PassiveNetwork visibility —
+    /// the trailing group bundles the Filter pot + output network.
+    #[test]
+    fn proco_rat_output_network_analyzes_passive_network_visibility() {
+        let src = example_source("distortion/proco_rat.pedal");
+        let (graph, groups, cut_edges) = groups_for(&src);
+        let target_gi = feedback_group_containing(&groups, &graph, "U1");
+
+        let load = analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("proco_rat filter/volume network should be visible (lkf1.3)");
+        match load.model.summarize(&graph) {
+            BoundaryLoadSummary::PassiveNetwork { component_ids } => {
+                assert!(
+                    component_ids.contains(&"Volume".to_string()),
+                    "expected the Volume pot in the visibility model, got {component_ids:?}"
+                );
+            }
+            other => panic!("expected PassiveNetwork summary, got {other:?}"),
+        }
+        assert_eq!(
+            gate_fusion(&load, &groups[target_gi], &graph, 9.0),
+            Err(REASON_UNVALIDATED_SHAPE)
+        );
+    }
+
+    /// phase90: the output branch is `U6.out → R10 → C_out → out` with NO
+    /// grounded element — an OPEN series branch, not a load. Analysis must
+    /// keep returning `None` (the boundary is genuinely unloaded).
+    #[test]
+    fn phase90_series_output_branch_stays_unrecognized() {
+        let src = example_source("phaser/phase90.pedal");
+        let (graph, groups, cut_edges) = groups_for(&src);
+        let target_gi = feedback_group_containing(&groups, &graph, "U6");
+        assert_eq!(
+            analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges),
+            None,
+            "a series-only branch to out is an open circuit, not a load"
+        );
+    }
+
+    // ── Compiled-pedal locks for the fused pot load (lkf1.3) ──────────────
+
+    fn compile_fixture(src: &str) -> super::super::compiled::CompiledPedal {
+        let pedal = crate::dsl::parse_pedal_file(src).expect("parse failed");
+        let options = super::super::compile::CompileOptions {
+            skip_blockwise: true,
+            skip_k_tables: true,
+            ..Default::default()
+        };
+        super::super::spqr_build::compile_via_spqr_with_options(&pedal, 48_000.0, options)
+            .expect("compile failed")
+    }
+
+    /// The divider fixture compiles with the pot FUSED into the multi-BJT
+    /// general-MNA stage: one FusedUpstream row, the fused stage owns the pot
+    /// as an in-stage variable resistor (control target
+    /// `PotInMultiNlStage`), the standalone trailing stage is consumed, and
+    /// NO WiperDivider is synthesized for the pot (the divider is solved
+    /// in-network — a WiperDivider would double-apply the position).
+    #[test]
+    fn compiled_pot_divider_pedal_fuses_pot_as_variable_g() {
+        let compiled = compile_fixture(POT_DIVIDER_LOAD_AMP);
+
+        assert_eq!(
+            compiled.boundary_loads.len(),
+            1,
+            "one analyzed output boundary expected, got {:?}",
+            compiled.boundary_loads
+        );
+        let binding = &compiled.boundary_loads[0];
+        assert_eq!(
+            binding.disposition,
+            pedalkernel_rt::processor::BoundaryLoadDisposition::FusedUpstream
+        );
+        match &binding.model {
+            BoundaryLoadSummary::SeriesCapIntoPotLoad {
+                pot_id,
+                component_ids,
+                ..
+            } => {
+                assert_eq!(pot_id, "VOL");
+                assert_eq!(
+                    component_ids,
+                    &["Cout".to_string(), "Rload".to_string(), "VOL".to_string()]
+                );
+            }
+            other => panic!("expected SeriesCapIntoPotLoad summary, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                compiled.stages[binding.upstream_stage],
+                super::super::compiled::Stage::MultiNl(_)
+            ),
+            "the fused stage is the multi-BJT general-MNA stage"
+        );
+
+        // The pot is owned by EXACTLY the fused stage (standalone trailing
+        // stage consumed — the load isn't applied twice).
+        let owners: Vec<usize> = compiled
+            .stages
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| s.control_target_for_pot(idx, "VOL").map(|_| idx))
+            .collect();
+        assert_eq!(
+            owners,
+            vec![binding.upstream_stage],
+            "VOL must be owned by the fused stage only"
+        );
+
+        // The control binding re-stamps the fused stage like any in-stage pot.
+        let ctrl = compiled
+            .controls
+            .iter()
+            .find(|c| c.component_id == "VOL")
+            .expect("Volume control binding should exist");
+        assert!(
+            matches!(
+                ctrl.target,
+                super::super::compiled::ControlTarget::PotInMultiNlStage(..)
+            ),
+            "fused pot control target should be PotInMultiNlStage, got {:?}",
+            ctrl.target
+        );
+
+        // No WiperDivider for the fused pot — the wiper node (`out`) is an
+        // MNA node of the fused stage; extraction happens at the wiper, so a
+        // post-stage divider would DOUBLE-APPLY the position.
+        assert!(
+            compiled
+                .wiper_dividers
+                .iter()
+                .all(|w| w.pot_comp_id != "VOL"),
+            "no WiperDivider must be synthesized for an in-MNA fused pot"
+        );
+    }
+
+    /// CONTROL FIDELITY (lkf1.3 gate 3): the fused pot responds to
+    /// `set_control` — sweeping the Volume control re-stamps the fused
+    /// stage's G matrix (scattering + extraction re-derived), the output
+    /// level moves MONOTONICALLY over a wide range, and the DC operating
+    /// point stays stable at every position (silence in → ~0 out).
+    #[test]
+    fn fused_pot_divider_volume_sweeps_monotonically_with_stable_dc_op() {
+        use pedalkernel_rt::PedalProcessor as _;
+        const SR: f64 = 48_000.0;
+        let mut proc = compile_fixture(POT_DIVIDER_LOAD_AMP);
+
+        // Fused sanity (same shape as the lock above).
+        assert_eq!(
+            proc.boundary_loads[0].disposition,
+            pedalkernel_rt::processor::BoundaryLoadDisposition::FusedUpstream
+        );
+
+        let mut rms_at = Vec::new();
+        for &v in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+            // Immediate path: bypasses the smoother, re-stamps the fused G
+            // matrix and re-derives scattering + extraction right away.
+            proc.set_control_immediate("Volume", v);
+
+            // DC settle on silence: the op must stay stable across
+            // re-stamps (the coupling cap blocks DC; v(out) → 0). A re-stamp
+            // kicks a REAL cap re-equilibration transient (τ ≈ Cout × network
+            // R ≈ 0.25 s), so give it 16k samples before measuring.
+            let mut dc_acc = 0.0f64;
+            for i in 0..16_000 {
+                let y = proc.process(0.0);
+                assert!(y.is_finite(), "non-finite output at Volume={v} (i={i})");
+                if i >= 15_000 {
+                    dc_acc += y;
+                }
+            }
+            let dc = dc_acc / 1000.0;
+            assert!(
+                dc.abs() < 1e-4,
+                "DC op should be stable after re-stamp at Volume={v}: dc={dc}"
+            );
+
+            // Small-signal RMS at 440 Hz.
+            let n = 4800;
+            let mut acc = 0.0;
+            for s in 0..n {
+                let x = 0.01 * (2.0 * core::f64::consts::PI * 440.0 * s as f64 / SR).sin();
+                let y = proc.process(x);
+                assert!(y.is_finite());
+                acc += y * y;
+            }
+            rms_at.push((v, (acc / n as f64).sqrt()));
+        }
+
+        // Monotonic increasing (control range [1.0, 0.0]: higher app value →
+        // wiper toward the track top → louder), with real authority.
+        for w in rms_at.windows(2) {
+            let (v0, r0) = w[0];
+            let (v1, r1) = w[1];
+            assert!(
+                r1 > r0 * 1.15,
+                "fused pot sweep must be monotonic: Volume={v0} → rms={r0:.6}, \
+                 Volume={v1} → rms={r1:.6} (full sweep: {rms_at:?})"
+            );
+        }
+        let (_, lo) = rms_at.first().unwrap();
+        let (_, hi) = rms_at.last().unwrap();
+        assert!(
+            hi / lo > 3.0,
+            "the volume pot should have wide authority over the fused stage: \
+             lo={lo:.6} hi={hi:.6}"
+        );
+    }
+
+    /// Fleet diagnostic (ignored; lkf1.3 data-first tool): dump per-group
+    /// shape data — group composition, trailing-load analysis, and the fusion
+    /// gate verdict — for the example pedals whose output boundaries were
+    /// open at the C2 sweep. This is the group-level view the compiled
+    /// `boundary_loads` table cannot show (it built the lkf1.3 shape catalog;
+    /// keep it for the lkf1.5 blockwise-recording work). Run with
+    /// `cargo test -p pedalkernel --lib boundary_load::tests::dump_fleet -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn dump_fleet_group_shapes() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/pedals");
+        for rel in [
+            "distortion/proco_rat.pedal",
+            "fuzz/big_muff.pedal",
+            "modulation/boss_ce2.pedal",
+            "overdrive/blues_driver.pedal",
+            "overdrive/fulltone_ocd.pedal",
+            "overdrive/klon_centaur.pedal",
+            "overdrive/tube_screamer.pedal",
+            "phaser/phase90.pedal",
+        ] {
+            let src = std::fs::read_to_string(root.join(rel)).expect("read pedal");
+            let (graph, groups, cut_edges) = groups_for(&src);
+            let node_name = |n: NodeId| -> String {
+                graph
+                    .node_names
+                    .iter()
+                    .filter(|(_, &id)| id == n)
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            };
+            println!("\n===== {rel} (out={}) =====", node_name(graph.out_node));
+            for (gi, g) in groups.iter().enumerate() {
+                let mut ids: Vec<String> = g
+                    .all_edges()
+                    .iter()
+                    .map(|&e| graph.components[graph.edges[e].comp_idx].id.clone())
+                    .collect();
+                ids.sort();
+                ids.dedup();
+                let touches_out = g.all_edges().iter().any(|&e| {
+                    graph.edges[e].node_a == graph.out_node
+                        || graph.edges[e].node_b == graph.out_node
+                });
+                println!(
+                    "  group {gi}: fb={} active={} out={} comps={:?}",
+                    g.has_feedback(),
+                    g.active_edges.len(),
+                    touches_out,
+                    ids
+                );
+                if g.has_feedback() {
+                    let analysis = analyze_trailing_output_load(gi, &groups, &graph, &cut_edges);
+                    let gate = gate_ba283_fusion(g, &graph, 9.0);
+                    println!("    -> analysis={analysis:?} gate={gate:?}");
+                }
+            }
         }
     }
 

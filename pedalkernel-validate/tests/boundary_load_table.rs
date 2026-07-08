@@ -170,6 +170,106 @@ fn si_fb_amp_boundary_table_is_empty_blockwise_path() {
     );
 }
 
+/// fulltone_ocd (lkf1.3 reality lock): the `Volume` pot IS the trailing
+/// group — its coupling cap `C5` and fixed load `R7` cross-reactive-merge
+/// into the MOSFET clipper group, leaving the pot as a bare
+/// `PotDividerAtOut` (track top at the boundary, wiper = `out`, bottom
+/// grounded). The widened analysis now NAMES the shape in the table, and the
+/// policy declines honestly: the target group carries MOSFET clippers, not
+/// the ≥2-BJT dc_qpoint shape (`gate:non-bjt-nonlinear`). When the device
+/// gate widens beyond BJT pairs, this test SHOULD fail — update it to lock
+/// the new disposition.
+#[test]
+fn fulltone_ocd_output_boundary_documents_pot_divider_reality() {
+    let proc = compile_public("../pedalkernel/examples/pedals/overdrive/fulltone_ocd.pedal");
+    let rendered =
+        render_boundary_loads(&[("fulltone_ocd".to_string(), proc.boundary_loads.clone())]);
+    println!("{rendered}");
+
+    // The MOSFET clipper stage's boundary row carries the recognized pot
+    // shape (OCD also records a second, genuinely-open boundary for its
+    // op-amp gain stage — that row keeps `analysis:no-trailing-output-load`).
+    let pot_row = proc
+        .boundary_loads
+        .iter()
+        .find(|b| matches!(&b.model, BoundaryLoadSummary::PotDividerAtOut { .. }))
+        .expect("OCD Volume should analyze to PotDividerAtOut (lkf1.3)");
+    match &pot_row.model {
+        BoundaryLoadSummary::PotDividerAtOut {
+            pot_id,
+            r_pot,
+            component_ids,
+        } => {
+            assert_eq!(pot_id, "Volume");
+            assert!((r_pot - 100e3).abs() < 1e-6, "Volume = 100k, got {r_pot}");
+            assert_eq!(component_ids, &["Volume".to_string()]);
+        }
+        other => panic!("expected PotDividerAtOut, got {other:?}"),
+    }
+    match &pot_row.disposition {
+        BoundaryLoadDisposition::Unloaded { reason } => {
+            assert_eq!(
+                reason, "gate:non-bjt-nonlinear",
+                "OCD decline reason changed — current reality moved, update this lock"
+            );
+        }
+        other => panic!(
+            "OCD Volume boundary is documented UNLOADED today; disposition \
+             changed to {other:?} — the gate widened, update this test"
+        ),
+    }
+    // The rendered table names the pot shape.
+    assert!(
+        rendered.contains("PotDividerAtOut{Volume:100kΩ pot; Volume}"),
+        "table should render the pot-divider model, got:\n{rendered}"
+    );
+    // Still an open boundary — the triage flag must fire with the reason.
+    let flag = unloaded_output_flag(&proc.boundary_loads)
+        .expect("unloaded output boundary must raise the triage flag");
+    assert!(flag.contains("gate:non-bjt-nonlinear"), "got: {flag}");
+}
+
+/// Rendering lock for the new lkf1.3 model variants (gate 4: the dashboard
+/// strings the fleet sweep prints).
+#[test]
+fn boundary_model_rendering_covers_pot_variants() {
+    use pedalkernel_validate::report::format_boundary_model;
+
+    let cap_pot = BoundaryLoadSummary::SeriesCapIntoPotLoad {
+        c: 10e-6,
+        pot_id: "VOL".to_string(),
+        r_pot: 100e3,
+        r_fixed: Some(100e3),
+        component_ids: vec!["Cout".into(), "Rload".into(), "VOL".into()],
+    };
+    assert_eq!(
+        format_boundary_model(&cap_pot),
+        "SeriesCapIntoPotLoad{10µF → VOL:100kΩ pot ∥ 100kΩ; Cout,Rload,VOL}"
+    );
+
+    let cap_pot_only = BoundaryLoadSummary::SeriesCapIntoPotLoad {
+        c: 4.7e-6,
+        pot_id: "RL".to_string(),
+        r_pot: 10e3,
+        r_fixed: None,
+        component_ids: vec!["Cout".into(), "RL".into()],
+    };
+    assert_eq!(
+        format_boundary_model(&cap_pot_only),
+        "SeriesCapIntoPotLoad{4.70µF → RL:10kΩ pot; Cout,RL}"
+    );
+
+    let divider = BoundaryLoadSummary::PotDividerAtOut {
+        pot_id: "Volume".to_string(),
+        r_pot: 100e3,
+        component_ids: vec!["Volume".into()],
+    };
+    assert_eq!(
+        format_boundary_model(&divider),
+        "PotDividerAtOut{Volume:100kΩ pot; Volume}"
+    );
+}
+
 fn collect_pedals(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
