@@ -353,14 +353,23 @@ fn corpus_boundary_load_sweep() {
                         "empty-table".to_string(),
                         "no-analysis (no feedback group reached general-MNA)".to_string(),
                     )
-                } else if loads
-                    .iter()
-                    .any(|b| b.disposition == BoundaryLoadDisposition::FusedUpstream)
-                {
+                } else if loads.iter().any(|b| {
+                    matches!(
+                        b.disposition,
+                        BoundaryLoadDisposition::FusedUpstream
+                            | BoundaryLoadDisposition::ReflectedThroughTransformer { .. }
+                    )
+                }) {
                     fused += 1;
                     let models: Vec<String> = loads
                         .iter()
-                        .filter(|b| b.disposition == BoundaryLoadDisposition::FusedUpstream)
+                        .filter(|b| {
+                            matches!(
+                                b.disposition,
+                                BoundaryLoadDisposition::FusedUpstream
+                                    | BoundaryLoadDisposition::ReflectedThroughTransformer { .. }
+                            )
+                        })
                         .map(|b| pedalkernel_validate::report::format_boundary_model(&b.model))
                         .collect();
                     ("FusedUpstream".to_string(), models.join(" | "))
@@ -370,7 +379,8 @@ fn corpus_boundary_load_sweep() {
                         .iter()
                         .filter_map(|b| match &b.disposition {
                             BoundaryLoadDisposition::Unloaded { reason } => Some(reason.clone()),
-                            BoundaryLoadDisposition::FusedUpstream => None,
+                            BoundaryLoadDisposition::FusedUpstream
+                            | BoundaryLoadDisposition::ReflectedThroughTransformer { .. } => None,
                         })
                         .collect();
                     reasons.sort();

@@ -587,6 +587,10 @@ pub fn format_boundary_disposition(d: &BoundaryLoadDisposition) -> String {
     match d {
         BoundaryLoadDisposition::FusedUpstream => "FusedUpstream".to_string(),
         BoundaryLoadDisposition::Unloaded { reason } => format!("Unloaded{{{reason}}}"),
+        BoundaryLoadDisposition::ReflectedThroughTransformer {
+            turns_ratio,
+            r_reflected,
+        } => format!("ReflectedThroughTransformer{{n={turns_ratio}, r_reflected={r_reflected}}}"),
     }
 }
 
@@ -606,10 +610,13 @@ pub fn format_boundary_disposition(d: &BoundaryLoadDisposition) -> String {
 /// silence on x86/WSL), ProCo RAT, Pultec — all with silently-unloaded output
 /// boundaries. This table is the triage lever for the ~76 corpus failures.
 pub fn unloaded_output_flag(loads: &[BoundaryLoadBinding]) -> Option<String> {
-    if loads
-        .iter()
-        .any(|b| b.disposition == BoundaryLoadDisposition::FusedUpstream)
-    {
+    if loads.iter().any(|b| {
+        matches!(
+            b.disposition,
+            BoundaryLoadDisposition::FusedUpstream
+                | BoundaryLoadDisposition::ReflectedThroughTransformer { .. }
+        )
+    }) {
         return None; // Output boundary load is fused into the upstream solve.
     }
     if loads.is_empty() {
@@ -623,7 +630,8 @@ pub fn unloaded_output_flag(loads: &[BoundaryLoadBinding]) -> Option<String> {
         .iter()
         .filter_map(|b| match &b.disposition {
             BoundaryLoadDisposition::Unloaded { reason } => Some(reason.as_str()),
-            BoundaryLoadDisposition::FusedUpstream => None,
+            BoundaryLoadDisposition::FusedUpstream
+            | BoundaryLoadDisposition::ReflectedThroughTransformer { .. } => None,
         })
         .collect();
     reasons.sort_unstable();

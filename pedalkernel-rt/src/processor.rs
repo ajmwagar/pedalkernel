@@ -1063,6 +1063,24 @@ pub enum BoundaryLoadDisposition {
     /// Nothing was done — the boundary is left open, with the reason
     /// (gate name / env opt-out / shape mismatch / no load found).
     Unloaded { reason: String },
+    /// A transformer-SECONDARY load network was fused into the transformer's
+    /// PRIMARY-side stage: the load edges join the same solved MNA network as
+    /// the transformer skeleton (DCR + leakage + magnetizing/JA core + ideal
+    /// turns-ratio branch), so the primary feels the secondary load through
+    /// the ideal-transformer stamp — physically equivalent to reflecting
+    /// `Z_secondary` to the primary as `n² · Z_secondary`. The standalone
+    /// downstream load stage was consumed (removed).
+    ///
+    /// NOTE (postcard stability): this variant is appended LAST so the wire
+    /// indices of `FusedUpstream`/`Unloaded` are unchanged.
+    ReflectedThroughTransformer {
+        /// Turns ratio `n = N_primary / N_secondary` (10:1 step-down → 10.0).
+        turns_ratio: f64,
+        /// The load resistance as seen from the PRIMARY winding:
+        /// `r_reflected = n² · r_total` (the value the primary-side solve
+        /// now feels).
+        r_reflected: f64,
+    },
 }
 
 /// One row of the compile-time boundary-load decision table: what hangs off a
