@@ -21,7 +21,7 @@ tools/.venv/
 *.db
 
 # Beads task tracking (ephemeral)
-.beads/
+# .beads/ blanket ignore removed: inner .beads/.gitignore handles dolt/runtime; issues.jsonl belongs in git
 .mcp.json
 
 # Local git worktrees (created by beads workflow; never meant to be committed)
