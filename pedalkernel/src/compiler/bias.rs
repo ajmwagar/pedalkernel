@@ -31,13 +31,21 @@
 //! - grouped-MNA NR warm-start seed — [`bjt_model_conduction_seed`] (replaces
 //!   the `initial_v` physics defaults in `rigid/general.rs`).
 //!
+//! As of ko5g.5 the **pentode** has its FIRST DC solver (none existed — every
+//! pentode rode the `PentodeRoot` −8.0 V default): [`PentodeSeed`] +
+//! [`solve_wdf_pentode_dc_qpoint`] / [`solve_pentode_dc_qpoint`] ride the
+//! shared core with the new `IterationScheme::MainCurrentBisection`
+//! (unconditionally convergent — the triode's damped relaxation diverges for
+//! high-g_m power tubes).  Includes the screen (Vg2) divider resolution, the
+//! shared-cathode-Rk co-solve, the inductive plate DC path (OT primary at its
+//! DCR — the first pedalkernel-bix9 landing), and the grounded-cathode
+//! FIXED-BIAS deferral (the ko5g.2 la2a-V5 safeguard: warn + keep default).
+//!
 //! Still per-type / not yet on the shared path:
 //! - the **varimu** branch inside `solve_triode_dc_qpoint` (fixed-bias, a
 //!   VariMu/Raffensperger model + Ia bisection — needs a dedicated `VariMuSeed`;
 //!   NOT bit-preserving under the relaxation scheme and has no characterization
 //!   golden, so left as-is);
-//! - the **pentode** DC path (no `PentodeSeed`; `solve_triode_dc_qpoint` returns
-//!   `None` for non-triode kinds — ko5g.5, NO solver exists anywhere today);
 //! - the single-port-WDF **FET** solver in `spqr_build.rs`
 //!   (`compute_wdf_fet_dc_qpoint`) — ko5g.6;
 //! - the `rigid/general.rs::compute_dc_bias` ±0.65 V BJT port clamp (a linear
@@ -116,6 +124,20 @@ pub(super) enum BiasError {
         label: String,
         missing: TopologyTerm,
     },
+    /// Could not determine the pentode operating point — missing topology element.
+    UndeterminablePentode {
+        label: String,
+        missing: TopologyTerm,
+    },
+    /// The pentode's cathode is wired DIRECTLY to GND: a fixed-bias topology.
+    ///
+    /// The control-grid bias of a fixed-bias stage comes from an external
+    /// (negative) bias supply that the netlist does not model, so it CANNOT be
+    /// determined from topology — and trusting the grid-leak's Vg1k = 0 would
+    /// slam the tube to maximum conduction (the ko5g.2 audit's la2a-V5 time
+    /// bomb).  The caller must keep the model default and warn until an
+    /// explicit bias hint exists (pedalkernel-ko5g.7).
+    FixedBiasPentode { label: String },
     /// The solved Q-point is non-physical (e.g. positive Vgk, infinite Vbe).
     NonPhysicalQpoint,
     /// The resistor-divider MNA matrix is singular (floating nodes, open mesh).
@@ -148,6 +170,22 @@ impl BiasError {
                  missing {missing}. \
                  Add an `init {{ {label}: active }}` hint, or check that \
                  gate-bias resistors and R_source (source→GND) are present.",
+            ),
+            Self::UndeterminablePentode { label, missing } => format!(
+                "Cannot determine DC operating point for pentode '{label}': \
+                 missing {missing}. \
+                 Check that the plate has a DC path to B+ (load resistor, or an \
+                 output-transformer primary whose center tap / far end is tied \
+                 to B+) and that R_cathode (cathode→GND) is present.",
+            ),
+            Self::FixedBiasPentode { label } => format!(
+                "Pentode '{label}' has its cathode wired directly to GND \
+                 (fixed-bias topology): the grid bias comes from an external \
+                 bias supply the netlist does not model, so it cannot be \
+                 determined from topology. Add a cathode resistor for \
+                 self-bias, or an explicit grid-bias hint \
+                 (`init {{ {label}: ... }}`, pedalkernel-ko5g.7) once hints \
+                 support tube grid voltages.",
             ),
             Self::NonPhysicalQpoint => {
                 "Solved DC Q-point is non-physical (check supply voltage and load resistors)."
@@ -183,6 +221,9 @@ pub(super) enum TopologyTerm {
     GateNode,
     /// A resistor from the drain to the supply rail.
     DrainResistor,
+    /// A DC-conducting path (resistor, inductor, or transformer-primary
+    /// winding at its DCR) from the plate to a positive supply rail.
+    PlateDcPath,
 }
 
 impl std::fmt::Display for TopologyTerm {
@@ -195,6 +236,11 @@ impl std::fmt::Display for TopologyTerm {
             Self::EmitterResistor => write!(f, "R_emitter (resistor from emitter to GND)"),
             Self::GateNode => write!(f, "gate node in netlist"),
             Self::DrainResistor => write!(f, "R_drain (resistor from drain to supply rail)"),
+            Self::PlateDcPath => write!(
+                f,
+                "DC path from plate to a positive rail (load resistor, or OT \
+                 primary with its center tap / far end on B+)"
+            ),
         }
     }
 }
@@ -312,6 +358,49 @@ pub(super) fn solve_network_bias(
     graph: &CircuitGraph,
     supply_voltage: f64,
 ) -> NetworkBias {
+    // Legacy rail-voltage arm order (byte-identity for the flow-group
+    // StaticBias classification): AC-ground resolves to 0 V BEFORE named
+    // supplies — the pedalkernel-mgsd family quirk, preserved here.
+    let legacy_rail_v = |node: NodeId| -> f64 {
+        if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
+            0.0
+        } else if node == graph.vcc_node {
+            graph
+                .supply_voltages
+                .get(&graph.vcc_node)
+                .copied()
+                .unwrap_or(supply_voltage)
+        } else if let Some(&v) = graph.supply_voltages.get(&node) {
+            v
+        } else {
+            0.0
+        }
+    };
+    solve_network_bias_with_rails(
+        edge_indices,
+        graph,
+        build_rail_set(graph),
+        &legacy_rail_v,
+    )
+}
+
+/// [`solve_network_bias`] with an explicit rail set + rail-voltage resolver.
+///
+/// The default rail set ([`build_rail_set`]) counts every AC-ground node as a
+/// 0 V rail — correct for the flow-group StaticBias classification it was
+/// built for, but WRONG for resolving a bypassed screen-grid node (the
+/// pedalkernel-mgsd family: a screen dropper's junction has a ≥10 µF bypass
+/// cap, so it IS AC ground, yet sits at ≈B+ at DC).  The pentode screen
+/// resolver passes the TRUE-rail set (`gnd` + declared supplies only) AND a
+/// supply-first `rail_v` (every named supply is itself AC-ground, so the
+/// legacy ac-ground-first arm order would stamp B+ as 0 V) so bypassed
+/// interior nodes are solved, not pinned to 0 V.
+fn solve_network_bias_with_rails(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    rail_set: HashSet<NodeId>,
+    rail_v: &dyn Fn(NodeId) -> f64,
+) -> NetworkBias {
     // Collect interior (non-rail) nodes by BFS from rails through resistor edges only.
     //
     // Caps/inductors/nonlinear elements are open at DC.  Signal-path nodes that
@@ -319,7 +408,6 @@ pub(super) fn solve_network_bias(
     // resistors) must be excluded: they would produce zero-conductance rows in the
     // G matrix → singular.  BFS from rails guarantees every included node has at
     // least one DC path to a known voltage.
-    let rail_set = build_rail_set(graph);
 
     // Build resistor-only adjacency from the provided edge set.
     let mut res_adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -369,22 +457,6 @@ pub(super) fn solve_network_bias(
         .enumerate()
         .map(|(i, &nd)| (nd, i))
         .collect();
-
-    let rail_v = |node: NodeId| -> f64 {
-        if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
-            0.0
-        } else if node == graph.vcc_node {
-            graph
-                .supply_voltages
-                .get(&graph.vcc_node)
-                .copied()
-                .unwrap_or(supply_voltage)
-        } else if let Some(&v) = graph.supply_voltages.get(&node) {
-            v
-        } else {
-            0.0
-        }
-    };
 
     let mut g_mat = vec![0.0_f64; n * n];
     let mut i_vec = vec![0.0_f64; n];
@@ -689,6 +761,25 @@ pub(super) enum IterationScheme {
         max_iter: usize,
         tol: f64,
     },
+    /// Bisection on the device **main-current** residual
+    /// `F(i) = i - i_model(v_ctrl(i), v_out(i))` over `[0, i_ceiling]`.
+    ///
+    /// `F` is monotone increasing for the self-bias load line (`F' = 1 +
+    /// n·R_k·g_m·(…) > 0`), so bisection ALWAYS converges — unlike the damped
+    /// relaxation, whose iteration map has slope `0.5·(1 − R_degen·g_m)` and
+    /// DIVERGES for high-transconductance power pentodes (`R_k·g_m > 3`, e.g.
+    /// an EL34 with Rk = 470 Ω).  Added for the pentode (ko5g.5); a candidate
+    /// for the vari-mu migration (ko5g.6), whose legacy branch already
+    /// bisects.
+    ///
+    /// `i_ceiling` bounds the search when the load line cannot (`r_load = 0`,
+    /// the transformer-coupled plate): pick a value comfortably above any
+    /// audio-tube plate current (1 A default at the pentode seed).
+    MainCurrentBisection {
+        i_ceiling: f64,
+        max_iter: usize,
+        tol: f64,
+    },
 }
 
 /// Device I-V response at a trial point.
@@ -828,6 +919,11 @@ pub(super) fn solve_located_operating_point<S: BiasSeed>(
             max_iter,
             tol,
         } => main_current_relaxation_solve(seed, topo, initial_i_main, damping, max_iter, tol),
+        IterationScheme::MainCurrentBisection {
+            i_ceiling,
+            max_iter,
+            tol,
+        } => main_current_bisection_solve(seed, topo, i_ceiling, max_iter, tol),
     };
 
     // Validate
@@ -994,6 +1090,79 @@ fn main_current_relaxation_solve<S: BiasSeed>(
     let _ = iv;
     let i_total = i_main + i_control;
     (v_control, i_total, v_output)
+}
+
+/// Bisection on the device main-current residual.  Returns `(v_control,
+/// i_total, v_output)` at the converged Q-point.
+///
+/// The residual `F(i) = i - i_main_model(v_ctrl(i), v_out(i))` is evaluated
+/// on the same load-line relations the relaxation uses (`v_out = v_rail -
+/// i·r_load`, `v_ctrl = v_th - i·r_degen`; control current treated as zero —
+/// tube grids draw none at the operating point).  `F(0) ≤ 0` (the un-biased
+/// device conducts) and `F(hi) > 0` once `v_ctrl(hi)` drives the device
+/// toward cutoff, so a sign change is bracketed by doubling `hi` from the
+/// load-line ceiling (or `i_ceiling` when `r_load = 0`).
+fn main_current_bisection_solve<S: BiasSeed>(
+    seed: &S,
+    topo: &BiasTopology,
+    i_ceiling: f64,
+    max_iter: usize,
+    tol: f64,
+) -> (f64, f64, f64) {
+    let eval = |i: f64| -> (f64, f64, f64) {
+        let v_output = (topo.v_load_rail - i * topo.r_load).max(0.0);
+        let v_control = topo.v_control_thevenin - i * topo.r_degeneration;
+        let iv = seed.device_iv(TrialPoint {
+            v_control,
+            v_output,
+        });
+        (v_control, v_output, i - iv.i_main)
+    };
+
+    let mut lo = 0.0_f64;
+    let mut hi = if topo.r_load > 0.0 {
+        (topo.v_load_rail / topo.r_load).max(1e-9)
+    } else {
+        i_ceiling.max(1e-9)
+    };
+
+    let (_, _, mut f_lo) = eval(lo);
+    let (_, _, mut f_hi) = eval(hi);
+    // Grow the bracket if the ceiling still conducts more than it draws.
+    let mut grow = 0;
+    while f_hi <= 0.0 && grow < 8 && f_hi.is_finite() {
+        hi *= 2.0;
+        f_hi = eval(hi).2;
+        grow += 1;
+    }
+    if !f_lo.is_finite() || !f_hi.is_finite() || f_lo.signum() == f_hi.signum() {
+        // No bracketed root — return a non-finite marker; the caller's
+        // validation maps it to `BiasError::NonPhysicalQpoint`.
+        return (f64::NAN, f64::NAN, f64::NAN);
+    }
+
+    for _ in 0..max_iter {
+        let mid = 0.5 * (lo + hi);
+        let (_, _, f_mid) = eval(mid);
+        if !f_mid.is_finite() {
+            return (f64::NAN, f64::NAN, f64::NAN);
+        }
+        if f_mid.abs() < tol {
+            lo = mid;
+            hi = mid;
+            break;
+        }
+        if f_lo.signum() == f_mid.signum() {
+            lo = mid;
+            f_lo = f_mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    let i_main = 0.5 * (lo + hi);
+    let (v_control, v_output, _) = eval(i_main);
+    (v_control, i_main, v_output)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2310,6 +2479,576 @@ fn solve_wdf_triode_dc_qpoint_inner(
         vpk,
         v_cathode,
         ia: v_cathode / topo.r_degeneration,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pentode bias entries (ko5g.5 — the first pentode DC solver; no legacy copy
+// existed, so unlike the triode/BJT migrations there are NO finder flavors to
+// preserve: both call-sites share one finder breadth, graph-wide direct-then-
+// BFS, plus the inductive-DC-path arms the tube fleet needs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Why a pentode Q-point solve produced no operating point (ko5g.5 — the
+/// exact [`TriodeQpointSkip`] pattern).
+///
+/// - [`NotApplicable`](Self::NotApplicable): not a single pentode-with-grid —
+///   silent (multi-NL pentode groups, grid-less pentodes, non-pentode kinds).
+/// - [`Undeterminable`](Self::Undeterminable): a REAL pentode stage that keeps
+///   its legacy fallback (the `PentodeRoot` −8.0 V `vg1k_bias` default and the
+///   model-default `vg2k`) — the caller must WARN LOUDLY via
+///   [`warn_if_undeterminable`](Self::warn_if_undeterminable).  This includes
+///   the [`BiasError::FixedBiasPentode`] guard: a grounded-cathode (fixed-bias)
+///   pentode DEFERS to the default rather than trusting the topology's
+///   Vg1k = 0 hot point (the audit's la2a-V5 safeguard).  The fail-loud flip
+///   is ko5g.8.
+#[derive(Debug, Clone)]
+pub(super) enum PentodeQpointSkip {
+    /// Not a single pentode-with-grid — nothing to warn about.
+    NotApplicable,
+    /// A pentode stage rode into its legacy default.
+    Undeterminable(BiasError),
+}
+
+impl PentodeQpointSkip {
+    /// ko5g.5 warn-not-error: print a loud stderr warning when a real pentode
+    /// stage keeps its legacy default.
+    pub(super) fn warn_if_undeterminable(&self, fallback: &str) {
+        if let Self::Undeterminable(err) = self {
+            eprintln!(
+                "  [bias] WARNING: {} {fallback} (warn-not-error, pedalkernel-ko5g.5; \
+                 this becomes a compile error under pedalkernel-ko5g.8)",
+                err.clone().into_compile_error()
+            );
+        }
+    }
+}
+
+/// DC operating-point data for a single pentode stage.
+#[derive(Debug, Clone)]
+pub(super) struct PentodeDcQpoint {
+    /// Control-grid bias voltage (negative for self-biased stages).
+    pub(super) vg1k: f64,
+    /// Plate-cathode voltage at the Q-point (≈ B+ for OT-coupled plates).
+    pub(super) vpk: f64,
+    /// Cathode voltage = −vg1k = n_sharing × Ia × R_cathode.
+    pub(super) v_cathode: f64,
+    /// Per-tube plate current at the Q-point (A).
+    pub(super) ia: f64,
+    /// Screen-grid DC voltage resolved from the circuit (divider/dropper at
+    /// DC — NO screen-current drop, the Koren model draws none).  `None` when
+    /// the netlist never wires the screen pin: the model-default `vg2k`
+    /// stands (it IS the declared operating point of such fixtures).
+    pub(super) vg2k: Option<f64>,
+}
+
+/// `PK_BIAS_QPOINT_DEBUG=1`: dump every pentode Q-point solve (or its failure).
+fn pentode_qpoint_debug(
+    path: &str,
+    label: &str,
+    supply_voltage: f64,
+    out: &Result<PentodeDcQpoint, PentodeQpointSkip>,
+) {
+    if std::env::var("PK_BIAS_QPOINT_DEBUG").is_err() {
+        return;
+    }
+    match out {
+        Ok(dc) => eprintln!(
+            "[bias-qpoint] path={path} pentode {label}: vg1k={:.6} vpk={:.6} v_cathode={:.6} ia={:.9} vg2k={} supply={supply_voltage}",
+            dc.vg1k,
+            dc.vpk,
+            dc.v_cathode,
+            dc.ia,
+            dc.vg2k
+                .map(|v| format!("{v:.6}"))
+                .unwrap_or_else(|| "model-default".to_owned()),
+        ),
+        Err(PentodeQpointSkip::Undeterminable(err)) => eprintln!(
+            "[bias-qpoint] path={path} pentode {label}: UNDETERMINABLE ({err:?}) supply={supply_voltage}"
+        ),
+        Err(PentodeQpointSkip::NotApplicable) => {}
+    }
+}
+
+/// `BiasSeed` for a self-biased pentode power/driver stage.
+///
+/// The screen voltage is resolved BEFORE the seed is built
+/// ([`resolve_pentode_screen_dc`]) and carried as a plain field: `Vg2k` is an
+/// external parameter of the Koren pentode plate equation, not a solved port.
+pub(super) struct PentodeSeed<'a> {
+    pub(super) nl_kind: &'a NonlinearKind,
+    pub(super) label: String,
+    pub(super) supply_voltage: f64,
+    /// Effective screen-grid voltage for the plate-current evaluation
+    /// (resolved from the circuit, or the model default when unwired).
+    pub(super) vg2k: f64,
+    /// Number of tubes sharing the cathode resistor (push-pull pairs share
+    /// one Rk: the DC drop is `n × Ia × Rk`, folded in as
+    /// `r_degeneration = n·Rk`).
+    pub(super) cathode_sharing: usize,
+}
+
+impl<'a> BiasSeed for PentodeSeed<'a> {
+    fn locate_bias_topology(
+        &self,
+        edge_indices: &[usize],
+        graph: &CircuitGraph,
+        _network_bias: &NetworkBias,
+        supply_voltage: f64,
+    ) -> Result<BiasTopology, BiasError> {
+        let (plate_node, cathode_node) = match self.nl_kind {
+            NonlinearKind::Pentode {
+                plate_node,
+                cathode_node,
+                grid_node: Some(_),
+                ..
+            } => (*plate_node, *cathode_node),
+            _ => {
+                return Err(BiasError::UndeterminablePentode {
+                    label: self.label.clone(),
+                    missing: TopologyTerm::GridNode,
+                });
+            }
+        };
+
+        // ── Cathode first: the fixed-bias guard (la2a-V5 safeguard) ────────
+        //
+        // A cathode wired DIRECTLY to GND is a fixed-bias topology — the grid
+        // bias comes from an external supply the netlist does not model.
+        // Trusting the grid leak's Vg1k = 0 would slam the tube to maximum
+        // conduction, an uncommanded behaviour flip in every circuit that
+        // rode the −8 V default (ko5g.2 audit).  Defer to the default, loudly.
+        if cathode_node == graph.gnd_node {
+            return Err(BiasError::FixedBiasPentode {
+                label: self.label.clone(),
+            });
+        }
+
+        // ── Plate DC path ──────────────────────────────────────────────────
+        //
+        // Arm order (most-specific first):
+        //  1. direct plate→rail resistor, stage edges then graph-wide
+        //     (named-rail edges land in other flow groups — pedalkernel-0stg);
+        //  2. cap-aware BFS, graph-wide;
+        //  3. plate node IS a rail (r_plate = 0);
+        //  4. inductive DC walk: resistors + inductors + transformer-primary
+        //     edges at their DC resistance (pedalkernel-bix9 — an OT primary
+        //     is a DC SHORT at its winding DCR, not an open);
+        //  5. OT-primary center tap on a rail (push-pull halves: the primary
+        //     a–b edge connects the two PLATES; B+ enters at the ct, which has
+        //     no graph edge — resolve through `transformer_info` + the ct
+        //     node aliases).
+        let graph_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let rails = positive_supply_rails(graph);
+        let (r_plate, v_plate_rail) = rails
+            .iter()
+            .find_map(|&rail| {
+                find_load_resistor_direct(plate_node, rail, edge_indices, graph)
+                    .or_else(|| find_load_resistor_direct(plate_node, rail, &graph_edges, graph))
+                    .map(|r| (r, rail))
+            })
+            .or_else(|| {
+                rails.iter().find_map(|&rail| {
+                    find_load_resistor_bfs(plate_node, rail, &graph_edges, graph)
+                        .map(|r| (r, rail))
+                })
+            })
+            .map(|(r, rail)| {
+                (
+                    r,
+                    rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage),
+                )
+            })
+            .or_else(|| {
+                rail_dc_voltage(plate_node, graph, supply_voltage)
+                    .filter(|&v| v > 0.0)
+                    .map(|v| (0.0, v))
+            })
+            .or_else(|| find_plate_dc_path_inductive(plate_node, graph, supply_voltage))
+            .or_else(|| find_ot_primary_ct_rail(plate_node, graph, supply_voltage))
+            .ok_or_else(|| BiasError::UndeterminablePentode {
+                label: self.label.clone(),
+                missing: TopologyTerm::PlateDcPath,
+            })?;
+
+        // ── Cathode resistor ───────────────────────────────────────────────
+        let r_cathode = find_load_resistor_direct(cathode_node, graph.gnd_node, edge_indices, graph)
+            .or_else(|| {
+                find_load_resistor_direct(cathode_node, graph.gnd_node, &graph_edges, graph)
+            })
+            .or_else(|| find_load_resistor_bfs(cathode_node, graph.gnd_node, &graph_edges, graph))
+            .ok_or_else(|| BiasError::UndeterminablePentode {
+                label: self.label.clone(),
+                missing: TopologyTerm::CathodeResistor,
+            })?;
+
+        Ok(BiasTopology {
+            r_load: r_plate,
+            v_load_rail: v_plate_rail,
+            // Shared-cathode co-solve: n tubes push their (matched) plate
+            // currents through ONE Rk, so the per-tube load line sees n·Rk.
+            r_degeneration: r_cathode * self.cathode_sharing as f64,
+            v_control_thevenin: 0.0,
+            r_control_thevenin: 0.0,
+            supply_voltage,
+            degeneration_node: Some(cathode_node),
+        })
+    }
+
+    fn device_iv(&self, trial: TrialPoint) -> DeviceIv {
+        let model_name = match self.nl_kind {
+            NonlinearKind::Pentode { model_name, .. } => model_name.as_str(),
+            _ => "EL34",
+        };
+        let model = super::helpers::pentode_model(model_name);
+        let v_max = self.supply_voltage.max(1.0);
+        let mut root = pedalkernel_rt::elements::nonlinear::PentodeRoot::new_with_v_max(
+            model,
+            v_max as pedalkernel_rt::Wave,
+        );
+        root.set_vg2k(self.vg2k as pedalkernel_rt::Wave);
+        root.set_vg1k(trial.v_control as pedalkernel_rt::Wave);
+        let ia = root.plate_current(trial.v_output as pedalkernel_rt::Wave) as f64;
+
+        // Numerical transconductance (matches the TriodeSeed convention).
+        let h = 1e-3_f64;
+        root.set_vg1k((trial.v_control + h) as pedalkernel_rt::Wave);
+        let ia2 = root.plate_current(trial.v_output as pedalkernel_rt::Wave) as f64;
+        let gm = (ia2 - ia) / h;
+
+        DeviceIv {
+            i_main: ia,
+            i_control: 0.0, // control grid draws no current at the Q-point
+            di_total_dv_control: gm,
+            di_control_dv_control: 0.0,
+        }
+    }
+
+    fn device_label(&self) -> &str {
+        &self.label
+    }
+
+    fn device_kind(&self) -> DeviceBiasKind {
+        DeviceBiasKind::Pentode
+    }
+
+    fn initial_v_control(&self) -> f64 {
+        -8.0 // unused by the bisection scheme; the model default, for symmetry
+    }
+
+    fn iteration_scheme(&self) -> IterationScheme {
+        // Bisection, NOT the triode's damped relaxation: power pentodes have
+        // g_m up to ~11 mS, and with Rk = 470 Ω the relaxation map's slope
+        // `0.5·(1 − Rk·g_m)` exceeds 1 in magnitude — it diverges exactly on
+        // the fleet's EL34 stage.  The main-current residual is monotone, so
+        // bisection is unconditionally convergent.
+        IterationScheme::MainCurrentBisection {
+            i_ceiling: 1.0,
+            max_iter: 80,
+            tol: 1e-9,
+        }
+    }
+}
+
+/// Walk the DC-conducting subgraph from the plate to a positive rail,
+/// traversing resistors (at R), inductors (at 0 Ω — the DSL models no
+/// inductor DCR), and transformer PRIMARY edges (at `primary_dcr`).
+/// Capacitors are open; nonlinear devices are not walked.
+///
+/// Returns `(series_resistance, rail_dc_voltage)` for the first (BFS-shortest)
+/// rail reached with a positive DC voltage.
+fn find_plate_dc_path_inductive(
+    plate_node: NodeId,
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<(f64, f64)> {
+    // DC series resistance of an edge, or None when open/not-walkable at DC.
+    let edge_dc_r = |eidx: usize| -> Option<f64> {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        match graph.effective_edge_kind(eidx) {
+            EdgeKind::Linear => comp.kind.resistance().filter(|r| *r > 0.0 && r.is_finite()),
+            EdgeKind::Reactive => {
+                if comp.kind.capacitance().is_some() {
+                    None // open at DC
+                } else if let Some(cfg) = comp.kind.transformer_config() {
+                    // The transformer's single graph edge is the primary a–b.
+                    Some(cfg.primary_dcr.max(0.0))
+                } else if comp.kind.inductance().is_some() {
+                    Some(0.0) // ideal inductor: DC short
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+
+    let mut adj: HashMap<NodeId, Vec<(NodeId, f64)>> = HashMap::new();
+    for eidx in 0..graph.edges.len() {
+        let Some(r) = edge_dc_r(eidx) else { continue };
+        let e = &graph.edges[eidx];
+        adj.entry(e.node_a).or_default().push((e.node_b, r));
+        adj.entry(e.node_b).or_default().push((e.node_a, r));
+    }
+
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut queue: VecDeque<(NodeId, f64)> = VecDeque::new();
+    visited.insert(plate_node);
+    queue.push_back((plate_node, 0.0));
+    while let Some((node, acc_r)) = queue.pop_front() {
+        if node != plate_node {
+            if let Some(v) = rail_dc_voltage(node, graph, supply_voltage) {
+                if v > 0.0 {
+                    return Some((acc_r, v));
+                }
+                continue; // gnd / 0 V rail: not a plate supply, stop here
+            }
+        }
+        for &(next, r) in adj.get(&node).into_iter().flatten() {
+            if visited.insert(next) {
+                queue.push_back((next, acc_r + r));
+            }
+        }
+    }
+    None
+}
+
+/// Push-pull OT primary: the transformer's only graph edge connects the two
+/// primary ENDS (the plates); B+ enters at the center tap, which never gets a
+/// graph edge.  When the plate is a primary-winding node and the ct node
+/// aliases resolve to a positive rail, the plate's DC load is half the
+/// primary winding at its DCR.
+fn find_ot_primary_ct_rail(
+    plate_node: NodeId,
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<(f64, f64)> {
+    let info = graph.transformer_info.get(&plate_node)?;
+    if info.is_secondary {
+        return None;
+    }
+    let comp = &graph.components[info.comp_idx];
+    let cfg = comp.kind.transformer_config()?;
+    let ct_node = ["ct", "pri.ct", "primary.ct", "pri_ct", "primary_ct"]
+        .iter()
+        .find_map(|suffix| graph.node_names.get(&format!("{}.{suffix}", comp.id)))
+        .copied()?;
+    let v = rail_dc_voltage(ct_node, graph, supply_voltage).filter(|&v| v > 0.0)?;
+    Some((0.5 * cfg.primary_dcr.max(0.0), v))
+}
+
+/// Count the tubes (components with a `plate` pin) whose `.cathode` pin sits
+/// on `cathode_node` — the shared-Rk co-solve multiplier.  Diode `.cathode`
+/// pins are excluded by the plate-pin requirement.
+fn count_cathode_sharing_tubes(graph: &CircuitGraph, cathode_node: NodeId) -> usize {
+    let mut sharing: HashSet<&str> = HashSet::new();
+    for (name, &node) in &graph.node_names {
+        if node != cathode_node {
+            continue;
+        }
+        let Some(comp_id) = name.strip_suffix(".cathode") else {
+            continue;
+        };
+        let Some(comp) = graph.components.iter().find(|c| c.id == comp_id) else {
+            continue;
+        };
+        if comp.kind.pin_config().valid_pins.contains(&"plate") {
+            sharing.insert(comp_id);
+        }
+    }
+    sharing.len().max(1)
+}
+
+/// Resolve the screen-grid (g2) DC voltage from the circuit.
+///
+/// - `None`: the netlist never wires a `g2`/`screen` pin — the model-default
+///   `vg2k` stands (it IS the declared op of screen-unwired fixtures).
+/// - Screen on a rail: the rail's DC voltage.
+/// - Otherwise: the resistor-divider nodal solve with the TRUE-rail set (a
+///   bypassed screen node is AC-ground but sits at ≈B+ at DC — mgsd family).
+///   A pure series dropper resolves to the feeding rail's voltage: the Koren
+///   model draws no screen current, so there is no Ig2·R drop to model.
+pub(super) fn resolve_pentode_screen_dc(
+    label: &str,
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<f64> {
+    let screen_node = ["g2", "screen"]
+        .iter()
+        .find_map(|pin| graph.node_names.get(&format!("{label}.{pin}")))
+        .copied()?;
+
+    if screen_node == graph.gnd_node {
+        return Some(0.0);
+    }
+    if graph.supply_nodes.contains(&screen_node) || screen_node == graph.vcc_node {
+        return Some(
+            graph
+                .supply_voltages
+                .get(&screen_node)
+                .copied()
+                .unwrap_or(supply_voltage),
+        );
+    }
+    if let Some(&v) = graph.supply_voltages.get(&screen_node) {
+        return Some(v);
+    }
+
+    let mut true_rails: HashSet<NodeId> = HashSet::new();
+    true_rails.insert(graph.gnd_node);
+    true_rails.insert(graph.vcc_node);
+    true_rails.extend(graph.supply_nodes.iter().copied());
+    // Supply-FIRST rail voltages: every named supply is itself AC-ground, so
+    // the legacy ac-ground-first arm order would stamp B+ as 0 V (mgsd).
+    let true_rail_v = |node: NodeId| -> f64 {
+        if node == graph.gnd_node {
+            0.0
+        } else if let Some(&v) = graph.supply_voltages.get(&node) {
+            v
+        } else if node == graph.vcc_node {
+            supply_voltage
+        } else {
+            0.0
+        }
+    };
+    let graph_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let nb = solve_network_bias_with_rails(&graph_edges, graph, true_rails, &true_rail_v);
+    nb.dc_voltages.get(&screen_node).copied()
+}
+
+/// Compute the DC operating point for a single self-biased pentode stage —
+/// the grouped-MNA entry (`rigid/general.rs`), `nl_kinds.len() == 1`.
+///
+/// Returns `Err(NotApplicable)` for anything that is not exactly one
+/// pentode-with-grid, `Err(Undeterminable)` when the topology cannot be
+/// resolved (incl. the grounded-cathode fixed-bias guard) — the caller warns
+/// and keeps the legacy defaults (warn-not-error until ko5g.8).
+pub(super) fn solve_pentode_dc_qpoint(
+    nl_kinds: &[NonlinearKind],
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Result<PentodeDcQpoint, PentodeQpointSkip> {
+    if nl_kinds.len() != 1 {
+        return Err(PentodeQpointSkip::NotApplicable);
+    }
+    let out = solve_pentode_dc_qpoint_inner(&nl_kinds[0], all_edges, graph, supply_voltage);
+    if let NonlinearKind::Pentode {
+        model_name,
+        plate_node,
+        ..
+    } = &nl_kinds[0]
+    {
+        pentode_qpoint_debug(
+            "mna",
+            &triode_display_label(graph, *plate_node, model_name),
+            supply_voltage,
+            &out,
+        );
+    }
+    out
+}
+
+/// Single-port-WDF pentode DC Q-point — seeds `PentodeRoot::set_bias` /
+/// `set_vg2k` at the `spqr_build.rs` call-site.  Same finder breadth and
+/// solver as the MNA entry (no legacy copy existed to flavor-preserve).
+pub(super) fn solve_wdf_pentode_dc_qpoint(
+    nl_kind: &NonlinearKind,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Result<PentodeDcQpoint, PentodeQpointSkip> {
+    let out = solve_pentode_dc_qpoint_inner(nl_kind, edge_indices, graph, supply_voltage);
+    if let NonlinearKind::Pentode {
+        model_name,
+        plate_node,
+        ..
+    } = nl_kind
+    {
+        pentode_qpoint_debug(
+            "wdf",
+            &triode_display_label(graph, *plate_node, model_name),
+            supply_voltage,
+            &out,
+        );
+    }
+    out
+}
+
+fn solve_pentode_dc_qpoint_inner(
+    nl_kind: &NonlinearKind,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Result<PentodeDcQpoint, PentodeQpointSkip> {
+    let (model_name, plate_node, cathode_node) = match nl_kind {
+        NonlinearKind::Pentode {
+            model_name,
+            plate_node,
+            cathode_node,
+            grid_node: Some(_),
+        } => (model_name.as_str(), *plate_node, *cathode_node),
+        // Grid-less pentodes have no Vg1k to solve; non-pentode kinds are not
+        // ours — silent skip either way.
+        _ => return Err(PentodeQpointSkip::NotApplicable),
+    };
+    let label = triode_instance_label(graph, plate_node, model_name);
+
+    // Locate FIRST: the topology errors (grounded-cathode fixed-bias guard,
+    // missing plate DC path) carry the actionable message and must not be
+    // masked by a screen-resolution failure.
+    let model = super::helpers::pentode_model(model_name);
+    let mut seed = PentodeSeed {
+        nl_kind,
+        label: label.clone(),
+        supply_voltage,
+        vg2k: model.vg2_default as f64, // placeholder until the screen resolves
+        cathode_sharing: count_cathode_sharing_tubes(graph, cathode_node),
+    };
+    let network_bias = NetworkBias::default();
+    let topo = seed
+        .locate_bias_topology(edge_indices, graph, &network_bias, supply_voltage)
+        .map_err(PentodeQpointSkip::Undeterminable)?;
+
+    // Screen: resolved from the circuit, model default when unwired.
+    let vg2k_resolved = resolve_pentode_screen_dc(&label, graph, supply_voltage);
+    let vg2k_eff = vg2k_resolved.unwrap_or(model.vg2_default as f64);
+    if !(vg2k_eff > 0.0) {
+        // Screen resolved to 0 V (or worse): the tube cannot conduct — a
+        // netlist bug (screen strapped to GND?), not a solvable op.
+        return Err(PentodeQpointSkip::Undeterminable(
+            BiasError::NonPhysicalQpoint,
+        ));
+    }
+    seed.vg2k = vg2k_eff;
+
+    let op = solve_located_operating_point(&seed, &topo)
+        .map_err(PentodeQpointSkip::Undeterminable)?;
+
+    let vg1k = op.control_bias;
+    let vpk = op.output_warm_start;
+    let v_cathode = -vg1k; // self-bias: V_k = n·Ia·Rk = -Vg1k
+    // r_degeneration = n·Rk, so v_cathode / r_degeneration is the PER-TUBE Ia.
+    let ia = if topo.r_degeneration > 0.0 {
+        v_cathode / topo.r_degeneration
+    } else {
+        0.0
+    };
+
+    // Sanity: self-biased pentode must land at negative Vg1k, positive Vpk.
+    if vg1k >= 0.0 || vpk <= 0.0 || !vg1k.is_finite() || !vpk.is_finite() || !ia.is_finite() {
+        return Err(PentodeQpointSkip::Undeterminable(
+            BiasError::NonPhysicalQpoint,
+        ));
+    }
+
+    Ok(PentodeDcQpoint {
+        vg1k,
+        vpk,
+        v_cathode,
+        ia,
+        vg2k: vg2k_resolved,
     })
 }
 
@@ -4908,6 +5647,459 @@ mod tests {
         assert!(matches!(
             solve_wdf_triode_dc_qpoint(&strapped, &all_edges, &graph, 250.0),
             Err(TriodeQpointSkip::NotApplicable)
+        ));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Pentode Q-point (ko5g.5)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fn pentode_nl_kind(graph: &CircuitGraph, comp_id: &str) -> NonlinearKind {
+        let e = graph
+            .edges
+            .iter()
+            .find(|e| graph.components[e.comp_idx].id == comp_id)
+            .expect("pentode edge");
+        let comp = &graph.components[e.comp_idx];
+        comp.kind
+            .classify_nonlinear(&comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names)
+            .expect("classify pentode")
+            .0
+    }
+
+    fn all_graph_edges(graph: &CircuitGraph) -> Vec<usize> {
+        (0..graph.edges.len()).collect()
+    }
+
+    /// Gate-4: self-biased Rk + resistive plate load + screen dropper — the
+    /// single-ended EL34 shape.  The solved op must be datasheet-plausible
+    /// (EL34 SE class-A at 450 V: Vg1 ≈ −30 ± 30 %, Ia tens of mA) and the
+    /// screen must resolve through the dropper to the feeding rail (no screen
+    /// current in the Koren model → no Ig2·R drop).
+    #[test]
+    fn pentode_qpoint_self_biased_rk_resistive_load() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 450V
+                components {
+                    V1: pentode(el34)
+                    R_p: resistor(3.5k)
+                    R_k: resistor(470)
+                    R_g: resistor(220k)
+                    R_scr: resistor(1k)
+                    C_k: cap(100u, electrolytic)
+                    C_in: cap(100n)
+                }
+                nets {
+                    in -> C_in.a
+                    C_in.b -> V1.grid, R_g.a
+                    R_g.b -> gnd
+                    vcc -> R_p.a
+                    R_p.b -> V1.plate
+                    vcc -> R_scr.a
+                    R_scr.b -> V1.g2
+                    V1.cathode -> R_k.a, C_k.a
+                    R_k.b -> gnd
+                    C_k.b -> gnd
+                    V1.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = pentode_nl_kind(&graph, "V1");
+        let all_edges = all_graph_edges(&graph);
+        let dc = solve_wdf_pentode_dc_qpoint(&nl, &all_edges, &graph, 450.0)
+            .expect("self-biased EL34 must solve");
+
+        assert!(
+            (-40.0..=-20.0).contains(&dc.vg1k),
+            "EL34 Vg1k {:.3} outside the datasheet-plausible −40..−20 V band",
+            dc.vg1k
+        );
+        assert!(
+            (0.04..=0.09).contains(&dc.ia),
+            "EL34 Ia {:.4} A outside the plausible 40-90 mA band",
+            dc.ia
+        );
+        assert!(
+            (150.0..=300.0).contains(&dc.vpk),
+            "EL34 Vpk {:.1} V outside the load-line band",
+            dc.vpk
+        );
+        // Self-bias consistency: Vk = Ia·Rk = −Vg1k.
+        assert!((dc.v_cathode - dc.ia * 470.0).abs() < 1e-6);
+        assert_eq!(
+            dc.vg2k,
+            Some(450.0),
+            "screen dropper resolves to the feeding rail (no Ig2 in the model)"
+        );
+    }
+
+    /// Gate-4: the screen resolver must survive the mgsd trap — a bypassed
+    /// screen node (≥10 µF cap → AC-ground classified) still resolves to ≈B+
+    /// at DC, and a named B+ rail (itself AC-ground) must not read as 0 V.
+    #[test]
+    fn pentode_qpoint_screen_dropper_resolution_survives_ac_ground() {
+        let graph = parse_graph(
+            r#"pedal "test" {
+                supplies { B+: 330V }
+                components {
+                    V1: pentode(6v6gt)
+                    R_p: resistor(5k)
+                    R_k: resistor(250)
+                    R_g: resistor(220k)
+                    R_scr: resistor(470)
+                    C_scr: cap(22u, electrolytic)
+                    C_k: cap(25u, electrolytic)
+                }
+                nets {
+                    in -> V1.grid, R_g.a
+                    R_g.b -> gnd
+                    B+ -> R_p.a
+                    R_p.b -> V1.plate
+                    B+ -> R_scr.a
+                    R_scr.b -> V1.screen, C_scr.a
+                    C_scr.b -> gnd
+                    V1.cathode -> R_k.a, C_k.a
+                    R_k.b -> gnd
+                    C_k.b -> gnd
+                    V1.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        // The actual mgsd trap: the named B+ rail is ITSELF AC-ground
+        // classified (graph.rs inserts supply nodes wholesale), so a
+        // rail-voltage resolver with the legacy ac-ground-first arm order
+        // stamps B+ as 0 V and the whole dropper solves to 0.
+        let bplus = graph
+            .supply_nodes
+            .iter()
+            .copied()
+            .find(|n| graph.ac_ground_nodes.contains(n))
+            .expect("fixture must have an AC-ground-classified named rail");
+        assert!(graph.supply_voltages.get(&bplus).copied() == Some(330.0));
+        let v = resolve_pentode_screen_dc("V1", &graph, 330.0);
+        assert_eq!(
+            v,
+            Some(330.0),
+            "bypassed screen dropper must resolve to B+ at DC, not the \
+             AC-ground 0 V (mgsd arm order)"
+        );
+    }
+
+    /// Gate-4 (THE ko5g.2 la2a-V5 safeguard): a grounded-cathode pentode is a
+    /// FIXED-BIAS topology — the solver must DEFER (loud Undeterminable with
+    /// the hint-shaped message), never trust the topology's Vg1k = 0 hot
+    /// point.
+    #[test]
+    fn pentode_qpoint_grounded_cathode_defers_loudly() {
+        let graph = parse_graph(
+            r#"pedal "test" {
+                supplies { B+: 275V }
+                components {
+                    V5: pentode(6aq5a)
+                    R_g: resistor(220k)
+                    R_scr: resistor(1k)
+                    R_p: resistor(10k)
+                }
+                nets {
+                    in -> V5.grid, R_g.a
+                    R_g.b -> gnd
+                    B+ -> R_p.a
+                    R_p.b -> V5.plate
+                    B+ -> R_scr.a
+                    R_scr.b -> V5.g2
+                    V5.cathode -> gnd
+                    V5.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = pentode_nl_kind(&graph, "V5");
+        let all_edges = all_graph_edges(&graph);
+        let out = solve_wdf_pentode_dc_qpoint(&nl, &all_edges, &graph, 275.0);
+        let Err(PentodeQpointSkip::Undeterminable(err)) = out else {
+            panic!("grounded-cathode pentode must DEFER, got {out:?}");
+        };
+        assert!(
+            matches!(err, BiasError::FixedBiasPentode { ref label } if label == "V5"),
+            "expected FixedBiasPentode for V5, got {err:?}"
+        );
+        let msg = err.into_compile_error();
+        assert!(
+            msg.contains("cathode resistor") && msg.contains("init { V5:"),
+            "deferral message must name both escape hatches, got: {msg}"
+        );
+    }
+
+    /// Gate-4: push-pull OT primary with its center tap on B+ — the plate DC
+    /// path resolves through the winding at DCR (bix9), and the SHARED
+    /// cathode resistor is co-solved (r_degeneration = 2·Rk, so
+    /// Vk = 2·Ia·Rk).
+    #[test]
+    fn pentode_qpoint_ot_primary_ct_on_rail_solves_shared_cathode() {
+        let graph = parse_graph(
+            r#"pedal "test" {
+                supplies { B+: 330V }
+                components {
+                    V3a: pentode(6v6gt)
+                    V3b: pentode(6v6gt)
+                    R_ga: resistor(220k)
+                    R_gb: resistor(220k)
+                    R_k: resistor(250)
+                    C_k: cap(25u, electrolytic)
+                    R_scr: resistor(470)
+                    OT: transformer(30:1, 8H, pp)
+                    R_spk: resistor(8)
+                }
+                nets {
+                    in -> V3a.grid, R_ga.a
+                    R_ga.b -> gnd
+                    gnd -> V3b.grid, R_gb.a
+                    R_gb.b -> gnd
+                    V3a.cathode -> R_k.a, C_k.a
+                    V3b.cathode -> R_k.a
+                    R_k.b -> gnd
+                    C_k.b -> gnd
+                    B+ -> R_scr.a
+                    R_scr.b -> V3a.screen, V3b.screen
+                    B+ -> OT.pri.ct
+                    V3a.plate -> OT.pri.a
+                    V3b.plate -> OT.pri.b
+                    OT.sec.a -> R_spk.a, out
+                    OT.sec.b -> gnd
+                    R_spk.b -> gnd
+                }
+                controls {}
+            }"#,
+        );
+        let nl = pentode_nl_kind(&graph, "V3a");
+        let all_edges = all_graph_edges(&graph);
+        let dc = solve_wdf_pentode_dc_qpoint(&nl, &all_edges, &graph, 330.0)
+            .expect("OT-primary-with-ct pentode must solve");
+
+        // r_load = winding DCR (unmodeled → 0) ⇒ plate sits at B+.
+        assert_eq!(dc.vpk, 330.0, "OT-coupled plate sits at B+ at DC");
+        // Shared cathode: Vk = 2·Ia·Rk (per-tube Ia reported).
+        assert!(
+            (dc.v_cathode - 2.0 * dc.ia * 250.0).abs() < 1e-6,
+            "shared-Rk co-solve: Vk {:.4} != 2·Ia·Rk {:.4}",
+            dc.v_cathode,
+            2.0 * dc.ia * 250.0
+        );
+        assert!(
+            (-25.0..=-8.0).contains(&dc.vg1k),
+            "6V6 push-pull Vg1k {:.3} outside the plausible −25..−8 V band \
+             (datasheet cathode bias ≈ −15 V at 330 V)",
+            dc.vg1k
+        );
+        assert!(
+            (0.015..=0.05).contains(&dc.ia),
+            "6V6 Ia {:.4} A outside the plausible 15-50 mA band",
+            dc.ia
+        );
+        assert_eq!(dc.vg2k, Some(330.0), "shared screen dropper → B+");
+    }
+
+    /// Gate-4: an OT primary whose center tap is NOT wired to any rail (the
+    /// push_pull_6l6 fixture's shape) must fall back LOUDLY — never silently
+    /// mis-solve through the transformer.
+    #[test]
+    fn pentode_qpoint_ot_primary_floating_ct_falls_back_loudly() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 400V
+                components {
+                    V1: pentode(6l6gc)
+                    V2: pentode(6l6gc)
+                    R_g1: resistor(220k)
+                    R_g2: resistor(220k)
+                    R_k: resistor(250)
+                    T1: transformer(25:1, 10H, pp)
+                    RL: resistor(8)
+                }
+                nets {
+                    in -> V1.g1, R_g1.a
+                    R_g1.b -> gnd
+                    gnd -> V2.g1, R_g2.a
+                    R_g2.b -> gnd
+                    V1.cathode -> R_k.a
+                    V2.cathode -> R_k.a
+                    R_k.b -> gnd
+                    V1.plate -> T1.a
+                    V2.plate -> T1.b
+                    T1.c -> RL.a, out
+                    T1.d -> gnd
+                    RL.b -> gnd
+                }
+                controls {}
+            }"#,
+        );
+        let nl = pentode_nl_kind(&graph, "V1");
+        let all_edges = all_graph_edges(&graph);
+        let out = solve_wdf_pentode_dc_qpoint(&nl, &all_edges, &graph, 400.0);
+        assert!(
+            matches!(
+                out,
+                Err(PentodeQpointSkip::Undeterminable(
+                    BiasError::UndeterminablePentode {
+                        missing: TopologyTerm::PlateDcPath,
+                        ..
+                    }
+                ))
+            ),
+            "floating-ct OT primary must be a LOUD PlateDcPath fallback, got {out:?}"
+        );
+    }
+
+    /// Gate-4: a two-terminal transformer primary between B+ and the plate
+    /// (the la2a EL_drive shape, degenerate series inductor) is a DC short —
+    /// the inductive walk resolves the plate to B+ through the winding.
+    #[test]
+    fn pentode_qpoint_two_terminal_inductive_primary_reaches_rail() {
+        let graph = parse_graph(
+            r#"pedal "test" {
+                supplies { B+: 275V }
+                components {
+                    V5: pentode(6aq5a)
+                    R_g: resistor(220k)
+                    R_k: resistor(470)
+                    R_scr: resistor(1k)
+                    EL_drive: transformer(1:2, 8H)
+                }
+                nets {
+                    in -> V5.grid, R_g.a
+                    R_g.b -> gnd
+                    B+ -> R_scr.a
+                    R_scr.b -> V5.g2
+                    B+ -> EL_drive.a
+                    V5.plate -> EL_drive.b
+                    V5.cathode -> R_k.a
+                    R_k.b -> gnd
+                    EL_drive.c -> out
+                    EL_drive.d -> gnd
+                }
+                controls {}
+            }"#,
+        );
+        let nl = pentode_nl_kind(&graph, "V5");
+        let all_edges = all_graph_edges(&graph);
+        let dc = solve_wdf_pentode_dc_qpoint(&nl, &all_edges, &graph, 275.0)
+            .expect("plate through a 2-terminal primary to B+ must solve");
+        assert_eq!(dc.vpk, 275.0, "inductive plate path → plate at B+ at DC");
+        assert!(dc.vg1k < 0.0 && dc.ia > 0.0);
+        assert_eq!(dc.vg2k, Some(275.0));
+    }
+
+    /// Gate-4: a netlist that never wires the screen pin keeps the MODEL
+    /// default `vg2k` (`PentodeDcQpoint::vg2k = None`) — the declared op of
+    /// the screen-unwired test fixtures.
+    #[test]
+    fn pentode_qpoint_unwired_screen_keeps_model_default() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 300V
+                components {
+                    V1: pentode(el84)
+                    R_p: resistor(100k)
+                    R_k: resistor(470)
+                    R_g: resistor(1M)
+                }
+                nets {
+                    in -> V1.grid, R_g.a
+                    R_g.b -> gnd
+                    vcc -> R_p.a
+                    R_p.b -> V1.plate
+                    V1.cathode -> R_k.a
+                    R_k.b -> gnd
+                    V1.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = pentode_nl_kind(&graph, "V1");
+        let all_edges = all_graph_edges(&graph);
+        let dc = solve_wdf_pentode_dc_qpoint(&nl, &all_edges, &graph, 300.0)
+            .expect("EL84 with resistive load must solve");
+        assert_eq!(
+            dc.vg2k, None,
+            "unwired screen → None → the model default stands at the call-site"
+        );
+        assert!(dc.vg1k < 0.0 && dc.vpk > 0.0);
+    }
+
+    /// Gate-4: non-pentode kinds and grid-less pentodes are NotApplicable
+    /// (silent), and a missing cathode resistor is a loud Undeterminable.
+    #[test]
+    fn pentode_qpoint_not_applicable_and_missing_rk() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 300V
+                components {
+                    V1: pentode(el84)
+                    R_p: resistor(100k)
+                    R_g: resistor(1M)
+                    C_k: cap(100u, electrolytic)
+                }
+                nets {
+                    in -> V1.grid, R_g.a
+                    R_g.b -> gnd
+                    vcc -> R_p.a
+                    R_p.b -> V1.plate
+                    V1.cathode -> C_k.a
+                    C_k.b -> gnd
+                    V1.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = pentode_nl_kind(&graph, "V1");
+        let all_edges = all_graph_edges(&graph);
+
+        // Cathode floats behind a cap (no Rk anywhere): loud Undeterminable.
+        let out = solve_wdf_pentode_dc_qpoint(&nl, &all_edges, &graph, 300.0);
+        assert!(
+            matches!(
+                out,
+                Err(PentodeQpointSkip::Undeterminable(
+                    BiasError::UndeterminablePentode {
+                        missing: TopologyTerm::CathodeResistor,
+                        ..
+                    }
+                ))
+            ),
+            "cap-isolated cathode without Rk must warn, got {out:?}"
+        );
+
+        // Grid-less pentode: silent NotApplicable.
+        let (plate_node, cathode_node) = match &nl {
+            NonlinearKind::Pentode {
+                plate_node,
+                cathode_node,
+                ..
+            } => (*plate_node, *cathode_node),
+            _ => unreachable!(),
+        };
+        let strapped = NonlinearKind::Pentode {
+            model_name: "el84".to_owned(),
+            plate_node,
+            cathode_node,
+            grid_node: None,
+        };
+        assert!(matches!(
+            solve_wdf_pentode_dc_qpoint(&strapped, &all_edges, &graph, 300.0),
+            Err(PentodeQpointSkip::NotApplicable)
+        ));
+
+        // Non-pentode kind through the grouped entry: silent NotApplicable.
+        let triode = NonlinearKind::Triode {
+            model_name: "12ax7".to_owned(),
+            plate_node,
+            cathode_node,
+            grid_node: None,
+            parallel_count: 1,
+            is_vari_mu: false,
+        };
+        assert!(matches!(
+            solve_pentode_dc_qpoint(&[triode], &all_edges, &graph, 300.0),
+            Err(PentodeQpointSkip::NotApplicable)
         ));
     }
 }

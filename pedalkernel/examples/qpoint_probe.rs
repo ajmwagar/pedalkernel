@@ -59,8 +59,106 @@ fn main() {
             48_000.0,
             pedalkernel::compiler::CompileOptions::debug(),
         ) {
-            Ok(_) => {}
+            Ok(compiled) => stage_map(&compiled),
             Err(e) => eprintln!("  compile error: {e}"),
+        }
+    }
+}
+
+/// `PK_BIAS_QPOINT_DEBUG=1`: dump where every tube/pentode landed at runtime —
+/// the stage container + the per-instance bias values the compiler actually
+/// stamped. This is the ko5g.5 gate-3 "after" column source for devices whose
+/// bias is a runtime field (WDF `PentodeRoot::vg1k_bias` / `vg2k`) rather than
+/// a solver print.
+fn stage_map(compiled: &pedalkernel_rt::processor::CompiledPedal) {
+    if std::env::var("PK_BIAS_QPOINT_DEBUG").is_err() {
+        return;
+    }
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        print_stage(&format!("stage {i}"), stage);
+    }
+}
+
+fn print_stage(tag: &str, stage: &pedalkernel_rt::processor::Stage) {
+    use pedalkernel_rt::processor::Stage;
+    use pedalkernel_rt::stage::{NlDeviceGroupKind, NlDeviceKind, RootKind};
+    {
+        let i = tag;
+        match stage {
+            Stage::Wdf(w) => match &w.root {
+                RootKind::Pentode(p) => eprintln!(
+                    "[stage-map] {i} Wdf root=Pentode vg1k_bias={:.6} vg2k={:.6} v_max={:.1}",
+                    p.vg1k_bias(),
+                    p.vg2k(),
+                    p.v_max()
+                ),
+                RootKind::Triode(t) => eprintln!(
+                    "[stage-map] {i} Wdf root=Triode vgk_bias={:.6} v_max={:.1}",
+                    t.vgk_bias(),
+                    t.v_max()
+                ),
+                other => eprintln!("[stage-map] {i} Wdf root={}", other.kind_name()),
+            },
+            Stage::MultiNl(m) => {
+                let devices: Vec<String> = m
+                    .nl_devices
+                    .iter()
+                    .map(|d| match d {
+                        NlDeviceKind::Pentode(p) => format!(
+                            "Pentode(vg1k_bias={:.6} vg2k={:.6})",
+                            p.vg1k_bias(),
+                            p.vg2k()
+                        ),
+                        other => other.debug_name().to_owned(),
+                    })
+                    .collect();
+                let groups: Vec<String> = m
+                    .device_groups
+                    .as_ref()
+                    .map(|g| {
+                        g.groups
+                            .iter()
+                            .map(|k| match k {
+                                NlDeviceGroupKind::PentodeThreePort(p) => format!(
+                                    "PentodeThreePort(vg2k={:.6} v_max={:.1})",
+                                    p.vg2k(),
+                                    p.v_max()
+                                ),
+                                NlDeviceGroupKind::TriodeThreePort(_) => {
+                                    "TriodeThreePort".to_owned()
+                                }
+                                NlDeviceGroupKind::VariMuThreePort(_) => {
+                                    "VariMuThreePort".to_owned()
+                                }
+                                NlDeviceGroupKind::BjtTwoPort(_) => "BjtTwoPort".to_owned(),
+                                NlDeviceGroupKind::EbersMollTwoPort(_) => {
+                                    "EbersMollTwoPort".to_owned()
+                                }
+                                NlDeviceGroupKind::SinglePort(d) => {
+                                    format!("SinglePort({})", d.debug_name())
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                eprintln!(
+                    "[stage-map] {i} MultiNl devices=[{}] groups=[{}]",
+                    devices.join(", "),
+                    groups.join(", ")
+                );
+            }
+            Stage::Blockwise(b) => {
+                eprintln!(
+                    "[stage-map] {i} Blockwise sub_stages={}",
+                    b.sub_stages.len()
+                );
+                for (j, sub) in b.sub_stages.iter().enumerate() {
+                    print_stage(&format!("{i}.sub{j}"), sub);
+                }
+            }
+            Stage::Iir(_) => eprintln!("[stage-map] {i} Iir"),
+            Stage::StateSpace(_) => eprintln!("[stage-map] {i} StateSpace"),
+            other => eprintln!("[stage-map] {i} {other:?}"),
         }
     }
 }
