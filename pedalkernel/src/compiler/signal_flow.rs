@@ -823,6 +823,33 @@ pub(in crate::compiler) fn bfs_distances_from_in_node(
 pub(in crate::compiler) fn directed_signal_distances_from_in(
     graph: &CircuitGraph,
 ) -> HashMap<NodeId, usize> {
+    let fwd = forward_signal_adjacency(graph);
+
+    let mut visited: HashMap<NodeId, usize> = HashMap::new();
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    visited.insert(graph.in_node, 0);
+    queue.push_back(graph.in_node);
+    while let Some(node) = queue.pop_front() {
+        let dist = visited[&node];
+        if let Some(neighbors) = fwd.get(&node) {
+            for &next in neighbors {
+                if !visited.contains_key(&next) {
+                    visited.insert(next, dist + 1);
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+    visited
+}
+
+/// The rail-blocked, signal-DIRECTED one-hop adjacency shared by
+/// [`directed_signal_distances_from_in`] and
+/// [`group_is_on_forward_audio_path`] (extracted verbatim, pedalkernel-y9hz):
+/// passive edges conduct both ways, active devices conduct `input ->
+/// output_nodes` only, rails dead-end, `Tight` transformer coupled-links are
+/// crossed both directions.
+fn forward_signal_adjacency(graph: &CircuitGraph) -> HashMap<NodeId, Vec<NodeId>> {
     let rails = rail_nodes(graph);
     let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
     let active_elements = find_active_elements(&all_edges, graph);
@@ -870,23 +897,67 @@ pub(in crate::compiler) fn directed_signal_distances_from_in(
             }
         }
     }
+    fwd
+}
 
-    let mut visited: HashMap<NodeId, usize> = HashMap::new();
-    let mut queue: VecDeque<NodeId> = VecDeque::new();
-    visited.insert(graph.in_node, 0);
-    queue.push_back(graph.in_node);
+/// Does this edge group sit ON the forward audio path from `in` to `out`?
+/// (pedalkernel-y9hz — the fuzz-face "modulator" misclassification fix.)
+///
+/// TRUE iff BOTH hold over the directed signal graph
+/// ([`forward_signal_adjacency`]):
+///
+/// 1. some node of the group is reachable from `in` (forward), AND
+/// 2. from some ACTIVE-device output node of the group, `out` is reachable
+///    (forward).
+///
+/// The seeds for (2) are deliberately the group's device OUTPUT nodes, not
+/// all group nodes: an envelope follower TAPS a node of the main chain (from
+/// which `out` is trivially reachable), but its collector-side network
+/// dead-ends at control electrodes — seeding at the tap would misclassify
+/// every detector as audio-path (the pedalkernel-b6tb tap-defeats-distance
+/// hazard, avoided by construction here). A true modulator group fails (1)
+/// (an oscillator nothing drives from `in`) or (2) (a detector whose outputs
+/// only reach control inputs); an audio-path core like the fuzz-face BJT pair
+/// passes both — signal enters Q1's base from the input cap and leaves Q2's
+/// collector through the output cap.
+pub(in crate::compiler) fn group_is_on_forward_audio_path(
+    graph: &CircuitGraph,
+    group_edge_indices: &[usize],
+) -> bool {
+    // (1) group reachable from `in` over the directed signal graph.
+    let dist_from_in = directed_signal_distances_from_in(graph);
+    let reachable_from_in = group_edge_indices.iter().any(|&eidx| {
+        let e = &graph.edges[eidx];
+        dist_from_in.contains_key(&e.node_a) || dist_from_in.contains_key(&e.node_b)
+    });
+    if !reachable_from_in {
+        return false;
+    }
+
+    // (2) forward BFS from the group's active-device output nodes to `out`.
+    let seeds: HashSet<NodeId> = find_active_elements(group_edge_indices, graph)
+        .iter()
+        .flat_map(|elem| elem.output_nodes.iter().copied())
+        .collect();
+    if seeds.contains(&graph.out_node) {
+        return true;
+    }
+    let fwd = forward_signal_adjacency(graph);
+    let mut visited: HashSet<NodeId> = seeds.iter().copied().collect();
+    let mut queue: VecDeque<NodeId> = seeds.into_iter().collect();
     while let Some(node) = queue.pop_front() {
-        let dist = visited[&node];
         if let Some(neighbors) = fwd.get(&node) {
             for &next in neighbors {
-                if !visited.contains_key(&next) {
-                    visited.insert(next, dist + 1);
+                if next == graph.out_node {
+                    return true;
+                }
+                if visited.insert(next) {
                     queue.push_back(next);
                 }
             }
         }
     }
-    visited
+    false
 }
 
 /// Set of non-rail nodes that have a directed signal path to `out` WITHOUT

@@ -91,17 +91,22 @@ fn ba283_output_boundary_fuses_series_cap_into_load() {
     );
 }
 
-/// Public circuit that does NOT fuse — documents CURRENT REALITY.
+/// `fuzz_face_pnp` FUSES its output load — CURRENT REALITY (pedalkernel-y9hz).
 ///
-/// `fuzz_face_pnp` DOES reach the general-MNA call site (its 2-PNP feedback
-/// group declines blockwise), and its trailing `C2 → RL` output network IS the
-/// recognized SeriesCapIntoLoad shape — but the BA283 policy gate declines
-/// with `gate:no-dc-qpoint-seed` (the PNP pair's compile-time DC q-point solve
-/// does not produce the seed the fusion requires), so the boundary is left
-/// OPEN and the row records the reason. When the gate widens to cover this
-/// circuit, this test SHOULD fail — update it to lock the new disposition.
+/// `fuzz_face_pnp` reaches the general-MNA call site (its 2-PNP feedback
+/// group declines blockwise), its trailing `C2 → RL` output network is the
+/// recognized SeriesCapIntoLoad shape, and — since the pedalkernel-129p PNP/Ge
+/// dc-seed fix (dense germanium source-stepping ladder + model-aware activity
+/// gate + accepted quiescent-dead ops) — the BA283 policy gate now PASSES:
+/// `solve_bjt_group_dc_qpoint` lands the deck's true all-at-VCC leakage root
+/// (ngspice `.op`, grounded input, reltol=1e-6: every node at 9 V, both
+/// AC128s at Vbe ≈ −0.3 µV / Ic ≈ 0.3 nA — a nodeset at a conducting guess
+/// collapses back to the same root; the deck's BJT cluster has no resistive
+/// path to ground, so quiescent-dead IS its physics). The boundary FUSES and
+/// the load-current demand is part of the solved network. Pre-y9hz reality
+/// (`Unloaded{gate:no-dc-qpoint-seed}`) is locked in git history.
 #[test]
-fn fuzz_face_pnp_output_boundary_documents_unloaded_reality() {
+fn fuzz_face_pnp_output_boundary_fuses_series_cap_into_load() {
     let proc = compile_public("circuits/active/fuzz_face_pnp.pedal");
     println!(
         "{}",
@@ -115,25 +120,22 @@ fn fuzz_face_pnp_output_boundary_documents_unloaded_reality() {
         proc.boundary_loads
     );
     let b = &proc.boundary_loads[0];
-    match &b.disposition {
-        BoundaryLoadDisposition::Unloaded { reason } => {
-            assert_eq!(
-                reason, "gate:no-dc-qpoint-seed",
-                "fuzz_face_pnp decline reason changed — current reality moved, \
-                 update this lock"
-            );
-        }
-        other => panic!(
-            "fuzz_face_pnp output boundary is documented UNLOADED today; \
-             disposition changed to {other:?} — the gate widened, update this test"
-        ),
-    }
-    // The open boundary must raise the triage flag next to any dashboard verdict.
-    let flag = unloaded_output_flag(&proc.boundary_loads)
-        .expect("unloaded output boundary must raise the triage flag");
     assert!(
-        flag.contains("gate:no-dc-qpoint-seed"),
-        "flag should carry the decline reason, got: {flag}"
+        matches!(&b.model, BoundaryLoadSummary::SeriesCapIntoLoad { .. }),
+        "fuzz_face_pnp output network is the classic C2→RL SeriesCapIntoLoad, got {:?}",
+        b.model
+    );
+    assert_eq!(
+        b.disposition,
+        BoundaryLoadDisposition::FusedUpstream,
+        "fuzz_face_pnp output load must fuse into the upstream MNA stage \
+         (pedalkernel-129p/y9hz) — if this regressed to Unloaded, the PNP/Ge \
+         dc-qpoint seed broke"
+    );
+    // A fused boundary is NOT an unloaded output — no triage flag.
+    assert!(
+        unloaded_output_flag(&proc.boundary_loads).is_none(),
+        "fused boundary must not raise the unloaded-output flag"
     );
 }
 

@@ -1784,3 +1784,132 @@ fn la2a_output_transformer_is_stamped_not_dropped() {
         compiled.boundary_loads
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// pedalkernel-y9hz: ghost-cores-compile gate — the fuzz-face family's BJT
+// cores must be PRESENT in the compiled stages. Two distinct pre-fix drops:
+//  (a) PNP family (examples fuzz_face.pedal / legends fizz / validate
+//      fuzz_face_pnp): `try_build_blockwise` returned `Some(EMPTY)` and the
+//      caller's `continue` vaporized the whole feedback group — the pedal
+//      compiled as its coupling caps + Volume pot (unity passthrough).
+//  (b) NPN core (no emitter bypass cap → no reactive edge in the group):
+//      `is_nonlinear_modulator_group` consumed the audio-path core as a
+//      "modulator" because it only checked DIRECT out-node contact, not the
+//      through-path via the output coupling cap.
+// Both tests are RED on main before this batch.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Every stage label that claims each component id, for diagnostics.
+fn stage_claims(compiled: &crate::compiler::compiled::CompiledPedal, id: &str) -> bool {
+    compiled
+        .stages
+        .iter()
+        .any(|s| s.graph_label().split(',').any(|c| c == id))
+}
+
+fn dump_stages(tag: &str, compiled: &crate::compiler::compiled::CompiledPedal) {
+    eprintln!("{tag}: {} stages", compiled.stages.len());
+    for (i, s) in compiled.stages.iter().enumerate() {
+        eprintln!("  stage {i}: [{}]", s.graph_label());
+    }
+}
+
+#[test]
+fn fuzz_face_pnp_core_compiles_not_ghost_dropped() {
+    // examples/pedals/fuzz/fuzz_face.pedal — 2×AC128 PNP with the Fuzz-pot
+    // emitter feedback bridge and the C2 emitter bypass (reactive edge in the
+    // core group → rides the blockwise/feedback path, NOT the modulator
+    // classifier).
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/pedals/fuzz/fuzz_face.pedal");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let pedal = crate::dsl::parse_pedal_file(&src).expect("parse fuzz_face");
+    let compiled = compile_via_spqr_with_options(&pedal, 48_000.0, CompileOptions::debug())
+        .expect("compile fuzz_face");
+    dump_stages("fuzz_face (PNP)", &compiled);
+
+    for q in ["Q1", "Q2"] {
+        assert!(
+            stage_claims(&compiled, q),
+            "fuzz_face: transistor {q} is absent from every compiled stage — \
+             the BJT core was ghost-dropped (try_build_blockwise Some(EMPTY), \
+             pedalkernel-y9hz)"
+        );
+    }
+}
+
+#[test]
+fn fuzz_face_npn_core_is_not_consumed_as_modulator() {
+    // The NPN fuzz-face shape (general_mna_tests fixture): no emitter bypass
+    // cap → the 2-BJT core group has ZERO reactive edges and no direct
+    // out-node contact, which is exactly the shape the modulator classifier
+    // used to swallow.
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "test" { supply 9V
+            components {
+                C1: cap(2.2u)
+                R1: resistor(33k)
+                Q1: npn(2n3904)
+                R2: resistor(8.2k)
+                Q2: npn(2n3904)
+                R3: resistor(100k)
+                R4: resistor(470)
+                C2: cap(22u)
+            }
+            nets {
+                in -> C1.a
+                C1.b -> R1.a
+                R1.b -> Q1.base
+                Q1.collector -> R2.a, Q2.base
+                R2.b -> vcc
+                Q1.emitter -> gnd
+                Q2.collector -> R3.a
+                R3.b -> vcc
+                Q2.emitter -> R4.a, Q1.base
+                R4.b -> gnd
+                Q2.collector -> C2.a
+                C2.b -> out
+            }
+            controls {}
+        }"#,
+    )
+    .expect("parse NPN fuzz face");
+    let compiled = compile_via_spqr_with_options(&pedal, 48_000.0, CompileOptions::debug())
+        .expect("compile NPN fuzz face");
+    dump_stages("fuzz_face (NPN fixture)", &compiled);
+
+    for q in ["Q1", "Q2"] {
+        assert!(
+            stage_claims(&compiled, q),
+            "NPN fuzz face: transistor {q} is absent from every compiled \
+             stage — the audio-path BJT core was consumed as a 'modulator' \
+             (is_nonlinear_modulator_group misfire, pedalkernel-y9hz)"
+        );
+    }
+}
+
+#[test]
+fn fuzz_face_pnp_validate_deck_core_compiles() {
+    // pedalkernel-validate/circuits/active/fuzz_face_pnp.pedal — the deck
+    // with the ngspice golden. Skips when the validate tree is absent.
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../pedalkernel-validate/circuits/active/fuzz_face_pnp.pedal");
+    if !path.exists() {
+        eprintln!("SKIP: {path:?} not present");
+        return;
+    }
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let pedal = crate::dsl::parse_pedal_file(&src).expect("parse fuzz_face_pnp");
+    let compiled = compile_via_spqr_with_options(&pedal, 48_000.0, CompileOptions::debug())
+        .expect("compile fuzz_face_pnp");
+    dump_stages("fuzz_face_pnp (validate deck)", &compiled);
+
+    for q in ["Q1", "Q2"] {
+        assert!(
+            stage_claims(&compiled, q),
+            "fuzz_face_pnp: transistor {q} is absent from every compiled \
+             stage (pedalkernel-y9hz ghost-drop gate)"
+        );
+    }
+}

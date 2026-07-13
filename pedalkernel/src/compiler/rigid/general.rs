@@ -573,6 +573,22 @@ fn build_general_mna_from_edges_inner(
         ),
     }
 
+    // Step 9b: DC Q-point for single-pentode stages (ko5g.5 — the first
+    // pentode bias solver).  Exactly the triode pattern above: solve the
+    // self-bias load line (screen divider resolved at DC, shared-cathode
+    // aware, OT-primary plate paths at DCR), then seed the NR warm-start,
+    // the circuit-true Vg2 on the PentodeThreePort, and the cathode bypass
+    // cap.  Undeterminable topologies — including the grounded-cathode
+    // FIXED-BIAS deferral (the ko5g.2 la2a-V5 safeguard) — keep the legacy
+    // defaults, loudly.
+    match super::super::bias::solve_pentode_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage) {
+        Ok(dc) => apply_pentode_dc_qpoint(&mut stage, &dc, &nl_kinds, &reactive_edges, graph),
+        Err(skip) => skip.warn_if_undeterminable(
+            "Stage keeps the linear dc-bias superposition (Vg1k≈0 warm start, \
+             model-default Vg2, no Q-point precharge).",
+        ),
+    }
+
     // Step 10: DC Q-point for grouped-BJT stages (pedalkernel-kzla).
     //
     // Problem (BA283 trace y2wj / 685e / ej0v): the runtime grouped-NR seeds each
@@ -590,17 +606,37 @@ fn build_general_mna_from_edges_inner(
     // via the exact wave-domain inversion (`apply_dc_qpoint_seed`).  Runs by
     // DEFAULT: non-BJT / degenerate groups return `None` and keep their linear
     // `dc_bias`, staying byte-identical.
-    if let Some(node_dc) =
-        super::super::bias::solve_bjt_group_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage)
-    {
-        apply_bjt_dc_qpoint(
-            &mut stage,
-            &node_dc,
-            &nl_terminals,
+    // pedalkernel-y9hz: a NAMED `init { Q: saturated/cutoff/... }` hint on any
+    // device of this group is the asymmetric-OSCILLATOR seed path (cross-coupled
+    // astables): the whole point is to start the NR AWAY from the network's
+    // symmetric DC fixed point so the multivibrator breaks symmetry
+    // deterministically. The group q-point seed would overwrite every port's
+    // warm-start with that symmetric root (measured: bjt_astable initial_v_prev
+    // with-hints == without-hints once the solver — post-129p — converges on
+    // the astable's metastable symmetric root). Skip the seed and keep the
+    // hinted state authoritative, mirroring the WDF call-site's has_hint guard.
+    // Explicit `op { }` seeds re-override AFTER this in apply_op_seed (Step 11)
+    // and need no gate.
+    let has_named_bjt_hint = init_hints.iter().any(|h| {
+        matches!(h.state, crate::dsl::InitState::Named(_))
+            && nl_comp_labels.iter().any(|l| l == &h.device_label)
+    });
+    if !has_named_bjt_hint {
+        if let Some(node_dc) = super::super::bias::solve_bjt_group_dc_qpoint(
             &nl_kinds,
-            &reactive_edges,
+            all_edges,
             graph,
-        );
+            supply_voltage,
+        ) {
+            apply_bjt_dc_qpoint(
+                &mut stage,
+                &node_dc,
+                &nl_terminals,
+                &nl_kinds,
+                &reactive_edges,
+                graph,
+            );
+        }
     }
 
     // Step 11: explicit `op { }` operating-point seed (pedalkernel — seed-and-hold).
@@ -2347,6 +2383,73 @@ fn apply_triode_dc_qpoint(
     //
     // `reactive_edges[k]` corresponds 1:1 to `passive_one_ports[k]` (both are
     // built in the same order by `build_wdf_ports`).
+    for (k, (eidx, _)) in reactive_edges.iter().enumerate() {
+        let e = &graph.edges[*eidx];
+        let is_cathode_cap = (e.node_a == cathode_node && e.node_b == graph.gnd_node)
+            || (e.node_b == cathode_node && e.node_a == graph.gnd_node);
+        if !is_cathode_cap {
+            continue;
+        }
+        if let Some(&one_port) = stage.passive_one_ports.get(k) {
+            one_port.wdf_set_one_port_state(
+                pedalkernel_rt::boundary_math::OnePortState::CapacitorVoltage(dc.v_cathode),
+                &mut stage.passive_runtime_state,
+            );
+        }
+    }
+}
+
+/// Apply the solved pentode DC operating point to a just-built single-pentode
+/// `MultiNlStage` (ko5g.5 — the exact `apply_triode_dc_qpoint` mirror).
+///
+/// Port layout (see `build_general_mna`): port 0 = grid-cathode (Vg1k),
+/// port 1 = plate-cathode (Vpk).  Additionally seeds the circuit-resolved
+/// screen voltage on the `PentodeThreePort` group device (its `vg2k` is an
+/// external parameter, previously always the model default).
+fn apply_pentode_dc_qpoint(
+    stage: &mut MultiNlStage,
+    dc: &super::super::bias::PentodeDcQpoint,
+    nl_kinds: &[NonlinearKind],
+    reactive_edges: &[(usize, OnePortKind)],
+    graph: &CircuitGraph,
+) {
+    // NR warm-start voltages at the solved op.
+    if stage.v_prev.len() >= 2 {
+        stage.v_prev[0] = dc.vg1k;
+        stage.v_prev[1] = dc.vpk;
+    }
+    if stage.initial_v_prev.len() >= 2 {
+        stage.initial_v_prev[0] = dc.vg1k;
+        stage.initial_v_prev[1] = dc.vpk;
+    }
+    if stage.v_prev_2.len() >= 2 {
+        stage.v_prev_2[0] = dc.vg1k;
+        stage.v_prev_2[1] = dc.vpk;
+    }
+
+    // Circuit-true screen voltage (None = unwired screen, model default stands).
+    if let Some(vg2) = dc.vg2k {
+        if let Some(groups) = stage.device_groups.as_mut() {
+            for g in &mut groups.groups {
+                if let NlDeviceGroupKind::PentodeThreePort(p) = g {
+                    p.set_vg2k(vg2 as pedalkernel_rt::Wave);
+                }
+            }
+        }
+        for d in &mut stage.nl_devices {
+            if let NlDeviceKind::Pentode(p) = d {
+                p.set_vg2k(vg2 as pedalkernel_rt::Wave);
+            }
+        }
+    }
+
+    let cathode_node = match nl_kinds.first() {
+        Some(NonlinearKind::Pentode { cathode_node, .. }) => *cathode_node,
+        _ => return,
+    };
+
+    // Pre-charge cathode bypass capacitors (caps between cathode and GND) —
+    // same mechanism as the triode apply above.
     for (k, (eidx, _)) in reactive_edges.iter().enumerate() {
         let e = &graph.edges[*eidx];
         let is_cathode_cap = (e.node_a == cathode_node && e.node_b == graph.gnd_node)

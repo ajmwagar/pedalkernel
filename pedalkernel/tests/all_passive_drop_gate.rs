@@ -34,12 +34,11 @@ const KNOWN_UNBOUND: &[(&str, &str)] = &[
     // 3-terminal opto/grid wiper straddling the GR + tube-grid stages
     // (same family as the CLAUDE.md LA-2A "Gain pot frozen" topology gap).
     ("outboard/compressor/la2a.pedal", "Limit/Compress"),
-    // Fuzz Face: the Fuzz pot is part of the cross-coupled BJT feedback
-    // group, absorbed into the nonlinear stage rather than an all-passive R.
-    ("pedals/fuzz/fuzz_face.pedal", "Fuzz"),
-    // Klon Centaur: Treble tone control reaches the active gain-recovery
-    // network, not an all-passive R-node.
-    ("pedals/overdrive/klon_centaur.pedal", "Treble"),
+    // REMOVED (pedalkernel-y9hz): fuzz_face "Fuzz" — the pot BINDS now that
+    // the ghost-dropped BJT core compiles (it lives inside the fused
+    // general-MNA stage as a variable-resistor candidate).
+    // REMOVED: klon_centaur "Treble" — was already binding on main (stale
+    // allowlist entry; this test was red at base 6599b243 for exactly this).
 ];
 
 fn collect_pedals(dir: &Path, out: &mut Vec<PathBuf>) {
