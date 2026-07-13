@@ -987,12 +987,56 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
         // identical when a direct plate/cathode resistor exists (the common
         // grounded-cathode topology).  BFS still rescues cap-coupled cathode-
         // followers where no direct edge exists.
-        let r_plate = find_load_resistor_direct(plate_node, graph.vcc_node, edge_indices, graph)
-            .or_else(|| find_load_resistor_bfs(plate_node, graph.vcc_node, edge_indices, graph))
-            .ok_or_else(|| BiasError::UndeterminableTriode {
-                label: self.label.clone(),
-                missing: TopologyTerm::PlateResistor,
-            })?;
+        // The LEGACY vcc searches (direct edge then cap-aware BFS, over the
+        // STAGE's edge set) run first, so every circuit they resolved keeps
+        // its Q-point bit-for-bit. Only stages the legacy search could NOT
+        // resolve fall through to the pedalkernel-0stg widening:
+        // * named rails (B+, V+, ...) — their NodeIds never matched the
+        //   literal vcc target, so every B+-fed stage silently kept the
+        //   -2.0V default;
+        // * GRAPH-WIDE edges (the BjtNpnSeed divider precedent) — named-rail
+        //   edges are excluded from passive claiming, so a B+ plate load
+        //   always lands in a DIFFERENT flow group than its triode (LA-2A:
+        //   R_p1 groups with C_c1, not with V1);
+        // * a plate wired DIRECTLY to a rail (`B+ -> V3.plate` unions the
+        //   plate node into the rail — the cathode follower) is the
+        //   r_plate = 0 load line on that rail.
+        let rails = positive_supply_rails(graph);
+        let graph_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let (r_plate, v_load_rail) = find_load_resistor_direct(
+            plate_node,
+            graph.vcc_node,
+            edge_indices,
+            graph,
+        )
+        .or_else(|| find_load_resistor_bfs(plate_node, graph.vcc_node, edge_indices, graph))
+        .map(|r| (r, graph.vcc_node))
+        .or_else(|| {
+            rails.iter().find_map(|&rail| {
+                find_load_resistor_direct(plate_node, rail, &graph_edges, graph)
+                    .map(|r| (r, rail))
+            })
+        })
+        .or_else(|| {
+            rails.iter().find_map(|&rail| {
+                find_load_resistor_bfs(plate_node, rail, &graph_edges, graph).map(|r| (r, rail))
+            })
+        })
+        .map(|(r, rail)| {
+            (
+                r,
+                rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage),
+            )
+        })
+        .or_else(|| {
+            rail_dc_voltage(plate_node, graph, supply_voltage)
+                .filter(|&v| v > 0.0)
+                .map(|v| (0.0, v))
+        })
+        .ok_or_else(|| BiasError::UndeterminableTriode {
+            label: self.label.clone(),
+            missing: TopologyTerm::PlateResistor,
+        })?;
 
         // Find R_cathode: resistor between cathode_node and gnd_node (direct, then BFS).
         let r_cathode = find_load_resistor_direct(cathode_node, graph.gnd_node, edge_indices, graph)
@@ -1004,7 +1048,7 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
 
         Ok(BiasTopology {
             r_load: r_plate,
-            v_load_rail: supply_voltage,
+            v_load_rail,
             r_degeneration: r_cathode,
             // Triode: grid is biased by auto-bias (cathode current through R_cathode).
             // V_control_thevenin = 0 (grid resistor to GND, unloaded).
@@ -1111,13 +1155,25 @@ impl<'a> BiasSeed for BjtNpnSeed<'a> {
         let _ = model_name;
         let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
 
-        // Base divider: R1 = base→vcc, R2 = base→gnd.
-        let r1 = find_load_resistor_direct(base_node, graph.vcc_node, &all_edges, graph)
-            .or_else(|| find_load_resistor_bfs(base_node, graph.vcc_node, &all_edges, graph))
+        // Base divider: R1 = base→rail, R2 = base→gnd. Rails vcc-first, then
+        // named rails (pedalkernel-0stg — see `positive_supply_rails`).
+        let rails = positive_supply_rails(graph);
+        let (r1, base_rail) = rails
+            .iter()
+            .find_map(|&rail| {
+                find_load_resistor_direct(base_node, rail, &all_edges, graph).map(|r| (r, rail))
+            })
+            .or_else(|| {
+                rails.iter().find_map(|&rail| {
+                    find_load_resistor_bfs(base_node, rail, &all_edges, graph).map(|r| (r, rail))
+                })
+            })
             .ok_or_else(|| BiasError::UndeterminableBjt {
                 label: self.label.clone(),
                 missing: TopologyTerm::BaseDivider,
             })?;
+        let base_rail_v =
+            rail_dc_voltage(base_rail, graph, supply_voltage).unwrap_or(supply_voltage);
         let r2 = find_load_resistor_direct(base_node, graph.gnd_node, &all_edges, graph)
             .or_else(|| find_load_resistor_bfs(base_node, graph.gnd_node, &all_edges, graph))
             .ok_or_else(|| BiasError::UndeterminableBjt {
@@ -1133,20 +1189,35 @@ impl<'a> BiasSeed for BjtNpnSeed<'a> {
                 missing: TopologyTerm::EmitterResistor,
             })?;
 
-        // Collector resistor RC: collector→vcc.
-        let _rc = find_load_resistor_direct(collector_node, graph.vcc_node, &all_edges, graph)
-            .or_else(|| find_load_resistor_bfs(collector_node, graph.vcc_node, &all_edges, graph));
+        // Collector resistor RC: collector→rail (vcc-first, then named).
+        let rc_found = rails
+            .iter()
+            .find_map(|&rail| {
+                find_load_resistor_direct(collector_node, rail, &all_edges, graph)
+                    .map(|r| (r, rail))
+            })
+            .or_else(|| {
+                rails.iter().find_map(|&rail| {
+                    find_load_resistor_bfs(collector_node, rail, &all_edges, graph)
+                        .map(|r| (r, rail))
+                })
+            });
+        let v_load_rail = rc_found
+            .map(|(_, rail)| rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage))
+            .unwrap_or(supply_voltage);
 
         // Thévenin base voltage: prefer StaticBias map, fall back to resistor divider.
         let vth = network_bias
             .voltage_at(base_node, graph, supply_voltage)
             .filter(|v| v.is_finite())
-            .unwrap_or_else(|| supply_voltage * r2 / (r1 + r2));
+            .unwrap_or_else(|| base_rail_v * r2 / (r1 + r2));
         let rth = r1 * r2 / (r1 + r2);
 
         Ok(BiasTopology {
-            r_load: _rc.unwrap_or(supply_voltage * 0.5 / 1e-3), // estimate if missing
-            v_load_rail: supply_voltage,
+            r_load: rc_found
+                .map(|(r, _)| r)
+                .unwrap_or(supply_voltage * 0.5 / 1e-3), // estimate if missing
+            v_load_rail,
             r_degeneration: re,
             v_control_thevenin: vth,
             r_control_thevenin: rth,
@@ -1200,6 +1271,76 @@ impl<'a> BiasSeed for BjtNpnSeed<'a> {
 // ═══════════════════════════════════════════════════════════════════════════
 // Resistor-finding helpers
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// Resolve the DC voltage of a supply-rail node — `vcc` OR a NAMED rail
+/// (`B+`, `V+`, ...). Returns `None` for non-rail (solved/interior) nodes.
+///
+/// This is THE rail resolver (pedalkernel-0stg): named supplies get their own
+/// `NodeId` (`graph.supply_nodes` / `graph.supply_voltages`) and never equal
+/// the literal `graph.vcc_node`, so every finder that compared against
+/// `vcc_node` alone silently skipped B+-fed stages.
+///
+/// ARM ORDER matters: every named supply node is ALSO in
+/// `graph.ac_ground_nodes` (rails are AC ground — graph.rs
+/// `compute_ac_ground_nodes` inserts `supply_nodes` wholesale), so the named-
+/// rail arms must be consulted BEFORE the ac-ground arm or B+ resolves to
+/// 0 V DC. This is the same family as the pedalkernel-mgsd
+/// ac-ground-as-DC-0 hazard; the `vcc` arm deliberately stays BEHIND the
+/// ac-ground arm to preserve the legacy resolution (`solve_bjt_group_dc_qpoint`'s
+/// `full_rail_v`, which delegates here) bit-for-bit for every vcc circuit —
+/// a bypassed-vcc quirk fix belongs to mgsd, not 0stg.
+pub(super) fn rail_dc_voltage(
+    node: NodeId,
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Option<f64> {
+    if node == graph.gnd_node {
+        Some(0.0)
+    } else if graph.supply_nodes.contains(&node) {
+        // Named rail (B+, V+, ...): its declared voltage, at DC, regardless
+        // of the node's (correct) AC-ground classification.
+        Some(
+            graph
+                .supply_voltages
+                .get(&node)
+                .copied()
+                .unwrap_or(supply_voltage),
+        )
+    } else if graph.ac_ground_nodes.contains(&node) {
+        Some(0.0)
+    } else if node == graph.vcc_node {
+        Some(
+            graph
+                .supply_voltages
+                .get(&graph.vcc_node)
+                .copied()
+                .unwrap_or(supply_voltage),
+        )
+    } else if let Some(&v) = graph.supply_voltages.get(&node) {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// The positive supply rails a device load resistor may return to, in
+/// deterministic search order: `vcc` FIRST (so vcc-fed circuits keep their
+/// exact legacy resolution bit-for-bit), then the named rails sorted by
+/// `NodeId` (`graph.supply_nodes` is a `HashSet` — iteration order must not
+/// leak into compiles).
+pub(super) fn positive_supply_rails(graph: &CircuitGraph) -> Vec<NodeId> {
+    let mut rails: Vec<NodeId> = Vec::with_capacity(1 + graph.supply_nodes.len());
+    rails.push(graph.vcc_node);
+    let mut named: Vec<NodeId> = graph
+        .supply_nodes
+        .iter()
+        .copied()
+        .filter(|&n| n != graph.vcc_node)
+        .collect();
+    named.sort_unstable();
+    rails.extend(named);
+    rails
+}
 
 /// Find a resistor directly connecting `device_node` to `rail_node` in the
 /// given edge set.  This is the legacy direct-edge strategy.
@@ -1445,20 +1586,32 @@ pub(super) fn solve_triode_dc_qpoint(
         _ => return None,
     };
 
-    // Find R_plate: linear resistor between vcc_node and plate_node.
-    let r_plate = all_edges.iter().find_map(|&eidx| {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
-            return None;
-        }
-        let (a, b) = (e.node_a, e.node_b);
-        if (a == graph.vcc_node && b == plate_node) || (b == graph.vcc_node && a == plate_node) {
-            comp.kind.resistance()
-        } else {
-            None
-        }
-    })?;
+    // Find R_plate: linear resistor between a positive supply rail and
+    // plate_node. Rails are searched vcc-first, then named rails (B+, ...) —
+    // pedalkernel-0stg: the literal vcc comparison never matched a named
+    // rail's NodeId, so every B+-fed stage silently kept the -2.0V default.
+    //
+    // The search is GRAPH-WIDE, not stage-edge-set-wide (the BjtNpnSeed
+    // divider precedent, `all_edges` at its locate_bias_topology): named-rail
+    // edges are excluded from passive claiming (graph.rs supply_nodes), so a
+    // B+ plate load always lands in a DIFFERENT flow group than its triode
+    // (LA-2A: R_p1 groups with C_c1, not with V1) and a stage-set-only search
+    // can never see it. vcc pedals keep their in-group direct hit unchanged.
+    //
+    // A plate wired DIRECTLY to a rail (cathode follower: `B+ -> V3.plate`
+    // unions the plate node into the rail) has r_plate = 0 on that rail.
+    let graph_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let (r_plate, plate_rail_v) = positive_supply_rails(graph)
+        .iter()
+        .find_map(|&rail| {
+            find_load_resistor_direct(plate_node, rail, &graph_edges, graph)
+                .map(|r| (r, rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage)))
+        })
+        .or_else(|| {
+            rail_dc_voltage(plate_node, graph, supply_voltage)
+                .filter(|&v| v > 0.0)
+                .map(|v| (0.0, v))
+        })?;
 
     // Find R_cathode: linear resistor between cathode_node and gnd_node.
     let r_cathode = all_edges.iter().find_map(|&eidx| {
@@ -1487,11 +1640,11 @@ pub(super) fn solve_triode_dc_qpoint(
         let vgk = triode.vgk_bias();
         triode.set_vgk(vgk);
 
-        let max_ia = (supply_voltage / r_plate.max(1.0)).max(1e-9);
+        let max_ia = (plate_rail_v / r_plate.max(1.0)).max(1e-9);
         let mut lo = 0.0_f64;
         let mut hi = max_ia;
         let residual = |ia: f64, triode: &mut VariMuTriodeRoot| -> f64 {
-            let vpk = (supply_voltage - ia * r_plate).max(0.0);
+            let vpk = (plate_rail_v - ia * r_plate).max(0.0);
             ia - triode.plate_current(vpk)
         };
 
@@ -1520,7 +1673,7 @@ pub(super) fn solve_triode_dc_qpoint(
         }
 
         let ia = 0.5 * (lo + hi);
-        let vpk = (supply_voltage - ia * r_plate).max(0.0);
+        let vpk = (plate_rail_v - ia * r_plate).max(0.0);
         let v_cathode = ia * r_cathode;
         if vgk >= 0.0 || vpk <= 0.0 || !vgk.is_finite() || !vpk.is_finite() {
             return None;
@@ -1708,25 +1861,10 @@ pub(super) fn solve_bjt_group_dc_qpoint(
     }
 
     // Full (unscaled) rail voltage, or None for an interior (solved) node.
-    let full_rail_v = |node: NodeId| -> Option<f64> {
-        if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
-            Some(0.0)
-        } else if node == graph.vcc_node {
-            Some(
-                graph
-                    .supply_voltages
-                    .get(&graph.vcc_node)
-                    .copied()
-                    .unwrap_or(supply_voltage),
-            )
-        } else if let Some(&v) = graph.supply_voltages.get(&node) {
-            Some(v)
-        } else if graph.supply_nodes.contains(&node) {
-            Some(supply_voltage)
-        } else {
-            None
-        }
-    };
+    // (The shared resolver — see `rail_dc_voltage` — was extracted from this
+    // closure verbatim for pedalkernel-0stg; delegation keeps one source of
+    // truth for rail resolution.)
+    let full_rail_v = |node: NodeId| -> Option<f64> { rail_dc_voltage(node, graph, supply_voltage) };
 
     // Resistor list (linear conductances): (node_a, node_b, g).
     let mut resistors: Vec<(NodeId, NodeId, f64)> = Vec::new();
@@ -2483,5 +2621,143 @@ mod tests {
         assert_eq!(nb.voltage_at(graph.gnd_node, &graph, 9.0), Some(0.0));
         // VCC should be 9.0
         assert_eq!(nb.voltage_at(graph.vcc_node, &graph, 9.0), Some(9.0));
+    }
+
+    // ── 8. Named supply rails (pedalkernel-0stg) ─────────────────────────────
+
+    /// Classify the single triode edge of a parsed graph into its
+    /// `NonlinearKind`, mirroring the triode-context call site.
+    fn triode_nl_kind(graph: &CircuitGraph, comp_id: &str) -> NonlinearKind {
+        let (eidx, e) = graph
+            .edges
+            .iter()
+            .enumerate()
+            .find(|(_, e)| graph.components[e.comp_idx].id == comp_id)
+            .expect("triode edge");
+        let _ = eidx;
+        let comp = &graph.components[e.comp_idx];
+        comp.kind
+            .classify_nonlinear(&comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names)
+            .expect("classify triode")
+            .0
+    }
+
+    /// A textbook common-cathode 12AX7 fed from a NAMED `B+` rail must solve
+    /// its load-line Q-point. Pre-0stg the r_plate finder compared the rail
+    /// node against the literal `graph.vcc_node`, never matched `B+`, and the
+    /// stage silently kept the -2.0V TriodeRoot default.
+    #[test]
+    fn triode_qpoint_solves_on_named_bplus_rail() {
+        let graph = parse_graph(
+            r#"pedal "test" {
+                supplies { B+: 275V }
+                components {
+                    V1: triode(12ax7)
+                    R_p: resistor(220k)
+                    R_k: resistor(1.5k)
+                    R_g: resistor(1M)
+                    C_k: cap(25u, electrolytic)
+                }
+                nets {
+                    B+ -> R_p.a
+                    R_p.b -> V1.plate
+                    V1.cathode -> R_k.a, C_k.a
+                    R_k.b -> gnd
+                    C_k.b -> gnd
+                    in -> V1.grid
+                    V1.grid -> R_g.a
+                    R_g.b -> gnd
+                    V1.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = triode_nl_kind(&graph, "V1");
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let dc = solve_triode_dc_qpoint(&[nl], &all_edges, &graph, 275.0)
+            .expect("B+ common-cathode stage must solve its Q-point (0stg)");
+        assert!(
+            dc.vgk < -0.5 && dc.vgk > -5.0,
+            "12AX7 @275V/220k/1.5k should self-bias around -1..-2V, got vgk={}",
+            dc.vgk
+        );
+        assert!(
+            dc.vpk > 50.0 && dc.vpk < 275.0,
+            "plate should sit well inside the load line, got vpk={}",
+            dc.vpk
+        );
+    }
+
+    /// A cathode follower whose plate ties DIRECTLY to the named rail
+    /// (`B+ -> V3.plate` unions the plate node into the rail) is the
+    /// r_plate = 0 load line on that rail — it must solve, not default.
+    #[test]
+    fn triode_qpoint_solves_follower_plate_direct_to_named_rail() {
+        let graph = parse_graph(
+            r#"pedal "test" {
+                supplies { B+: 275V }
+                components {
+                    V3: triode(12bh7)
+                    R_k: resistor(10k)
+                    R_g: resistor(1M)
+                }
+                nets {
+                    B+ -> V3.plate
+                    in -> V3.grid
+                    V3.grid -> R_g.a
+                    R_g.b -> gnd
+                    V3.cathode -> R_k.a
+                    R_k.b -> gnd
+                    V3.cathode -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = triode_nl_kind(&graph, "V3");
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let dc = solve_triode_dc_qpoint(&[nl], &all_edges, &graph, 275.0)
+            .expect("B+ cathode follower must solve its Q-point (0stg)");
+        assert!(
+            dc.vgk < -1.0,
+            "12BH7 follower @275V/Rk=10k should self-bias strongly negative, got vgk={}",
+            dc.vgk
+        );
+        assert!(
+            (dc.v_cathode - -dc.vgk).abs() < 1e-9,
+            "cathode auto-bias identity: v_cathode == -vgk"
+        );
+    }
+
+    /// vcc-fed circuits must keep their EXACT legacy resolution: the rail
+    /// search tries vcc first, so this Q-point is bit-identical to the
+    /// pre-0stg solver output for the same circuit.
+    #[test]
+    fn triode_qpoint_vcc_path_unchanged() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 250V
+                components {
+                    V1: triode(12ax7)
+                    R_p: resistor(100k)
+                    R_k: resistor(1.5k)
+                    R_g: resistor(1M)
+                }
+                nets {
+                    vcc -> R_p.a
+                    R_p.b -> V1.plate
+                    V1.cathode -> R_k.a
+                    R_k.b -> gnd
+                    in -> V1.grid
+                    V1.grid -> R_g.a
+                    R_g.b -> gnd
+                    V1.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = triode_nl_kind(&graph, "V1");
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let dc = solve_triode_dc_qpoint(&[nl], &all_edges, &graph, 250.0)
+            .expect("vcc common-cathode stage must still solve");
+        assert!(dc.vgk < -0.5, "expected self-bias, got vgk={}", dc.vgk);
     }
 }

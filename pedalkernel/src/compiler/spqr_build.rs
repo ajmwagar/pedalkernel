@@ -5841,20 +5841,49 @@ fn compute_wdf_triode_dc_qpoint(
         _ => return None,
     };
 
-    // Find R_plate: linear resistor between vcc_node and plate_node.
-    let r_plate = edge_indices.iter().find_map(|&eidx| {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
-            return None;
-        }
-        let (a, b) = (e.node_a, e.node_b);
-        if (a == graph.vcc_node && b == plate_node) || (b == graph.vcc_node && a == plate_node) {
-            comp.kind.resistance()
-        } else {
-            None
-        }
-    })?;
+    // Find R_plate: linear resistor between a positive supply rail and
+    // plate_node. The legacy search (vcc, stage edge set) runs FIRST —
+    // bit-identical resolution for every circuit it already handled — then
+    // the pedalkernel-0stg widening: named rails (B+, ...) whose NodeIds
+    // never matched the literal vcc comparison, searched GRAPH-WIDE because
+    // named-rail edges are excluded from passive claiming and always land in
+    // a different flow group than their triode. A plate wired DIRECTLY to a
+    // rail (cathode follower) is the r_plate = 0 load line on that rail.
+    let find_direct = |edges: &[usize], rail: NodeId| -> Option<f64> {
+        edges.iter().find_map(|&eidx| {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+                return None;
+            }
+            let (a, b) = (e.node_a, e.node_b);
+            if (a == rail && b == plate_node) || (b == rail && a == plate_node) {
+                comp.kind.resistance()
+            } else {
+                None
+            }
+        })
+    };
+    let graph_edges: Vec<usize> = (0..graph.edges.len()).collect();
+    let (r_plate, plate_rail_v) = find_direct(edge_indices, graph.vcc_node)
+        .map(|r| (r, graph.vcc_node))
+        .or_else(|| {
+            super::bias::positive_supply_rails(graph)
+                .iter()
+                .find_map(|&rail| find_direct(&graph_edges, rail).map(|r| (r, rail)))
+        })
+        .map(|(r, rail)| {
+            (
+                r,
+                super::bias::rail_dc_voltage(rail, graph, supply_voltage)
+                    .unwrap_or(supply_voltage),
+            )
+        })
+        .or_else(|| {
+            super::bias::rail_dc_voltage(plate_node, graph, supply_voltage)
+                .filter(|&v| v > 0.0)
+                .map(|v| (0.0, v))
+        })?;
 
     // Find R_cathode: linear resistor between cathode_node and gnd_node.
     let r_cathode = edge_indices.iter().find_map(|&eidx| {
@@ -5880,7 +5909,7 @@ fn compute_wdf_triode_dc_qpoint(
     let mut ia = 1e-4_f64; // initial guess: 0.1 mA
     for _iter in 0..50 {
         let vgk = -ia * r_cathode;
-        let vpk = (supply_voltage - ia * r_plate).max(0.0);
+        let vpk = (plate_rail_v - ia * r_plate).max(0.0);
         triode.set_vgk(vgk);
         let ia_model = triode.plate_current(vpk);
         let f = ia - ia_model;
@@ -6099,13 +6128,11 @@ fn dc_single_rail_resistance(
 }
 
 fn dc_rail_voltage(node: NodeId, graph: &CircuitGraph, supply_voltage: f64) -> Option<f64> {
-    if node == graph.gnd_node || graph.ac_ground_nodes.contains(&node) {
-        Some(0.0)
-    } else if node == graph.vcc_node || graph.supply_nodes.contains(&node) {
-        Some(supply_voltage)
-    } else {
-        None
-    }
+    // Delegates to THE shared rail resolver (pedalkernel-0stg): named rails
+    // now resolve to their ACTUAL declared voltage (graph.supply_voltages)
+    // instead of blanket `supply_voltage`. Single-supply pedals are
+    // unchanged (their one rail's voltage IS supply_voltage).
+    super::bias::rail_dc_voltage(node, graph, supply_voltage)
 }
 
 /// Compute the forward base-emitter bias (Vbe) for a single-device common-emitter
@@ -6192,8 +6219,19 @@ fn compute_wdf_bjt_dc_qpoint(
         })
     };
 
-    // Base divider: R1 = base→vcc, R2 = base→gnd.
-    let r1 = find_r_to_rail(base_node, graph.vcc_node)?;
+    // Base divider: R1 = base→rail, R2 = base→gnd. Rails vcc-first, then
+    // named rails with their actual voltages (pedalkernel-0stg).
+    let (r1, base_rail_v) = super::bias::positive_supply_rails(graph)
+        .iter()
+        .find_map(|&rail| {
+            find_r_to_rail(base_node, rail).map(|r| {
+                (
+                    r,
+                    super::bias::rail_dc_voltage(rail, graph, supply_voltage)
+                        .unwrap_or(supply_voltage),
+                )
+            })
+        })?;
     let r2 = find_r_to_rail(base_node, graph.gnd_node)?;
     if r1 + r2 <= 0.0 {
         return None;
@@ -6203,7 +6241,7 @@ fn compute_wdf_bjt_dc_qpoint(
     // open-circuit divider voltage; fall back to the resistor divider directly.
     let vth = node_dc_voltage(base_node, bias_node_voltages, graph)
         .filter(|v| v.is_finite())
-        .unwrap_or(supply_voltage * r2 / (r1 + r2));
+        .unwrap_or(base_rail_v * r2 / (r1 + r2));
     let rth = r1 * r2 / (r1 + r2);
 
     // Emitter resistor RE (emitter→gnd).  Required for the load-line solve; a
