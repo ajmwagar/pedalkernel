@@ -83,6 +83,11 @@ pedal "Pultec EQP-1A" subtitle "Pulse Techniques EQP-1A — passive tube program
 
     # ── Output transformer (to 600 Ω line) ─────────────────────────────────
     T_out: transformer(4:1, 250m, dcr=40)
+    # 600 Ω line termination — the load the real unit drives. Without it the
+    # secondary is open and T_out degrades to magnetizing-only (no reflected
+    # load in the makeup stage). Mirrored 1:1 in the ngspice full-circuit deck
+    # (spice-circuits/eq/pultec_eqp1a_full_*.spice) — bead pedalkernel-q3mf.
+    R_term: resistor(600)
   }
 
   nets {
@@ -132,6 +137,8 @@ pedal "Pultec EQP-1A" subtitle "Pulse Techniques EQP-1A — passive tube program
     T_out.b -> gnd
     T_out.c -> out
     T_out.d -> gnd
+    out -> R_term.a
+    R_term.b -> gnd
   }
 
   controls {
