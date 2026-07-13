@@ -153,6 +153,7 @@ fn probe_triode_unified_vs_per_type_qpoint() {
         label: "V1".to_string(),
         supply_voltage: 250.0,
         parallel_count: 1,
+        flavor: super::bias::TriodeFinderFlavor::DirectThenBfs,
     };
     let nb = super::bias::NetworkBias::default();
     let unified = super::bias::solve_operating_point(&seed, &all_edges, &graph, &nb, 250.0)

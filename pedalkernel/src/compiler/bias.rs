@@ -759,19 +759,30 @@ pub(super) fn solve_operating_point<S: BiasSeed>(
     supply_voltage: f64,
 ) -> Result<DeviceOperatingPoint, BiasError> {
     let topo = seed.locate_bias_topology(edge_indices, graph, network_bias, supply_voltage)?;
+    solve_located_operating_point(seed, &topo)
+}
 
+/// Run the iteration scheme against an already-located [`BiasTopology`].
+///
+/// Split out of [`solve_operating_point`] (ko5g.3) so call-sites that also
+/// need topology values themselves (e.g. `R_cathode` for the plate-current
+/// readback in `solve_wdf_triode_dc_qpoint`) can locate once and solve once.
+pub(super) fn solve_located_operating_point<S: BiasSeed>(
+    seed: &S,
+    topo: &BiasTopology,
+) -> Result<DeviceOperatingPoint, BiasError> {
     // Both schemes converge to the same load-line fixed point and return the
     // triple (v_control, i_total, v_output) at that point.
     let (v_ctrl, i_total_final, v_output_final) = match seed.iteration_scheme() {
         IterationScheme::ControlNewton => {
-            control_newton_solve(seed, &topo)
+            control_newton_solve(seed, topo)
         }
         IterationScheme::MainCurrentRelaxation {
             initial_i_main,
             damping,
             max_iter,
             tol,
-        } => main_current_relaxation_solve(seed, &topo, initial_i_main, damping, max_iter, tol),
+        } => main_current_relaxation_solve(seed, topo, initial_i_main, damping, max_iter, tol),
     };
 
     // Validate
@@ -932,6 +943,32 @@ fn main_current_relaxation_solve<S: BiasSeed>(
 
 // ── Triode ──────────────────────────────────────────────────────────────────
 
+/// Which resistor-finder chain `TriodeSeed::locate_bias_topology` runs (ko5g.3).
+///
+/// The two production call-sites historically used DIFFERENT finder breadths,
+/// and this refactor is byte-identity-gated, so the breadth is preserved
+/// per-flavor rather than silently widened:
+///
+/// - [`DirectThenBfs`](Self::DirectThenBfs) — the grouped MNA path
+///   (`rigid/general.rs` → `solve_triode_dc_qpoint`): direct-edge match first,
+///   then the cap-aware BFS fallback, at every arm.
+/// - [`DirectOnly`](Self::DirectOnly) — the single-port WDF path
+///   (`spqr_build.rs` → `solve_wdf_triode_dc_qpoint`): the deleted
+///   `compute_wdf_triode_dc_qpoint` copy never had a BFS fallback; keeping it
+///   direct-only keeps every WDF Q-point (solve OR fail-to-default) identical.
+///
+/// Both flavors share the SAME arm order (pedalkernel-0stg): vcc in the stage
+/// edge set → named rails (B+, ...) GRAPH-WIDE (named-rail edges are excluded
+/// from passive claiming so a B+ plate load always lands in a different flow
+/// group than its triode) → plate wired DIRECTLY to a rail (cathode follower,
+/// r_plate = 0). Unifying the breadths is a deliberate future physics change,
+/// not part of this refactor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TriodeFinderFlavor {
+    DirectThenBfs,
+    DirectOnly,
+}
+
 /// `BiasSeed` for a common-cathode triode stage.
 pub(super) struct TriodeSeed<'a> {
     pub(super) nl_kind: &'a NonlinearKind,
@@ -943,6 +980,8 @@ pub(super) struct TriodeSeed<'a> {
     pub(super) supply_voltage: f64,
     /// Parallel-triode multiplier (sections wired in parallel share plate/cathode).
     pub(super) parallel_count: usize,
+    /// Which resistor-finder chain to run (per-call-site legacy breadth).
+    pub(super) flavor: TriodeFinderFlavor,
 }
 
 impl<'a> BiasSeed for TriodeSeed<'a> {
@@ -981,12 +1020,14 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
 
         // Find R_plate: resistor between vcc_node and plate_node.
         //
-        // Direct-edge FIRST, then cap-aware BFS as a fallback.  The direct match
-        // is what the legacy per-type `solve_triode_dc_qpoint` used, so trying it
-        // first keeps the production triode call-site's Q-point bit-for-bit
-        // identical when a direct plate/cathode resistor exists (the common
-        // grounded-cathode topology).  BFS still rescues cap-coupled cathode-
-        // followers where no direct edge exists.
+        // Direct-edge FIRST, then (DirectThenBfs flavor only) cap-aware BFS as
+        // a fallback.  The direct match is what the legacy per-type
+        // `solve_triode_dc_qpoint` used, so trying it first keeps the
+        // production triode call-site's Q-point bit-for-bit identical when a
+        // direct plate/cathode resistor exists (the common grounded-cathode
+        // topology).  BFS still rescues cap-coupled cathode-followers where no
+        // direct edge exists.  The single-port WDF flavor (`DirectOnly`) never
+        // had the BFS arms — see `TriodeFinderFlavor`.
         // The LEGACY vcc searches (direct edge then cap-aware BFS, over the
         // STAGE's edge set) run first, so every circuit they resolved keeps
         // its Q-point bit-for-bit. Only stages the legacy search could NOT
@@ -1001,6 +1042,16 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
         // * a plate wired DIRECTLY to a rail (`B+ -> V3.plate` unions the
         //   plate node into the rail — the cathode follower) is the
         //   r_plate = 0 load line on that rail.
+        //
+        // NOTE (pedalkernel-bix9): these finders treat inductive one-ports
+        // (transformer windings, chokes) as OPEN at DC, but a magnetizing
+        // inductance is a DC SHORT through its winding DCR — a
+        // cathode/plate-loaded output transformer shifts the true op-point
+        // (pultec V2: cold -13.27 V vs true -0.89 V). Now that BOTH triode
+        // call-sites route through this single locate, the bix9 fix (walk
+        // winding/inductor edges at their DCR) lands HERE + in
+        // `find_load_resistor_direct`/`find_load_resistor_bfs` once.
+        let use_bfs = self.flavor == TriodeFinderFlavor::DirectThenBfs;
         let rails = positive_supply_rails(graph);
         let graph_edges: Vec<usize> = (0..graph.edges.len()).collect();
         let (r_plate, v_load_rail) = find_load_resistor_direct(
@@ -1009,7 +1060,11 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
             edge_indices,
             graph,
         )
-        .or_else(|| find_load_resistor_bfs(plate_node, graph.vcc_node, edge_indices, graph))
+        .or_else(|| {
+            use_bfs
+                .then(|| find_load_resistor_bfs(plate_node, graph.vcc_node, edge_indices, graph))
+                .flatten()
+        })
         .map(|r| (r, graph.vcc_node))
         .or_else(|| {
             rails.iter().find_map(|&rail| {
@@ -1018,9 +1073,14 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
             })
         })
         .or_else(|| {
-            rails.iter().find_map(|&rail| {
-                find_load_resistor_bfs(plate_node, rail, &graph_edges, graph).map(|r| (r, rail))
-            })
+            use_bfs
+                .then(|| {
+                    rails.iter().find_map(|&rail| {
+                        find_load_resistor_bfs(plate_node, rail, &graph_edges, graph)
+                            .map(|r| (r, rail))
+                    })
+                })
+                .flatten()
         })
         .map(|(r, rail)| {
             (
@@ -1038,9 +1098,16 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
             missing: TopologyTerm::PlateResistor,
         })?;
 
-        // Find R_cathode: resistor between cathode_node and gnd_node (direct, then BFS).
+        // Find R_cathode: resistor between cathode_node and gnd_node (direct,
+        // then BFS on the DirectThenBfs flavor).
         let r_cathode = find_load_resistor_direct(cathode_node, graph.gnd_node, edge_indices, graph)
-            .or_else(|| find_load_resistor_bfs(cathode_node, graph.gnd_node, edge_indices, graph))
+            .or_else(|| {
+                use_bfs
+                    .then(|| {
+                        find_load_resistor_bfs(cathode_node, graph.gnd_node, edge_indices, graph)
+                    })
+                    .flatten()
+            })
             .ok_or_else(|| BiasError::UndeterminableTriode {
                 label: self.label.clone(),
                 missing: TopologyTerm::CathodeResistor,
@@ -1506,6 +1573,97 @@ fn build_rail_set(graph: &CircuitGraph) -> HashSet<NodeId> {
 // about WDF waves / scattering: it returns the CONDUCTING nodal operating point;
 // the runtime (`apply_triode_dc_qpoint` / `apply_bjt_dc_qpoint`) consumes it.
 
+/// Why a triode Q-point solve produced no operating point (ko5g.3).
+///
+/// Splits the old opaque `None` into the two cases the ko5g epic cares about:
+///
+/// - [`NotApplicable`](Self::NotApplicable): the stage is not a solvable
+///   single-triode-with-grid shape at all — pentode groups (ko5g.5), vari-mu on
+///   the WDF path (ko5g.6), strapped/grid-less triodes, multi-NL groups. These
+///   have no triode load line to solve and stay SILENT.
+/// - [`Undeterminable`](Self::Undeterminable): a REAL triode gain stage whose
+///   bias could not be determined from topology (e.g. the tweed 5e3 cathodyne
+///   phase inverter, per the ko5g.2 audit). The caller keeps its legacy
+///   fallback (WDF path: the -2.0 V `TriodeRoot` default; MNA path: the linear
+///   `dc_bias` superposition) and must WARN LOUDLY via
+///   [`warn_if_undeterminable`](Self::warn_if_undeterminable). The fail-loud
+///   flip (warn → `CompileError`) is ko5g.8, gated on the blast-radius audit.
+#[derive(Debug, Clone)]
+pub(super) enum TriodeQpointSkip {
+    /// Not a single common-cathode triode-with-grid — nothing to warn about.
+    NotApplicable,
+    /// A triode gain stage rode into its silent legacy fallback.
+    Undeterminable(BiasError),
+}
+
+impl TriodeQpointSkip {
+    /// ko5g.3 warn-not-error: print a loud stderr warning when a real triode
+    /// stage keeps its legacy fallback. `fallback` names what the caller
+    /// actually does (the two call-sites default differently).
+    pub(super) fn warn_if_undeterminable(&self, fallback: &str) {
+        if let Self::Undeterminable(err) = self {
+            eprintln!(
+                "  [bias] WARNING: {} {fallback} (warn-not-error, pedalkernel-ko5g.3; \
+                 this becomes a compile error under pedalkernel-ko5g.8)",
+                err.clone().into_compile_error()
+            );
+        }
+    }
+}
+
+/// Best-effort instance name for the triode that owns `plate_node`: the
+/// `<comp>.plate` pin name if one maps to the node (→ "V2"), else the
+/// lexicographically-first node alias, else the model name. Used for warnings
+/// (where it must be a valid `init {}` hint target) + the
+/// `PK_BIAS_QPOINT_DEBUG` table — never affects the solve.
+pub(super) fn triode_instance_label(
+    graph: &CircuitGraph,
+    plate_node: NodeId,
+    model_name: &str,
+) -> String {
+    let mut names: Vec<&str> = graph
+        .node_names
+        .iter()
+        .filter(|(_, &n)| n == plate_node)
+        .map(|(k, _)| k.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+        .iter()
+        .find(|k| k.ends_with(".plate"))
+        .map(|k| k.trim_end_matches(".plate").to_owned())
+        .or_else(|| names.first().map(|k| (*k).to_owned()))
+        .unwrap_or_else(|| model_name.to_owned())
+}
+
+/// Display form for the `PK_BIAS_QPOINT_DEBUG` table: "V2 (12au7)".
+fn triode_display_label(graph: &CircuitGraph, plate_node: NodeId, model_name: &str) -> String {
+    let inst = triode_instance_label(graph, plate_node, model_name);
+    if inst == model_name {
+        inst
+    } else {
+        format!("{inst} ({model_name})")
+    }
+}
+
+/// `PK_BIAS_QPOINT_DEBUG=1`: dump every triode Q-point solve (or its failure)
+/// to stderr — the per-instance Vgk table used to gate bias refactors.
+fn qpoint_debug(path: &str, label: &str, supply_voltage: f64, out: &Result<TriodeDcQpoint, TriodeQpointSkip>) {
+    if std::env::var("PK_BIAS_QPOINT_DEBUG").is_err() {
+        return;
+    }
+    match out {
+        Ok(dc) => eprintln!(
+            "[bias-qpoint] path={path} triode {label}: vgk={:.6} vpk={:.6} v_cathode={:.6} ia={:.9} supply={supply_voltage}",
+            dc.vgk, dc.vpk, dc.v_cathode, dc.ia
+        ),
+        Err(TriodeQpointSkip::Undeterminable(err)) => eprintln!(
+            "[bias-qpoint] path={path} triode {label}: UNDETERMINABLE ({err:?}) supply={supply_voltage}"
+        ),
+        Err(TriodeQpointSkip::NotApplicable) => {}
+    }
+}
+
 /// DC operating-point data for a single common-cathode triode stage.
 ///
 /// Moved verbatim from `rigid/general.rs` (was `TriodeDcQpoint`) so the triode
@@ -1546,26 +1704,56 @@ pub(super) struct TriodeDcQpoint {
 ///   VariMu/Raffensperger model + Ia bisection; migrating it needs a dedicated
 ///   `VariMuSeed` and is NOT bit-preserving under the relaxation scheme (bisection
 ///   vs relaxation) and has no characterization golden — left as-is.
-/// - The pentode branch (`solve_triode_dc_qpoint` returns `None` for non-triode
-///   kinds) and the single-port-WDF `compute_wdf_triode_dc_qpoint` in
-///   spqr_build.rs are separate follow-ups.
+/// - The pentode branch (`solve_triode_dc_qpoint` returns `NotApplicable` for
+///   non-triode kinds) is a separate follow-up (ko5g.5).  The single-port-WDF
+///   path is MIGRATED (ko5g.3): `spqr_build.rs`'s duplicate
+///   `compute_wdf_triode_dc_qpoint` was deleted and that call-site now rides
+///   [`solve_wdf_triode_dc_qpoint`] below (same seed/core, legacy
+///   `DirectOnly` finder flavor).
 ///
 /// Uses the load-line equations:
 ///   Vgk = -Ia × R_cathode    (cathode self-bias)
 ///   Vpk = VCC - Ia × R_plate (plate load line)
 ///   Ia = Triode.plate_current(Vgk, Vpk)
 ///
-/// Returns `None` if the circuit doesn't have exactly one triode-with-grid or
-/// if R_plate/R_cathode cannot be found.
+/// Returns `Err(TriodeQpointSkip::NotApplicable)` when the group isn't exactly
+/// one triode-with-grid (multi-NL groups, pentodes, strapped triodes), and
+/// `Err(TriodeQpointSkip::Undeterminable)` when it IS one but R_plate/R_cathode
+/// cannot be found or the solve lands non-physical — the ko5g.3 warn-not-error
+/// split (the caller warns and keeps its legacy fallback; ko5g.8 flips to a
+/// compile error).
 pub(super) fn solve_triode_dc_qpoint(
     nl_kinds: &[NonlinearKind],
     all_edges: &[usize],
     graph: &CircuitGraph,
     supply_voltage: f64,
-) -> Option<TriodeDcQpoint> {
+) -> Result<TriodeDcQpoint, TriodeQpointSkip> {
+    let out = solve_triode_dc_qpoint_inner(nl_kinds, all_edges, graph, supply_voltage);
+    if let Some(NonlinearKind::Triode {
+        model_name,
+        plate_node,
+        ..
+    }) = nl_kinds.first()
+    {
+        qpoint_debug(
+            "mna",
+            &triode_display_label(graph, *plate_node, model_name),
+            supply_voltage,
+            &out,
+        );
+    }
+    out
+}
+
+fn solve_triode_dc_qpoint_inner(
+    nl_kinds: &[NonlinearKind],
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Result<TriodeDcQpoint, TriodeQpointSkip> {
     // Only handle single-triode-with-grid stages.
     if nl_kinds.len() != 1 {
-        return None;
+        return Err(TriodeQpointSkip::NotApplicable);
     }
     let (model_name, plate_node, cathode_node, parallel_count, is_vari_mu) = match &nl_kinds[0] {
         NonlinearKind::Triode {
@@ -1583,7 +1771,14 @@ pub(super) fn solve_triode_dc_qpoint(
             *parallel_count,
             *is_vari_mu,
         ),
-        _ => return None,
+        _ => return Err(TriodeQpointSkip::NotApplicable),
+    };
+    let label = triode_instance_label(graph, plate_node, model_name);
+    let undet = |missing: TopologyTerm, label: &str| {
+        TriodeQpointSkip::Undeterminable(BiasError::UndeterminableTriode {
+            label: label.to_owned(),
+            missing,
+        })
     };
 
     // Find R_plate: linear resistor between a positive supply rail and
@@ -1611,23 +1806,12 @@ pub(super) fn solve_triode_dc_qpoint(
             rail_dc_voltage(plate_node, graph, supply_voltage)
                 .filter(|&v| v > 0.0)
                 .map(|v| (0.0, v))
-        })?;
+        })
+        .ok_or_else(|| undet(TopologyTerm::PlateResistor, &label))?;
 
     // Find R_cathode: linear resistor between cathode_node and gnd_node.
-    let r_cathode = all_edges.iter().find_map(|&eidx| {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
-            return None;
-        }
-        let (a, b) = (e.node_a, e.node_b);
-        if (a == cathode_node && b == graph.gnd_node) || (b == cathode_node && a == graph.gnd_node)
-        {
-            comp.kind.resistance()
-        } else {
-            None
-        }
-    })?;
+    let r_cathode = find_load_resistor_direct(cathode_node, graph.gnd_node, all_edges, graph)
+        .ok_or_else(|| undet(TopologyTerm::CathodeResistor, &label))?;
 
     if is_vari_mu {
         // Variable-mu fixtures are fixed-bias devices: the grid control voltage
@@ -1651,13 +1835,17 @@ pub(super) fn solve_triode_dc_qpoint(
         let mut flo = residual(lo, &mut triode);
         let fhi = residual(hi, &mut triode);
         if !flo.is_finite() || !fhi.is_finite() || flo.signum() == fhi.signum() {
-            return None;
+            return Err(TriodeQpointSkip::Undeterminable(
+                BiasError::NonPhysicalQpoint,
+            ));
         }
         for _ in 0..80 {
             let mid = 0.5 * (lo + hi);
             let fmid = residual(mid, &mut triode);
             if !fmid.is_finite() {
-                return None;
+                return Err(TriodeQpointSkip::Undeterminable(
+                    BiasError::NonPhysicalQpoint,
+                ));
             }
             if fmid.abs() < 1e-10 {
                 lo = mid;
@@ -1676,9 +1864,11 @@ pub(super) fn solve_triode_dc_qpoint(
         let vpk = (plate_rail_v - ia * r_plate).max(0.0);
         let v_cathode = ia * r_cathode;
         if vgk >= 0.0 || vpk <= 0.0 || !vgk.is_finite() || !vpk.is_finite() {
-            return None;
+            return Err(TriodeQpointSkip::Undeterminable(
+                BiasError::NonPhysicalQpoint,
+            ));
         }
-        return Some(TriodeDcQpoint {
+        return Ok(TriodeDcQpoint {
             vgk,
             vpk,
             v_cathode,
@@ -1698,9 +1888,10 @@ pub(super) fn solve_triode_dc_qpoint(
 
     let seed = TriodeSeed {
         nl_kind: &nl_kinds[0],
-        label: model_name.to_owned(),
+        label: label.clone(),
         supply_voltage,
         parallel_count,
+        flavor: TriodeFinderFlavor::DirectThenBfs,
     };
     let op = solve_operating_point(
         &seed,
@@ -1709,7 +1900,7 @@ pub(super) fn solve_triode_dc_qpoint(
         &NetworkBias::default(),
         supply_voltage,
     )
-    .ok()?;
+    .map_err(TriodeQpointSkip::Undeterminable)?;
 
     let vgk = op.control_bias;
     let vpk = op.output_warm_start;
@@ -1718,14 +1909,109 @@ pub(super) fn solve_triode_dc_qpoint(
 
     // Sanity: Q-point should have negative Vgk and positive Vpk.
     if vgk >= 0.0 || vpk <= 0.0 || !vgk.is_finite() || !vpk.is_finite() {
-        return None;
+        return Err(TriodeQpointSkip::Undeterminable(
+            BiasError::NonPhysicalQpoint,
+        ));
     }
 
-    Some(TriodeDcQpoint {
+    Ok(TriodeDcQpoint {
         vgk,
         vpk,
         v_cathode,
         ia,
+    })
+}
+
+/// Single-port-WDF triode DC Q-point (ko5g.3) — replaces the deleted
+/// `spqr_build.rs::compute_wdf_triode_dc_qpoint` duplicate. Rides the SAME
+/// `TriodeSeed` locate + `MainCurrentRelaxation` core as the grouped MNA path
+/// above, with the legacy WDF call-site semantics preserved exactly:
+///
+/// - **`TriodeFinderFlavor::DirectOnly`** — the deleted copy had no cap-aware
+///   BFS fallback in any finder arm.
+/// - **`parallel_count` NOT applied** (divergence, preserved): the deleted copy
+///   solved the load line for a SINGLE section even though the runtime root is
+///   built `.with_parallel_count(n)` (`build.rs`). Fixing that shifts every
+///   parallel-section WDF Q-point and belongs with its own golden re-baseline.
+/// - **No `vpk > 0` sanity** (divergence, preserved): the deleted copy accepted
+///   a rail-saturated `vpk == 0` solve; only `vgk < 0` (finite) is required.
+/// - **No vari-mu branch**: vari-mu is fixed-bias; on the WDF path the
+///   `VariMuRoot` model default stands until ko5g.6 — `NotApplicable`, silent.
+pub(super) fn solve_wdf_triode_dc_qpoint(
+    nl_kind: &NonlinearKind,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Result<TriodeDcQpoint, TriodeQpointSkip> {
+    let out = solve_wdf_triode_dc_qpoint_inner(nl_kind, edge_indices, graph, supply_voltage);
+    if let NonlinearKind::Triode {
+        model_name,
+        plate_node,
+        ..
+    } = nl_kind
+    {
+        qpoint_debug(
+            "wdf",
+            &triode_display_label(graph, *plate_node, model_name),
+            supply_voltage,
+            &out,
+        );
+    }
+    out
+}
+
+fn solve_wdf_triode_dc_qpoint_inner(
+    nl_kind: &NonlinearKind,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Result<TriodeDcQpoint, TriodeQpointSkip> {
+    let (model_name, plate_node) = match nl_kind {
+        NonlinearKind::Triode {
+            model_name,
+            plate_node,
+            grid_node: Some(_),
+            is_vari_mu: false,
+            ..
+        } => (model_name.as_str(), *plate_node),
+        // Strapped (grid-less) triodes, vari-mu (ko5g.6), pentodes (ko5g.5),
+        // non-tube kinds: no load-line Q-point on this path — silent skip.
+        _ => return Err(TriodeQpointSkip::NotApplicable),
+    };
+    let label = triode_instance_label(graph, plate_node, model_name);
+
+    let seed = TriodeSeed {
+        nl_kind,
+        label: label.clone(),
+        supply_voltage,
+        // LEGACY-PRESERVING: see the fn doc — the deleted WDF copy never
+        // applied the parallel-section multiplier.
+        parallel_count: 1,
+        flavor: TriodeFinderFlavor::DirectOnly,
+    };
+    let network_bias = NetworkBias::default();
+    let topo = seed
+        .locate_bias_topology(edge_indices, graph, &network_bias, supply_voltage)
+        .map_err(TriodeQpointSkip::Undeterminable)?;
+    let op = solve_located_operating_point(&seed, &topo)
+        .map_err(TriodeQpointSkip::Undeterminable)?;
+
+    let vgk = op.control_bias;
+    let vpk = op.output_warm_start;
+    let v_cathode = -vgk; // cathode auto-bias: V_cathode = Ia*Rk = -Vgk
+
+    // Legacy WDF sanity: negative, finite Vgk only (no vpk > 0 requirement).
+    if vgk >= 0.0 || !vgk.is_finite() || !v_cathode.is_finite() {
+        return Err(TriodeQpointSkip::Undeterminable(
+            BiasError::NonPhysicalQpoint,
+        ));
+    }
+
+    Ok(TriodeDcQpoint {
+        vgk,
+        vpk,
+        v_cathode,
+        ia: v_cathode / topo.r_degeneration,
     })
 }
 
@@ -2415,6 +2701,7 @@ mod tests {
             label: "T1".to_owned(),
             supply_voltage: supply,
             parallel_count: 1,
+            flavor: TriodeFinderFlavor::DirectThenBfs,
         };
 
         let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
@@ -2759,5 +3046,269 @@ mod tests {
         let dc = solve_triode_dc_qpoint(&[nl], &all_edges, &graph, 250.0)
             .expect("vcc common-cathode stage must still solve");
         assert!(dc.vgk < -0.5, "expected self-bias, got vgk={}", dc.vgk);
+    }
+
+    // ── ko5g.3: the unified single-port-WDF entry ────────────────────────────
+
+    const VCC_CC_12AX7: &str = r#"pedal "test" { supply 250V
+        components {
+            V1: triode(12ax7)
+            R_p: resistor(100k)
+            R_k: resistor(1.5k)
+            R_g: resistor(1M)
+        }
+        nets {
+            vcc -> R_p.a
+            R_p.b -> V1.plate
+            V1.cathode -> R_k.a
+            R_k.b -> gnd
+            in -> V1.grid
+            V1.grid -> R_g.a
+            R_g.b -> gnd
+            V1.plate -> out
+        }
+        controls {}
+    }"#;
+
+    /// The WDF entry reproduces the DELETED `spqr_build.rs`
+    /// `compute_wdf_triode_dc_qpoint` loop bit-for-bit on the canonical vcc
+    /// grounded-cathode stage, and lands the SAME Q-point as the grouped MNA
+    /// entry (both resolve the same direct R_plate/R_cathode here).
+    #[test]
+    fn wdf_triode_qpoint_reproduces_legacy_loop_and_matches_mna() {
+        let graph = parse_graph(VCC_CC_12AX7);
+        let nl = triode_nl_kind(&graph, "V1");
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+
+        // The deleted spqr_build loop, replicated verbatim (Rp=100k, Rk=1.5k).
+        let supply = 250.0_f64;
+        let (r_plate, r_cathode) = (100_000.0_f64, 1_500.0_f64);
+        let model = super::super::helpers::triode_model("12ax7");
+        let mut triode =
+            pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(model, supply);
+        let mut ia = 1e-4_f64;
+        for _ in 0..50 {
+            let vgk = -ia * r_cathode;
+            let vpk = (supply - ia * r_plate).max(0.0);
+            triode.set_vgk(vgk);
+            let ia_model = triode.plate_current(vpk);
+            let f = ia - ia_model;
+            ia = (ia - f * 0.5).max(0.0);
+            if f.abs() < 1e-9 {
+                break;
+            }
+        }
+        let legacy_vgk = -ia * r_cathode;
+        let legacy_v_cathode = ia * r_cathode;
+
+        let wdf = solve_wdf_triode_dc_qpoint(&nl, &all_edges, &graph, supply)
+            .expect("WDF entry must solve the vcc grounded-cathode stage");
+        assert!(
+            (wdf.vgk - legacy_vgk).abs() < 1e-12,
+            "WDF vgk={} must reproduce the deleted loop's vgk={}",
+            wdf.vgk,
+            legacy_vgk
+        );
+        assert!(
+            (wdf.v_cathode - legacy_v_cathode).abs() < 1e-12,
+            "WDF v_cathode={} vs legacy {}",
+            wdf.v_cathode,
+            legacy_v_cathode
+        );
+
+        let mna = solve_triode_dc_qpoint(&[nl], &all_edges, &graph, supply)
+            .expect("MNA entry must also solve");
+        assert!(
+            (wdf.vgk - mna.vgk).abs() < 1e-12 && (wdf.vpk - mna.vpk).abs() < 1e-12,
+            "WDF and MNA entries share the solver core: wdf=({}, {}) mna=({}, {})",
+            wdf.vgk,
+            wdf.vpk,
+            mna.vgk,
+            mna.vpk
+        );
+    }
+
+    /// B+-railed common-cathode (the 0stg named-rail arm) solves on the WDF
+    /// entry too — graph-wide named-rail direct search, no BFS needed.
+    #[test]
+    fn wdf_triode_qpoint_solves_on_named_bplus_rail() {
+        let graph = parse_graph(
+            r#"pedal "test" {
+                supplies { B+: 275V }
+                components {
+                    V1: triode(12ax7)
+                    R_p: resistor(220k)
+                    R_k: resistor(1.5k)
+                    R_g: resistor(1M)
+                    C_k: cap(25u, electrolytic)
+                }
+                nets {
+                    B+ -> R_p.a
+                    R_p.b -> V1.plate
+                    V1.cathode -> R_k.a, C_k.a
+                    R_k.b -> gnd
+                    C_k.b -> gnd
+                    in -> V1.grid
+                    V1.grid -> R_g.a
+                    R_g.b -> gnd
+                    V1.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = triode_nl_kind(&graph, "V1");
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let wdf = solve_wdf_triode_dc_qpoint(&nl, &all_edges, &graph, 275.0)
+            .expect("B+ common-cathode must solve on the WDF entry (0stg)");
+        let mna = solve_triode_dc_qpoint(&[nl], &all_edges, &graph, 275.0)
+            .expect("MNA entry must also solve");
+        assert!(
+            (wdf.vgk - mna.vgk).abs() < 1e-12,
+            "same direct topology → same Q-point: wdf={} mna={}",
+            wdf.vgk,
+            mna.vgk
+        );
+        assert!(wdf.vgk < -0.5 && wdf.vgk > -5.0, "vgk={}", wdf.vgk);
+    }
+
+    /// A cathode follower whose plate ties DIRECTLY to the named rail solves
+    /// as the r_plate = 0 load line on the WDF entry.
+    #[test]
+    fn wdf_triode_qpoint_solves_follower_plate_direct_to_rail() {
+        let graph = parse_graph(
+            r#"pedal "test" {
+                supplies { B+: 275V }
+                components {
+                    V3: triode(12bh7)
+                    R_k: resistor(10k)
+                    R_g: resistor(1M)
+                }
+                nets {
+                    B+ -> V3.plate
+                    in -> V3.grid
+                    V3.grid -> R_g.a
+                    R_g.b -> gnd
+                    V3.cathode -> R_k.a
+                    R_k.b -> gnd
+                    V3.cathode -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = triode_nl_kind(&graph, "V3");
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let wdf = solve_wdf_triode_dc_qpoint(&nl, &all_edges, &graph, 275.0)
+            .expect("B+ follower must solve on the WDF entry");
+        assert!(wdf.vgk < -1.0, "12BH7 follower should self-bias strongly negative, got {}", wdf.vgk);
+        assert!(
+            (wdf.v_cathode - -wdf.vgk).abs() < 1e-9,
+            "cathode auto-bias identity: v_cathode == -vgk"
+        );
+    }
+
+    /// Undeterminable bias (no cathode-to-gnd resistor reachable by the
+    /// legacy DIRECT-only WDF finder) is a WARN case: `Undeterminable`, not
+    /// `NotApplicable`.  The SAME fixture still locates under the MNA
+    /// `DirectThenBfs` flavor — pinning the preserved per-call-site
+    /// divergence (the WDF path never had the BFS fallback).
+    #[test]
+    fn wdf_triode_qpoint_undeterminable_is_warned_not_silent() {
+        // Cathode reaches gnd only through TWO series resistors: the direct
+        // finder fails, the cap-aware BFS succeeds.
+        let graph = parse_graph(
+            r#"pedal "test" { supply 250V
+                components {
+                    V1: triode(12ax7)
+                    R_p: resistor(100k)
+                    R_k1: resistor(750)
+                    R_k2: resistor(750)
+                    R_g: resistor(1M)
+                }
+                nets {
+                    vcc -> R_p.a
+                    R_p.b -> V1.plate
+                    V1.cathode -> R_k1.a
+                    R_k1.b -> R_k2.a
+                    R_k2.b -> gnd
+                    in -> V1.grid
+                    V1.grid -> R_g.a
+                    R_g.b -> gnd
+                    V1.plate -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = triode_nl_kind(&graph, "V1");
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+
+        let err = solve_wdf_triode_dc_qpoint(&nl, &all_edges, &graph, 250.0)
+            .expect_err("series-Rk must be undeterminable on the DIRECT-only WDF flavor");
+        match err {
+            TriodeQpointSkip::Undeterminable(BiasError::UndeterminableTriode {
+                ref missing,
+                ..
+            }) => {
+                assert!(
+                    matches!(missing, TopologyTerm::CathodeResistor),
+                    "should name the missing cathode resistor, got {missing:?}"
+                );
+            }
+            other => panic!("expected Undeterminable(UndeterminableTriode), got {other:?}"),
+        }
+
+        // The MNA flavor's BFS arm CAN locate through the series pair — the
+        // preserved breadth divergence between the two call-sites.
+        let seed = TriodeSeed {
+            nl_kind: &nl,
+            label: "V1".to_owned(),
+            supply_voltage: 250.0,
+            parallel_count: 1,
+            flavor: TriodeFinderFlavor::DirectThenBfs,
+        };
+        let topo = seed
+            .locate_bias_topology(&all_edges, &graph, &NetworkBias::default(), 250.0)
+            .expect("DirectThenBfs must locate via the BFS fallback");
+        assert!(
+            (topo.r_degeneration - 750.0).abs() < 1e-9,
+            "BFS returns the FIRST resistor stepped through (750Ω), got {}",
+            topo.r_degeneration
+        );
+    }
+
+    /// Vari-mu and strapped (grid-less) triodes are NotApplicable on the WDF
+    /// entry — silent skip, no warning (ko5g.6 owns vari-mu).
+    #[test]
+    fn wdf_triode_qpoint_not_applicable_for_varimu_and_strapped() {
+        let graph = parse_graph(VCC_CC_12AX7);
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let plate_node = *graph.node_names.get("V1.plate").expect("plate");
+        let cathode_node = *graph.node_names.get("V1.cathode").expect("cathode");
+        let grid_node = graph.node_names.get("V1.grid").copied();
+
+        let varimu = NonlinearKind::Triode {
+            model_name: "6386".to_owned(),
+            plate_node,
+            cathode_node,
+            grid_node,
+            parallel_count: 1,
+            is_vari_mu: true,
+        };
+        assert!(matches!(
+            solve_wdf_triode_dc_qpoint(&varimu, &all_edges, &graph, 250.0),
+            Err(TriodeQpointSkip::NotApplicable)
+        ));
+
+        let strapped = NonlinearKind::Triode {
+            model_name: "12ax7".to_owned(),
+            plate_node,
+            cathode_node,
+            grid_node: None,
+            parallel_count: 1,
+            is_vari_mu: false,
+        };
+        assert!(matches!(
+            solve_wdf_triode_dc_qpoint(&strapped, &all_edges, &graph, 250.0),
+            Err(TriodeQpointSkip::NotApplicable)
+        ));
     }
 }
