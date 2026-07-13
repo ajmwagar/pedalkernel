@@ -3642,6 +3642,48 @@ pub(super) fn build_spqr_stage_with_options(
                 }
             }
 
+            // Seed the PentodeRoot with the DC Q-point (ko5g.5 — the FIRST
+            // pentode bias solver; every pentode previously rode the −8.0 V
+            // `vg1k_bias` default and the model-default `vg2k`, never seeded).
+            //
+            // bias::solve_wdf_pentode_dc_qpoint solves the self-bias load line
+            // (shared-cathode aware, OT-primary-at-DCR plate paths) and
+            // resolves the screen divider at DC.  Three initialization
+            // targets:
+            //   1. PentodeRoot::set_bias(vg1k)   — NR warm-start + K-table centre
+            //   2. PentodeRoot::set_vg2k(vg2)    — circuit-true screen voltage
+            //   3. Cathode bypass cap seed       — eliminates startup transient
+            //
+            // Undeterminable topologies (incl. the grounded-cathode FIXED-BIAS
+            // guard — the ko5g.2 la2a-V5 safeguard) keep ALL defaults, loudly.
+            let pentode_dc = if matches!(root, RootKind::Pentode(_)) {
+                match super::bias::solve_wdf_pentode_dc_qpoint(
+                    &nl_kind,
+                    &edge_indices,
+                    graph,
+                    supply_voltage,
+                ) {
+                    Ok(dc) => Some(dc),
+                    Err(skip) => {
+                        skip.warn_if_undeterminable(
+                            "Pentode stage keeps the -8.0 V default Vg1k bias and the \
+                             model-default Vg2.",
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(ref dc) = pentode_dc {
+                if let RootKind::Pentode(p) = &mut root {
+                    p.set_bias(dc.vg1k as pedalkernel_rt::Wave);
+                    if let Some(vg2) = dc.vg2k {
+                        p.set_vg2k(vg2 as pedalkernel_rt::Wave);
+                    }
+                }
+            }
+
             // Seed the BjtRoot DC operating point (Q-point).
             //
             // Without this the BjtRoot keeps its default vbe_bias = 0 V, which
@@ -3770,6 +3812,48 @@ pub(super) fn build_spqr_stage_with_options(
                                 && (e.node_b == graph.gnd_node
                                     || graph.ac_ground_nodes.contains(&e.node_b)))
                                 || (e.node_b == *triode_cathode_node
+                                    && (e.node_a == graph.gnd_node
+                                        || graph.ac_ground_nodes.contains(&e.node_a)));
+                            if !is_cathode_gnd {
+                                continue;
+                            }
+                            let comp = &graph.components[e.comp_idx];
+                            if comp.kind.capacitance().is_none() {
+                                continue;
+                            }
+                            if let Some(port) =
+                                wdf_stage.tree.one_port_runtime_binding_mut(&comp.id)
+                            {
+                                port.wdf_set_one_port_state(
+                                    pedalkernel_rt::boundary_math::OnePortState::CapacitorVoltage(
+                                        v_cat,
+                                    ),
+                                    &mut wdf_stage.runtime_state,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // (2a) Pre-charge the pentode cathode bypass cap (ko5g.5) — the
+            // exact mirror of the triode block above: the shared/self-bias
+            // cathode resistor develops n·Ia·Rk and the bypass cap across it
+            // must start charged or the stage spends τ = Rk·Ck settling.
+            if let Some(ref dc) = pentode_dc {
+                if dc.v_cathode > 0.01 {
+                    if let super::classify::NonlinearKind::Pentode {
+                        cathode_node: pentode_cathode_node,
+                        ..
+                    } = &nl_kind
+                    {
+                        let v_cat = dc.v_cathode as pedalkernel_rt::Wave;
+                        for eidx in 0..graph.edges.len() {
+                            let e = &graph.edges[eidx];
+                            let is_cathode_gnd = (e.node_a == *pentode_cathode_node
+                                && (e.node_b == graph.gnd_node
+                                    || graph.ac_ground_nodes.contains(&e.node_b)))
+                                || (e.node_b == *pentode_cathode_node
                                     && (e.node_a == graph.gnd_node
                                         || graph.ac_ground_nodes.contains(&e.node_a)));
                             if !is_cathode_gnd {
