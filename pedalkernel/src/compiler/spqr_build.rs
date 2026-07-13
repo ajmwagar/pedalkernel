@@ -5380,7 +5380,25 @@ fn is_nonlinear_modulator_group(
         }
     }
 
-    has_transistor_nl && !touches_output && !has_reactive && !has_vcvs
+    if !(has_transistor_nl && !touches_output && !has_reactive && !has_vcvs) {
+        return false;
+    }
+
+    // pedalkernel-y9hz GHOST-DROP FIX (the pedalkernel-ffkl guard finding):
+    // "doesn't touch `out` directly" is NOT "off the audio path" — the
+    // fuzz-face family's BJT core reaches `out` THROUGH its output coupling
+    // cap (a cut edge in a different group), so this classifier consumed the
+    // whole audio core as a "modulator" and the pedal compiled as a unity
+    // passthrough. A group that signal FLOWS THROUGH (reachable from `in`,
+    // device outputs reach `out` over the directed signal graph) is an
+    // audio-path core and must compile as real stages. True modulators
+    // (envelope followers, LFO cores) fail the directed through-path test —
+    // their device outputs dead-end at control electrodes.
+    if super::signal_flow::group_is_on_forward_audio_path(graph, &group.all_edges()) {
+        return false;
+    }
+
+    true
 }
 
 /// Get the non-GND signal node from a ground-clip group.

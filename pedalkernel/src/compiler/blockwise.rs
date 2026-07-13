@@ -2137,6 +2137,52 @@ pub(super) fn try_build_blockwise(
     coupled_newton: bool,
     init_hints: &[crate::dsl::InitHint],
 ) -> Option<Vec<BuiltStage>> {
+    let stages = try_build_blockwise_inner(
+        edge_indices,
+        graph,
+        terminals,
+        sample_rate,
+        bias_node_voltages,
+        supply_voltage,
+        port_defs,
+        force_serial,
+        force_serial_feedback_gain,
+        disable_iir,
+        coupled_newton,
+        init_hints,
+    )?;
+    // pedalkernel-y9hz GHOST-DROP FIX (the pedalkernel-ffkl guard finding):
+    // `Some(EMPTY)` used to tell the caller "blockwise handled this group"
+    // while handing it ZERO stages — the caller's `continue` then vaporized
+    // the whole edge set (the PNP fuzz family compiled as its coupling caps +
+    // Volume pot, passing audio at unity with the BJT core GONE). An empty
+    // build is a DECLINE: return None so the group falls through to the
+    // monolithic/general-MNA path and every edge stays accounted for.
+    if stages.is_empty() {
+        eprintln!(
+            "  [blockwise] built 0 stages for {} edges — declining so the group \
+             falls through to the monolithic build (pedalkernel-y9hz ghost-drop fix)",
+            edge_indices.len()
+        );
+        return None;
+    }
+    Some(stages)
+}
+
+fn try_build_blockwise_inner(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    terminals: &[NodeId],
+    sample_rate: f64,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    supply_voltage: f64,
+    port_defs: &[crate::dsl::PortDef],
+    force_serial: bool,
+    force_serial_feedback_gain: f64,
+    disable_iir: bool,
+    coupled_newton: bool,
+    init_hints: &[crate::dsl::InitHint],
+) -> Option<Vec<BuiltStage>> {
     let mut plan = analyze_blockwise(edge_indices, graph)?;
 
     #[cfg(test)]
