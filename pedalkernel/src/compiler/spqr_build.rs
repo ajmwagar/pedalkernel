@@ -2199,7 +2199,10 @@ pub fn compile_via_spqr_with_options(
             "stage assembly",
             &unaccounted,
             &graph,
-            EdgeGuardMode::Warn,
+            // pedalkernel-x5ac (promoted in the y9hz batch): error by
+            // default, like the builder-level guard — corpus is quiet now
+            // that the blockwise Some(empty) ghost drop is fixed.
+            EdgeGuardMode::Error,
         )?;
     }
 
@@ -4428,13 +4431,13 @@ fn try_build_convergence_sum(
 /// * builder-level (`rigid::general` — an edge handed to a builder was not
 ///   stamped): **error**. Corpus-measured clean; any trip is a formation bug.
 /// * assembly-level (a graph edge landed in NO stage and NO consumption
-///   mechanism): **warn**. The corpus does not allow error yet — the
-///   PNP fuzz family (fuzz_face.pedal, legends fizz, fuzz_face_pnp) hits a
-///   pre-existing REAL drop: `try_build_blockwise` returns `Some(empty)` for
-///   its feedback group and the `continue` discards the entire BJT core,
-///   compiling the pedal as its coupling caps + Volume pot only (the
-///   pedalkernel-129p family). Promotion to error is beaded — see the
-///   pedalkernel-ffkl follow-up.
+///   mechanism): **error** (pedalkernel-x5ac, promoted in the
+///   pedalkernel-y9hz batch). The one real corpus drop that blocked
+///   promotion — `try_build_blockwise` returning `Some(empty)` and
+///   vaporizing the PNP fuzz family's BJT core — is FIXED (empty build
+///   declines to the monolithic path), and the full lib corpus runs
+///   guard-quiet (2 trips -> 0, measured). Any trip is now a compile error:
+///   a circuit must not compile with a component missing and no trace.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::compiler) enum EdgeGuardMode {
     Off,
