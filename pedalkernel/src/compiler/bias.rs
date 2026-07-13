@@ -1,10 +1,10 @@
 //! Unified compile-time DC bias infrastructure.
 //!
-//! This module provides the data types and solver that will eventually replace
-//! the per-type DC bias code spread across `spqr_build.rs`
-//! (`compute_wdf_triode_dc_qpoint`, `compute_wdf_bjt_dc_qpoint`, etc.).
+//! This module provides the data types and solver that replace the per-type
+//! DC bias code formerly spread across `spqr_build.rs`, `blockwise.rs` and
+//! `rigid/general.rs` (triode + BJT collapsed; FET/pentode still pending).
 //!
-//! # Current status (ko5g.3)
+//! # Current status (ko5g.4)
 //!
 //! Migrated into this file: the flow-group bias classification + resistor-divider
 //! nodal solve (`classify_group_bias` / `solve_network_bias`, absorbed from the
@@ -16,7 +16,20 @@
 //! shared `BiasSeed`/`solve_operating_point` core (`TriodeSeed` +
 //! `IterationScheme::MainCurrentRelaxation`): `solve_triode_dc_qpoint`'s
 //! non-varimu branch is now a thin delegation (bit-for-bit vs the deleted
-//! Ia-relaxation loop; corpus failing-set unchanged).
+//! Ia-relaxation loop; corpus failing-set unchanged).  ko5g.3 folded the
+//! single-port-WDF triode copy in ([`solve_wdf_triode_dc_qpoint`]).
+//!
+//! As of ko5g.4 ALL FOUR BJT bias paths live here:
+//! - grouped nodal co-solve — [`solve_bjt_group_dc_qpoint`] (unchanged);
+//! - single-port WDF load line — [`solve_wdf_bjt_dc_qpoint`] (`BjtSeed` +
+//!   `ControlNewton`, replaces `spqr_build.rs::compute_wdf_bjt_dc_qpoint`
+//!   bit-for-bit);
+//! - blockwise raw base-voltage read — [`solve_blockwise_bjt_base_bias`] +
+//!   the named [`bjt_unconditional_default_vbe`] (replaces the anonymous
+//!   `default_vbe` at `blockwise.rs:359`, the ko5g.2 audit's S9 silent
+//!   conduction-forcing default — now warned loudly);
+//! - grouped-MNA NR warm-start seed — [`bjt_model_conduction_seed`] (replaces
+//!   the `initial_v` physics defaults in `rigid/general.rs`).
 //!
 //! Still per-type / not yet on the shared path:
 //! - the **varimu** branch inside `solve_triode_dc_qpoint` (fixed-bias, a
@@ -24,10 +37,12 @@
 //!   NOT bit-preserving under the relaxation scheme and has no characterization
 //!   golden, so left as-is);
 //! - the **pentode** DC path (no `PentodeSeed`; `solve_triode_dc_qpoint` returns
-//!   `None` for non-triode kinds);
-//! - the single-port-WDF-root solvers in `spqr_build.rs`
-//!   (`compute_wdf_triode_dc_qpoint`, `compute_wdf_bjt_dc_qpoint`,
-//!   `compute_wdf_fet_dc_qpoint`) — a separate follow-up.
+//!   `None` for non-triode kinds — ko5g.5, NO solver exists anywhere today);
+//! - the single-port-WDF **FET** solver in `spqr_build.rs`
+//!   (`compute_wdf_fet_dc_qpoint`) — ko5g.6;
+//! - the `rigid/general.rs::compute_dc_bias` ±0.65 V BJT port clamp (a linear
+//!   dc-bias floor, adjacent to but distinct from the seeds above — flagged
+//!   for ko5g.8).
 //!
 //! # Architecture
 //!
@@ -643,9 +658,22 @@ pub(super) struct TrialPoint {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum IterationScheme {
     /// Newton on the control-voltage residual.  The default; used by the BJT
-    /// divider path (`BjtNpnSeed`), which needs Newton's robustness against the
+    /// divider path (`BjtSeed`), which needs Newton's robustness against the
     /// exponential Vbe stiffness.
-    ControlNewton,
+    ///
+    /// The parameters are the knobs the legacy per-type loops disagreed on.
+    /// The trait default ([`BiasSeed::iteration_scheme`]) carries the constants
+    /// of the deleted `spqr_build.rs::compute_wdf_bjt_dc_qpoint` loop (ko5g.4:
+    /// 60 iterations, ±0.1 V step clamp, per-iteration `v_control` clamp to
+    /// [0, 1] V) so the single production Newton call-site is reproduced
+    /// bit-for-bit.
+    ControlNewton {
+        max_iter: usize,
+        /// Symmetric NR step clamp (V).
+        step_clamp: f64,
+        /// Optional per-iteration clamp applied to `v_control` AFTER stepping.
+        v_control_clamp: Option<(f64, f64)>,
+    },
     /// Damped relaxation on the device **main current** (the triode Ia-relaxation).
     ///
     /// Bit-for-bit reproduces the legacy per-type `solve_triode_dc_qpoint` loop:
@@ -673,8 +701,17 @@ pub(super) struct DeviceIv {
     /// `0.0` for JFETs/MOSFETs and vacuum triodes (grids draw negligible current
     /// at normal audio-rate operating points).
     pub(super) i_control: f64,
-    /// ∂I_main/∂V_control (transconductance).
-    pub(super) di_main_dv_control: f64,
+    /// ∂(I_main + I_control)/∂V_control — the TOTAL-current derivative, which is
+    /// what the degeneration term of the Newton Jacobian actually needs
+    /// (`dF/dV = -dI_ctrl·R_th - 1 - dI_total·R_degen`).
+    ///
+    /// ko5g.4 NOTE (bit-identity): the deleted `compute_wdf_bjt_dc_qpoint` loop
+    /// computed this as `(ic2 + ib2 - ie) / h` — total currents summed BEFORE
+    /// the finite-difference division.  Carrying the total derivative as one
+    /// field (instead of `di_main + di_control` summed in the solver) preserves
+    /// that floating-point grouping exactly.  For devices with `i_control = 0`
+    /// (triode, FET) this is simply the transconductance g_m.
+    pub(super) di_total_dv_control: f64,
     /// ∂I_control/∂V_control.
     pub(super) di_control_dv_control: f64,
 }
@@ -721,11 +758,17 @@ pub(super) trait BiasSeed {
 
     /// Which iteration scheme `solve_operating_point` should use.
     ///
-    /// Defaults to `ControlNewton` (the BJT-divider path).  The triode overrides
-    /// this to `MainCurrentRelaxation` so the shared solver reproduces the legacy
-    /// per-type Ia-relaxation Q-point bit-for-bit.
+    /// Defaults to `ControlNewton` with the deleted
+    /// `spqr_build.rs::compute_wdf_bjt_dc_qpoint` loop constants (ko5g.4), so
+    /// the BJT-divider path reproduces the legacy per-type Newton bit-for-bit.
+    /// The triode overrides this to `MainCurrentRelaxation` so the shared
+    /// solver reproduces the legacy Ia-relaxation Q-point bit-for-bit.
     fn iteration_scheme(&self) -> IterationScheme {
-        IterationScheme::ControlNewton
+        IterationScheme::ControlNewton {
+            max_iter: 60,
+            step_clamp: 0.1,
+            v_control_clamp: Some((0.0, 1.0)),
+        }
     }
 }
 
@@ -774,9 +817,11 @@ pub(super) fn solve_located_operating_point<S: BiasSeed>(
     // Both schemes converge to the same load-line fixed point and return the
     // triple (v_control, i_total, v_output) at that point.
     let (v_ctrl, i_total_final, v_output_final) = match seed.iteration_scheme() {
-        IterationScheme::ControlNewton => {
-            control_newton_solve(seed, topo)
-        }
+        IterationScheme::ControlNewton {
+            max_iter,
+            step_clamp,
+            v_control_clamp,
+        } => control_newton_solve(seed, topo, max_iter, step_clamp, v_control_clamp),
         IterationScheme::MainCurrentRelaxation {
             initial_i_main,
             damping,
@@ -808,13 +853,24 @@ pub(super) fn solve_located_operating_point<S: BiasSeed>(
 }
 
 /// Newton on the control-voltage residual.  Returns `(v_control, i_total,
-/// v_output)` at the converged Q-point.  This is the original
-/// `solve_operating_point` inner loop, extracted verbatim so the BJT path is
-/// byte-identical.
-fn control_newton_solve<S: BiasSeed>(seed: &S, topo: &BiasTopology) -> (f64, f64, f64) {
+/// v_output)` at the converged Q-point.
+///
+/// With the trait-default parameters (`max_iter = 60`, `step_clamp = 0.1`,
+/// `v_control_clamp = [0, 1]`) and a `DeviceIv` whose derivatives use the
+/// legacy floating-point grouping (see [`DeviceIv::di_total_dv_control`]),
+/// this loop reproduces the deleted `spqr_build.rs::compute_wdf_bjt_dc_qpoint`
+/// Newton bit-for-bit (pinned by
+/// `wdf_bjt_qpoint_bit_reproduces_deleted_loop`).
+fn control_newton_solve<S: BiasSeed>(
+    seed: &S,
+    topo: &BiasTopology,
+    max_iter: usize,
+    step_clamp: f64,
+    v_control_clamp: Option<(f64, f64)>,
+) -> (f64, f64, f64) {
     let mut v_ctrl = seed.initial_v_control();
 
-    for _ in 0..80 {
+    for _ in 0..max_iter {
         // Compute v_output from the load line using the current v_ctrl estimate.
         //
         // For auto-bias (triode): Ia = -Vgk / Rk (KVL at cathode), so
@@ -850,17 +906,20 @@ fn control_newton_solve<S: BiasSeed>(seed: &S, topo: &BiasTopology) -> (f64, f64
             - v_ctrl
             - i_total * topo.r_degeneration;
 
-        // dF/dV_ctrl = -dIb/dV * Rth - 1 - (dIb/dV + dIa/dV) * R_degen
+        // dF/dV_ctrl = -dIb/dV * Rth - 1 - dI_total/dV * R_degen
         let df = -iv.di_control_dv_control * topo.r_control_thevenin
             - 1.0
-            - (iv.di_main_dv_control + iv.di_control_dv_control) * topo.r_degeneration;
+            - iv.di_total_dv_control * topo.r_degeneration;
 
         if df.abs() < 1e-18 {
             break;
         }
 
-        let step = (f / df).clamp(-0.2, 0.2);
+        let step = (f / df).clamp(-step_clamp, step_clamp);
         v_ctrl -= step;
+        if let Some((lo, hi)) = v_control_clamp {
+            v_ctrl = v_ctrl.clamp(lo, hi);
+        }
 
         if step.abs() < 1e-9 {
             break;
@@ -1155,7 +1214,8 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
         DeviceIv {
             i_main: ia,
             i_control: 0.0, // grid draws no current
-            di_main_dv_control: gm,
+            // i_control ≡ 0, so the total-current derivative IS g_m.
+            di_total_dv_control: gm,
             di_control_dv_control: 0.0,
         }
     }
@@ -1184,16 +1244,181 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
     }
 }
 
-// ── BJT NPN ─────────────────────────────────────────────────────────────────
+// ── BJT ─────────────────────────────────────────────────────────────────────
 
-/// `BiasSeed` for a common-emitter NPN BJT.
-pub(super) struct BjtNpnSeed<'a> {
-    pub(super) nl_kind: &'a NonlinearKind,
-    pub(super) label: String,
+/// Which resistor-finder chain `BjtSeed::locate_bias_topology` runs (ko5g.4).
+///
+/// Exactly like [`TriodeFinderFlavor`], the historical BJT bias copies used
+/// DIFFERENT finder breadths, and this refactor is byte-identity-gated, so the
+/// breadth is preserved per-flavor rather than silently widened:
+///
+/// - [`WdfStageDirect`](Self::WdfStageDirect) — the single-port WDF path
+///   (`spqr_build.rs` → [`solve_wdf_bjt_dc_qpoint`]): the deleted
+///   `compute_wdf_bjt_dc_qpoint` searched the STAGE edge set only, with
+///   direct-edge matches only (no cap-aware BFS in any arm); R1 across
+///   `positive_supply_rails` (vcc first, then named — pedalkernel-0stg); RC
+///   against the LITERAL `graph.vcc_node` only; the Thévenin base voltage
+///   prefers the spqr `StaticBias` node-voltage map (legacy
+///   `node_dc_voltage` arm order); PNP is handled by the magnitude mirror
+///   `v_drive = |supply| - Vth|`.
+/// - [`DividerBfs`](Self::DividerBfs) — the ko5g.1 `BjtNpnSeed` breadth
+///   (currently exercised by characterization tests only, NO production
+///   call-site): GRAPH-WIDE R1/R2/RC search, direct-edge first then cap-aware
+///   BFS at every arm, RC across all rails with an estimate fallback, Thévenin
+///   base voltage from [`NetworkBias::voltage_at`]. NPN only.
+///
+/// KNOWN LEGACY GAPS preserved by BOTH flavors (fix lands HERE, once, after
+/// this collapse):
+/// - **pedalkernel-6ou7**: RE is searched from emitter to GND only — a classic
+///   PNP common-emitter whose RE returns to VCC never seeds (cutoff).  The RC
+///   arm of `WdfStageDirect` is likewise vcc/positive-rail-only.  The fix is
+///   to key the RE/RC rail targets on device polarity in
+///   `locate_bias_topology` below.
+/// - **pedalkernel-129p** (partly): the WDF entry's `vbe.clamp(0.3, 0.8)`
+///   post-clamp ([`WDF_BJT_VBE_CLAMP`]) forces a germanium conducting point
+///   (Vbe ≈ 0.15-0.3 V) up to 0.3 V.  The group-solver half of 129p is the
+///   `any_active` physicality gate in [`solve_bjt_group_dc_qpoint`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BjtFinderFlavor {
+    WdfStageDirect,
+    DividerBfs,
 }
 
-impl<'a> BiasSeed for BjtNpnSeed<'a> {
-    fn locate_bias_topology(
+/// Post-solve Vbe clamp of the deleted `compute_wdf_bjt_dc_qpoint` (ko5g.4):
+/// "A silicon BJT in conduction sits ~0.55-0.75 V; clamp defensively."
+/// Named so the pedalkernel-129p germanium fix (Ge Vbe ≈ 0.15-0.3 V conducts,
+/// this floor forces it to 0.3) has exactly one greppable place to relax.
+pub(super) const WDF_BJT_VBE_CLAMP: (f64, f64) = (0.3, 0.8);
+
+/// `BiasSeed` for a common-emitter BJT (NPN, plus PNP via the magnitude mirror
+/// on the `WdfStageDirect` flavor).
+pub(super) struct BjtSeed<'a> {
+    pub(super) nl_kind: &'a NonlinearKind,
+    pub(super) label: String,
+    /// Which resistor-finder chain to run (per-call-site legacy breadth).
+    pub(super) flavor: BjtFinderFlavor,
+    /// The spqr `StaticBias` node-voltage map, used by the `WdfStageDirect`
+    /// flavor's Thévenin-base-voltage preference (legacy `node_dc_voltage`
+    /// arm order — which differs from [`NetworkBias::voltage_at`]: it
+    /// consults `supply_voltages` BEFORE the ac-ground arm).  `None` behaves
+    /// as an empty map.
+    pub(super) wdf_bias_node_voltages: Option<&'a std::collections::BTreeMap<NodeId, f64>>,
+}
+
+impl<'a> BjtSeed<'a> {
+    fn nl_terminals(&self) -> Option<(&str, NodeId, NodeId, NodeId, bool)> {
+        match self.nl_kind {
+            NonlinearKind::BjtNpn {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } => Some((
+                model_name.as_str(),
+                *base_node,
+                *collector_node,
+                *emitter_node,
+                false,
+            )),
+            NonlinearKind::BjtPnp {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } => Some((
+                model_name.as_str(),
+                *base_node,
+                *collector_node,
+                *emitter_node,
+                true,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The deleted WDF copy's locate: STAGE edge set, direct-edge matches only.
+    fn locate_wdf_stage_direct(
+        &self,
+        edge_indices: &[usize],
+        graph: &CircuitGraph,
+        supply_voltage: f64,
+    ) -> Result<BiasTopology, BiasError> {
+        let undet = |missing: TopologyTerm| BiasError::UndeterminableBjt {
+            label: self.label.clone(),
+            missing,
+        };
+        let (_model_name, base_node, _collector_node, emitter_node, is_pnp) = self
+            .nl_terminals()
+            .ok_or_else(|| undet(TopologyTerm::BaseDivider))?;
+
+        // Base divider: R1 = base→rail, R2 = base→gnd. Rails vcc-first, then
+        // named rails with their actual voltages (pedalkernel-0stg).
+        let (r1, base_rail_v) = positive_supply_rails(graph)
+            .iter()
+            .find_map(|&rail| {
+                find_load_resistor_direct(base_node, rail, edge_indices, graph).map(|r| {
+                    (
+                        r,
+                        rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage),
+                    )
+                })
+            })
+            .ok_or_else(|| undet(TopologyTerm::BaseDivider))?;
+        let r2 = find_load_resistor_direct(base_node, graph.gnd_node, edge_indices, graph)
+            .ok_or_else(|| undet(TopologyTerm::BaseDivider))?;
+        if r1 + r2 <= 0.0 {
+            return Err(undet(TopologyTerm::BaseDivider));
+        }
+
+        // Prefer the StaticBias-map base voltage (matches blockwise's source) for
+        // the open-circuit divider voltage; fall back to the resistor divider.
+        static EMPTY_BIAS_MAP: std::collections::BTreeMap<NodeId, f64> =
+            std::collections::BTreeMap::new();
+        let bias_map = self.wdf_bias_node_voltages.unwrap_or(&EMPTY_BIAS_MAP);
+        let vth = node_dc_voltage(base_node, bias_map, graph)
+            .filter(|v| v.is_finite())
+            .unwrap_or(base_rail_v * r2 / (r1 + r2));
+        let rth = r1 * r2 / (r1 + r2);
+
+        // Emitter resistor RE (emitter→gnd).  Required for the load-line solve;
+        // a degeneration resistor is what makes the raw divider voltage an
+        // over-bias.  pedalkernel-6ou7: this is GND-only even for PNP whose RE
+        // returns to VCC — preserved (fix lands here, once).
+        let re = find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
+            .ok_or_else(|| undet(TopologyTerm::EmitterResistor))?;
+
+        // PNP common-emitter is the mirror image: the emitter sits at VCC, the
+        // divider biases the base below it, so the loop voltage that
+        // forward-biases the (emitter-base) junction is (VCC - Vth) and RE
+        // returns to VCC.  Working in the device's own (positive-forward) sign
+        // convention, the magnitude equations are identical with
+        // `v_drive = |rail - Vth|`.
+        let v_drive = if is_pnp {
+            (supply_voltage.abs() - vth).abs()
+        } else {
+            vth
+        };
+
+        Ok(BiasTopology {
+            // The WDF entry computes its own legacy Vce warm-start (RC lookup
+            // is vcc-literal AND optional there — see
+            // `solve_wdf_bjt_dc_qpoint`), so the load-line fields are inert
+            // placeholders: r_load = 0 makes the shared final-eval
+            // v_output = v_load_rail, finite by construction.
+            r_load: 0.0,
+            v_load_rail: supply_voltage.abs(),
+            r_degeneration: re,
+            v_control_thevenin: v_drive,
+            r_control_thevenin: rth,
+            supply_voltage,
+            degeneration_node: Some(emitter_node),
+        })
+    }
+
+    /// The ko5g.1 graph-wide direct-then-BFS locate (NPN only; no production
+    /// call-site — kept per-flavor for the characterization suite and as the
+    /// candidate breadth for the ko5g.8-era unification).
+    fn locate_divider_bfs(
         &self,
         edge_indices: &[usize],
         graph: &CircuitGraph,
@@ -1248,7 +1473,7 @@ impl<'a> BiasSeed for BjtNpnSeed<'a> {
                 missing: TopologyTerm::BaseDivider,
             })?;
 
-        // Emitter resistor RE: emitter→gnd.
+        // Emitter resistor RE: emitter→gnd (pedalkernel-6ou7 applies here too).
         let re = find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
             .or_else(|| find_load_resistor_bfs(emitter_node, graph.gnd_node, edge_indices, graph))
             .ok_or_else(|| BiasError::UndeterminableBjt {
@@ -1292,32 +1517,60 @@ impl<'a> BiasSeed for BjtNpnSeed<'a> {
             degeneration_node: Some(emitter_node),
         })
     }
+}
+
+impl<'a> BiasSeed for BjtSeed<'a> {
+    fn locate_bias_topology(
+        &self,
+        edge_indices: &[usize],
+        graph: &CircuitGraph,
+        network_bias: &NetworkBias,
+        supply_voltage: f64,
+    ) -> Result<BiasTopology, BiasError> {
+        match self.flavor {
+            BjtFinderFlavor::WdfStageDirect => {
+                self.locate_wdf_stage_direct(edge_indices, graph, supply_voltage)
+            }
+            BjtFinderFlavor::DividerBfs => {
+                self.locate_divider_bfs(edge_indices, graph, network_bias, supply_voltage)
+            }
+        }
+    }
 
     fn device_iv(&self, trial: TrialPoint) -> DeviceIv {
         let model_name = match self.nl_kind {
-            NonlinearKind::BjtNpn { model_name, .. } => model_name.as_str(),
+            NonlinearKind::BjtNpn { model_name, .. }
+            | NonlinearKind::BjtPnp { model_name, .. } => model_name.as_str(),
             _ => "2N3904",
         };
         let model = super::helpers::gummel_poon_model(model_name);
-        let vbc_active = -1.0_f64; // assume active region (reverse Vbc)
+        // Active-region collector reverse bias: vbc < 0 → exp term negligible.
+        // A small fixed reverse bias keeps base_charge / transport in the
+        // active region.  PNP runs in the device's own positive-forward
+        // convention (the topology's `v_drive` mirror), so the model call is
+        // polarity-agnostic here — exactly the deleted copy's convention.
+        let vbc_active = -1.0_f64;
         let (ic, ib) = model.currents(
             trial.v_control as pedalkernel_rt::Wave,
             vbc_active as pedalkernel_rt::Wave,
         );
+        let ie = ic + ib;
 
-        // Numerical derivatives
+        // Numerical derivatives, in the deleted loop's exact grouping (the
+        // total-current derivative sums the perturbed currents BEFORE the
+        // finite-difference division — see `DeviceIv::di_total_dv_control`).
         let h = 1e-4_f64;
         let (ic2, ib2) = model.currents(
             (trial.v_control + h) as pedalkernel_rt::Wave,
             vbc_active as pedalkernel_rt::Wave,
         );
-        let dic_dvbe = (ic2 - ic) as f64 / h;
         let dib_dvbe = (ib2 - ib) as f64 / h;
+        let die_dvbe = (ic2 + ib2 - ie) as f64 / h;
 
         DeviceIv {
             i_main: ic as f64,
             i_control: ib as f64,
-            di_main_dv_control: dic_dvbe,
+            di_total_dv_control: die_dvbe,
             di_control_dv_control: dib_dvbe,
         }
     }
@@ -1327,7 +1580,10 @@ impl<'a> BiasSeed for BjtNpnSeed<'a> {
     }
 
     fn device_kind(&self) -> DeviceBiasKind {
-        DeviceBiasKind::BjtNpn
+        match self.nl_kind {
+            NonlinearKind::BjtPnp { .. } => DeviceBiasKind::BjtPnp,
+            _ => DeviceBiasKind::BjtNpn,
+        }
     }
 
     fn initial_v_control(&self) -> f64 {
@@ -1388,6 +1644,33 @@ pub(super) fn rail_dc_voltage(
     } else {
         None
     }
+}
+
+/// DC voltage of `node` from the spqr `StaticBias` node-voltage map, with the
+/// LEGACY rail arm order (moved verbatim from `spqr_build.rs`, ko5g.4): gnd →
+/// declared supply voltages → ac-ground → solved map.
+///
+/// NOTE this order differs from [`NetworkBias::voltage_at`], which consults
+/// the ac-ground arm before ANY supply arm (the pedalkernel-mgsd family):
+/// here a node that is both a declared supply and AC-ground resolves to its
+/// supply voltage, there it resolves to 0 V.  Both orders are preserved
+/// because each is load-bearing for its historical call-sites; unifying them
+/// is mgsd's business, not this refactor's.
+pub(super) fn node_dc_voltage(
+    node: NodeId,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    graph: &CircuitGraph,
+) -> Option<f64> {
+    if node == graph.gnd_node {
+        return Some(0.0);
+    }
+    if let Some(&v) = graph.supply_voltages.get(&node) {
+        return Some(v);
+    }
+    if graph.ac_ground_nodes.contains(&node) {
+        return Some(0.0);
+    }
+    bias_node_voltages.get(&node).copied()
 }
 
 /// The positive supply rails a device load resistor may return to, in
@@ -2015,6 +2298,356 @@ fn solve_wdf_triode_dc_qpoint_inner(
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Single-device BJT bias entries (ko5g.4 — the three collapsed copies)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Why a single-device BJT bias resolution produced no value (ko5g.4 — the
+/// exact [`TriodeQpointSkip`] pattern from ko5g.3).
+///
+/// - [`NotApplicable`](Self::NotApplicable): the element is not a BJT at all —
+///   nothing to warn about, silent.
+/// - [`Undeterminable`](Self::Undeterminable): a REAL BJT stage whose bias
+///   could not be determined.  The caller keeps its legacy fallback (WDF path:
+///   `BjtRoot`'s vbe_bias = 0 cutoff default; blockwise path: the named
+///   [`bjt_unconditional_default_vbe`]) and must WARN LOUDLY via
+///   [`warn_if_undeterminable`](Self::warn_if_undeterminable).  The fail-loud
+///   flip (warn → `CompileError`) is ko5g.8.
+#[derive(Debug, Clone)]
+pub(super) enum BjtQpointSkip {
+    /// Not a BJT — nothing to warn about.
+    NotApplicable,
+    /// A BJT stage rode into its legacy fallback.
+    Undeterminable(BiasError),
+}
+
+impl BjtQpointSkip {
+    /// ko5g.4 warn-not-error: print a loud stderr warning when a real BJT
+    /// stage keeps its legacy fallback. `fallback` names what the caller
+    /// actually does (the call-sites default differently).
+    pub(super) fn warn_if_undeterminable(&self, fallback: &str) {
+        if let Self::Undeterminable(err) = self {
+            eprintln!(
+                "  [bias] WARNING: {} {fallback} (warn-not-error, pedalkernel-ko5g.4; \
+                 this becomes a compile error under pedalkernel-ko5g.8)",
+                err.clone().into_compile_error()
+            );
+        }
+    }
+}
+
+/// Best-effort instance name for the BJT that owns `base_node`: the
+/// `<comp>.base` pin name if one maps to the node (→ "Q2"), else the
+/// lexicographically-first node alias, else the model name. Used for warnings
+/// (where it must be a valid `init {}` hint target) + the
+/// `PK_BIAS_QPOINT_DEBUG` table — never affects the solve.
+pub(super) fn bjt_instance_label(
+    graph: &CircuitGraph,
+    base_node: NodeId,
+    model_name: &str,
+) -> String {
+    let mut names: Vec<&str> = graph
+        .node_names
+        .iter()
+        .filter(|(_, &n)| n == base_node)
+        .map(|(k, _)| k.as_str())
+        .collect();
+    names.sort_unstable();
+    names
+        .iter()
+        .find(|k| k.ends_with(".base"))
+        .map(|k| k.trim_end_matches(".base").to_owned())
+        .or_else(|| names.first().map(|k| (*k).to_owned()))
+        .unwrap_or_else(|| model_name.to_owned())
+}
+
+/// Display form for the `PK_BIAS_QPOINT_DEBUG` table: "Q2 (2n3904)".
+fn bjt_display_label(graph: &CircuitGraph, base_node: NodeId, model_name: &str) -> String {
+    let inst = bjt_instance_label(graph, base_node, model_name);
+    if inst == model_name {
+        inst
+    } else {
+        format!("{inst} ({model_name})")
+    }
+}
+
+/// `PK_BIAS_QPOINT_DEBUG=1`: dump every single-device BJT Q-point solve (or
+/// its failure) to stderr — the per-instance Vbe/Vce table used to gate bias
+/// refactors (gate 2 of ko5g.4).
+fn bjt_qpoint_debug(
+    path: &str,
+    label: &str,
+    supply_voltage: f64,
+    out: &Result<BjtDcQpoint, BjtQpointSkip>,
+) {
+    if std::env::var("PK_BIAS_QPOINT_DEBUG").is_err() {
+        return;
+    }
+    match out {
+        Ok(dc) => eprintln!(
+            "[bias-qpoint] path={path} bjt {label}: vbe={:.6} vce={:.6} v_emitter={:.6} supply={supply_voltage}",
+            dc.vbe, dc.vce, dc.v_emitter
+        ),
+        Err(BjtQpointSkip::Undeterminable(err)) => eprintln!(
+            "[bias-qpoint] path={path} bjt {label}: UNDETERMINABLE ({err:?}) supply={supply_voltage}"
+        ),
+        Err(BjtQpointSkip::NotApplicable) => {}
+    }
+}
+
+/// DC Q-point data for a single common-emitter BJT stage (moved verbatim from
+/// `spqr_build.rs`, ko5g.4).
+#[derive(Debug, Clone)]
+pub(super) struct BjtDcQpoint {
+    /// Forward base-emitter voltage at the operating point (magnitude, fed to
+    /// `BjtRoot::set_bias`; the root applies PNP sign internally).
+    pub(super) vbe: f64,
+    /// Collector-emitter voltage at the operating point, signed for PNP, fed to
+    /// `BjtRoot::set_initial_prev_v` as the NR warm-start.
+    pub(super) vce: f64,
+    /// Emitter-resistor DC drop (|Ie·RE|), to pre-charge the emitter bypass cap.
+    pub(super) v_emitter: f64,
+}
+
+/// Single-port-WDF BJT DC Q-point (ko5g.4) — replaces the deleted
+/// `spqr_build.rs::compute_wdf_bjt_dc_qpoint` copy. Rides the SAME
+/// `BjtSeed` locate + `ControlNewton` core as the (test-only) divider path,
+/// with the legacy WDF call-site semantics preserved exactly:
+///
+/// - **`BjtFinderFlavor::WdfStageDirect`** — stage-edge-set, direct-edge-only
+///   finders; RC vcc-literal; StaticBias-map Thévenin preference (legacy
+///   `node_dc_voltage` arm order); the PNP magnitude mirror.  See
+///   [`BjtFinderFlavor`].
+/// - **Newton loop** — the trait-default `ControlNewton` parameters ARE the
+///   deleted loop's (60 iters, ±0.1 step clamp, [0,1] V per-iter clamp,
+///   0.65 V start, h = 1e-4, Vbc = -1 V), and `BjtSeed::device_iv` carries the
+///   deleted loop's exact finite-difference grouping — bit-for-bit, pinned by
+///   `wdf_bjt_qpoint_bit_reproduces_deleted_loop`.
+/// - **Post-solve** — reject `vbe <= 0`; clamp to [`WDF_BJT_VBE_CLAMP`]
+///   (divergence vs the group solver, preserved: forces a germanium
+///   conducting point up to 0.3 V — pedalkernel-129p's WDF half); Vce from a
+///   vcc-LITERAL stage-set RC lookup (pedalkernel-6ou7's second half) with the
+///   half-rail fallback, clamped to [0, vcc], PNP-signed;
+///   `v_emitter = |Ie·RE|`.
+///
+/// Returns `Err(BjtQpointSkip::NotApplicable)` when the element is not a BJT,
+/// `Err(BjtQpointSkip::Undeterminable)` when it IS one but the base divider /
+/// emitter resistor cannot be located or the solve lands non-physical — the
+/// warn-not-error split (the caller warns and keeps its legacy cutoff
+/// fallback; ko5g.8 flips to a compile error).
+pub(super) fn solve_wdf_bjt_dc_qpoint(
+    nl_kind: &NonlinearKind,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    supply_voltage: f64,
+) -> Result<BjtDcQpoint, BjtQpointSkip> {
+    let out = solve_wdf_bjt_dc_qpoint_inner(
+        nl_kind,
+        edge_indices,
+        graph,
+        bias_node_voltages,
+        supply_voltage,
+    );
+    if let NonlinearKind::BjtNpn {
+        model_name,
+        base_node,
+        ..
+    }
+    | NonlinearKind::BjtPnp {
+        model_name,
+        base_node,
+        ..
+    } = nl_kind
+    {
+        bjt_qpoint_debug(
+            "wdf",
+            &bjt_display_label(graph, *base_node, model_name),
+            supply_voltage,
+            &out,
+        );
+    }
+    out
+}
+
+fn solve_wdf_bjt_dc_qpoint_inner(
+    nl_kind: &NonlinearKind,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+    supply_voltage: f64,
+) -> Result<BjtDcQpoint, BjtQpointSkip> {
+    let (model_name, base_node, collector_node, is_pnp) = match nl_kind {
+        NonlinearKind::BjtNpn {
+            model_name,
+            base_node,
+            collector_node,
+            ..
+        } => (model_name.as_str(), *base_node, *collector_node, false),
+        NonlinearKind::BjtPnp {
+            model_name,
+            base_node,
+            collector_node,
+            ..
+        } => (model_name.as_str(), *base_node, *collector_node, true),
+        // Not a BJT: no base-loop Q-point on this path — silent skip.
+        _ => return Err(BjtQpointSkip::NotApplicable),
+    };
+    let label = bjt_instance_label(graph, base_node, model_name);
+
+    let seed = BjtSeed {
+        nl_kind,
+        label: label.clone(),
+        flavor: BjtFinderFlavor::WdfStageDirect,
+        wdf_bias_node_voltages: Some(bias_node_voltages),
+    };
+    let network_bias = NetworkBias::default();
+    let topo = seed
+        .locate_bias_topology(edge_indices, graph, &network_bias, supply_voltage)
+        .map_err(BjtQpointSkip::Undeterminable)?;
+    let op = solve_located_operating_point(&seed, &topo)
+        .map_err(BjtQpointSkip::Undeterminable)?;
+
+    // Legacy WDF sanity: a non-positive solved Vbe means the base loop drove
+    // the junction out of conduction — treat as no Q-point.
+    let vbe = op.control_bias;
+    if !vbe.is_finite() || vbe <= 0.0 {
+        return Err(BjtQpointSkip::Undeterminable(BiasError::NonPhysicalQpoint));
+    }
+    // A silicon BJT in conduction sits ~0.55-0.75 V; clamp defensively.
+    let (clamp_lo, clamp_hi) = WDF_BJT_VBE_CLAMP;
+    let vbe = vbe.clamp(clamp_lo, clamp_hi);
+
+    // Collector-emitter operating-point voltage, for the BjtRoot warm-start.
+    // RC = collector→rail.  Vce = |VCC - Ic·RC - Ie·RE| (active region).  Used
+    // to pre-seed `prev_v` so the WDF/NR solve cold-starts AT the Q-point
+    // instead of 0 V, eliminating the bias-settling startup transient (ngspice
+    // runs a `.op` before `.tran`).  Falls back to half-rail when RC is absent.
+    let model = super::helpers::gummel_poon_model(model_name);
+    let vbc_active = -1.0_f64;
+    let (ic, ib) = model.currents(
+        vbe as pedalkernel_rt::Wave,
+        vbc_active as pedalkernel_rt::Wave,
+    );
+    let ie = ic + ib;
+    let re = topo.r_degeneration;
+    let rc = find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph);
+    let vcc = supply_voltage.abs();
+    let vce = match rc {
+        Some(rc) => (vcc - ic * rc - ie * re).clamp(0.0, vcc),
+        None => vcc * 0.5,
+    };
+    let vce = if is_pnp { -vce } else { vce };
+
+    // Emitter DC voltage = Ie·RE (NPN: positive above gnd).  Used to pre-charge
+    // the emitter bypass cap so its RE·CE time-constant transient does not
+    // appear at startup.  For PNP the emitter returns to VCC; the cap across RE
+    // still charges to the |Ie·RE| drop, so we report the magnitude.
+    let v_emitter = (ie * re).abs();
+
+    Ok(BjtDcQpoint {
+        vbe,
+        vce,
+        v_emitter,
+    })
+}
+
+/// Blockwise-path BJT base bias (ko5g.4) — replaces the copy that lived at
+/// `blockwise.rs::lower_block_stages` (the ko5g.2 audit's S9 site).
+///
+/// DIVERGENCE (preserved): unlike the WDF load-line solve above, this flavor
+/// never solved anything — it reads the RAW `StaticBias` base-node DC voltage
+/// of the first NL edge whose `<comp>.base` pin is in the map and caps it at
+/// 0.8 V (`v_base.min(0.8)` — no lower clamp, no emitter-degeneration
+/// correction, no PNP sign handling).  Collapsing it here makes the divergence
+/// visible and greppable; making it a real load-line solve is a deliberate
+/// physics change for a later bead, not this refactor.
+///
+/// `Err(Undeterminable)` when no NL edge's base voltage is in the map — the
+/// caller warns loudly and applies the named
+/// [`bjt_unconditional_default_vbe`] (byte-identical to the deleted
+/// `default_vbe` behavior, minus the silence).
+pub(super) fn solve_blockwise_bjt_base_bias(
+    nl_edge_indices: &[usize],
+    graph: &CircuitGraph,
+    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
+) -> Result<f64, BjtQpointSkip> {
+    let base_bias = nl_edge_indices.iter().find_map(|&eidx| {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let base_key = format!("{}.base", comp.id);
+        let base_node = graph.node_names.get(&base_key)?;
+        bias_node_voltages.get(base_node).copied()
+    });
+
+    // Label for warnings/debug: the first NL component in the block.
+    let label = nl_edge_indices
+        .first()
+        .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+        .unwrap_or_else(|| "BJT".to_owned());
+
+    let out = match base_bias {
+        Some(v_base) => Ok(v_base.min(0.8)),
+        None => Err(BjtQpointSkip::Undeterminable(BiasError::UndeterminableBjt {
+            label: label.clone(),
+            missing: TopologyTerm::BaseDivider,
+        })),
+    };
+    if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+        match &out {
+            Ok(vbe) => eprintln!(
+                "[bias-qpoint] path=blockwise bjt {label}: vbe={vbe:.6} (StaticBias map)"
+            ),
+            Err(BjtQpointSkip::Undeterminable(err)) => {
+                eprintln!("[bias-qpoint] path=blockwise bjt {label}: UNDETERMINABLE ({err:?})")
+            }
+            Err(BjtQpointSkip::NotApplicable) => {}
+        }
+    }
+    out
+}
+
+/// THE unconditional BJT conduction default (ko5g.4) — the ko5g.2 audit's S9
+/// fallback, formerly the anonymous `default_vbe` at `blockwise.rs:359`.
+///
+/// This is the engine's most aggressive silent bias default: it FORCES the
+/// device into nominal conduction (0.6 V silicon / 0.3 V low-voltage) with no
+/// topology evidence at all — the opposite polarity of the WDF path's
+/// leave-at-cutoff fallback.  It exists as a named, documented, greppable
+/// function so that (a) the blockwise call-site can keep byte-identical
+/// behavior while WARNING loudly when it fires, and (b) ko5g.8 has exactly one
+/// place to delete.
+pub(super) fn bjt_unconditional_default_vbe(supply_voltage: f64) -> f64 {
+    if supply_voltage > 1.0 {
+        0.6
+    } else {
+        0.3
+    }
+}
+
+/// Model-derived BJT conduction seed (ko5g.4) — replaces the copy that lived
+/// in `rigid/general.rs` (`initial_v` physics-based defaults for
+/// `BjtTwoPort` groups; the bead's "general.rs:1205" path).
+///
+/// Returns the SIGNED `(vbe, vce)` NR warm-start pair for one device:
+/// `vbe = nf·Vt·ln(1 mA / Is)` — the junction voltage at a nominal 1 mA
+/// collector current — clamped to [0.1, 0.8] V, and `vce = supply/2`
+/// (half-rail active region), both negated for PNP.
+///
+/// DIVERGENCE (preserved): this flavor is a MODEL-only seed — no topology at
+/// all (not even the divider) — because it only warm-starts the grouped-MNA
+/// NR whose DC excitation (`dc_bias`) is computed elsewhere.  It can never
+/// fail, so it has no `Undeterminable` arm.
+pub(super) fn bjt_model_conduction_seed(
+    model: &GummelPoonModel,
+    supply_voltage: f64,
+    is_pnp: bool,
+) -> (f64, f64) {
+    let sign = if is_pnp { -1.0 } else { 1.0 };
+    let vbe = model.nf * model.vt * (1.0e-3_f64 / model.is).ln();
+    (sign * vbe.clamp(0.1, 0.8), sign * supply_voltage * 0.5)
+}
+
 /// Solve the **nonlinear** DC operating point of every BJT in the group.
 ///
 /// This is the BJT analogue of [`solve_triode_dc_qpoint`].  Where the triode
@@ -2417,6 +3050,23 @@ pub(super) fn solve_bjt_group_dc_qpoint(
             }
         }
     }
+
+    // `PK_BIAS_QPOINT_DEBUG=1`: per-instance grouped op-point table (probe
+    // output only — the solve above is unaffected; ko5g.4 gate 2).
+    if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+        for b in &bjts {
+            let vb_ = node_voltage(b.base, &v);
+            let vc_ = node_voltage(b.collector, &v);
+            let ve_ = node_voltage(b.emitter, &v);
+            let sign = if b.is_npn { 1.0 } else { -1.0 };
+            eprintln!(
+                "[bias-qpoint] path=mna-group bjt {}: vbe={:.6} vce={:.6} supply={supply_voltage}",
+                bjt_display_label(graph, b.base, b.model_name),
+                sign * (vb_ - ve_),
+                sign * (vc_ - ve_),
+            );
+        }
+    }
     Some(node_dc)
 }
 
@@ -2733,7 +3383,7 @@ mod tests {
 
     // ── 5. BJT Q-point: match vs compute_wdf_bjt_dc_qpoint ──────────────────
 
-    /// Verify that `solve_operating_point` with `BjtNpnSeed` returns the same
+    /// Verify that `solve_operating_point` with `BjtSeed` returns the same
     /// Vbe as the existing `compute_wdf_bjt_dc_qpoint` for a classic NPN
     /// common-emitter divider circuit (2N3904, 9V supply).
     #[test]
@@ -2821,9 +3471,11 @@ mod tests {
             emitter_node,
         };
 
-        let seed = BjtNpnSeed {
+        let seed = BjtSeed {
             nl_kind: &nl_kind,
             label: "Q1".to_owned(),
+            flavor: BjtFinderFlavor::DividerBfs,
+            wdf_bias_node_voltages: None,
         };
 
         let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
@@ -2849,6 +3501,495 @@ mod tests {
             new_vbe > 0.3 && new_vbe < 0.85,
             "Vbe={new_vbe:.4} V out of physical range [0.3, 0.85]"
         );
+    }
+
+    // ── 5b. ko5g.4: single-device BJT collapse — per-flavor behavior pins ────
+
+    /// VERBATIM copy of the deleted `spqr_build.rs::compute_wdf_bjt_dc_qpoint`
+    /// (ko5g.4), kept as the bit-reproduction reference for
+    /// `wdf_bjt_qpoint_bit_reproduces_deleted_loop`.  Do not "clean up" — the
+    /// exact expression grouping is the thing under test.
+    #[allow(clippy::too_many_arguments)]
+    fn deleted_compute_wdf_bjt_dc_qpoint(
+        nl_kind: &NonlinearKind,
+        edge_indices: &[usize],
+        graph: &CircuitGraph,
+        bias_node_voltages: &std::collections::BTreeMap<super::super::graph::NodeId, f64>,
+        supply_voltage: f64,
+    ) -> Option<(f64, f64, f64)> {
+        use super::super::component::EdgeKind;
+        let (model_name, base_node, _collector_node, emitter_node, is_pnp) = match nl_kind {
+            NonlinearKind::BjtNpn {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } => (
+                model_name.as_str(),
+                *base_node,
+                *collector_node,
+                *emitter_node,
+                false,
+            ),
+            NonlinearKind::BjtPnp {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } => (
+                model_name.as_str(),
+                *base_node,
+                *collector_node,
+                *emitter_node,
+                true,
+            ),
+            _ => return None,
+        };
+
+        let find_r_to_rail = |node: super::super::graph::NodeId,
+                              rail: super::super::graph::NodeId|
+         -> Option<f64> {
+            edge_indices.iter().find_map(|&eidx| {
+                if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+                    return None;
+                }
+                let e = &graph.edges[eidx];
+                let (a, b) = (e.node_a, e.node_b);
+                if (a == node && b == rail) || (b == node && a == rail) {
+                    graph.components[e.comp_idx].kind.resistance()
+                } else {
+                    None
+                }
+            })
+        };
+
+        let (r1, base_rail_v) = positive_supply_rails(graph).iter().find_map(|&rail| {
+            find_r_to_rail(base_node, rail).map(|r| {
+                (
+                    r,
+                    rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage),
+                )
+            })
+        })?;
+        let r2 = find_r_to_rail(base_node, graph.gnd_node)?;
+        if r1 + r2 <= 0.0 {
+            return None;
+        }
+
+        let vth = node_dc_voltage(base_node, bias_node_voltages, graph)
+            .filter(|v| v.is_finite())
+            .unwrap_or(base_rail_v * r2 / (r1 + r2));
+        let rth = r1 * r2 / (r1 + r2);
+
+        let re = find_r_to_rail(emitter_node, graph.gnd_node)?;
+
+        let v_drive = if is_pnp {
+            (supply_voltage.abs() - vth).abs()
+        } else {
+            vth
+        };
+
+        let model = super::super::helpers::gummel_poon_model(model_name);
+        let vbc_active = -1.0_f64;
+        let mut vbe = 0.65_f64;
+        for _ in 0..60 {
+            let (ic, ib) = model.currents(
+                vbe as pedalkernel_rt::Wave,
+                vbc_active as pedalkernel_rt::Wave,
+            );
+            let (ic, ib) = (ic, ib);
+            let ie = ic + ib;
+            let f = v_drive - ib * rth - vbe - ie * re;
+            let h = 1e-4;
+            let (ic2, ib2) = model.currents(
+                (vbe + h) as pedalkernel_rt::Wave,
+                vbc_active as pedalkernel_rt::Wave,
+            );
+            let (ic2, ib2) = (ic2, ib2);
+            let df = -((ib2 - ib) / h) * rth - 1.0 - ((ic2 + ib2 - ie) / h) * re;
+            if df.abs() < 1e-18 {
+                break;
+            }
+            let step = (f / df).clamp(-0.1, 0.1);
+            vbe -= step;
+            vbe = vbe.clamp(0.0, 1.0);
+            if step.abs() < 1e-9 {
+                break;
+            }
+        }
+
+        if !vbe.is_finite() || vbe <= 0.0 {
+            return None;
+        }
+        let vbe = vbe.clamp(0.3, 0.8);
+
+        let (ic, ib) = model.currents(
+            vbe as pedalkernel_rt::Wave,
+            vbc_active as pedalkernel_rt::Wave,
+        );
+        let ie = ic + ib;
+        let rc = find_r_to_rail(_collector_node, graph.vcc_node);
+        let vcc = supply_voltage.abs();
+        let vce = match rc {
+            Some(rc) => (vcc - ic * rc - ie * re).clamp(0.0, vcc),
+            None => vcc * 0.5,
+        };
+        let vce = if is_pnp { -vce } else { vce };
+        let v_emitter = (ie * re).abs();
+
+        Some((vbe, vce, v_emitter))
+    }
+
+    /// Classify the single BJT edge of a parsed graph into its
+    /// `NonlinearKind`, mirroring the WDF stage-builder call site.
+    fn bjt_nl_kind(graph: &CircuitGraph, comp_id: &str, is_pnp: bool) -> NonlinearKind {
+        let e = graph
+            .edges
+            .iter()
+            .find(|e| graph.components[e.comp_idx].id == comp_id)
+            .expect("bjt edge");
+        let comp = &graph.components[e.comp_idx];
+        let nl = comp
+            .kind
+            .classify_nonlinear(&comp.id, e.node_a, e.node_b, graph.gnd_node, &graph.node_names)
+            .expect("classify bjt")
+            .0;
+        match (&nl, is_pnp) {
+            (NonlinearKind::BjtNpn { .. }, false) | (NonlinearKind::BjtPnp { .. }, true) => nl,
+            _ => panic!("fixture {comp_id} classified as unexpected NonlinearKind"),
+        }
+    }
+
+    /// Gate-4 pin: the unified WDF entry bit-reproduces the deleted
+    /// `compute_wdf_bjt_dc_qpoint` — NPN divider CE, with and without a
+    /// StaticBias-map preference, and the PNP magnitude mirror.
+    #[test]
+    fn wdf_bjt_qpoint_bit_reproduces_deleted_loop() {
+        let npn = parse_graph(
+            r#"pedal "test" { supply 9V
+                components {
+                    Q1: npn(2n3904)
+                    R1: resistor(47k)
+                    R2: resistor(10k)
+                    RC: resistor(4k7)
+                    RE: resistor(1k)
+                    C_in: cap(10u, electrolytic)
+                    C_out: cap(10u, electrolytic)
+                }
+                nets {
+                    vcc -> R1.a
+                    R1.b -> Q1.base
+                    Q1.base -> R2.a
+                    R2.b -> gnd
+                    vcc -> RC.a
+                    RC.b -> Q1.collector
+                    Q1.emitter -> RE.a
+                    RE.b -> gnd
+                    in -> C_in.a
+                    C_in.b -> Q1.base
+                    Q1.collector -> C_out.a
+                    C_out.b -> out
+                }
+                controls {}
+            }"#,
+        );
+        // Classic PNP mirror with RE returned to GND so the legacy finder
+        // resolves it (the RE→VCC case is pinned separately below).  The
+        // divider is mirrored (base sits NEAR VCC: R1 small to vcc, R2 large
+        // to gnd) so `v_drive = |VCC - Vth|` lands a real active-region point.
+        let pnp = parse_graph(
+            r#"pedal "test" { supply 9V
+                components {
+                    Q1: pnp(2n3906)
+                    R1: resistor(10k)
+                    R2: resistor(47k)
+                    RC: resistor(4k7)
+                    RE: resistor(1k)
+                    C_in: cap(10u, electrolytic)
+                    C_out: cap(10u, electrolytic)
+                }
+                nets {
+                    vcc -> R1.a
+                    R1.b -> Q1.base
+                    Q1.base -> R2.a
+                    R2.b -> gnd
+                    vcc -> RC.a
+                    RC.b -> Q1.collector
+                    Q1.emitter -> RE.a
+                    RE.b -> gnd
+                    in -> C_in.a
+                    C_in.b -> Q1.base
+                    Q1.collector -> C_out.a
+                    C_out.b -> out
+                }
+                controls {}
+            }"#,
+        );
+
+        for (graph, is_pnp, with_map) in [
+            (&npn, false, false),
+            (&npn, false, true),
+            (&pnp, true, false),
+        ] {
+            let nl = bjt_nl_kind(graph, "Q1", is_pnp);
+            let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+            let mut bias_map = std::collections::BTreeMap::new();
+            if with_map {
+                // A StaticBias solve would land near but not exactly on the
+                // unloaded divider voltage — pin the preference arm.
+                let base = *graph.node_names.get("Q1.base").unwrap();
+                bias_map.insert(base, 1.52_f64);
+            }
+
+            let legacy =
+                deleted_compute_wdf_bjt_dc_qpoint(&nl, &all_edges, graph, &bias_map, 9.0)
+                    .expect("legacy loop must solve this divider CE");
+            let new = solve_wdf_bjt_dc_qpoint(&nl, &all_edges, graph, &bias_map, 9.0)
+                .expect("unified WDF entry must solve this divider CE");
+
+            eprintln!(
+                "wdf bjt bit-repro (pnp={is_pnp} map={with_map}): legacy=({:.15}, {:.15}, {:.15}) new=({:.15}, {:.15}, {:.15})",
+                legacy.0, legacy.1, legacy.2, new.vbe, new.vce, new.v_emitter
+            );
+            assert!(
+                (new.vbe - legacy.0).abs() < 1e-12,
+                "vbe diverged: legacy={:.17} new={:.17}",
+                legacy.0,
+                new.vbe
+            );
+            assert!(
+                (new.vce - legacy.1).abs() < 1e-12,
+                "vce diverged: legacy={:.17} new={:.17}",
+                legacy.1,
+                new.vce
+            );
+            assert!(
+                (new.v_emitter - legacy.2).abs() < 1e-12,
+                "v_emitter diverged: legacy={:.17} new={:.17}",
+                legacy.2,
+                new.v_emitter
+            );
+            if is_pnp {
+                assert!(new.vce < 0.0, "PNP Vce must be signed negative");
+            }
+        }
+    }
+
+    /// Gate-4 pin (pedalkernel-6ou7, preserved NOT fixed): a classic PNP CE
+    /// whose emitter resistor returns to VCC never seeds on the WDF path —
+    /// the RE finder searches emitter→GND only.  The deleted copy returned a
+    /// silent `None`; the unified entry returns the SAME no-seed outcome, now
+    /// as a loud `Undeterminable(EmitterResistor)`.  The 6ou7 fix lands in
+    /// `BjtSeed::locate_wdf_stage_direct` (one place) and flips this test.
+    #[test]
+    fn wdf_bjt_pnp_re_to_vcc_fails_identically_6ou7() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 9V
+                components {
+                    Q1: pnp(2n3906)
+                    R1: resistor(47k)
+                    Rb2: resistor(470k)
+                    R2: resistor(10k)
+                    R3: resistor(2.2k)
+                    C1: cap(100n)
+                }
+                nets {
+                    in -> C1.a
+                    C1.b -> R1.a, Q1.base
+                    R1.b -> vcc
+                    Q1.base -> Rb2.a
+                    Rb2.b -> gnd
+                    gnd -> R2.a
+                    R2.b -> Q1.collector
+                    Q1.emitter -> R3.a
+                    R3.b -> vcc
+                    Q1.collector -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = bjt_nl_kind(&graph, "Q1", true);
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let bias_map = std::collections::BTreeMap::new();
+
+        let legacy = deleted_compute_wdf_bjt_dc_qpoint(&nl, &all_edges, &graph, &bias_map, 9.0);
+        assert!(legacy.is_none(), "legacy copy silently skipped PNP RE→VCC");
+
+        let new = solve_wdf_bjt_dc_qpoint(&nl, &all_edges, &graph, &bias_map, 9.0);
+        match new {
+            Err(BjtQpointSkip::Undeterminable(BiasError::UndeterminableBjt {
+                missing: TopologyTerm::EmitterResistor,
+                ..
+            })) => {}
+            other => panic!(
+                "PNP RE→VCC must fail as Undeterminable(EmitterResistor) \
+                 (6ou7 preserved), got {other:?}"
+            ),
+        }
+    }
+
+    /// Gate-4 pin: the two BJT finder flavors keep their historical breadths.
+    /// A base divider reachable only THROUGH another resistor resolves under
+    /// the graph-wide/BFS `DividerBfs` flavor but not under the stage-set
+    /// direct-only `WdfStageDirect` flavor.
+    #[test]
+    fn bjt_finder_flavor_breadth_divergence_pinned() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 9V
+                components {
+                    Q1: npn(2n3904)
+                    R_stop: resistor(1k)
+                    R1: resistor(47k)
+                    R2: resistor(10k)
+                    RC: resistor(4k7)
+                    RE: resistor(1k)
+                }
+                nets {
+                    vcc -> R1.a
+                    R1.b -> R_stop.a
+                    R_stop.b -> Q1.base
+                    Q1.base -> R2.a
+                    R2.b -> gnd
+                    vcc -> RC.a
+                    RC.b -> Q1.collector
+                    Q1.emitter -> RE.a
+                    RE.b -> gnd
+                    in -> Q1.base
+                    Q1.collector -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = bjt_nl_kind(&graph, "Q1", false);
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let network_bias = NetworkBias::default();
+
+        let wdf_seed = BjtSeed {
+            nl_kind: &nl,
+            label: "Q1".to_owned(),
+            flavor: BjtFinderFlavor::WdfStageDirect,
+            wdf_bias_node_voltages: None,
+        };
+        assert!(
+            wdf_seed
+                .locate_bias_topology(&all_edges, &graph, &network_bias, 9.0)
+                .is_err(),
+            "WdfStageDirect must NOT see the base divider through R_stop (direct-only)"
+        );
+
+        let bfs_seed = BjtSeed {
+            nl_kind: &nl,
+            label: "Q1".to_owned(),
+            flavor: BjtFinderFlavor::DividerBfs,
+            wdf_bias_node_voltages: None,
+        };
+        let topo = bfs_seed
+            .locate_bias_topology(&all_edges, &graph, &network_bias, 9.0)
+            .expect("DividerBfs must locate the divider through R_stop");
+        assert!(
+            topo.r_degeneration > 0.0,
+            "BFS flavor should find RE too, got {topo:?}"
+        );
+    }
+
+    /// Gate-4 pin: the blockwise flavor reads the RAW StaticBias base voltage
+    /// (capped at 0.8 V, no lower clamp, no load line) and fails loudly —
+    /// never silently — when the map has nothing for the base node.
+    #[test]
+    fn blockwise_bjt_base_bias_flavor_pinned() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 9V
+                components {
+                    Q1: npn(2n3904)
+                    R1: resistor(47k)
+                    R2: resistor(10k)
+                    RE: resistor(1k)
+                }
+                nets {
+                    vcc -> R1.a
+                    R1.b -> Q1.base
+                    Q1.base -> R2.a
+                    R2.b -> gnd
+                    Q1.emitter -> RE.a
+                    RE.b -> gnd
+                    in -> Q1.base
+                    Q1.collector -> out
+                }
+                controls {}
+            }"#,
+        );
+        let base_node = *graph.node_names.get("Q1.base").unwrap();
+        let nl_edges: Vec<usize> = graph
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| graph.components[e.comp_idx].id == "Q1")
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!nl_edges.is_empty(), "fixture must expose Q1 edges");
+
+        // In-map: raw value passes through…
+        let mut bias_map = std::collections::BTreeMap::new();
+        bias_map.insert(base_node, 0.72_f64);
+        let vbe = solve_blockwise_bjt_base_bias(&nl_edges, &graph, &bias_map)
+            .expect("base voltage in map must resolve");
+        assert_eq!(vbe, 0.72, "raw StaticBias voltage passes through");
+
+        // …capped at 0.8 V above (and NOT floored below — legacy semantics).
+        bias_map.insert(base_node, 1.53_f64);
+        let vbe = solve_blockwise_bjt_base_bias(&nl_edges, &graph, &bias_map).unwrap();
+        assert_eq!(vbe, 0.8, "over-bias caps at 0.8 V");
+        bias_map.insert(base_node, 0.05_f64);
+        let vbe = solve_blockwise_bjt_base_bias(&nl_edges, &graph, &bias_map).unwrap();
+        assert_eq!(vbe, 0.05, "no lower clamp (legacy: cutoff-level reads pass)");
+
+        // Map miss → loud Undeterminable, and the named unconditional default
+        // carries the deleted `default_vbe` values exactly.
+        bias_map.clear();
+        let miss = solve_blockwise_bjt_base_bias(&nl_edges, &graph, &bias_map);
+        assert!(
+            matches!(
+                miss,
+                Err(BjtQpointSkip::Undeterminable(
+                    BiasError::UndeterminableBjt { .. }
+                ))
+            ),
+            "map miss must be Undeterminable (S9 flavor no longer silent), got {miss:?}"
+        );
+        assert_eq!(bjt_unconditional_default_vbe(9.0), 0.6);
+        assert_eq!(bjt_unconditional_default_vbe(1.01), 0.6);
+        assert_eq!(bjt_unconditional_default_vbe(1.0), 0.3);
+        assert_eq!(bjt_unconditional_default_vbe(0.9), 0.3);
+    }
+
+    /// Gate-4 pin: the grouped-MNA model-derived warm-start seed reproduces
+    /// the deleted `rigid/general.rs` expression exactly (Vbe at 1 mA clamped
+    /// to [0.1, 0.8], half-rail Vce, PNP-negated).
+    #[test]
+    fn bjt_model_conduction_seed_matches_deleted_general_expr() {
+        for (model_name, supply, is_pnp) in [
+            ("2N3904", 9.0, false),
+            ("2N3906", 9.0, true),
+            ("AC128", 9.0, true), // germanium: high Is → low Vbe, exercises the clamp floor region
+            ("2N3904", 250.0, false),
+        ] {
+            let model = super::super::helpers::gummel_poon_model(model_name);
+            // The deleted expression, verbatim.
+            let sign = if is_pnp { -1.0 } else { 1.0 };
+            let legacy_vbe_raw = model.nf * model.vt * (1.0e-3_f64 / model.is).ln();
+            let legacy_vbe = sign * legacy_vbe_raw.clamp(0.1, 0.8);
+            let legacy_vce = sign * supply * 0.5;
+
+            let (vbe, vce) = bjt_model_conduction_seed(&model, supply, is_pnp);
+            assert_eq!(
+                vbe, legacy_vbe,
+                "{model_name} pnp={is_pnp}: vbe seed must be bit-identical"
+            );
+            assert_eq!(
+                vce, legacy_vce,
+                "{model_name} pnp={is_pnp}: vce seed must be bit-identical"
+            );
+        }
     }
 
     // ── 6. BiasError::into_compile_error produces actionable messages ────────

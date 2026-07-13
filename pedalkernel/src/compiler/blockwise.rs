@@ -344,23 +344,43 @@ fn lower_block_stages(
 
             if let BuiltStage::Wdf(ref mut wdf) = built {
                 if let pedalkernel_rt::stage::RootKind::Bjt(ref mut bjt) = wdf.root {
-                    let base_bias = block.nl_edges.iter().find_map(|&eidx| {
-                        let e = &graph.edges[eidx];
-                        let comp = &graph.components[e.comp_idx];
-                        let base_key = format!("{}.base", comp.id);
-                        let base_node = graph.node_names.get(&base_key)?;
-                        bias_node_voltages.get(base_node).copied()
-                    });
-
-                    if let Some(v_base) = base_bias {
-                        bjt.set_bias(v_base.min(0.8));
-                        #[cfg(test)]
-                        eprintln!("  Block {bi}: BJT bias = {v_base:.3}V (from circuit)");
-                    } else {
-                        let default_vbe = if supply_voltage > 1.0 { 0.6 } else { 0.3 };
-                        bjt.set_bias(default_vbe);
-                        #[cfg(test)]
-                        eprintln!("  Block {bi}: BJT bias = {default_vbe:.1}V (default)");
+                    // ko5g.4: the raw StaticBias base-voltage read (and the
+                    // formerly-anonymous `default_vbe` fallback) live in
+                    // bias.rs — see `solve_blockwise_bjt_base_bias` /
+                    // `bjt_unconditional_default_vbe` for the preserved
+                    // legacy semantics (v_base.min(0.8), no load line).
+                    match super::bias::solve_blockwise_bjt_base_bias(
+                        &block.nl_edges,
+                        graph,
+                        bias_node_voltages,
+                    ) {
+                        Ok(vbe) => {
+                            bjt.set_bias(vbe);
+                            #[cfg(test)]
+                            eprintln!("  Block {bi}: BJT bias = {vbe:.3}V (from circuit)");
+                        }
+                        Err(skip) => {
+                            // ko5g.4 warn-not-error: this call-site's legacy
+                            // fallback is the UNCONDITIONAL conduction-forcing
+                            // default (the ko5g.2 audit's S9) — byte-identical,
+                            // but no longer silent.
+                            skip.warn_if_undeterminable(
+                                "Blockwise BJT stage FORCES the unconditional \
+                                 nominal-conduction default \
+                                 (bias::bjt_unconditional_default_vbe).",
+                            );
+                            let default_vbe =
+                                super::bias::bjt_unconditional_default_vbe(supply_voltage);
+                            bjt.set_bias(default_vbe);
+                            if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+                                eprintln!(
+                                    "[bias-qpoint] path=blockwise bjt block{bi}: DEFAULT \
+                                     vbe={default_vbe:.6} supply={supply_voltage}"
+                                );
+                            }
+                            #[cfg(test)]
+                            eprintln!("  Block {bi}: BJT bias = {default_vbe:.1}V (default)");
+                        }
                     }
 
                     bjt.set_v_max(supply_voltage.abs().max(1.0));

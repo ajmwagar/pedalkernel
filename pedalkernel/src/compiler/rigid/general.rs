@@ -2043,13 +2043,27 @@ fn assemble_multi_nl_stage(
             max_group_ports = max_group_ports.max(group.n_ports());
             match group {
                 NlDeviceGroupKind::BjtTwoPort(bjt) => {
-                    let sign = if bjt.is_pnp { -1.0 } else { 1.0 };
+                    // ko5g.4: the model-derived conduction warm-start (signed
+                    // Vbe at a nominal 1 mA, half-rail Vce) lives in bias.rs —
+                    // `bjt_model_conduction_seed` — alongside the other BJT
+                    // bias flavors.
+                    let (vbe, vce) = super::super::bias::bjt_model_conduction_seed(
+                        &bjt.model,
+                        supply_voltage,
+                        bjt.is_pnp,
+                    );
                     if off < n_nl {
-                        let vbe = bjt.model.nf * bjt.model.vt * (1.0e-3_f64 / bjt.model.is).ln();
-                        initial_v[off] = sign * vbe.clamp(0.1, 0.8);
+                        initial_v[off] = vbe;
                     }
                     if off + 1 < n_nl {
-                        initial_v[off + 1] = sign * supply_voltage * 0.5;
+                        initial_v[off + 1] = vce;
+                    }
+                    if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+                        eprintln!(
+                            "[bias-qpoint] path=mna-seed bjt {}: vbe={vbe:.6} vce={vce:.6} \
+                             supply={supply_voltage}",
+                            nl_comp_labels.get(g).map(|s| s.as_str()).unwrap_or("?"),
+                        );
                     }
                 }
                 NlDeviceGroupKind::TriodeThreePort(_)
