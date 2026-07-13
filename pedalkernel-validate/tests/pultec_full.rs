@@ -442,6 +442,46 @@ fn wdf_settled_window(controls: &[(&str, f64)], freq: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Regression gate for pedalkernel-n0yy: the program EQ must PARTICIPATE in
+/// the transfer, not merely be stamped.
+///
+/// Pre-fix, the stage's adapted input port injected at V1.grid (the
+/// amplifier-pin fallback ran before the input-boundary search), bypassing
+/// the entire LCR network: flat@1k measured +23.3 dB re input (no EQ
+/// insertion loss, V1 overdriven) and the EQ controls moved the response by
+/// exactly 0.00 dB. Post-fix the port lands on the T_in-secondary boundary
+/// node (`n_lf`) and both invariants flip:
+///
+/// * flat@1k overall gain is NEGATIVE (EQ insertion loss + makeup < unity
+///   for this netlist; measured ≈ −21.9 dB — assert < −5 dB, wide margin).
+/// * LF Boost 0→1 RAISES 60 Hz (measured +3.4 dB; assert > +1 dB —
+///   authority magnitude itself is the pedalkernel-5ty3 netlist question).
+#[test]
+fn pultec_full_eq_participates_in_transfer() {
+    let flat_1k = wdf_settled_window(&[], 1_000.0);
+    let gain_1k_db =
+        20.0 * (metrics::single_bin_amplitude(&flat_1k, 1_000.0, SR) / SINE_AMP).log10();
+    println!("  flat@1k overall gain: {gain_1k_db:+.2} dB (pre-n0yy: +23.3 dB)");
+    assert!(
+        gain_1k_db < -5.0,
+        "EQ insertion loss missing: flat@1k gain {gain_1k_db:+.2} dB — the \
+         adapted input port is bypassing the program EQ again (pedalkernel-n0yy)"
+    );
+
+    let flat_60 = wdf_settled_window(&[], 60.0);
+    let boost_60 = wdf_settled_window(&[("LF Boost", 1.0)], 60.0);
+    let delta_db = 20.0
+        * (metrics::single_bin_amplitude(&boost_60, 60.0, SR)
+            / metrics::single_bin_amplitude(&flat_60, 60.0, SR))
+        .log10();
+    println!("  LF Boost 0->1 moves 60 Hz by {delta_db:+.2} dB (pre-n0yy: 0.00 dB)");
+    assert!(
+        delta_db > 1.0,
+        "LF Boost has no authority at 60 Hz ({delta_db:+.2} dB) — the program \
+         EQ is inert again (pedalkernel-n0yy)"
+    );
+}
+
 /// AC dashboard: single-bin gain (WDF/golden) per config × frequency, plus
 /// THD on both sides at flat@1k. REPORTS the gap per the bead charter (this
 /// is a measurement run); hard assertions only on measurement validity:
