@@ -1612,9 +1612,10 @@ impl TriodeQpointSkip {
 }
 
 /// Best-effort instance name for the triode that owns `plate_node`: the
-/// `<comp>.plate` pin name if one maps to the node (→ "V2 (12au7)"), else the
-/// lexicographically-first node alias. Used for warnings + the
-/// `PK_BIAS_QPOINT_DEBUG` table only — never affects the solve.
+/// `<comp>.plate` pin name if one maps to the node (→ "V2"), else the
+/// lexicographically-first node alias, else the model name. Used for warnings
+/// (where it must be a valid `init {}` hint target) + the
+/// `PK_BIAS_QPOINT_DEBUG` table — never affects the solve.
 pub(super) fn triode_instance_label(
     graph: &CircuitGraph,
     plate_node: NodeId,
@@ -1627,14 +1628,21 @@ pub(super) fn triode_instance_label(
         .map(|(k, _)| k.as_str())
         .collect();
     names.sort_unstable();
-    let inst = names
+    names
         .iter()
         .find(|k| k.ends_with(".plate"))
-        .map(|k| k.trim_end_matches(".plate"))
-        .or_else(|| names.first().copied());
-    match inst {
-        Some(i) => format!("{i} ({model_name})"),
-        None => model_name.to_owned(),
+        .map(|k| k.trim_end_matches(".plate").to_owned())
+        .or_else(|| names.first().map(|k| (*k).to_owned()))
+        .unwrap_or_else(|| model_name.to_owned())
+}
+
+/// Display form for the `PK_BIAS_QPOINT_DEBUG` table: "V2 (12au7)".
+fn triode_display_label(graph: &CircuitGraph, plate_node: NodeId, model_name: &str) -> String {
+    let inst = triode_instance_label(graph, plate_node, model_name);
+    if inst == model_name {
+        inst
+    } else {
+        format!("{inst} ({model_name})")
     }
 }
 
@@ -1729,7 +1737,7 @@ pub(super) fn solve_triode_dc_qpoint(
     {
         qpoint_debug(
             "mna",
-            &triode_instance_label(graph, *plate_node, model_name),
+            &triode_display_label(graph, *plate_node, model_name),
             supply_voltage,
             &out,
         );
@@ -1944,7 +1952,7 @@ pub(super) fn solve_wdf_triode_dc_qpoint(
     {
         qpoint_debug(
             "wdf",
-            &triode_instance_label(graph, *plate_node, model_name),
+            &triode_display_label(graph, *plate_node, model_name),
             supply_voltage,
             &out,
         );
