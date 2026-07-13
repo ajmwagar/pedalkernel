@@ -561,10 +561,16 @@ fn build_general_mna_from_edges_inner(
     // DC cathode voltage. This puts the system at the correct Q-point at t=0.
     // The DC operating-point COMPUTATION lives in `compiler::bias` — the single
     // bias-computation file (pedalkernel-kzla).  This module only APPLIES it.
-    if let Some(dc) =
-        super::super::bias::solve_triode_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage)
-    {
-        apply_triode_dc_qpoint(&mut stage, &dc, &nl_kinds, &reactive_edges, graph);
+    match super::super::bias::solve_triode_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage) {
+        Ok(dc) => apply_triode_dc_qpoint(&mut stage, &dc, &nl_kinds, &reactive_edges, graph),
+        // ko5g.3 warn-not-error: an undeterminable single-triode stage keeps
+        // the legacy silent fallback — the LINEAR `compute_dc_bias`
+        // superposition (Vgk ≈ 0 warm start) — but now says so loudly.
+        // Multi-NL groups / pentodes / strapped triodes are NotApplicable
+        // (no triode load line to solve) and stay silent.
+        Err(skip) => skip.warn_if_undeterminable(
+            "Stage keeps the linear dc-bias superposition (Vgk≈0 warm start, no Q-point precharge).",
+        ),
     }
 
     // Step 10: DC Q-point for grouped-BJT stages (pedalkernel-kzla).

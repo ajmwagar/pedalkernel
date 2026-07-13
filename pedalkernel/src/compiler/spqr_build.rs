@@ -3599,11 +3599,13 @@ pub(super) fn build_spqr_stage_with_options(
             }
             // Seed the TriodeRoot with the DC Q-point from load-line analysis.
             //
-            // bias::solve_triode_dc_qpoint runs a 1-D Newton-Raphson on the
-            // load-line equations (Vgk = -Ia*Rk, Vpk = VCC - Ia*Rp) using
-            // edge_indices to locate R_plate and R_cathode.  Returns None when
-            // the triode lacks a grid node (strapped triode) or when the plate/
-            // cathode resistors are not found in the group.
+            // bias::solve_wdf_triode_dc_qpoint (ko5g.3 — the unified solver
+            // that replaced this file's duplicate `compute_wdf_triode_dc_qpoint`)
+            // runs the shared 1-D load-line relaxation (Vgk = -Ia*Rk,
+            // Vpk = VCC - Ia*Rp) using edge_indices to locate R_plate and
+            // R_cathode.  NotApplicable when the triode lacks a grid node
+            // (strapped triode) or is vari-mu; Undeterminable when the plate/
+            // cathode resistors are not found.
             //
             // Two initialization targets:
             //   1. TriodeRoot::set_bias(vgk)  — NR warm-start + K-table centre
@@ -3613,8 +3615,23 @@ pub(super) fn build_spqr_stage_with_options(
             // which is wrong for high-voltage stages (e.g. 250 V 12AX7).
             // Without (2) the cathode cap takes τ=Rk*Ck time-constants to charge;
             // SPICE runs a .op before .tran so it starts at steady state.
-            let dc_qpoint =
-                compute_wdf_triode_dc_qpoint(&nl_kind, &edge_indices, graph, supply_voltage);
+            let dc_qpoint = match super::bias::solve_wdf_triode_dc_qpoint(
+                &nl_kind,
+                &edge_indices,
+                graph,
+                supply_voltage,
+            ) {
+                Ok(dc) => Some(dc),
+                Err(skip) => {
+                    // ko5g.3 warn-not-error: an undeterminable triode keeps the
+                    // legacy -2.0 V TriodeRoot default (loudly); the fail-loud
+                    // flip is ko5g.8.
+                    skip.warn_if_undeterminable(
+                        "Triode stage keeps the -2.0 V default Vgk bias.",
+                    );
+                    None
+                }
+            };
             // (1) Seed bias
             if let Some(ref dc) = dc_qpoint {
                 if let RootKind::Triode(t) = &mut root {
@@ -5853,125 +5870,10 @@ pub(super) fn compute_group_terminals(
     terminals
 }
 
-/// DC Q-point data for a single common-cathode triode stage.
-struct TriodeDcQpoint {
-    vgk: f64,
-    v_cathode: f64,
-}
-
-/// Compute the load-line DC Q-point for a common-cathode triode stage.
-///
-/// Mirrors the same function in `rigid/general.rs` but operates on the
-/// NlWdf group's edge set (which includes R_plate and R_cathode alongside
-/// the triode NL edge).  Returns None when the circuit lacks a grid node,
-/// R_plate, or R_cathode, or when the Q-point is non-physical.
-fn compute_wdf_triode_dc_qpoint(
-    nl_kind: &NonlinearKind,
-    edge_indices: &[usize],
-    graph: &CircuitGraph,
-    supply_voltage: f64,
-) -> Option<TriodeDcQpoint> {
-    use super::component::EdgeKind;
-    let (model_name, plate_node, cathode_node) = match nl_kind {
-        NonlinearKind::Triode {
-            model_name,
-            plate_node,
-            cathode_node,
-            grid_node: Some(_),
-            is_vari_mu: false,
-            ..
-        } => (model_name.as_str(), *plate_node, *cathode_node),
-        _ => return None,
-    };
-
-    // Find R_plate: linear resistor between a positive supply rail and
-    // plate_node. The legacy search (vcc, stage edge set) runs FIRST —
-    // bit-identical resolution for every circuit it already handled — then
-    // the pedalkernel-0stg widening: named rails (B+, ...) whose NodeIds
-    // never matched the literal vcc comparison, searched GRAPH-WIDE because
-    // named-rail edges are excluded from passive claiming and always land in
-    // a different flow group than their triode. A plate wired DIRECTLY to a
-    // rail (cathode follower) is the r_plate = 0 load line on that rail.
-    let find_direct = |edges: &[usize], rail: NodeId| -> Option<f64> {
-        edges.iter().find_map(|&eidx| {
-            let e = &graph.edges[eidx];
-            let comp = &graph.components[e.comp_idx];
-            if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
-                return None;
-            }
-            let (a, b) = (e.node_a, e.node_b);
-            if (a == rail && b == plate_node) || (b == rail && a == plate_node) {
-                comp.kind.resistance()
-            } else {
-                None
-            }
-        })
-    };
-    let graph_edges: Vec<usize> = (0..graph.edges.len()).collect();
-    let (r_plate, plate_rail_v) = find_direct(edge_indices, graph.vcc_node)
-        .map(|r| (r, graph.vcc_node))
-        .or_else(|| {
-            super::bias::positive_supply_rails(graph)
-                .iter()
-                .find_map(|&rail| find_direct(&graph_edges, rail).map(|r| (r, rail)))
-        })
-        .map(|(r, rail)| {
-            (
-                r,
-                super::bias::rail_dc_voltage(rail, graph, supply_voltage)
-                    .unwrap_or(supply_voltage),
-            )
-        })
-        .or_else(|| {
-            super::bias::rail_dc_voltage(plate_node, graph, supply_voltage)
-                .filter(|&v| v > 0.0)
-                .map(|v| (0.0, v))
-        })?;
-
-    // Find R_cathode: linear resistor between cathode_node and gnd_node.
-    let r_cathode = edge_indices.iter().find_map(|&eidx| {
-        let e = &graph.edges[eidx];
-        let comp = &graph.components[e.comp_idx];
-        if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
-            return None;
-        }
-        let (a, b) = (e.node_a, e.node_b);
-        if (a == cathode_node && b == graph.gnd_node) || (b == cathode_node && a == graph.gnd_node)
-        {
-            comp.kind.resistance()
-        } else {
-            None
-        }
-    })?;
-
-    // Newton-Raphson on F(Ia) = Ia - plate_current(Vgk(Ia), Vpk(Ia)) = 0.
-    use pedalkernel_rt::elements::nonlinear::TriodeRoot;
-    let model = super::helpers::triode_model(model_name);
-    let mut triode = TriodeRoot::new_with_v_max(model, supply_voltage);
-
-    let mut ia = 1e-4_f64; // initial guess: 0.1 mA
-    for _iter in 0..50 {
-        let vgk = -ia * r_cathode;
-        let vpk = (plate_rail_v - ia * r_plate).max(0.0);
-        triode.set_vgk(vgk);
-        let ia_model = triode.plate_current(vpk);
-        let f = ia - ia_model;
-        ia = (ia - f * 0.5).max(0.0);
-        if f.abs() < 1e-9 {
-            break;
-        }
-    }
-
-    let vgk = -ia * r_cathode;
-    let v_cathode = ia * r_cathode;
-
-    // Sanity: Q-point should have negative Vgk.
-    if vgk >= 0.0 || !vgk.is_finite() || !v_cathode.is_finite() {
-        return None;
-    }
-
-    Some(TriodeDcQpoint { vgk, v_cathode })
-}
+// NOTE (ko5g.3): the duplicate `compute_wdf_triode_dc_qpoint` that lived here
+// was deleted — the single-port WDF triode call-site now rides
+// `super::bias::solve_wdf_triode_dc_qpoint` (same load-line core as the
+// grouped MNA path, legacy `TriodeFinderFlavor::DirectOnly` finder breadth).
 
 struct FetDcQpoint {
     vgs: f64,
@@ -6181,9 +6083,10 @@ fn dc_rail_voltage(node: NodeId, graph: &CircuitGraph, supply_voltage: f64) -> O
 /// Compute the forward base-emitter bias (Vbe) for a single-device common-emitter
 /// BJT stage, to seed the WDF `BjtRoot` operating point at compile time.
 ///
-/// Mirrors `compute_wdf_triode_dc_qpoint`: a load-line DC solve over the NlWdf
-/// group's `edge_indices`.  Where the triode solves `Vgk = -Ia·Rk`, the BJT
-/// solves the base loop with emitter degeneration:
+/// Mirrors the WDF triode Q-point (`bias::solve_wdf_triode_dc_qpoint` since
+/// ko5g.3): a load-line DC solve over the NlWdf group's `edge_indices`.  Where
+/// the triode solves `Vgk = -Ia·Rk`, the BJT solves the base loop with emitter
+/// degeneration:
 ///
 ///   Vth = Ib·Rth + Vbe + Ie·RE        (KVL, base mesh)
 ///   Ie  = Ic + Ib,  with (Ic, Ib) = device(Vbe)   (Gummel-Poon transport)
