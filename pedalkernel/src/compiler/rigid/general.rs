@@ -363,6 +363,7 @@ fn build_general_mna_from_edges_inner(
         "general MNA",
         &dropped_edges,
         graph,
+        super::super::spqr_build::EdgeGuardMode::Error,
     )?;
 
     // Stamp the planned transformers + collect their synthetic reactive

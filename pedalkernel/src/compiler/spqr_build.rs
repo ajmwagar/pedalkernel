@@ -532,6 +532,10 @@ pub fn compile_via_spqr_with_options(
     // Their containing groups will be skipped to avoid double-processing.
     let mut triode_absorbed_edges: std::collections::HashSet<usize> =
         std::collections::HashSet::new();
+    // Edge guard (pedalkernel-ffkl): edges DELIBERATELY excluded from stage
+    // assembly, with the exclusion reason logged at the exclusion site.
+    let mut guard_excluded_edges: std::collections::HashSet<usize> =
+        std::collections::HashSet::new();
     build_order.sort_by_key(|(_, g)| if g.has_feedback() { 1 } else { 0 });
 
     for &(gi, group) in &build_order {
@@ -628,6 +632,12 @@ pub fn compile_via_spqr_with_options(
         if is_nonlinear_modulator_group(group, &graph) {
             #[cfg(test)]
             eprintln!("  → nonlinear modulator group consumed by control analysis");
+            // Edge guard: deliberate exclusion, with a reason. (When the
+            // modulator classifier MISfires — e.g. the fuzz-face family's
+            // audio-path BJT core consumed here, leaving a unity passthrough —
+            // that is the classifier's known bug, pedalkernel-129p family,
+            // not an unaccounted edge.)
+            guard_excluded_edges.extend(group.all_edges());
             continue;
         }
 
@@ -2159,18 +2169,38 @@ pub fn compile_via_spqr_with_options(
         for eidx in 0..graph.edges.len() {
             let comp = &graph.components[graph.edges[eidx].comp_idx];
             let kind = graph.effective_edge_kind(eidx);
-            let accounted = matches!(kind, EdgeKind::Vcvs | EdgeKind::Behavioral)
-                || claimed_comp_ids.contains(&comp.id)
-                || triode_absorbed_edges.contains(&eidx)
-                || cut_edges.cuts.contains_key(&eidx)
-                || bkm_consumed_comp_ids.contains(&comp.id)
-                || xfmr_consumed_comp_ids.contains(&comp.id)
-                || ground_clip_edges.contains(&eidx);
+            // Vcvs (op-amp nullor) and Vccs (OTA transconductance) edges
+            // lower via the active-IC pipeline (opamp analysis / OTA
+            // envelope resolution), Behavioral edges bind at bind-time —
+            // deliberate exclusions with a home elsewhere.
+            let accounted =
+                matches!(kind, EdgeKind::Vcvs | EdgeKind::Vccs | EdgeKind::Behavioral)
+                    || claimed_comp_ids.contains(&comp.id)
+                    || triode_absorbed_edges.contains(&eidx)
+                    || guard_excluded_edges.contains(&eidx)
+                    || cut_edges.cuts.contains_key(&eidx)
+                    || bkm_consumed_comp_ids.contains(&comp.id)
+                    || xfmr_consumed_comp_ids.contains(&comp.id)
+                    || ground_clip_edges.contains(&eidx);
             if !accounted {
                 unaccounted.push(eidx);
             }
         }
-        report_dropped_edges("stage assembly", &unaccounted, &graph)?;
+        if !unaccounted.is_empty() && std::env::var("PK_EDGE_GUARD_DEBUG").is_ok() {
+            eprintln!(
+                "[edge-guard-debug] stages={} stage_comp_ids={stage_comp_ids:?} \
+                 absorbed={triode_absorbed_edges:?} cuts={:?} bkm={bkm_consumed_comp_ids:?} \
+                 xfmr={xfmr_consumed_comp_ids:?}",
+                stages.len(),
+                cut_edges.cuts.keys().collect::<Vec<_>>(),
+            );
+        }
+        report_dropped_edges(
+            "stage assembly",
+            &unaccounted,
+            &graph,
+            EdgeGuardMode::Warn,
+        )?;
     }
 
     // Defect B tertiary tiebreak: when two stages share a signal_flow_distance,
@@ -4355,11 +4385,23 @@ fn try_build_convergence_sum(
 /// falls through every stamping branch — the failure mode that silently
 /// dropped the LA-2A `T_out` primary from the triode-context MNA.
 ///
-/// * `error` (default): the compile FAILS with the offending component list.
+/// * `error`: the compile FAILS with the offending component list.
 ///   A circuit must not compile with a component missing and no trace.
-/// * `warn`: loud eprintln diagnostic, compile proceeds (escape hatch for
-///   corpus triage).
+/// * `warn`: loud eprintln diagnostic, compile proceeds.
 /// * `off`: legacy silent behavior.
+///
+/// DEFAULTS are per-layer (each call site passes its own), overridable for
+/// both layers at once via `PK_EDGE_GUARD=error|warn|off`:
+/// * builder-level (`rigid::general` — an edge handed to a builder was not
+///   stamped): **error**. Corpus-measured clean; any trip is a formation bug.
+/// * assembly-level (a graph edge landed in NO stage and NO consumption
+///   mechanism): **warn**. The corpus does not allow error yet — the
+///   PNP fuzz family (fuzz_face.pedal, legends fizz, fuzz_face_pnp) hits a
+///   pre-existing REAL drop: `try_build_blockwise` returns `Some(empty)` for
+///   its feedback group and the `continue` discards the entire BJT core,
+///   compiling the pedal as its coupling caps + Volume pot only (the
+///   pedalkernel-129p family). Promotion to error is beaded — see the
+///   pedalkernel-ffkl follow-up.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::compiler) enum EdgeGuardMode {
     Off,
@@ -4367,12 +4409,12 @@ pub(in crate::compiler) enum EdgeGuardMode {
     Error,
 }
 
-pub(in crate::compiler) fn edge_guard_mode() -> EdgeGuardMode {
+pub(in crate::compiler) fn edge_guard_mode(default_mode: EdgeGuardMode) -> EdgeGuardMode {
     match std::env::var("PK_EDGE_GUARD").as_deref() {
         Ok("off") => EdgeGuardMode::Off,
         Ok("warn") => EdgeGuardMode::Warn,
         Ok("error") => EdgeGuardMode::Error,
-        _ => EdgeGuardMode::Error,
+        _ => default_mode,
     }
 }
 
@@ -4382,11 +4424,12 @@ pub(in crate::compiler) fn report_dropped_edges(
     context: &str,
     dropped: &[usize],
     graph: &super::graph::CircuitGraph,
+    default_mode: EdgeGuardMode,
 ) -> Result<(), String> {
     if dropped.is_empty() {
         return Ok(());
     }
-    let mode = edge_guard_mode();
+    let mode = edge_guard_mode(default_mode);
     if mode == EdgeGuardMode::Off {
         return Ok(());
     }
