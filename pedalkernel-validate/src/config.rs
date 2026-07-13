@@ -3556,17 +3556,28 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                             label: Some("sine".to_string()),
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
-                        // Measured 2026-06-15: sine RMS=0.0dB Peak=0.0dB
-                        // NOTE: Time-domain amplitude matches because WDF engine falls back to
-                        // rigid MNA for pentode (SPQR drop). THD not gated — topology mismatch
-                        // (auto-bias Rk vs fixed-bias) means operating point and harmonic structure
-                        // differ (THD error was 30.53dB when measured). Smoke check only.
+                        // Re-baselined 2026-07-13 (pedalkernel-ko5g.5, pentode DC solver):
+                        // the engine now SOLVES the self-bias op — Vg1k=-30.52V /
+                        // Ia=64.9mA / Vpk=222.7V / Vg2=450V, matching the deck's
+                        // documented op (Vg1=-33V fixed / Ip~65mA / Vp~225V) within 8%.
+                        // Steady-state error vs ngspice: RMS 2.5dB / Peak 6.1dB
+                        // (pre-solver the engine idled hot+plate-saturated: output RMS
+                        // 0.876 vs golden 7.45 — ~19dB dead — and "passed" only because
+                        // a 100%-relative-error output reads as 0.0dB on the
+                        // rms(err)/rms(ref) metric; THD error 37.5dB, now 16.4dB).
+                        // warmup_trim 30ms: the engine does not seed the OUTPUT coupling
+                        // cap (C_out 100n into 100k, tau=10ms) so the first ~3 tau is the
+                        // COUT charge transient; the deck sidesteps it with
+                        // `.IC V(COUT)=225`. Residual steady-state gap = acknowledged
+                        // netlist-vs-deck topology mismatch (auto-bias Rk + circuit
+                        // Vg2=450 vs deck fixed -33V + Vg2=470) + engine atan(KVB=24)
+                        // vs deck atan(KVB2=18). Smoke check only.
                         pass_criteria: PassCriteria {
                             normalized_rms_error_db: Some(3.0),
-                            peak_error_db: Some(3.0),
+                            peak_error_db: Some(8.0),
                             ..Default::default()
                         },
-                        warmup_trim_ms: None,
+                        warmup_trim_ms: Some(30.0),
                         pending_reference: false,
                         pro_circuit_path: None,
                     },
