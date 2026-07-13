@@ -3658,14 +3658,30 @@ pub(super) fn build_spqr_stage_with_options(
             // a stage into conduction whose DC operating point cannot be
             // characterized (and may not be DC-blocked downstream), a strictly
             // larger blast radius than the cutoff-amplifier bug this fix targets.
+            //
+            // bias::solve_wdf_bjt_dc_qpoint (ko5g.4 — the unified solver that
+            // replaced this file's duplicate `compute_wdf_bjt_dc_qpoint`) runs
+            // the shared base-loop Newton with the legacy stage-set direct-only
+            // finder breadth (`BjtFinderFlavor::WdfStageDirect`).
             let bjt_dc = if matches!(root, RootKind::Bjt(_)) {
-                compute_wdf_bjt_dc_qpoint(
+                match super::bias::solve_wdf_bjt_dc_qpoint(
                     &nl_kind,
                     &edge_indices,
                     graph,
                     bias_node_voltages,
                     supply_voltage,
-                )
+                ) {
+                    Ok(dc) => Some(dc),
+                    Err(skip) => {
+                        // ko5g.4 warn-not-error: an undeterminable BJT keeps the
+                        // legacy leave-at-cutoff fallback (vbe_bias = 0, no Vce
+                        // warm-start) — loudly; the fail-loud flip is ko5g.8.
+                        skip.warn_if_undeterminable(
+                            "BJT stage keeps its cutoff default (vbe_bias = 0 V, no Vce warm-start).",
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -4676,27 +4692,11 @@ fn infer_transformer_dc_bias_current(
         return None;
     }
 
-    let vp = node_dc_voltage(primary_pos, bias_node_voltages, graph)?;
-    let vn = node_dc_voltage(primary_neg, bias_node_voltages, graph)?;
+    // Moved to bias.rs (ko5g.4) — the single legacy-arm-order node-voltage read.
+    let vp = super::bias::node_dc_voltage(primary_pos, bias_node_voltages, graph)?;
+    let vn = super::bias::node_dc_voltage(primary_neg, bias_node_voltages, graph)?;
     let current = (vp - vn) / r_primary;
     (current.is_finite() && current.abs() > 1.0e-12).then_some(current)
-}
-
-fn node_dc_voltage(
-    node: NodeId,
-    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
-    graph: &CircuitGraph,
-) -> Option<f64> {
-    if node == graph.gnd_node {
-        return Some(0.0);
-    }
-    if let Some(&v) = graph.supply_voltages.get(&node) {
-        return Some(v);
-    }
-    if graph.ac_ground_nodes.contains(&node) {
-        return Some(0.0);
-    }
-    bias_node_voltages.get(&node).copied()
 }
 
 fn passive_transformer_voltage_gain(
@@ -6078,213 +6078,6 @@ fn dc_rail_voltage(node: NodeId, graph: &CircuitGraph, supply_voltage: f64) -> O
     // instead of blanket `supply_voltage`. Single-supply pedals are
     // unchanged (their one rail's voltage IS supply_voltage).
     super::bias::rail_dc_voltage(node, graph, supply_voltage)
-}
-
-/// Compute the forward base-emitter bias (Vbe) for a single-device common-emitter
-/// BJT stage, to seed the WDF `BjtRoot` operating point at compile time.
-///
-/// Mirrors the WDF triode Q-point (`bias::solve_wdf_triode_dc_qpoint` since
-/// ko5g.3): a load-line DC solve over the NlWdf group's `edge_indices`.  Where
-/// the triode solves `Vgk = -Ia·Rk`, the BJT solves the base loop with emitter
-/// degeneration:
-///
-///   Vth = Ib·Rth + Vbe + Ie·RE        (KVL, base mesh)
-///   Ie  = Ic + Ib,  with (Ic, Ib) = device(Vbe)   (Gummel-Poon transport)
-///
-/// where the Thevenin equivalent of the base divider is
-///   Vth = VCC · R2 / (R1 + R2),  Rth = R1·R2 / (R1 + R2)
-/// (R1 = base→rail, R2 = base→gnd).  Solving for `Vbe` self-consistently gives
-/// the *actual* junction voltage at the Q-point — typically ~0.6-0.65 V once the
-/// emitter resistor's IR drop is accounted for, rather than the raw base-node
-/// divider voltage.  This is the value the WDF `BjtRoot` needs (its `set_bias`
-/// argument is the forward Vbe magnitude; the runtime adds the AC input and the
-/// root's internal `sign` handles PNP polarity), and it matches the operating
-/// point ngspice establishes with its `.op` before `.tran`.
-///
-/// Bias-source resolution mirrors the blockwise path's two-tier lookup:
-///   1. Prefer the DC base-node voltage from the global StaticBias map
-///      (`bias_node_voltages`) when the divider compiled as its own group, as
-///      `blockwise.rs` does (`bias_node_voltages.get(base_node)`).
-///   2. Otherwise read R1/R2 directly from the group's edge set.
-///
-/// Either way the final returned value is the load-line Vbe (NOT the raw base
-/// voltage) so the stage biases into the active region instead of saturation.
-///
-/// Returns `None` when the element is not a BJT, when the base divider / emitter
-/// resistor cannot be located, or when the solved Q-point is non-physical,
-/// letting the caller fall back to a nominal forward drop.
-fn compute_wdf_bjt_dc_qpoint(
-    nl_kind: &NonlinearKind,
-    edge_indices: &[usize],
-    graph: &CircuitGraph,
-    bias_node_voltages: &std::collections::BTreeMap<NodeId, f64>,
-    supply_voltage: f64,
-) -> Option<BjtDcQpoint> {
-    use super::component::EdgeKind;
-    let (model_name, base_node, _collector_node, emitter_node, is_pnp) = match nl_kind {
-        NonlinearKind::BjtNpn {
-            model_name,
-            base_node,
-            collector_node,
-            emitter_node,
-        } => (
-            model_name.as_str(),
-            *base_node,
-            *collector_node,
-            *emitter_node,
-            false,
-        ),
-        NonlinearKind::BjtPnp {
-            model_name,
-            base_node,
-            collector_node,
-            emitter_node,
-        } => (
-            model_name.as_str(),
-            *base_node,
-            *collector_node,
-            *emitter_node,
-            true,
-        ),
-        _ => return None,
-    };
-
-    // Locate a linear resistor between `node` and a fixed rail (vcc or gnd).
-    let find_r_to_rail = |node: NodeId, rail: NodeId| -> Option<f64> {
-        edge_indices.iter().find_map(|&eidx| {
-            if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
-                return None;
-            }
-            let e = &graph.edges[eidx];
-            let (a, b) = (e.node_a, e.node_b);
-            if (a == node && b == rail) || (b == node && a == rail) {
-                graph.components[e.comp_idx].kind.resistance()
-            } else {
-                None
-            }
-        })
-    };
-
-    // Base divider: R1 = base→rail, R2 = base→gnd. Rails vcc-first, then
-    // named rails with their actual voltages (pedalkernel-0stg).
-    let (r1, base_rail_v) = super::bias::positive_supply_rails(graph)
-        .iter()
-        .find_map(|&rail| {
-            find_r_to_rail(base_node, rail).map(|r| {
-                (
-                    r,
-                    super::bias::rail_dc_voltage(rail, graph, supply_voltage)
-                        .unwrap_or(supply_voltage),
-                )
-            })
-        })?;
-    let r2 = find_r_to_rail(base_node, graph.gnd_node)?;
-    if r1 + r2 <= 0.0 {
-        return None;
-    }
-
-    // Prefer the StaticBias-map base voltage (matches blockwise's source) for the
-    // open-circuit divider voltage; fall back to the resistor divider directly.
-    let vth = node_dc_voltage(base_node, bias_node_voltages, graph)
-        .filter(|v| v.is_finite())
-        .unwrap_or(base_rail_v * r2 / (r1 + r2));
-    let rth = r1 * r2 / (r1 + r2);
-
-    // Emitter resistor RE (emitter→gnd).  Required for the load-line solve; a
-    // degeneration resistor is what makes the raw divider voltage an over-bias.
-    let re = find_r_to_rail(emitter_node, graph.gnd_node)?;
-
-    // PNP common-emitter is the mirror image: the emitter sits at VCC, the
-    // divider biases the base below it, so the loop voltage that forward-biases
-    // the (emitter-base) junction is (VCC - Vth) and RE returns to VCC.  Working
-    // in the device's own (positive-forward) sign convention, the magnitude
-    // equations are identical with `v_drive = |rail - Vth|`.
-    let v_drive = if is_pnp {
-        (supply_voltage.abs() - vth).abs()
-    } else {
-        vth
-    };
-
-    // Newton-Raphson on the base loop:  f(Vbe) = v_drive - Ib·Rth - Vbe - Ie·RE.
-    let model = super::helpers::gummel_poon_model(model_name);
-    // Active-region collector reverse bias: vbc < 0 → exp term negligible.  Use a
-    // small fixed reverse bias so base_charge / transport stay in the active region.
-    let vbc_active = -1.0_f64;
-    let mut vbe = 0.65_f64;
-    for _ in 0..60 {
-        let (ic, ib) = model.currents(
-            vbe as pedalkernel_rt::Wave,
-            vbc_active as pedalkernel_rt::Wave,
-        );
-        let (ic, ib) = (ic, ib);
-        let ie = ic + ib;
-        let f = v_drive - ib * rth - vbe - ie * re;
-        // df/dVbe via finite difference on the device currents.
-        let h = 1e-4;
-        let (ic2, ib2) = model.currents(
-            (vbe + h) as pedalkernel_rt::Wave,
-            vbc_active as pedalkernel_rt::Wave,
-        );
-        let (ic2, ib2) = (ic2, ib2);
-        let df = -((ib2 - ib) / h) * rth - 1.0 - ((ic2 + ib2 - ie) / h) * re;
-        if df.abs() < 1e-18 {
-            break;
-        }
-        let step = (f / df).clamp(-0.1, 0.1);
-        vbe -= step;
-        vbe = vbe.clamp(0.0, 1.0);
-        if step.abs() < 1e-9 {
-            break;
-        }
-    }
-
-    if !vbe.is_finite() || vbe <= 0.0 {
-        return None;
-    }
-    // A silicon BJT in conduction sits ~0.55-0.75 V; clamp defensively.
-    let vbe = vbe.clamp(0.3, 0.8);
-
-    // Collector-emitter operating-point voltage, for the BjtRoot warm-start.
-    // RC = collector→rail.  Vce = |VCC - Ic·RC - Ie·RE| (active region).  Used to
-    // pre-seed `prev_v` so the WDF/NR solve cold-starts AT the Q-point instead of
-    // 0 V, eliminating the bias-settling startup transient (ngspice runs a `.op`
-    // before `.tran`).  Falls back to half-rail when RC is absent.
-    let (ic, ib) = model.currents(
-        vbe as pedalkernel_rt::Wave,
-        vbc_active as pedalkernel_rt::Wave,
-    );
-    let ie = ic + ib;
-    let rc = find_r_to_rail(_collector_node, graph.vcc_node);
-    let vcc = supply_voltage.abs();
-    let vce = match rc {
-        Some(rc) => (vcc - ic * rc - ie * re).clamp(0.0, vcc),
-        None => vcc * 0.5,
-    };
-    let vce = if is_pnp { -vce } else { vce };
-
-    // Emitter DC voltage = Ie·RE (NPN: positive above gnd).  Used to pre-charge
-    // the emitter bypass cap so its RE·CE time-constant transient does not appear
-    // at startup.  For PNP the emitter returns to VCC; the cap across RE still
-    // charges to the |Ie·RE| drop, so we report the magnitude.
-    let v_emitter = (ie * re).abs();
-
-    Some(BjtDcQpoint {
-        vbe,
-        vce,
-        v_emitter,
-    })
-}
-
-/// DC Q-point data for a single common-emitter BJT stage.
-struct BjtDcQpoint {
-    /// Forward base-emitter voltage at the operating point (magnitude, fed to
-    /// `BjtRoot::set_bias`; the root applies PNP sign internally).
-    vbe: f64,
-    /// Collector-emitter voltage at the operating point, signed for PNP, fed to
-    /// `BjtRoot::set_initial_prev_v` as the NR warm-start.
-    vce: f64,
-    /// Emitter-resistor DC drop (|Ie·RE|), to pre-charge the emitter bypass cap.
-    v_emitter: f64,
 }
 
 /// Resolve a BJT init state name to the initial Vce warm-start for BjtRoot.
