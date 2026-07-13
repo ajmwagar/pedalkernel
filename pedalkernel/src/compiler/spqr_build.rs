@@ -2131,6 +2131,48 @@ pub fn compile_via_spqr_with_options(
         }
     }
 
+    // ── Edge accounting guard (pedalkernel-ffkl) ─────────────────────────────
+    // After stage assembly every graph edge must be accounted for: solved in
+    // some stage (its component id is claimed by a stage's comp-id set),
+    // consumed by an explicit mechanism (triode-context absorption, blockwise
+    // coupling, transformer reflection, ground-clip merge, delayed-cut carry),
+    // or deliberately excluded with a reason (op-amp nullor edges lower via
+    // the op-amp pipeline; behavioral coupler edges bind at bind-time). An
+    // edge that falls through means a component silently vanished from the
+    // compiled circuit — the LA-2A T_out failure family. Mode is governed by
+    // PK_EDGE_GUARD (error by default; see `report_dropped_edges`).
+    //
+    // NOTE this comp-id-granular sweep is the OUTER net; the INNER net is the
+    // builder-level guard in `rigid::general::stamp_passive_edges`, which
+    // catches edge-granular drops inside a build (a stage can claim a comp id
+    // while dropping one of its edges — exactly how T_out was lost while V3's
+    // stage label listed it).
+    {
+        use super::component::EdgeKind;
+        let claimed_comp_ids: std::collections::HashSet<&String> =
+            stage_comp_ids.iter().flatten().collect();
+        let ground_clip_edges: std::collections::HashSet<usize> = ground_clip_built
+            .iter()
+            .flat_map(|&gi| feedback_groups[gi].all_edges())
+            .collect();
+        let mut unaccounted: Vec<usize> = Vec::new();
+        for eidx in 0..graph.edges.len() {
+            let comp = &graph.components[graph.edges[eidx].comp_idx];
+            let kind = graph.effective_edge_kind(eidx);
+            let accounted = matches!(kind, EdgeKind::Vcvs | EdgeKind::Behavioral)
+                || claimed_comp_ids.contains(&comp.id)
+                || triode_absorbed_edges.contains(&eidx)
+                || cut_edges.cuts.contains_key(&eidx)
+                || bkm_consumed_comp_ids.contains(&comp.id)
+                || xfmr_consumed_comp_ids.contains(&comp.id)
+                || ground_clip_edges.contains(&eidx);
+            if !accounted {
+                unaccounted.push(eidx);
+            }
+        }
+        report_dropped_edges("stage assembly", &unaccounted, &graph)?;
+    }
+
     // Defect B tertiary tiebreak: when two stages share a signal_flow_distance,
     // resolve their order DETERMINISTICALLY by the minimum stable component id
     // in each stage (netlist names are stable across compiles/processes). This
