@@ -590,17 +590,37 @@ fn build_general_mna_from_edges_inner(
     // via the exact wave-domain inversion (`apply_dc_qpoint_seed`).  Runs by
     // DEFAULT: non-BJT / degenerate groups return `None` and keep their linear
     // `dc_bias`, staying byte-identical.
-    if let Some(node_dc) =
-        super::super::bias::solve_bjt_group_dc_qpoint(&nl_kinds, all_edges, graph, supply_voltage)
-    {
-        apply_bjt_dc_qpoint(
-            &mut stage,
-            &node_dc,
-            &nl_terminals,
+    // pedalkernel-y9hz: a NAMED `init { Q: saturated/cutoff/... }` hint on any
+    // device of this group is the asymmetric-OSCILLATOR seed path (cross-coupled
+    // astables): the whole point is to start the NR AWAY from the network's
+    // symmetric DC fixed point so the multivibrator breaks symmetry
+    // deterministically. The group q-point seed would overwrite every port's
+    // warm-start with that symmetric root (measured: bjt_astable initial_v_prev
+    // with-hints == without-hints once the solver — post-129p — converges on
+    // the astable's metastable symmetric root). Skip the seed and keep the
+    // hinted state authoritative, mirroring the WDF call-site's has_hint guard.
+    // Explicit `op { }` seeds re-override AFTER this in apply_op_seed (Step 11)
+    // and need no gate.
+    let has_named_bjt_hint = init_hints.iter().any(|h| {
+        matches!(h.state, crate::dsl::InitState::Named(_))
+            && nl_comp_labels.iter().any(|l| l == &h.device_label)
+    });
+    if !has_named_bjt_hint {
+        if let Some(node_dc) = super::super::bias::solve_bjt_group_dc_qpoint(
             &nl_kinds,
-            &reactive_edges,
+            all_edges,
             graph,
-        );
+            supply_voltage,
+        ) {
+            apply_bjt_dc_qpoint(
+                &mut stage,
+                &node_dc,
+                &nl_terminals,
+                &nl_kinds,
+                &reactive_edges,
+                graph,
+            );
+        }
     }
 
     // Step 11: explicit `op { }` operating-point seed (pedalkernel — seed-and-hold).
