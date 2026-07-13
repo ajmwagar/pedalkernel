@@ -902,16 +902,37 @@ pub(super) fn analyze_transformer_secondary_load(
     graph: &CircuitGraph,
     cut_edges: &DelayedCutSet,
 ) -> Option<TransformerSecondaryLoad> {
+    analyze_transformer_secondary_load_in_edges(
+        &groups[target_gi].all_edges(),
+        target_gi,
+        groups,
+        graph,
+        cut_edges,
+    )
+}
+
+/// Edge-set variant of [`analyze_transformer_secondary_load`]: the target is
+/// an explicit edge set rather than a flow group. This is what the
+/// triode-context MNA path needs (pedalkernel-ffkl): V3's build set is the
+/// group's edges plus BFS-collected context edges, and the transformer's
+/// primary edge lives in THAT set. `target_gi` remains the building group's
+/// index so the load-group search never fuses the target into itself.
+pub(super) fn analyze_transformer_secondary_load_in_edges(
+    target_edges: &[usize],
+    target_gi: usize,
+    groups: &[FlowGroup],
+    graph: &CircuitGraph,
+    cut_edges: &DelayedCutSet,
+) -> Option<TransformerSecondaryLoad> {
     let out = graph.out_node;
     if out == graph.gnd_node || out == graph.vcc_node {
         return None;
     }
     let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
 
-    // Exactly one transformer component in the target group (its primary edge).
-    let target = &groups[target_gi];
+    // Exactly one transformer component in the target edge set (its primary edge).
     let mut xfmr_comp: Option<usize> = None;
-    for &eidx in &target.all_edges() {
+    for &eidx in target_edges {
         let comp_idx = graph.edges[eidx].comp_idx;
         if graph.components[comp_idx].kind.is_transformer() {
             match xfmr_comp {
@@ -939,8 +960,8 @@ pub(super) fn analyze_transformer_secondary_load(
         return None;
     }
     // The hot secondary node must live strictly downstream of the target
-    // group (no target edge may already touch it).
-    for &eidx in &target.all_edges() {
+    // edge set (no target edge may already touch it).
+    for &eidx in target_edges {
         let e = &graph.edges[eidx];
         if e.node_a == sec_pos || e.node_b == sec_pos {
             return None;
@@ -955,6 +976,12 @@ pub(super) fn analyze_transformer_secondary_load(
         }
         let edges = source.all_edges();
         if edges.is_empty() {
+            continue;
+        }
+        // Never fuse a group whose edges are already in the target's build
+        // set (BFS-collected context could overlap; fusing would stamp the
+        // load twice).
+        if edges.iter().any(|eidx| target_edges.contains(eidx)) {
             continue;
         }
         // Never fuse across a broker-cut (delayed-coupling) boundary.
@@ -1016,6 +1043,24 @@ pub(super) fn analyze_transformer_secondary_load(
 ///
 /// * `PK_XFMR_REFLECT_DISABLE` is the opt-out escape hatch, mirroring
 ///   `PK_OUTPUT_FUSE_DISABLE`.
+/// POLICY gate for transformer-secondary load reflection at the
+/// TRIODE-CONTEXT MNA path (pedalkernel-ffkl).
+///
+/// The general MNA builder stamps the same linear transformer skeleton
+/// (`stamp_linear_transformer_skeleton`: DCR + leakage + magnetizing/JA +
+/// ideal turns-ratio branch) that `build_passive_rtype_stage` uses, so the
+/// reflection is available to a transformer primary owned by a triode stage
+/// (LA-2A: V3's cathode follower drives `T_out`). The passive-only device
+/// gate of [`gate_transformer_reflection`] deliberately does NOT apply — the
+/// triode IS the target here. Honors the same opt-out env as the passive
+/// path.
+pub(super) fn gate_triode_context_transformer_reflection() -> Result<(), &'static str> {
+    if std::env::var("PK_XFMR_REFLECT_DISABLE").is_ok() {
+        return Err("env:PK_XFMR_REFLECT_DISABLE");
+    }
+    Ok(())
+}
+
 pub(super) fn gate_transformer_reflection(
     target: &FlowGroup,
     graph: &CircuitGraph,

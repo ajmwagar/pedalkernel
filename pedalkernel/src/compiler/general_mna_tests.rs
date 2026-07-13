@@ -457,3 +457,92 @@ fn push_pull_pentode_routes_to_pentode_three_port() {
             .collect::<Vec<_>>()
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Edge guard (pedalkernel-ffkl)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Builder-level edge guard: an edge the general MNA builder cannot stamp
+/// must FAIL the build loudly (default `PK_EDGE_GUARD=error`), never vanish
+/// silently. The synthetic dropped-edge fixture is a THREE-winding
+/// transformer — `has_tertiary()` is deliberately excluded from the
+/// transformer stamp plan, so its primary edge matches no stamping branch.
+/// Pre-guard this compiled "successfully" with the transformer contributing
+/// nothing (the LA-2A T_out failure mode).
+#[test]
+fn edge_guard_rejects_unstampable_edge_in_general_mna() {
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "guard fixture" { supply 250V
+            components {
+                V1: triode(12ax7)
+                R_p: resistor(100k)
+                R_k: resistor(1.5k)
+                R_g: resistor(1M)
+                T3: transformer(4:1, 5.7H, 10, 10p, tertiary=9.5:1)
+            }
+            nets {
+                vcc -> R_p.a
+                R_p.b -> V1.plate
+                V1.cathode -> R_k.a
+                R_k.b -> gnd
+                in -> V1.grid
+                V1.grid -> R_g.a
+                R_g.b -> gnd
+                V1.cathode -> T3.a
+                T3.b -> gnd
+                V1.plate -> out
+            }
+            controls {}
+        }"#,
+    )
+    .expect("parse guard fixture");
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+
+    let result = super::rigid::build_general_mna_from_edges_with_supply(
+        &all_edges, &graph, 48_000.0, 250.0,
+    );
+    let err = result.err().expect(
+        "a build set containing an unstampable (tertiary-transformer) edge \
+         must fail the edge guard, not compile with the component missing",
+    );
+    assert!(
+        err.contains("edge guard") && err.contains("T3"),
+        "guard error must name the mechanism and the dropped component: {err}"
+    );
+}
+
+/// The guard must stay SILENT for a build where every edge is stamped —
+/// the same fixture minus the tertiary transformer builds cleanly.
+#[test]
+fn edge_guard_passes_clean_triode_build() {
+    let pedal = crate::dsl::parse_pedal_file(
+        r#"
+        pedal "guard clean" { supply 250V
+            components {
+                V1: triode(12ax7)
+                R_p: resistor(100k)
+                R_k: resistor(1.5k)
+                R_g: resistor(1M)
+            }
+            nets {
+                vcc -> R_p.a
+                R_p.b -> V1.plate
+                V1.cathode -> R_k.a
+                R_k.b -> gnd
+                in -> V1.grid
+                V1.grid -> R_g.a
+                R_g.b -> gnd
+                V1.plate -> out
+            }
+            controls {}
+        }"#,
+    )
+    .expect("parse clean fixture");
+    let graph = super::graph::CircuitGraph::from_pedal(&pedal);
+    let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+
+    super::rigid::build_general_mna_from_edges_with_supply(&all_edges, &graph, 48_000.0, 250.0)
+        .expect("clean triode build must pass the edge guard");
+}
