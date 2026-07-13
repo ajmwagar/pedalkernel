@@ -24,10 +24,10 @@
 //! - single-port WDF load line — [`solve_wdf_bjt_dc_qpoint`] (`BjtSeed` +
 //!   `ControlNewton`, replaces `spqr_build.rs::compute_wdf_bjt_dc_qpoint`
 //!   bit-for-bit);
-//! - blockwise raw base-voltage read — [`solve_blockwise_bjt_base_bias`] +
-//!   the named [`bjt_unconditional_default_vbe`] (replaces the anonymous
-//!   `default_vbe` at `blockwise.rs:359`, the ko5g.2 audit's S9 silent
-//!   conduction-forcing default — now warned loudly);
+//! - blockwise raw base-voltage read — [`solve_blockwise_bjt_base_bias`],
+//!   with the group co-solve fallback [`solve_blockwise_bjt_group_qpoint`]
+//!   (pedalkernel-y9hz: the ko5g.2 audit's S9 unconditional-conduction
+//!   `default_vbe` is DELETED — undeterminable now warns + stays at cutoff);
 //! - grouped-MNA NR warm-start seed — [`bjt_model_conduction_seed`] (replaces
 //!   the `initial_v` physics defaults in `rigid/general.rs`).
 //!
@@ -2323,9 +2323,9 @@ fn solve_wdf_triode_dc_qpoint_inner(
 /// - [`NotApplicable`](Self::NotApplicable): the element is not a BJT at all —
 ///   nothing to warn about, silent.
 /// - [`Undeterminable`](Self::Undeterminable): a REAL BJT stage whose bias
-///   could not be determined.  The caller keeps its legacy fallback (WDF path:
-///   `BjtRoot`'s vbe_bias = 0 cutoff default; blockwise path: the named
-///   [`bjt_unconditional_default_vbe`]) and must WARN LOUDLY via
+///   could not be determined.  The caller keeps the cutoff fallback
+///   (`BjtRoot`'s vbe_bias = 0 default — both the WDF and, since
+///   pedalkernel-y9hz, the blockwise path) and must WARN LOUDLY via
 ///   [`warn_if_undeterminable`](Self::warn_if_undeterminable).  The fail-loud
 ///   flip (warn → `CompileError`) is ko5g.8.
 #[derive(Debug, Clone)]
@@ -2597,9 +2597,9 @@ fn solve_wdf_bjt_dc_qpoint_inner(
 /// physics change for a later bead, not this refactor.
 ///
 /// `Err(Undeterminable)` when no NL edge's base voltage is in the map — the
-/// caller warns loudly and applies the named
-/// [`bjt_unconditional_default_vbe`] (byte-identical to the deleted
-/// `default_vbe` behavior, minus the silence).
+/// caller falls through to the REAL group co-solve
+/// [`solve_blockwise_bjt_group_qpoint`] (pedalkernel-y9hz; the unconditional
+/// 0.6 V conduction default that used to fire here is DELETED).
 pub(super) fn solve_blockwise_bjt_base_bias(
     nl_edge_indices: &[usize],
     graph: &CircuitGraph,
@@ -2640,23 +2640,13 @@ pub(super) fn solve_blockwise_bjt_base_bias(
     out
 }
 
-/// THE unconditional BJT conduction default (ko5g.4) — the ko5g.2 audit's S9
-/// fallback, formerly the anonymous `default_vbe` at `blockwise.rs:359`.
-///
-/// This is the engine's most aggressive silent bias default: it FORCES the
-/// device into nominal conduction (0.6 V silicon / 0.3 V low-voltage) with no
-/// topology evidence at all — the opposite polarity of the WDF path's
-/// leave-at-cutoff fallback.  It exists as a named, documented, greppable
-/// function so that (a) the blockwise call-site can keep byte-identical
-/// behavior while WARNING loudly when it fires, and (b) ko5g.8 has exactly one
-/// place to delete.
-pub(super) fn bjt_unconditional_default_vbe(supply_voltage: f64) -> f64 {
-    if supply_voltage > 1.0 {
-        0.6
-    } else {
-        0.3
-    }
-}
+// DELETED (pedalkernel-y9hz, USER DIRECTIVE): `bjt_unconditional_default_vbe`
+// — the ko5g.2 audit's S9, the anonymous `default_vbe` ko5g.4 named for
+// exactly this one-line removal. The blockwise call-site now falls through to
+// [`solve_blockwise_bjt_group_qpoint`] (real solve) and, when THAT is
+// undeterminable, keeps the `BjtRoot` cutoff default — never a fabricated
+// conduction point. `bias_tests::unconditional_conduction_default_is_deleted`
+// is the greppable proof.
 
 /// Model-derived BJT conduction seed (ko5g.4) — replaces the copy that lived
 /// in `rigid/general.rs` (`initial_v` physics-based defaults for
@@ -2693,6 +2683,133 @@ pub(super) fn bjt_model_conduction_seed(
 /// operating points that genuinely conduct at 0.12-0.25 V.
 pub(super) fn bjt_nominal_conduction_vbe(model: &GummelPoonModel) -> f64 {
     (model.nf * model.vt * (1.0e-3_f64 / model.is).ln()).clamp(0.1, 0.8)
+}
+
+/// Blockwise-path REAL BJT bias solve (pedalkernel-y9hz, USER DIRECTIVE).
+///
+/// This replaces the deleted `bjt_unconditional_default_vbe` — the ko5g.2
+/// audit's S9, the engine's most aggressive silent default: when the raw
+/// `StaticBias` base-voltage read missed, the blockwise call-site FORCED the
+/// device into nominal conduction (0.6 V) with no topology evidence at all.
+///
+/// The real solve: run [`solve_bjt_group_dc_qpoint`] — the full-network
+/// source-stepping-homotopy Newton the general-MNA path seeds from (the BA283
+/// fix-#1 solver) — over the WHOLE blockwise plan's edges (all blocks +
+/// coupling), so DC-coupled feedback bias loops that CROSS block boundaries
+/// (fuzz-face family, si_fb_amp's Rf servo) are co-solved, then read the
+/// target block's BJT terminals out of the solved node-voltage map.
+///
+/// Returns the device-normalized Q-point:
+/// - `vbe` — forward base-emitter magnitude (≥ 0; cutoff reads ≈ 0), fed to
+///   `BjtRoot::set_bias` which applies PNP sign internally;
+/// - `vce` — RAW `V(collector) − V(emitter)` (negative for a conducting PNP),
+///   fed to `set_initial_prev_v` exactly like the WDF path's PNP-signed
+///   warm-start;
+/// - `v_emitter` — always 0.0 here: the blockwise call-site does not
+///   pre-charge emitter bypass caps (blocks carry their own reactive state).
+///
+/// `Err(NotApplicable)` when the target block holds no BJT;
+/// `Err(Undeterminable)` when the group solve fails — the caller warns loudly
+/// and keeps the `BjtRoot` cutoff default (vbe_bias = 0), the solver's proper
+/// fallback semantics. NEVER a fabricated conduction default.
+pub(super) fn solve_blockwise_bjt_group_qpoint(
+    target_nl_edges: &[usize],
+    plan_all_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> Result<BjtDcQpoint, BjtQpointSkip> {
+    // Identify the target block's BJT (first BJT-classified NL component).
+    let target = target_nl_edges.iter().find_map(|&eidx| {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        let (kind, _) = comp.kind.classify_nonlinear(
+            &comp.id,
+            e.node_a,
+            e.node_b,
+            graph.gnd_node,
+            &graph.node_names,
+        )?;
+        match kind {
+            NonlinearKind::BjtNpn {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } => Some((model_name, base_node, collector_node, emitter_node, false)),
+            NonlinearKind::BjtPnp {
+                model_name,
+                base_node,
+                collector_node,
+                emitter_node,
+            } => Some((model_name, base_node, collector_node, emitter_node, true)),
+            _ => None,
+        }
+    });
+    let Some((model_name, base_node, collector_node, emitter_node, is_pnp)) = target else {
+        return Err(BjtQpointSkip::NotApplicable);
+    };
+    let label = bjt_instance_label(graph, base_node, &model_name);
+    let undet = || {
+        BjtQpointSkip::Undeterminable(BiasError::UndeterminableBjt {
+            label: label.clone(),
+            missing: TopologyTerm::BaseDivider,
+        })
+    };
+
+    // Classify every NL device across the plan (dedup by component — BJTs
+    // contribute two graph edges) for the group co-solve.
+    let mut nl_kinds: Vec<NonlinearKind> = Vec::new();
+    let mut seen: HashSet<usize> = HashSet::new();
+    for &eidx in plan_all_edges {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Nonlinear {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        if !seen.insert(e.comp_idx) {
+            continue;
+        }
+        let comp = &graph.components[e.comp_idx];
+        if let Some((kind, _)) = comp.kind.classify_nonlinear(
+            &comp.id,
+            e.node_a,
+            e.node_b,
+            graph.gnd_node,
+            &graph.node_names,
+        ) {
+            nl_kinds.push(kind);
+        }
+    }
+
+    let node_dc = solve_bjt_group_dc_qpoint(&nl_kinds, plan_all_edges, graph, supply_voltage)
+        .ok_or_else(undet)?;
+    let (Some(&vb), Some(&vc), Some(&ve)) = (
+        node_dc.get(&base_node),
+        node_dc.get(&collector_node),
+        node_dc.get(&emitter_node),
+    ) else {
+        return Err(undet());
+    };
+
+    let sign = if is_pnp { -1.0 } else { 1.0 };
+    let out = BjtDcQpoint {
+        // Forward magnitude; a (true) cutoff op reads as ~0 → the root stays
+        // at cutoff, matching the solved circuit instead of forcing 0.6 V.
+        vbe: (sign * (vb - ve)).max(0.0),
+        // Raw collector-emitter voltage: positive for conducting NPN,
+        // negative for conducting PNP — the same signed convention the WDF
+        // path hands `set_initial_prev_v`.
+        vce: vc - ve,
+        v_emitter: 0.0,
+    };
+    if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+        eprintln!(
+            "[bias-qpoint] path=blockwise-group bjt {}: vbe={:.6} vce={:.6} supply={supply_voltage}",
+            bjt_display_label(graph, base_node, &model_name),
+            out.vbe,
+            out.vce
+        );
+    }
+    Ok(out)
 }
 
 /// Solve the **nonlinear** DC operating point of every BJT in the group.
@@ -4259,8 +4376,9 @@ mod tests {
         let vbe = solve_blockwise_bjt_base_bias(&nl_edges, &graph, &bias_map).unwrap();
         assert_eq!(vbe, 0.05, "no lower clamp (legacy: cutoff-level reads pass)");
 
-        // Map miss → loud Undeterminable, and the named unconditional default
-        // carries the deleted `default_vbe` values exactly.
+        // Map miss → loud Undeterminable (the caller then runs the REAL group
+        // co-solve; the unconditional conduction default is DELETED — see
+        // `unconditional_conduction_default_is_deleted`).
         bias_map.clear();
         let miss = solve_blockwise_bjt_base_bias(&nl_edges, &graph, &bias_map);
         assert!(
@@ -4272,10 +4390,34 @@ mod tests {
             ),
             "map miss must be Undeterminable (S9 flavor no longer silent), got {miss:?}"
         );
-        assert_eq!(bjt_unconditional_default_vbe(9.0), 0.6);
-        assert_eq!(bjt_unconditional_default_vbe(1.01), 0.6);
-        assert_eq!(bjt_unconditional_default_vbe(1.0), 0.3);
-        assert_eq!(bjt_unconditional_default_vbe(0.9), 0.3);
+    }
+
+    /// pedalkernel-y9hz gate-4 proof: the unconditional-conduction flavor
+    /// (`bjt_unconditional_default_vbe`, the ko5g.2 audit's S9) is DELETED
+    /// from the codebase — grep-level, source-of-truth check over the two
+    /// files that ever defined or called it. The needle is assembled at
+    /// runtime so this test's own source cannot satisfy it.
+    #[test]
+    fn unconditional_conduction_default_is_deleted() {
+        let needle: String = ["bjt_unconditional", "_default_vbe"].concat();
+        for (name, src) in [
+            ("bias.rs", include_str!("bias.rs")),
+            ("blockwise.rs", include_str!("blockwise.rs")),
+        ] {
+            let defines_or_calls = src
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    !t.starts_with("//") && !t.starts_with("///") && !t.starts_with("//!")
+                })
+                .any(|l| l.contains(&needle));
+            assert!(
+                !defines_or_calls,
+                "{name} still defines or calls `{needle}` — the S9 \
+                 unconditional conduction default must stay deleted \
+                 (pedalkernel-y9hz USER DIRECTIVE)"
+            );
+        }
     }
 
     /// Gate-4 pin: the grouped-MNA model-derived warm-start seed reproduces
