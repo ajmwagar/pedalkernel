@@ -156,6 +156,31 @@ fn probe_full_pultec() {
         let gain_db = 20.0 * (om / 0.05).log10();
         eprintln!("    {freq:>8.0} Hz: {gain_db:+7.2} dB");
     }
+
+    // Control A/B at the program frequencies — do the EQ pots shape the WDF
+    // response at all? (ngspice: LF Boost moves 60 Hz by tens of dB.)
+    eprintln!("=== WDF control A/B (0.05 amp, 1 s settle) ===");
+    for (label, freq, ctrls) in [
+        ("flat      @60", 60.0, vec![]),
+        ("LF Boost=1 @60", 60.0, vec![("LF Boost", 1.0)]),
+        ("flat      @10k", 10_000.0, vec![]),
+        ("HF Atten=1 @10k", 10_000.0, vec![("HF Atten", 1.0)]),
+    ] {
+        let mut p = compile_full();
+        for &(c, v) in &ctrls {
+            p.set_control(c, v);
+        }
+        let settle = SR as usize;
+        for i in 0..settle {
+            p.process(0.05 * (2.0 * PI * freq * i as f64 / SR).sin());
+        }
+        let m = (0.2 * SR) as usize;
+        let out: Vec<f64> = (0..m)
+            .map(|j| p.process(0.05 * (2.0 * PI * freq * (settle + j) as f64 / SR).sin()))
+            .collect();
+        let g = 20.0 * (goertzel_mag(&out, freq) / 0.05).log10();
+        eprintln!("    {label:<16}: {g:+7.2} dB");
+    }
 }
 
 fn goertzel_mag(buf: &[f64], freq: f64) -> f64 {
