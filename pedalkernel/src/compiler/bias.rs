@@ -1267,17 +1267,16 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
 ///   BFS at every arm, RC across all rails with an estimate fallback, Thévenin
 ///   base voltage from [`NetworkBias::voltage_at`]. NPN only.
 ///
-/// KNOWN LEGACY GAPS preserved by BOTH flavors (fix lands HERE, once, after
-/// this collapse):
-/// - **pedalkernel-6ou7**: RE is searched from emitter to GND only — a classic
-///   PNP common-emitter whose RE returns to VCC never seeds (cutoff).  The RC
-///   arm of `WdfStageDirect` is likewise vcc/positive-rail-only.  The fix is
-///   to key the RE/RC rail targets on device polarity in
-///   `locate_bias_topology` below.
-/// - **pedalkernel-129p** (partly): the WDF entry's `vbe.clamp(0.3, 0.8)`
-///   post-clamp ([`WDF_BJT_VBE_CLAMP`]) forces a germanium conducting point
-///   (Vbe ≈ 0.15-0.3 V) up to 0.3 V.  The group-solver half of 129p is the
-///   `any_active` physicality gate in [`solve_bjt_group_dc_qpoint`].
+/// LEGACY GAPS — FIXED here in the pedalkernel-y9hz batch:
+/// - **pedalkernel-6ou7** (FIXED): the RE/RC finder rails are keyed on device
+///   polarity in `locate_wdf_stage_direct` — NPN keeps the legacy GND/vcc
+///   arms bit-for-bit; the PNP mirror searches RE→positive-rails (then GND)
+///   and RC→GND (then vcc).
+/// - **pedalkernel-129p** (FIXED, both halves): the WDF post-clamp floor
+///   ([`WDF_BJT_VBE_CLAMP`]) and the group solver's `any_active` window are
+///   MODEL-AWARE via [`bjt_nominal_conduction_vbe`] — germanium (Vbe_on ≈
+///   0.11-0.2 V) conducts below the silicon floor; silicon keeps the legacy
+///   0.3 V floor bit-for-bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BjtFinderFlavor {
     WdfStageDirect,
@@ -1286,8 +1285,9 @@ pub(super) enum BjtFinderFlavor {
 
 /// Post-solve Vbe clamp of the deleted `compute_wdf_bjt_dc_qpoint` (ko5g.4):
 /// "A silicon BJT in conduction sits ~0.55-0.75 V; clamp defensively."
-/// Named so the pedalkernel-129p germanium fix (Ge Vbe ≈ 0.15-0.3 V conducts,
-/// this floor forces it to 0.3) has exactly one greppable place to relax.
+/// pedalkernel-129p (y9hz batch): the FLOOR is now model-aware at the use
+/// site — it relaxes to `0.5 · bjt_nominal_conduction_vbe(model)` when that
+/// is lower (germanium), keeping silicon at this legacy 0.3 V bit-for-bit.
 pub(super) const WDF_BJT_VBE_CLAMP: (f64, f64) = (0.3, 0.8);
 
 /// `BiasSeed` for a common-emitter BJT (NPN, plus PNP via the magnitude mirror
@@ -1380,12 +1380,27 @@ impl<'a> BjtSeed<'a> {
             .unwrap_or(base_rail_v * r2 / (r1 + r2));
         let rth = r1 * r2 / (r1 + r2);
 
-        // Emitter resistor RE (emitter→gnd).  Required for the load-line solve;
-        // a degeneration resistor is what makes the raw divider voltage an
-        // over-bias.  pedalkernel-6ou7: this is GND-only even for PNP whose RE
-        // returns to VCC — preserved (fix lands here, once).
-        let re = find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
-            .ok_or_else(|| undet(TopologyTerm::EmitterResistor))?;
+        // Emitter resistor RE.  Required for the load-line solve; a
+        // degeneration resistor is what makes the raw divider voltage an
+        // over-bias.  pedalkernel-6ou7 FIX (pedalkernel-y9hz batch): the rail
+        // RE returns to is keyed on device polarity — NPN degenerates to GND
+        // (legacy arm, byte-identical); a classic PNP common-emitter mirror
+        // returns RE to VCC/a positive rail (searched rails-first, with the
+        // GND arm kept as a fallback for flipped "positive-ground" PNP decks
+        // whose emitters sit near ground).
+        let re = if is_pnp {
+            positive_supply_rails(graph)
+                .iter()
+                .find_map(|&rail| {
+                    find_load_resistor_direct(emitter_node, rail, edge_indices, graph)
+                })
+                .or_else(|| {
+                    find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
+                })
+        } else {
+            find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
+        }
+        .ok_or_else(|| undet(TopologyTerm::EmitterResistor))?;
 
         // PNP common-emitter is the mirror image: the emitter sits at VCC, the
         // divider biases the base below it, so the loop voltage that
@@ -2423,12 +2438,12 @@ pub(super) struct BjtDcQpoint {
 ///   0.65 V start, h = 1e-4, Vbc = -1 V), and `BjtSeed::device_iv` carries the
 ///   deleted loop's exact finite-difference grouping — bit-for-bit, pinned by
 ///   `wdf_bjt_qpoint_bit_reproduces_deleted_loop`.
-/// - **Post-solve** — reject `vbe <= 0`; clamp to [`WDF_BJT_VBE_CLAMP`]
-///   (divergence vs the group solver, preserved: forces a germanium
-///   conducting point up to 0.3 V — pedalkernel-129p's WDF half); Vce from a
-///   vcc-LITERAL stage-set RC lookup (pedalkernel-6ou7's second half) with the
-///   half-rail fallback, clamped to [0, vcc], PNP-signed;
-///   `v_emitter = |Ie·RE|`.
+/// - **Post-solve** — reject `vbe <= 0`; clamp to [`WDF_BJT_VBE_CLAMP`] with
+///   a MODEL-AWARE floor (pedalkernel-129p fixed: germanium conducts below
+///   the silicon 0.3 V floor; silicon keeps it bit-for-bit); Vce from a
+///   polarity-keyed stage-set RC lookup (pedalkernel-6ou7 fixed: NPN
+///   vcc-literal as before, PNP collector→GND first) with the half-rail
+///   fallback, clamped to [0, vcc], PNP-signed; `v_emitter = |Ie·RE|`.
 ///
 /// Returns `Err(BjtQpointSkip::NotApplicable)` when the element is not a BJT,
 /// `Err(BjtQpointSkip::Undeterminable)` when it IS one but the base divider /
@@ -2515,7 +2530,16 @@ fn solve_wdf_bjt_dc_qpoint_inner(
         return Err(BjtQpointSkip::Undeterminable(BiasError::NonPhysicalQpoint));
     }
     // A silicon BJT in conduction sits ~0.55-0.75 V; clamp defensively.
+    // pedalkernel-129p FIX (WDF half, pedalkernel-y9hz batch): the floor is
+    // MODEL-AWARE — a germanium device (AC128/OC44: Vbe_on ≈ 0.11-0.2 V)
+    // genuinely conducts BELOW the silicon floor, and forcing it up to 0.3 V
+    // over-biased every Ge WDF stage. The floor relaxes to half the model's
+    // nominal 1 mA conduction voltage when that is lower; silicon models
+    // (Vbe_on ≈ 0.65 → half ≈ 0.33 > 0.3) keep the legacy 0.3 V floor
+    // bit-for-bit.
+    let model = super::helpers::gummel_poon_model(model_name);
     let (clamp_lo, clamp_hi) = WDF_BJT_VBE_CLAMP;
+    let clamp_lo = clamp_lo.min(0.5 * bjt_nominal_conduction_vbe(&model));
     let vbe = vbe.clamp(clamp_lo, clamp_hi);
 
     // Collector-emitter operating-point voltage, for the BjtRoot warm-start.
@@ -2523,7 +2547,6 @@ fn solve_wdf_bjt_dc_qpoint_inner(
     // to pre-seed `prev_v` so the WDF/NR solve cold-starts AT the Q-point
     // instead of 0 V, eliminating the bias-settling startup transient (ngspice
     // runs a `.op` before `.tran`).  Falls back to half-rail when RC is absent.
-    let model = super::helpers::gummel_poon_model(model_name);
     let vbc_active = -1.0_f64;
     let (ic, ib) = model.currents(
         vbe as pedalkernel_rt::Wave,
@@ -2531,7 +2554,17 @@ fn solve_wdf_bjt_dc_qpoint_inner(
     );
     let ie = ic + ib;
     let re = topo.r_degeneration;
-    let rc = find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph);
+    // pedalkernel-6ou7 FIX (second half): the RC rail is polarity-keyed too —
+    // NPN keeps the legacy vcc-LITERAL lookup bit-for-bit; the PNP mirror's
+    // load returns to GND (collector pulls toward ground), with the vcc arm
+    // kept as a fallback for flipped positive-ground decks.
+    let rc = if is_pnp {
+        find_load_resistor_direct(collector_node, graph.gnd_node, edge_indices, graph).or_else(
+            || find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph),
+        )
+    } else {
+        find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph)
+    };
     let vcc = supply_voltage.abs();
     let vce = match rc {
         Some(rc) => (vcc - ic * rc - ie * re).clamp(0.0, vcc),
@@ -2644,8 +2677,22 @@ pub(super) fn bjt_model_conduction_seed(
     is_pnp: bool,
 ) -> (f64, f64) {
     let sign = if is_pnp { -1.0 } else { 1.0 };
-    let vbe = model.nf * model.vt * (1.0e-3_f64 / model.is).ln();
-    (sign * vbe.clamp(0.1, 0.8), sign * supply_voltage * 0.5)
+    (
+        sign * bjt_nominal_conduction_vbe(model),
+        sign * supply_voltage * 0.5,
+    )
+}
+
+/// Nominal conduction Vbe for a BJT model: the junction voltage at a nominal
+/// 1 mA collector current, `nf·Vt·ln(1 mA / Is)`, clamped to [0.1, 0.8] V.
+/// Silicon (Is ≈ 1e-14) ≈ 0.65 V; germanium (Is ≈ 2e-5, AC128) ≈ 0.11 V.
+///
+/// Shared by [`bjt_model_conduction_seed`] (byte-identical extraction) and
+/// the MODEL-AWARE physicality gates (pedalkernel-129p, y9hz batch): any
+/// fixed "conducting Vbe" window tuned for silicon rejects germanium
+/// operating points that genuinely conduct at 0.12-0.25 V.
+pub(super) fn bjt_nominal_conduction_vbe(model: &GummelPoonModel) -> f64 {
+    (model.nf * model.vt * (1.0e-3_f64 / model.is).ln()).clamp(0.1, 0.8)
 }
 
 /// Solve the **nonlinear** DC operating point of every BJT in the group.
@@ -2861,13 +2908,91 @@ pub(super) fn solve_bjt_group_dc_qpoint(
     // the Newton lands the conducting branch; raising lambda then *tracks* that
     // branch up to the full operating point instead of jumping to the cutoff
     // fixed point a cold full-supply start would settle into.
-    let lambdas: [f64; 8] = [0.05, 0.1, 0.2, 0.35, 0.55, 0.75, 0.9, 1.0];
+    let base_lambdas: [f64; 8] = [0.05, 0.1, 0.2, 0.35, 0.55, 0.75, 0.9, 1.0];
+
+    // pedalkernel-129p (y9hz batch): the ladder density is MODEL-AWARE.
+    // Branch TRACKING requires each rail step to stay within the Newton basin
+    // of the previous rung's root. The legacy 8-rung ladder steps the rails
+    // by up to ~1.4 V — fine for silicon (Vbe_on ≈ 0.65 V, junction scale
+    // 60 mV: intermediate roots are separated by far more than a step), but a
+    // GERMANIUM junction (AC128 Vbe_on ≈ 0.11 V, nf·Vt ≈ 33 mV) is already in
+    // mA-scale conduction one coarse step past its root, so the continuation
+    // CONVERGES onto a saturated/inverse artifact branch and rides it to a
+    // non-physical "root" at full supply (measured: fuzz_face_pnp, Q1 vbc ≈
+    // +1.05 V forward, collector 0.93 V ABOVE the rail — a point ngspice's
+    // `.op` never lands). When any device in the group is germanium-class
+    // (Vbe_on < 0.3 V), build a DENSE linear ladder whose rail step is half
+    // the smallest conduction voltage (~160 rungs at 9 V — compile-time
+    // trivial for these small groups). All-silicon groups keep the exact
+    // legacy ladder (and start) bit-for-bit.
+    let min_vbe_on = models
+        .iter()
+        .map(bjt_nominal_conduction_vbe)
+        .fold(f64::INFINITY, f64::min);
+    let lambdas: Vec<f64> = if min_vbe_on < 0.3 && supply_voltage.abs() > 0.0 {
+        let d_lambda = (0.5 * min_vbe_on / supply_voltage.abs()).min(0.05);
+        let steps = (1.0 / d_lambda).ceil() as usize;
+        (1..=steps).map(|k| (k as f64) * d_lambda).map(|l| l.min(1.0)).collect()
+    } else {
+        base_lambdas.to_vec()
+    };
 
     // Interior-node state, carried across continuation steps.  Start every node
     // at a mild forward bias relative to the first (smallest) rail scale.
     let mut v = vec![0.5 * lambdas[0] * supply_voltage; n];
 
-    for &lambda in &lambdas {
+    // SPICE-style iterate limiting bracket (pedalkernel-y9hz): at DC the
+    // network's node voltages live within the rail hull; a Newton ITERATE has
+    // no such guarantee — on a floating high-Is (germanium) cluster whose only
+    // ground conductance is `gmin`, one bad step on the reverse-leakage
+    // plateau (Jacobian row ≈ gmin) threw an interior node to −27 V, and the
+    // 0.25 V step clamp then needed >100 iterations to crawl back (measured:
+    // fuzz_face_pnp, NO CONVERGENCE at lambda=0.1). Clamp each iterate to the
+    // rail hull ± 1 V — every true root is strictly inside, so this only
+    // shortens wild excursions, it cannot change which root is found.
+    let (v_lo, v_hi) = {
+        let mut lo = 0.0_f64;
+        let mut hi = 0.0_f64;
+        for &node in &dc_path {
+            if let Some(rv) = full_rail_v(node) {
+                lo = lo.min(rv);
+                hi = hi.max(rv);
+            }
+        }
+        lo = lo.min(supply_voltage.min(0.0));
+        hi = hi.max(supply_voltage.max(0.0));
+        (lo - 1.0, hi + 1.0)
+    };
+
+    // Adaptive source-step refinement (pedalkernel-y9hz / 129p): the fixed
+    // ladder's 2× steps move the rails by up to ~1.4 V per step — fine for
+    // silicon (junction scale 60 mV, negligible current below ~0.5 V), but a
+    // GERMANIUM junction (Is ≈ 20 µA, nf·Vt ≈ 33 mV) already conducts mA-scale
+    // current a couple hundred mV past its previous root, so the warm start
+    // lands outside the Newton basin and the step fails (measured:
+    // fuzz_face_pnp stalls at lambda 0.1→0.2). Standard SPICE practice: on a
+    // failed source step, RESTORE the last converged state and BISECT the
+    // step, giving up only below a minimum step size / attempt budget. A run
+    // whose every ladder step converges (BA283, muff — the silicon fleet)
+    // executes the exact same Newton sequence as before, bit-for-bit.
+    let mut pending: std::collections::VecDeque<f64> = lambdas.iter().copied().collect();
+    let mut lambda_done = 0.0_f64;
+    let mut attempts = 0usize;
+    // Per-iteration Newton trace (pedalkernel-y9hz diagnostic — this is how
+    // the −27 V excursion and the Ge branch-jump were localized).
+    let trace = std::env::var("PK_BIAS_GROUP_TRACE").is_ok();
+    while let Some(lambda) = pending.pop_front() {
+        attempts += 1;
+        if attempts > 1024 {
+            if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+                eprintln!(
+                    "[bias-qpoint] path=mna-group: source-step attempt budget exhausted \
+                     at lambda={lambda}"
+                );
+            }
+            return None;
+        }
+        let v_checkpoint = v.clone();
         let rail_v = |node: NodeId| -> Option<f64> { full_rail_v(node).map(|rv| rv * lambda) };
         let node_voltage = |node: NodeId, v: &[f64]| -> f64 {
             if let Some(rv) = rail_v(node) {
@@ -2972,6 +3097,11 @@ pub(super) fn solve_bjt_group_dc_qpoint(
             // Converge on the current residual (KCL must balance to a tiny
             // current at every node).
             let max_f = f.iter().fold(0.0_f64, |m, &x| m.max(x.abs()));
+            if trace {
+                eprintln!(
+                    "[bias-group-trace] lambda={lambda} iter={_iter} max_f={max_f:.3e} v={v:.4?}"
+                );
+            }
             if max_f < 1e-9 {
                 converged = true;
                 break;
@@ -2986,15 +3116,32 @@ pub(super) fn solve_bjt_group_dc_qpoint(
             let max_raw = delta.iter().fold(0.0_f64, |m, &x| m.max(x.abs()));
             let scale = if max_raw > 0.25 { 0.25 / max_raw } else { 1.0 };
             for k in 0..n {
-                v[k] += delta[k] * scale;
+                v[k] = (v[k] + delta[k] * scale).clamp(v_lo, v_hi);
             }
             if !v.iter().all(|x| x.is_finite()) {
-                return None;
+                break; // treated as a failed step below (state restored)
             }
         }
-        if !converged {
+        if converged && v.iter().all(|x| x.is_finite()) {
+            lambda_done = lambda;
+            continue;
+        }
+        // Failed step: restore the last converged state and bisect.
+        v = v_checkpoint;
+        let step = lambda - lambda_done;
+        if step < 1e-3 {
+            if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+                eprintln!(
+                    "[bias-qpoint] path=mna-group: NO CONVERGENCE — source step \
+                     {lambda_done}→{lambda} unresolvable below minimum step \
+                     (n={n} interior nodes, {} BJTs)",
+                    bjts.len()
+                );
+            }
             return None;
         }
+        pending.push_front(lambda);
+        pending.push_front(lambda_done + 0.5 * step);
     }
 
     // Final converged state is at lambda = 1.0 (full supply).
@@ -3012,7 +3159,7 @@ pub(super) fn solve_bjt_group_dc_qpoint(
         .unwrap_or(supply_voltage)
         .max(supply_voltage);
     let mut any_active = false;
-    for b in &bjts {
+    for (b, model) in bjts.iter().zip(models.iter()) {
         let vb_ = node_voltage(b.base, &v);
         let vc_ = node_voltage(b.collector, &v);
         let ve_ = node_voltage(b.emitter, &v);
@@ -3026,14 +3173,43 @@ pub(super) fn solve_bjt_group_dc_qpoint(
         // Darlington is acceptable (its Vce can be small), but a junction biased
         // well past turn-on or reverse-biased Vce is a failed solve.
         if vbe > 1.2 || vce < -0.5 || vce > vcc_ceiling + 1.0 {
+            if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+                eprintln!(
+                    "[bias-qpoint] path=mna-group bjt {}: NON-PHYSICAL reject \
+                     vbe={vbe:.6} vce={vce:.6} ceiling={vcc_ceiling:.3}",
+                    bjt_display_label(graph, b.base, b.model_name),
+                );
+            }
             return None;
         }
-        if (0.3..=1.0).contains(&vbe) && vce > 0.05 {
+        // pedalkernel-129p FIX (group half, y9hz batch): the "conducting"
+        // floor is MODEL-AWARE. The old fixed `0.3 ≤ vbe` window was tuned
+        // for silicon (Vbe_on ≈ 0.65, half ≈ 0.33 → the 0.3 floor is
+        // preserved bit-for-bit via the `min`) and rejected every germanium
+        // operating point (AC128 conducts at Vbe ≈ 0.12-0.25 V).
+        let active_floor = 0.3_f64.min(0.5 * bjt_nominal_conduction_vbe(model));
+        if (active_floor..=1.0).contains(&vbe) && vce > 0.05 {
             any_active = true;
         }
     }
+    // pedalkernel-129p FIX (y9hz batch): a CONVERGED all-cutoff solution is a
+    // real operating point, not a failed solve. The `any_active` reject was a
+    // blunt proxy for "did the homotopy escape the spurious cutoff basin" —
+    // but the source-stepping homotopy above IS the mechanism that escapes
+    // it, and some circuits are genuinely quiescent-dead at DC (validated:
+    // fuzz_face_pnp's BJT cluster has NO resistive path to ground, and
+    // ngspice `.op` with a grounded input + reltol=1e-6 lands every node at
+    // VCC with both AC128s at Vbe ≈ -0.3 µV / Ic ≈ 0.3 nA — nodeset at a
+    // conducting guess collapses back to the same root). Rejecting that op
+    // silently substituted a fabricated conduction seed downstream. Accept
+    // it, LOUDLY, so bias dashboards compare the true fixed point.
     if !any_active {
-        return None;
+        eprintln!(
+            "  [bias] WARNING: BJT group DC solve converged with ALL {} device(s) in \
+             cutoff — accepting the quiescent-dead operating point (pedalkernel-129p; \
+             was silently rejected before pedalkernel-y9hz).",
+            bjts.len()
+        );
     }
 
     // Return the solved DC node voltages, including the rail nodes that BJT
@@ -3775,14 +3951,16 @@ mod tests {
         }
     }
 
-    /// Gate-4 pin (pedalkernel-6ou7, preserved NOT fixed): a classic PNP CE
-    /// whose emitter resistor returns to VCC never seeds on the WDF path —
-    /// the RE finder searches emitter→GND only.  The deleted copy returned a
-    /// silent `None`; the unified entry returns the SAME no-seed outcome, now
-    /// as a loud `Undeterminable(EmitterResistor)`.  The 6ou7 fix lands in
-    /// `BjtSeed::locate_wdf_stage_direct` (one place) and flips this test.
+    /// pedalkernel-6ou7 FIXED (y9hz batch): a classic PNP CE whose emitter
+    /// resistor returns to VCC now SEEDS on the WDF path — the RE/RC finder
+    /// rails are keyed on device polarity in `BjtSeed::locate_wdf_stage_direct`
+    /// (one place, post-ko5g.4). The deleted copy returned a silent `None`
+    /// here (pinned by ko5g.4 as `..fails_identically_6ou7`); this test now
+    /// pins the FIX: divider 47k/470k → Vth ≈ 8.18 V, v_drive ≈ 0.82 V,
+    /// RE = 2.2 k → an active-region point with a few-tens-of-µA emitter
+    /// current, PNP-signed Vce, and a real |Ie·RE| emitter drop.
     #[test]
-    fn wdf_bjt_pnp_re_to_vcc_fails_identically_6ou7() {
+    fn wdf_bjt_pnp_re_to_vcc_seeds_6ou7() {
         let graph = parse_graph(
             r#"pedal "test" { supply 9V
                 components {
@@ -3813,19 +3991,157 @@ mod tests {
         let bias_map = std::collections::BTreeMap::new();
 
         let legacy = deleted_compute_wdf_bjt_dc_qpoint(&nl, &all_edges, &graph, &bias_map, 9.0);
-        assert!(legacy.is_none(), "legacy copy silently skipped PNP RE→VCC");
+        assert!(
+            legacy.is_none(),
+            "legacy copy silently skipped PNP RE→VCC (the 6ou7 bug this fixes)"
+        );
 
-        let new = solve_wdf_bjt_dc_qpoint(&nl, &all_edges, &graph, &bias_map, 9.0);
-        match new {
-            Err(BjtQpointSkip::Undeterminable(BiasError::UndeterminableBjt {
-                missing: TopologyTerm::EmitterResistor,
-                ..
-            })) => {}
-            other => panic!(
-                "PNP RE→VCC must fail as Undeterminable(EmitterResistor) \
-                 (6ou7 preserved), got {other:?}"
-            ),
+        let dc = solve_wdf_bjt_dc_qpoint(&nl, &all_edges, &graph, &bias_map, 9.0)
+            .expect("PNP RE→VCC must seed after the 6ou7 fix");
+        // Silicon PNP in conduction: solved forward Vbe in the clamp window,
+        // not pinned AT either clamp edge (a real solve, not a clamp artifact).
+        assert!(
+            dc.vbe > 0.3 && dc.vbe < 0.8,
+            "solved Vbe should be a real conduction point, got {}",
+            dc.vbe
+        );
+        // Vce PNP-signed negative, inside the rail span, and NOT the half-rail
+        // fallback — RC (10k collector→gnd) must be found by the PNP arm.
+        assert!(
+            dc.vce < 0.0 && dc.vce > -9.0,
+            "PNP Vce must be signed negative within the rail span, got {}",
+            dc.vce
+        );
+        assert!(
+            (dc.vce - (-4.5)).abs() > 0.2,
+            "Vce ≈ -4.5 V means the RC finder fell back to half-rail — the \
+             PNP collector→GND arm must resolve RC, got {}",
+            dc.vce
+        );
+        // |Ie·RE| — the divider (Vth ≈ 8.18 V, v_drive ≈ 0.82 V) drops most
+        // of the drive across RE ≈ 2.2 k.
+        assert!(
+            dc.v_emitter > 0.05 && dc.v_emitter < 0.82,
+            "emitter drop should be a real Ie·RE, got {}",
+            dc.v_emitter
+        );
+    }
+
+    /// pedalkernel-129p (group half): a germanium PNP pair whose true DC root
+    /// is QUIESCENT-DEAD must SOLVE, landing the same all-at-VCC leakage root
+    /// ngspice's `.op` finds. This is the fuzz_face_pnp validate deck: its
+    /// BJT cluster has NO resistive path to ground (R1 is a gnd→vcc bleed),
+    /// so ngspice (grounded input, reltol=1e-6) puts every node at 9 V with
+    /// both AC128s at Vbe ≈ −0.3 µV — and a nodeset at a conducting guess
+    /// collapses back to the same root. Pre-y9hz the solver (a) branch-jumped
+    /// onto a saturated artifact root (Q1 vbc ≈ +1.05 V, collector above the
+    /// rail) because the source-stepping ladder was silicon-coarse, and
+    /// (b) would have rejected the true root anyway via the `any_active`
+    /// gate. Both fixed: dense Ge ladder + accepted quiescent-dead op.
+    #[test]
+    fn bjt_group_ge_quiescent_dead_root_accepted() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 9V
+                components {
+                    C1: cap(2.2u)
+                    R1: resistor(33k)
+                    R2: resistor(8.2k)
+                    Q1: pnp(ac128)
+                    R3: resistor(470)
+                    R4: resistor(100k)
+                    Q2: pnp(ac128)
+                    C2: cap(10u)
+                    RL: resistor(10k)
+                }
+                nets {
+                    in -> C1.a
+                    C1.b -> Q1.base
+                    vcc -> Q1.emitter
+                    gnd -> R1.a
+                    R1.b -> vcc
+                    Q2.collector -> R2.a
+                    R2.b -> Q1.base
+                    Q1.collector -> R4.a
+                    R4.b -> Q2.base
+                    vcc -> R3.a
+                    R3.b -> Q2.emitter
+                    Q2.collector -> C2.a
+                    C2.b -> RL.a, out
+                    RL.b -> gnd
+                }
+                controls {}
+            }"#,
+        );
+        let nl_q1 = bjt_nl_kind(&graph, "Q1", true);
+        let nl_q2 = bjt_nl_kind(&graph, "Q2", true);
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+
+        let node_dc = solve_bjt_group_dc_qpoint(&[nl_q1, nl_q2], &all_edges, &graph, 9.0)
+            .expect("Ge quiescent-dead group must solve (pedalkernel-129p)");
+
+        // Every BJT-cluster node sits at the rail (within a few mV of gmin
+        // leakage), matching ngspice's grounded-input .op.
+        for pin in ["Q1.base", "Q1.collector", "Q2.base", "Q2.collector", "Q2.emitter"] {
+            let node = *graph.node_names.get(pin).unwrap();
+            let v = node_dc.get(&node).copied().unwrap_or(f64::NAN);
+            assert!(
+                (v - 9.0).abs() < 0.01,
+                "{pin} should sit at the 9 V rail (quiescent-dead root), got {v}"
+            );
         }
+    }
+
+    /// pedalkernel-129p (group half, conducting case): a germanium PNP CE
+    /// whose true operating point conducts at Vbe ≈ 0.1-0.2 V — BELOW the old
+    /// silicon-tuned `0.3 ≤ vbe` activity floor — must solve and be counted
+    /// ACTIVE (no quiescent-dead warning path needed; the model-aware floor
+    /// is 0.5·Vbe_on(AC128) ≈ 0.057 V).
+    #[test]
+    fn bjt_group_ge_conducting_point_below_silicon_floor_accepted() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 9V
+                components {
+                    Q1: pnp(ac128)
+                    R1: resistor(47k)
+                    Rb2: resistor(470k)
+                    R2: resistor(10k)
+                    R3: resistor(2.2k)
+                    C1: cap(100n)
+                }
+                nets {
+                    in -> C1.a
+                    C1.b -> R1.a, Q1.base
+                    R1.b -> vcc
+                    Q1.base -> Rb2.a
+                    Rb2.b -> gnd
+                    gnd -> R2.a
+                    R2.b -> Q1.collector
+                    Q1.emitter -> R3.a
+                    R3.b -> vcc
+                    Q1.collector -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = bjt_nl_kind(&graph, "Q1", true);
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+
+        let node_dc = solve_bjt_group_dc_qpoint(&[nl], &all_edges, &graph, 9.0)
+            .expect("conducting Ge PNP CE must solve (pedalkernel-129p)");
+
+        let vb = node_dc[graph.node_names.get("Q1.base").unwrap()];
+        let ve = node_dc[graph.node_names.get("Q1.emitter").unwrap()];
+        let vc = node_dc[graph.node_names.get("Q1.collector").unwrap()];
+        let vbe = ve - vb; // PNP-normalized forward magnitude
+        let vce = ve - vc;
+        assert!(
+            (0.05..0.3).contains(&vbe),
+            "Ge PNP should conduct BELOW the old 0.3 V silicon floor, got vbe={vbe}"
+        );
+        assert!(
+            vce > 1.0,
+            "conducting CE should hold a real collector swing, got vce={vce}"
+        );
     }
 
     /// Gate-4 pin: the two BJT finder flavors keep their historical breadths.
