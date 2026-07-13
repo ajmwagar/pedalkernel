@@ -1,0 +1,142 @@
+* ============================================================================
+* Pultec EQP-1A — FULL circuit (transformers + tube makeup), LF-BOOST-MAX configuration
+* PedalKernel Validation Circuit (bead pedalkernel-q3mf)
+* ============================================================================
+*
+* Mirrors circuits/eq/pultec_eqp1a.pedal exactly (WITH the 600 Ω output
+* termination R_term added by bead pedalkernel-q3mf — both sides carry it).
+*
+* Signal flow:
+*   v_in -> T_in (1:1, 500 mH, dcr=50/50, k=0.99)
+*        -> [LF shelf] -> [HF boost tank] -> [HF atten shelf]
+*        -> 12AX7 gain -> Cc -> 12AU7 cathode follower
+*        -> T_out (4:1, 250 mH, dcr=40/40, k=0.99) -> R_term 600 -> v_out
+*
+* Transformer model: the engine's cantilever decomposition
+* (stamp_linear_transformer_skeleton) written out explicitly: series DCR,
+* Llp = Lp(1-k), shunt Lm = k*Lp, ideal n:1 (E/F dependent-source pair with a
+* 0 V sense source), Lls = Ls(1-k) with Ls = Lp/n^2, series DCR. This is
+* algebraically identical to K-coupled inductors with M = k*sqrt(L1*L2), but
+* unlike the K element it starts cleanly under the harness's UIC transient
+* (K-coupled pairs abort at the initial timepoint). For the 1:1 T_in with
+* both windings ground-referenced the ideal transformer is omitted entirely
+* (electrically identical without isolation).
+*
+* Triode model: the ENGINE's TriodeThreePort is mirrored 1:1 —
+*   Ip = ( Vpk/KP * ln(1 + exp(KP*(1/MU + Vgk/sqrt(KVB + Vpk^2)))) )^EX / KG1
+*   with Vpk clamped at 0, softplus written overflow-safe, and the engine's
+*   ideal grid diode Ig = 1e-9*(exp(Vgk/0.025) - 1)  (Igs=1e-9, Vt=25 mV).
+*   The deck clamps the diode exponent at Vgk=0.5 V (Ig there = 0.49 A —
+*   far beyond any operating point; identical physics, Newton-safe).
+* Engine params (pedalkernel/models/triodes.model):
+*   12AX7: MU=100  EX=1.4 KG1=1060 KP=600 KVB=300
+*   12AU7: MU=21.5 EX=1.3 KG1=1180 KP=84  KVB=300
+* NOTE: the older pultec_eqp1a_passive_makeup_flat.spice used a DIFFERENT
+* 12AU7 (EX=1.35 KG1=1460) and a non-engine grid diode — this deck supersedes
+* that convention for engine-vs-ngspice differencing.
+*
+* Supply: the engine solves the makeup stage against an ideal 285 V rail
+* (probe-verified: settled V1 op satisfies vcc=285 exactly), so Vb is ideal.
+*
+* Pot model: WdfPot rp = taper.apply(pos) * max_R, min = max_R * 0.001 = 10 Ω
+*   Audio taper (A): (10^p - 1)/9 * 10k;  Linear taper (B): p * 10k
+* LF-BOOST-MAX positions: LF_Boost=1.0 -> (10^1-1)/9*10k = 10k, LF_Atten=0 -> 10,
+*   HF_Boost=0 -> 10, HF_BW=0.5 -> 5000 (linear), HF_Atten=0 -> 10
+* ============================================================================
+
+* B+ supply (ideal at steady state, engine-verified). Soft-started over 5 ms:
+* the t=0 285 V slam makes the assembled stiff network (2 H coil + both
+* triodes + transformer cantilevers) fail the harness's UIC initial timepoint;
+* the ramp is over ~200× before the 1 s settle window ends (proofs gate it).
+Vb vcc 0 PULSE(0 285 0 5m 1u 100 200)
+
+* ── Input transformer T_in: 1:1, Lp=Ls=0.5H, k=0.99, dcr=50 both windings ──
+* Cantilever T: 50Ω — Llp 5mH — [Lm 495mH shunt] — Lls 5mH — 50Ω (no ideal
+* 1:1 needed: both windings ground-referenced).
+Rtinp  v_in    n_tinp   50
+Ltinp_l n_tinp n_tin_c  5m
+Ltin_m n_tin_c 0        495m
+Ltins_l n_tin_c n_tins  5m
+Rtins  n_tins  n_lf     50
+* UIC startup tie: n_tin_c is inductor-only (singular at the first UIC
+* timepoint without it). 1 GΩ — no measurable physics.
+Rcnv1  n_tin_c 0        1G
+
+* ── LOW FREQUENCY shelf ─────────────────────────────────────────────────────
+Llf    n_lf    n_lb    2
+R_lfboost  n_lb  0  10k
+Ccps   n_lf    n_la    100n
+R_lfatten  n_la  0  10
+Rlf    n_lf    n_hf    56k
+
+* ── HIGH FREQUENCY BOOST tank ───────────────────────────────────────────────
+Lhf    n_hf    n_hfb   47m
+Ckcs   n_hf    n_hfb   5600p
+R_hfboost  n_hfb  0  10
+R_hfbw n_hf    0       5000
+
+* ── HIGH FREQUENCY ATTEN shelf ──────────────────────────────────────────────
+Chfas  n_hf    n_hfa_sw  3300p
+R_hfatten  n_hfa_sw  0  10
+Rhfa   n_hf    n_amp   100k
+
+* ── 12AX7 common-cathode gain stage ─────────────────────────────────────────
+Rp1    vcc     n_plate1  100k
+X1     n_plate1  n_amp  n_cath1  TRIODE_12AX7_PK
+Rk1    n_cath1  0  1.5k
+Ck1    n_cath1  0  25u
+
+* ── Interstage coupling ─────────────────────────────────────────────────────
+Cc     n_plate1  n_grid2  47n
+Rg2    n_grid2   0  1MEG
+
+* ── 12AU7 cathode follower ──────────────────────────────────────────────────
+X2     vcc     n_grid2  n_cath2  TRIODE_12AU7_PK
+Rk2    n_cath2  0  10k
+
+* ── Output transformer T_out: 4:1, Lp=0.25H, Ls=15.625mH, k=0.99, dcr=40/40 ─
+* Cantilever: 40Ω — Llp 2.5mH — [Lm 247.5mH shunt] — ideal 4:1 — Lls
+* 0.15625mH — 40Ω. Ideal 4:1: Vsec = Vpri/4 (E), Ipri = Isec/4 (F via the
+* 0 V sense source Vtos). Reflected secondary load = 16·(load) on the primary.
+Rtop   n_cath2  n_top   40
+Ltop_l n_top    n_to_c  2.5m
+Lto_m  n_to_c   0       247.5m
+Etos   n_tos_raw 0  n_to_c 0  0.25
+Vtos   n_tos_raw n_tos  DC 0
+Ftop   n_to_c   0  Vtos  0.25
+Ltos_l n_tos    n_tos2  0.15625m
+Rtos   n_tos2   v_out   40
+* UIC startup tie (see Rcnv1).
+Rcnv2  n_to_c  0        1G
+
+* ── 600 Ω line termination (bead pedalkernel-q3mf) ──────────────────────────
+Rterm  v_out   0  600
+
+* (No .ic: with the soft-started B+ the all-zero UIC start is consistent; the
+*  1 s settle window + settle proofs in tests/pultec_full.rs own steady state.
+*  Settled note: the T_out primary DC-shorts the V2 cathode once Lm charges —
+*  n_cath2 settles at ~0.89 V / 22.3 mA, NOT the Rk2-only bias.)
+
+* ── 12AX7 — engine TriodeThreePort mirror ───────────────────────────────────
+.SUBCKT TRIODE_12AX7_PK anode grid cathode
+Bip anode cathode I = {
++ PWR(
++   MAX(V(anode,cathode),0)/600 *
++   ( MAX(600*(0.01 + V(grid,cathode)/SQRT(300 + (V(anode,cathode)*V(anode,cathode)))),0)
++   + LN(1 + EXP(-ABS(600*(0.01 + V(grid,cathode)/SQRT(300 + (V(anode,cathode)*V(anode,cathode))))))) ),
++   1.4
++ ) / 1060 }
+Bgd grid cathode I = { 1e-9 * (EXP(MIN(V(grid,cathode),0.5)/0.025) - 1) }
+.ENDS TRIODE_12AX7_PK
+
+* ── 12AU7 — engine TriodeThreePort mirror (MU=21.5 EX=1.3 KG1=1180 KP=84) ───
+.SUBCKT TRIODE_12AU7_PK anode grid cathode
+Bip anode cathode I = {
++ PWR(
++   MAX(V(anode,cathode),0)/84 *
++   ( MAX(84*(0.046511628 + V(grid,cathode)/SQRT(300 + (V(anode,cathode)*V(anode,cathode)))),0)
++   + LN(1 + EXP(-ABS(84*(0.046511628 + V(grid,cathode)/SQRT(300 + (V(anode,cathode)*V(anode,cathode))))))) ),
++   1.3
++ ) / 1180 }
+Bgd grid cathode I = { 1e-9 * (EXP(MIN(V(grid,cathode),0.5)/0.025) - 1) }
+.ENDS TRIODE_12AU7_PK

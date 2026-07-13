@@ -446,7 +446,7 @@ fn build_general_mna_from_edges_inner(
         passive_edges,
         effective_rate,
         adapted_source_r,
-    );
+    )?;
     let n_passive = passive_children.len();
     let extract_output_node_id = find_output_extract_node(all_edges, &node_set, graph);
     let extract_output_nodes = extract_output_node_id
@@ -1259,12 +1259,15 @@ fn build_wdf_ports(
     edge_indices: &[usize],
     effective_rate: f64,
     r_adapted: f64,
-) -> (
-    Vec<WdfPort>,
-    Vec<WdfPortTerminals>,
-    Vec<MnaOnePort>,
-    Vec<f64>,
-) {
+) -> Result<
+    (
+        Vec<WdfPort>,
+        Vec<WdfPortTerminals>,
+        Vec<MnaOnePort>,
+        Vec<f64>,
+    ),
+    String,
+> {
     let r_nl_default = 1000.0;
     let mut ports = Vec::with_capacity(n_nl + reactive_edges.len() + 1);
     let mut port_node_pairs = Vec::new();
@@ -1325,16 +1328,65 @@ fn build_wdf_ports(
         ports.push(port);
     }
 
-    // Adapted (input voltage source) port.
-    // Use graph.in_node if it's in this MNA. Otherwise, find the active
-    // element's signal input pin from Component::signal_terminals().
-    // Last resort: the boundary node nearest the global input (NL groups
-    // with no amplifier inside, e.g. a clipper + tone network split off an
-    // op-amp gain stage). Without this the adapted VS port is grounded and
-    // the stage is structurally silent (s_nl_adapted = 0).
-    let injection_mna = node_to_mna(graph.in_node)
-        .or_else(|| {
-            edge_indices.iter().find_map(|&eidx| {
+    // Adapted (input voltage source) port — where the audio ENTERS this group.
+    // Choice is ordered by how unambiguously each candidate identifies the
+    // physical entry node:
+    //
+    // 1. `graph.in_node` when it is a member of this MNA (possibly pulled in
+    //    by the Option-B input-coupling inclusion above) — the true source.
+    // 2. MAGNETIC entry (pedalkernel-n0yy): the input-nearest boundary node
+    //    (directed signal distance) when it is a transformer WINDING whose
+    //    sibling winding lies outside the group. A winding is the one
+    //    unambiguous entry: the upstream stage drives this group through the
+    //    transformer, and injecting at the device input pin instead silently
+    //    bypasses any in-group network between the winding and the pin (the
+    //    Pultec program EQ between `n_lf` and `V1.grid` — stamped in the G
+    //    matrix, contributing nothing: present-but-inert).
+    // 3. GALVANIC entry — legacy order preserved: the active element's
+    //    signal input pin from `Component::signal_terminals()`, then the
+    //    input-nearest boundary node (NL groups with no amplifier inside,
+    //    e.g. a clipper + tone network split off an op-amp gain stage).
+    //    Preferring the boundary node here too would be the fully general
+    //    fix, but the entry-node choice interacts with the cross-stage
+    //    WiperDivider contract (straddling pots would double-count) and
+    //    with sidechain/feed-forward taps — measured on the LA-2A as a
+    //    −28 dB level shift. Scoped out; see the pedalkernel-n0yy follow-up
+    //    bead before widening.
+    //
+    // Guard: when the amplifier-pin fallback engages while the group HAS
+    // boundary nodes but NONE is reachable from `in`, that is a reachability
+    // gap of the present-but-inert family — diagnose via PK_INJECT_GUARD
+    // (warn by default).
+    //
+    // Without any of these the adapted VS port is grounded and the stage is
+    // structurally silent (s_nl_adapted = 0).
+    let inject_debug = std::env::var("PK_INJECT_DEBUG").as_deref() == Ok("1");
+    let name_of = |mna: Option<usize>| -> String {
+        let Some(m) = mna else {
+            return "<gnd>".to_string();
+        };
+        let names: Vec<&str> = graph
+            .node_names
+            .iter()
+            .filter(|(_, &n)| node_to_mna(n) == Some(m))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        format!("mna#{m}[{}]", names.join(","))
+    };
+    let injection_mna = if let Some(m) = node_to_mna(graph.in_node) {
+        if inject_debug {
+            eprintln!("[PK_INJECT] branch=in_node -> {}", name_of(Some(m)));
+        }
+        Some(m)
+    } else {
+        let boundary = find_input_boundary_node(edge_indices, graph, node_to_mna);
+        if let Some((m, true)) = boundary.winner {
+            if inject_debug {
+                eprintln!("[PK_INJECT] branch=winding-boundary -> {}", name_of(Some(m)));
+            }
+            Some(m)
+        } else {
+            let amp_pin = edge_indices.iter().find_map(|&eidx| {
                 let comp = &graph.components[graph.edges[eidx].comp_idx];
                 match comp.kind.signal_terminals() {
                     super::super::component::SignalTerminals::Amplifier { input, .. } => {
@@ -1343,9 +1395,46 @@ fn build_wdf_ports(
                     }
                     _ => None,
                 }
-            })
-        })
-        .or_else(|| find_input_boundary_node(edge_indices, graph, node_to_mna));
+            });
+            match (amp_pin, boundary.winner) {
+                (Some(m), _) => {
+                    if inject_debug {
+                        eprintln!("[PK_INJECT] branch=amplifier-pin -> {}", name_of(Some(m)));
+                    }
+                    // In-loop op-amp nullor groups (pedalkernel-9xu1) inject
+                    // at the virtual-ground pin BY DESIGN — the NL device
+                    // co-solves against the closed-loop impedance, and the
+                    // feedback topology means no boundary node is forward-
+                    // reachable. Not a present-but-inert hazard: skip the
+                    // guard.
+                    let is_nullor_pin = graph
+                        .nullor_pins
+                        .iter()
+                        .any(|rec| {
+                            node_to_mna(rec.pos_node) == Some(m)
+                                || node_to_mna(rec.neg_node) == Some(m)
+                        });
+                    if boundary.winner.is_none() && !is_nullor_pin {
+                        report_unverified_injection(
+                            &name_of(Some(m)),
+                            boundary.has_boundary_nodes,
+                        )?;
+                    }
+                    Some(m)
+                }
+                (None, Some((m, _))) => {
+                    if inject_debug {
+                        eprintln!("[PK_INJECT] branch=boundary-fallback -> {}", name_of(Some(m)));
+                    }
+                    Some(m)
+                }
+                (None, None) => {
+                    report_unverified_injection("<none>", boundary.has_boundary_nodes)?;
+                    None
+                }
+            }
+        }
+    };
     ports.push(WdfPort {
         node_pos: injection_mna,
         node_neg: None,
@@ -1353,28 +1442,95 @@ fn build_wdf_ports(
     });
     port_node_pairs.push(WdfPortTerminals::maybe_single_ended(injection_mna));
 
-    (
+    Ok((
         ports,
         port_node_pairs,
         passive_one_ports,
         nl_port_resistances,
-    )
+    ))
 }
 
-/// Injection fallback: the boundary node nearest the global input.
+/// Injection-node guard (pedalkernel-n0yy): the adapted VS port should land
+/// on the group's input *boundary* node — the node the upstream stage
+/// actually drives. When the boundary search comes back empty-handed even
+/// though the group HAS boundary nodes (they exist but are unreachable from
+/// `graph.in_node`), the injection degrades to the amplifier-pin heuristic,
+/// which silently bypasses any in-group network upstream of the device pin —
+/// the "present-but-inert" failure the edge guard cannot see (everything is
+/// stamped; nothing participates). Diagnose it:
 ///
-/// NL groups that contain neither `graph.in_node` nor an amplifier receive
-/// their audio from an upstream stage at a *boundary* node — a node of this
-/// group that is also touched by edges outside the group. Among those, pick
-/// the one with the shortest hop distance from `graph.in_node` (BFS over the
-/// full graph, not traversing GND/supply rails, ties broken by NodeId for
-/// determinism) so the adapted VS port lands where the upstream stage
-/// actually drives this group.
+/// * `PK_INJECT_GUARD=error` — fail the compile.
+/// * `warn` (default) — loud eprintln, compile proceeds.
+/// * `off` — silent.
+fn report_unverified_injection(injection_desc: &str, has_boundary_nodes: bool) -> Result<(), String> {
+    if !has_boundary_nodes {
+        // No boundary at all (single-group circuit whose input node vanished,
+        // or a truly isolated NL island) — the amplifier pin is the best and
+        // only guess; nothing was bypassed.
+        return Ok(());
+    }
+    let mode = match std::env::var("PK_INJECT_GUARD").as_deref() {
+        Ok("off") => return Ok(()),
+        Ok("error") => crate::compiler::spqr_build::EdgeGuardMode::Error,
+        _ => crate::compiler::spqr_build::EdgeGuardMode::Warn,
+    };
+    let msg = format!(
+        "injection guard [general-MNA]: group has boundary nodes but none is \
+         reachable from the global input — adapted input port falls back to \
+         the device input pin ({injection_desc}), bypassing any in-group \
+         network upstream of it (components would stay stamped yet \
+         contribute nothing to the transfer). \
+         (Set PK_INJECT_GUARD=warn to compile anyway, PK_INJECT_GUARD=off to \
+         silence.)"
+    );
+    if mode == crate::compiler::spqr_build::EdgeGuardMode::Error {
+        Err(msg)
+    } else {
+        eprintln!("[pedalkernel] WARNING: {msg}");
+        Ok(())
+    }
+}
+
+/// The injection target: the group's input boundary node.
+///
+/// NL groups that do not contain `graph.in_node` receive their audio from an
+/// upstream stage at a *boundary* node — a node of this group that is also
+/// touched by edges outside the group, OR a transformer winding node whose
+/// sibling winding lives outside this group (a transformer couples its
+/// windings with no shared graph edge, so an input transformer's secondary —
+/// the Pultec `n_lf` — is invisible to the edge-touch test). Among those,
+/// pick the one with the smallest rail-blocked signal-DIRECTED distance from
+/// `graph.in_node` ([`directed_signal_distances_from_in`], ties broken by
+/// NodeId for determinism) so the adapted VS port lands where the upstream
+/// stage actually drives this group.
+///
+/// The DIRECTED metric matters twice (pedalkernel-n0yy):
+/// * it crosses Tight transformer windings and active devices forward, so a
+///   group behind an input transformer or downstream of another tube sees
+///   its true entry node instead of silently degrading to the amplifier-pin
+///   heuristic (the Pultec program EQ stamped-but-bypassed);
+/// * it never walks backward through device outputs, sidechain taps, or
+///   feed-forward forks, so an output-side boundary node cannot measure
+///   "closer" to `in` than the input-side one (an undirected metric put the
+///   LA-2A output-transformer group's injection on `out`: −28 dB).
+///
+/// Returns the input-nearest winner tagged with whether it is a
+/// transformer-winding boundary, plus whether ANY boundary node exists (the
+/// PK_INJECT_GUARD diagnostic fires when the search fails despite boundaries
+/// existing).
+struct InputBoundary {
+    /// `(mna_index, is_transformer_winding)` of the input-nearest boundary
+    /// node, if any is reachable from `in` under the directed metric.
+    winner: Option<(usize, bool)>,
+    /// The group has at least one boundary node (reachable or not).
+    has_boundary_nodes: bool,
+}
+
 fn find_input_boundary_node(
     edge_indices: &[usize],
     graph: &CircuitGraph,
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
-) -> Option<usize> {
+) -> InputBoundary {
     let edge_set: HashSet<usize> = edge_indices.iter().copied().collect();
 
     // Boundary nodes: in this group's MNA, but also touched by outside edges.
@@ -1389,36 +1545,94 @@ fn find_input_boundary_node(
             }
         }
     }
-    if boundary.is_empty() {
-        return None;
-    }
 
-    // BFS hop distances from the global input. GND and supply rails are
-    // barriers — almost everything meets there, so passing through them
-    // would make the distances meaningless.
-    let blocked =
-        |n: NodeId| n == graph.gnd_node || n == graph.vcc_node || graph.supply_nodes.contains(&n);
-    let mut dist: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
-    let mut queue = std::collections::VecDeque::new();
-    dist.insert(graph.in_node, 0);
-    queue.push_back(graph.in_node);
-    while let Some(n) = queue.pop_front() {
-        let d = dist[&n];
-        for e in &graph.edges {
-            for (from, to) in [(e.node_a, e.node_b), (e.node_b, e.node_a)] {
-                if from == n && !blocked(to) && !dist.contains_key(&to) {
-                    dist.insert(to, d + 1);
-                    queue.push_back(to);
+    let dist = super::super::signal_flow::directed_signal_distances_from_in(graph);
+
+    // Transformer-winding ENTRY nodes: winding node in this MNA driven from
+    // the outside — some sibling winding node of the same transformer lies
+    // outside this MNA *and* sits strictly closer to `in` (the signal
+    // arrives through the transformer INTO this group). The strict-distance
+    // test rejects the group's own OUTPUT transformer: its outside/secondary
+    // side is downstream (larger distance, or none at all when the winding
+    // hop is gated at `out`), so e.g. the LA-2A `T_out` secondary node —
+    // which is simultaneously `out` and a sidechain tap — can never be
+    // classified as an entry.
+    //
+    // EXCLUSION: groups carrying a photocoupler variable resistor (LA-2A
+    // T4B) keep the legacy device-pin injection. Their in-group divider is
+    // control-plane coordinated (`DetectorLedCoupling` drive scale was
+    // calibrated against pin-injection — pedalkernel-o5dg); re-basing the
+    // injection would silently re-scale the whole calibrated GR loop
+    // (measured: LA-2A quiet gain +16.6 → +5.0 dB). Widening magnetic-entry
+    // to these groups is the pedalkernel-n0yy follow-up.
+    let group_has_photocoupler = edge_indices.iter().any(|&eidx| {
+        graph.components[graph.edges[eidx].comp_idx]
+            .kind
+            .type_tag()
+            == "photocoupler"
+    });
+    let mut winding_entry: HashSet<NodeId> = HashSet::new();
+    if !group_has_photocoupler {
+        let mut by_comp: std::collections::HashMap<usize, Vec<NodeId>> =
+            std::collections::HashMap::new();
+        for (&n, info) in &graph.transformer_info {
+            by_comp.entry(info.comp_idx).or_default().push(n);
+        }
+        for nodes in by_comp.values() {
+            for &n in nodes {
+                if node_to_mna(n).is_none() {
+                    continue;
+                }
+                let Some(&d_n) = dist.get(&n) else {
+                    continue;
+                };
+                let driven_from_outside = nodes.iter().any(|&sib| {
+                    sib != n
+                        && node_to_mna(sib).is_none()
+                        && dist.get(&sib).is_some_and(|&d_sib| d_sib < d_n)
+                });
+                if driven_from_outside {
+                    winding_entry.insert(n);
+                    if !boundary.contains(&n) {
+                        boundary.push(n);
+                    }
                 }
             }
         }
     }
+    if boundary.is_empty() {
+        return InputBoundary {
+            winner: None,
+            has_boundary_nodes: false,
+        };
+    }
 
-    boundary
+    if std::env::var("PK_INJECT_DEBUG").as_deref() == Ok("1") {
+        let names = |n: NodeId| -> String {
+            let v: Vec<&str> = graph
+                .node_names
+                .iter()
+                .filter(|(_, &x)| x == n)
+                .map(|(k, _)| k.as_str())
+                .collect();
+            format!("{n}[{}]", v.join(","))
+        };
+        eprintln!(
+            "[PK_INJECT/bfs] in_node={} boundary={:?} dist_of_boundary={:?}",
+            names(graph.in_node),
+            boundary.iter().map(|&n| names(n)).collect::<Vec<_>>(),
+            boundary.iter().map(|n| dist.get(n)).collect::<Vec<_>>()
+        );
+    }
+    let winner = boundary
         .iter()
         .filter_map(|&n| dist.get(&n).map(|&d| (d, n)))
         .min()
-        .and_then(|(_, n)| node_to_mna(n))
+        .and_then(|(_, n)| node_to_mna(n).map(|m| (m, winding_entry.contains(&n))));
+    InputBoundary {
+        winner,
+        has_boundary_nodes: true,
+    }
 }
 
 /// Step 5: Derive scattering matrix + iterative Thevenin adaptation.
