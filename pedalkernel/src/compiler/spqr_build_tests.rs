@@ -1687,3 +1687,100 @@ fn non_sp_passive_network_compiles_to_stages() {
          would render as passthrough (regression of hcpb.2 fix)"
     );
 }
+
+/// pedalkernel-ffkl: the LA-2A output transformer `T_out` must be STAMPED in
+/// the compiled pedal — a real transformer skeleton in the stage that solves
+/// V3's cathode-follower network — and its 600 Ω secondary load must be
+/// recorded as reflected through the turns ratio.
+///
+/// Before the fix, T_out's primary edge sat in V3's flow group (so the stage
+/// LABEL listed `T_out` — deceptively) but `stamp_passive_edges` in the
+/// triode-context MNA build silently dropped the edge: a transformer matches
+/// none of resistance/capacitance/inductance, so the component contributed
+/// NOTHING to any compiled stage, with no diagnostic, while `R_load` built as
+/// a standalone stage dividing by an arbitrary source impedance (GAP F).
+/// Label presence is therefore NOT stamping proof; this test asserts the
+/// structural signature of the stamp (the transformer's magnetizing/leakage
+/// inductor one-ports) plus the boundary-load reflection record.
+#[test]
+fn la2a_output_transformer_is_stamped_not_dropped() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/outboard/compressor/la2a.pedal");
+    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let pedal = crate::dsl::parse_pedal_file(&src).expect("parse la2a");
+    let compiled = compile_via_spqr_with_options(&pedal, 48_000.0, CompileOptions::debug())
+        .expect("compile la2a");
+
+    // Diagnostic dump: per-stage labels + triode Vgk warm starts.
+    eprintln!("la2a compiled: {} stages", compiled.stages.len());
+    for (i, stage) in compiled.stages.iter().enumerate() {
+        let label = stage.graph_label();
+        match stage {
+            Stage::MultiNl(mnl) => {
+                eprintln!(
+                    "  stage {i}: MultiNl [{}] initial_v_prev={:?}",
+                    label,
+                    &mnl.initial_v_prev[..mnl.n_nl.min(mnl.initial_v_prev.len())]
+                );
+            }
+            _ => eprintln!("  stage {i}: {label}"),
+        }
+    }
+    for bl in &compiled.boundary_loads {
+        eprintln!("  boundary load: {bl:?}");
+    }
+
+    // The MultiNl stage that owns T_out (V3's cathode-follower group) must
+    // carry the transformer skeleton's inductive one-ports (leakage +
+    // magnetizing branches). Pre-fix that stage's passives were caps and
+    // resistors only — zero inductors — because the transformer edge fell
+    // through every branch of `stamp_passive_edges`.
+    let t_out_stamped = compiled.stages.iter().any(|s| {
+        let Stage::MultiNl(mnl) = s else { return false };
+        if !s.graph_label().split(',').any(|id| id == "T_out") {
+            return false;
+        }
+        mnl.passive_one_ports.iter().any(|op| {
+            matches!(
+                op.spec.kind,
+                pedalkernel_rt::boundary_math::OnePortKind::Inductor(_)
+            )
+        })
+    });
+    assert!(
+        t_out_stamped,
+        "no MultiNl stage carries T_out's transformer skeleton (inductive \
+         one-ports) — the output transformer primary edge was silently \
+         dropped from the triode-context MNA (pedalkernel-ffkl)"
+    );
+
+    // The consumed 600 Ω load must NOT also survive as a standalone stage
+    // (that would double-apply the load).
+    let standalone_r_load = compiled
+        .stages
+        .iter()
+        .any(|s| s.graph_label() == "R_load");
+    assert!(
+        !standalone_r_load,
+        "R_load still compiles as a standalone stage — the secondary load \
+         was not consumed by the transformer reflection"
+    );
+
+    // The 600 Ω secondary load must be recorded as reflected through the
+    // turns ratio (C4 boundary-load machinery, LoadDisposition::
+    // ReflectedThroughTransformer with n=4 → r_reflected = 16·600 = 9.6k).
+    let reflected = compiled.boundary_loads.iter().any(|bl| {
+        matches!(
+            bl.disposition,
+            pedalkernel_rt::processor::BoundaryLoadDisposition::ReflectedThroughTransformer {
+                ..
+            }
+        )
+    });
+    assert!(
+        reflected,
+        "no ReflectedThroughTransformer disposition recorded for T_out's \
+         secondary load (boundary-load table: {:?})",
+        compiled.boundary_loads
+    );
+}

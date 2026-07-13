@@ -1405,7 +1405,7 @@ pub fn compile_via_spqr_with_options(
                     ) {
                         // For 1-edge groups collect context; for multi-edge groups
                         // the context is already in group_edges — use them directly.
-                        let context_edges = if group_edges.len() == 1 {
+                        let mut context_edges = if group_edges.len() == 1 {
                             collect_triode_context_edges(nl_edge_idx, &graph, &all_edges)
                         } else {
                             group_edges.clone()
@@ -1416,8 +1416,114 @@ pub fn compile_via_spqr_with_options(
                             group_edges.len(),
                             context_edges.len(),
                         );
+
+                        // ── Transformer-secondary load reflection at the
+                        // triode-context MNA (pedalkernel-ffkl / GAP F) ──
+                        // If this build set owns a transformer primary edge
+                        // (LA-2A: V3's cathode follower drives T_out), find
+                        // the grounded resistive load on its secondary (the
+                        // C4 analysis) and fuse those edges into the build so
+                        // the general-MNA transformer stamp solves the
+                        // reflection in-stage: the load current flows through
+                        // the ideal turns-ratio branch and the follower feels
+                        // n²·R. The standalone load group is consumed
+                        // (absorbed-edge skip + built-stage removal below)
+                        // and the decision is recorded on the boundary-load
+                        // table either way.
+                        let mut xfmr_fused: Option<(
+                            super::boundary_load::TransformerSecondaryLoad,
+                            Vec<String>,
+                        )> = None;
+                        if let Some(load) =
+                            super::boundary_load::analyze_transformer_secondary_load_in_edges(
+                                &context_edges,
+                                gi,
+                                &feedback_groups,
+                                &graph,
+                                &cut_edges,
+                            )
+                        {
+                            let load_already_consumed =
+                                load.model.edges().iter().any(|&eidx| {
+                                    xfmr_consumed_comp_ids.contains(
+                                        &graph.components[graph.edges[eidx].comp_idx].id,
+                                    )
+                                });
+                            let mut fused_load_ids: Option<Vec<String>> = None;
+                            let disposition = if load_already_consumed {
+                                super::boundary_load::LoadDisposition::Unloaded {
+                                    reason: "gate:load-group-already-consumed",
+                                }
+                            } else {
+                                match super::boundary_load::
+                                    gate_triode_context_transformer_reflection()
+                                {
+                                    Ok(()) => {
+                                        for &eidx in load.model.edges() {
+                                            if !context_edges.contains(&eidx) {
+                                                context_edges.push(eidx);
+                                            }
+                                        }
+                                        let mut load_ids: Vec<String> = load
+                                            .model
+                                            .edges()
+                                            .iter()
+                                            .map(|&eidx| {
+                                                graph.components
+                                                    [graph.edges[eidx].comp_idx]
+                                                    .id
+                                                    .clone()
+                                            })
+                                            .collect();
+                                        load_ids.sort();
+                                        load_ids.dedup();
+                                        #[cfg(test)]
+                                        eprintln!(
+                                            "  [compile] group {gi}: reflected transformer-\
+                                             secondary load group {} (n={}, r_reflected={:.1}) \
+                                             into triode-context MNA",
+                                            load.load_group, load.turns_ratio, load.r_reflected
+                                        );
+                                        fused_load_ids = Some(load_ids);
+                                        super::boundary_load::
+                                            LoadDisposition::ReflectedThroughTransformer {
+                                            consumed_group: load.load_group,
+                                            turns_ratio: load.turns_ratio,
+                                            r_reflected: load.r_reflected,
+                                        }
+                                    }
+                                    Err(reason) => {
+                                        super::boundary_load::LoadDisposition::Unloaded {
+                                            reason,
+                                        }
+                                    }
+                                }
+                            };
+                            match fused_load_ids {
+                                // Fused: the row is recorded after the stage
+                                // push (its stage_key needs the fused comp-id
+                                // set).
+                                Some(ids) => xfmr_fused = Some((load, ids)),
+                                // Analyzed but declined: record for the
+                                // dashboard now — build proceeds unchanged.
+                                None => pending_boundary_loads.push(
+                                    super::boundary_load::PendingBoundaryLoad {
+                                        stage_key: group_comp_ids
+                                            .iter()
+                                            .min()
+                                            .cloned()
+                                            .unwrap_or_else(|| "~".to_string()),
+                                        boundary_node: load.boundary_node,
+                                        model: load.model.summarize(&graph),
+                                        disposition: disposition.summarize(),
+                                    },
+                                ),
+                            }
+                        }
+
                         // Mark all non-NL context edges as absorbed so their
-                        // groups are skipped later.
+                        // groups are skipped later (with a fused load this
+                        // also consumes the standalone secondary-load group).
                         for &eidx in &context_edges {
                             if graph.effective_edge_kind(eidx)
                                 != super::component::EdgeKind::Nonlinear
@@ -1456,13 +1562,82 @@ pub fn compile_via_spqr_with_options(
                             bfs_dist_from_in_node(grid_node, &graph)
                                 .unwrap_or(group_flow_distances[gi])
                         };
-                        push_stage!(
-                            BuiltStage::MultiNl(built),
-                            triode_flow_dist,
-                            group_label.clone(),
-                            is_bypass,
-                            group_comp_ids.clone()
-                        );
+                        if let Some((load, load_ids)) = xfmr_fused {
+                            // Fused stage owns the reflected load components:
+                            // label / comp ids come from the full fused edge
+                            // set so later stage lookups (and the boundary-
+                            // load stage_key) see them. Only the transformer
+                            // family takes this arm — everyone else keeps the
+                            // group ids byte-identical.
+                            let mut fused_comp_ids: Vec<String> = context_edges
+                                .iter()
+                                .map(|&eidx| {
+                                    graph.components[graph.edges[eidx].comp_idx].id.clone()
+                                })
+                                .collect();
+                            fused_comp_ids.sort();
+                            fused_comp_ids.dedup();
+                            #[cfg(debug_assertions)]
+                            let fused_label = fused_comp_ids.join(",");
+                            #[cfg(not(debug_assertions))]
+                            let fused_label = String::new();
+                            push_stage!(
+                                BuiltStage::MultiNl(built),
+                                triode_flow_dist,
+                                fused_label,
+                                is_bypass,
+                                fused_comp_ids.clone()
+                            );
+
+                            // Consume the standalone load group: the absorbed-
+                            // edge skip handles the not-yet-built order; if it
+                            // already built (group enumeration order), remove
+                            // its stage. Same de-duplication contract as the
+                            // C4 passive-path fusion.
+                            for id in &load_ids {
+                                xfmr_consumed_comp_ids.insert(id.clone());
+                            }
+                            for idx in (0..stages.len().saturating_sub(1)).rev() {
+                                if stage_comp_ids[idx] == load_ids {
+                                    #[cfg(test)]
+                                    eprintln!(
+                                        "  [compile] group {gi}: removed standalone \
+                                         secondary-load stage {idx} ({load_ids:?}) — consumed \
+                                         by triode-context transformer reflection"
+                                    );
+                                    stages.remove(idx);
+                                    stage_comp_ids.remove(idx);
+                                    break;
+                                }
+                            }
+                            pending_boundary_loads.push(
+                                super::boundary_load::PendingBoundaryLoad {
+                                    stage_key: fused_comp_ids
+                                        .iter()
+                                        .min()
+                                        .cloned()
+                                        .unwrap_or_else(|| "~".to_string()),
+                                    boundary_node: load.boundary_node,
+                                    model: load.model.summarize(&graph),
+                                    disposition:
+                                        super::boundary_load::LoadDisposition::
+                                            ReflectedThroughTransformer {
+                                            consumed_group: load.load_group,
+                                            turns_ratio: load.turns_ratio,
+                                            r_reflected: load.r_reflected,
+                                        }
+                                        .summarize(),
+                                },
+                            );
+                        } else {
+                            push_stage!(
+                                BuiltStage::MultiNl(built),
+                                triode_flow_dist,
+                                group_label.clone(),
+                                is_bypass,
+                                group_comp_ids.clone()
+                            );
+                        }
                         continue;
                     }
                 }
@@ -4134,7 +4309,79 @@ fn try_build_convergence_sum(
     Some(cs)
 }
 
-fn stamp_linear_transformer_skeleton(
+/// Edge-guard (pedalkernel-ffkl): what a builder does when a circuit edge
+/// falls through every stamping branch — the failure mode that silently
+/// dropped the LA-2A `T_out` primary from the triode-context MNA.
+///
+/// * `error` (default): the compile FAILS with the offending component list.
+///   A circuit must not compile with a component missing and no trace.
+/// * `warn`: loud eprintln diagnostic, compile proceeds (escape hatch for
+///   corpus triage).
+/// * `off`: legacy silent behavior.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::compiler) enum EdgeGuardMode {
+    Off,
+    Warn,
+    Error,
+}
+
+pub(in crate::compiler) fn edge_guard_mode() -> EdgeGuardMode {
+    match std::env::var("PK_EDGE_GUARD").as_deref() {
+        Ok("off") => EdgeGuardMode::Off,
+        Ok("warn") => EdgeGuardMode::Warn,
+        Ok("error") => EdgeGuardMode::Error,
+        _ => EdgeGuardMode::Error,
+    }
+}
+
+/// Report edges that a builder received but did not stamp, port, or
+/// explicitly consume. Returns `Err` in [`EdgeGuardMode::Error`].
+pub(in crate::compiler) fn report_dropped_edges(
+    context: &str,
+    dropped: &[usize],
+    graph: &super::graph::CircuitGraph,
+) -> Result<(), String> {
+    if dropped.is_empty() {
+        return Ok(());
+    }
+    let mode = edge_guard_mode();
+    if mode == EdgeGuardMode::Off {
+        return Ok(());
+    }
+    let mut descriptions: Vec<String> = dropped
+        .iter()
+        .map(|&eidx| {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            format!(
+                "{} ({}, edge {eidx}, kind {:?})",
+                comp.id,
+                comp.kind.type_tag(),
+                graph.effective_edge_kind(eidx)
+            )
+        })
+        .collect();
+    descriptions.sort();
+    descriptions.dedup();
+    let msg = format!(
+        "edge guard [{context}]: {} edge(s) fell through the build without a \
+         stamp, port, or explicit consumption — the compiled circuit would be \
+         missing these components with no trace: {}. \
+         (Set PK_EDGE_GUARD=warn to compile anyway, PK_EDGE_GUARD=off to \
+         silence.)",
+        descriptions.len(),
+        descriptions.join(", ")
+    );
+    match mode {
+        EdgeGuardMode::Error => Err(msg),
+        _ => {
+            eprintln!("[pedalkernel] WARNING: {msg}");
+            Ok(())
+        }
+    }
+}
+
+pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
     mna: &mut MnaSystem,
     comp_id: &str,
     cfg: &TransformerConfig,

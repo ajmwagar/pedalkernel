@@ -252,28 +252,193 @@ fn build_general_mna_from_edges_inner(
         }
     };
 
+    // ── Transformer stamp plan (pedalkernel-ffkl) ────────────────────────────
+    // Plain two-port transformers among this build's passive edges. Before
+    // this plan existed the transformer's primary edge fell through EVERY
+    // branch of `stamp_passive_edges` (a transformer has no scalar
+    // resistance/capacitance/inductance) and the component silently vanished
+    // from the compiled stage — the LA-2A `T_out` drop.
+    //
+    // Each transformer is stamped one of two ways:
+    // * FULL skeleton (`stamp_linear_transformer_skeleton`, the same
+    //   machinery `build_passive_rtype_stage` uses: DCR + leakage +
+    //   magnetizing + ideal turns-ratio branch) when its secondary
+    //   PARTICIPATES in this MNA — both winding ends are ground or solved
+    //   nodes (e.g. the fused secondary load of the C4 reflection). 4
+    //   internal nodes + 2 voltage sources.
+    // * MAGNETIZING-ONLY branch (primary DCR in series with the full primary
+    //   inductance) when the secondary does not participate: with no
+    //   secondary loop the ideal branch carries zero current, so from the
+    //   primary's terminals the transformer IS its magnetizing inductance.
+    //   Stamping the full skeleton here would instead SHORT the dangling
+    //   winding to the MNA ground reference. 1 internal node, no sources.
+    struct TransformerStampPlan {
+        comp_idx: usize,
+        primary_eidx: usize,
+        internal_base: usize,
+        /// `Some(vsrc_base)` → full skeleton; `None` → magnetizing-only.
+        vsrc_base: Option<usize>,
+    }
+    let mut transformer_plans: Vec<TransformerStampPlan> = Vec::new();
+    let mut transformer_edge_set: HashSet<usize> = HashSet::new();
+    {
+        let is_gnd =
+            |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut internal_next = num_mna_nodes;
+        for &eidx in passive_edges {
+            let comp_idx = graph.edges[eidx].comp_idx;
+            let comp = &graph.components[comp_idx];
+            let Some(cfg) = comp.kind.transformer_config() else {
+                continue;
+            };
+            if cfg.has_tertiary() {
+                // Three-winding transformers are not supported by this
+                // builder; the edge deliberately falls to the guard below
+                // (loud) instead of being silently dropped.
+                continue;
+            }
+            transformer_edge_set.insert(eidx);
+            if !seen.insert(comp_idx) {
+                continue;
+            }
+            let winding_in_mna = |pin: &str| -> bool {
+                graph
+                    .node_names
+                    .get(&format!("{}.{pin}", comp.id))
+                    .map(|&n| is_gnd(n) || node_to_mna(n).is_some())
+                    .unwrap_or(false)
+            };
+            let full = winding_in_mna("c") && winding_in_mna("d");
+            let (internal_base, vsrc_base) = if full {
+                let base = internal_next;
+                internal_next += 4;
+                let vsrc = num_vsources;
+                num_vsources += 2;
+                (base, Some(vsrc))
+            } else {
+                let base = internal_next;
+                internal_next += 1;
+                (base, None)
+            };
+            transformer_plans.push(TransformerStampPlan {
+                comp_idx,
+                primary_eidx: eidx,
+                internal_base,
+                vsrc_base,
+            });
+        }
+    }
+    let total_mna_nodes = num_mna_nodes
+        + transformer_plans
+            .iter()
+            .map(|p| if p.vsrc_base.is_some() { 4 } else { 1 })
+            .sum::<usize>();
+
     let nl_edge_set: HashSet<usize> = all_edges
         .iter()
         .filter(|&&eidx| graph.effective_edge_kind(eidx) == EdgeKind::Nonlinear)
         .copied()
         .collect();
 
-    let (mut mna, reactive_edges, variable_resistor_candidates) = stamp_passive_edges(
-        passive_edges,
-        &nl_edge_set,
+    let (mut mna, reactive_edges, variable_resistor_candidates, dropped_edges) =
+        stamp_passive_edges(
+            passive_edges,
+            &nl_edge_set,
+            graph,
+            &node_to_mna,
+            total_mna_nodes,
+            num_vsources,
+            effective_rate,
+            vcc_vs_idx,
+            &vcvs_vsrc_base,
+            &transformer_edge_set,
+        );
+
+    // ── Edge guard (pedalkernel-ffkl): a builder must not silently drop ──
+    // Every edge handed to this build is stamped into the MNA, lowered to a
+    // WDF/one-port, registered as a variable resistor, or explicitly consumed
+    // (NL ports, VCVS, transformer plan). Anything else is a formation bug.
+    super::super::spqr_build::report_dropped_edges(
+        "general MNA",
+        &dropped_edges,
         graph,
-        &node_to_mna,
-        num_mna_nodes,
-        num_vsources,
-        effective_rate,
-        vcc_vs_idx,
-        &vcvs_vsrc_base,
-    );
+    )?;
+
+    // Stamp the planned transformers + collect their synthetic reactive
+    // one-ports (leakage / magnetizing inductors, inter-winding capacitance).
+    let mut synthetic_one_ports: Vec<(WdfPort, OnePortKind)> = Vec::new();
+    for plan in &transformer_plans {
+        let comp = &graph.components[plan.comp_idx];
+        let cfg = comp
+            .kind
+            .transformer_config()
+            .expect("planned transformer has a config");
+        let resolved_cfg = crate::model_lookup::transformer_config_from_dsl(cfg);
+        let e = &graph.edges[plan.primary_eidx];
+        let p1 = node_to_mna(e.node_a);
+        let p2 = node_to_mna(e.node_b);
+        match plan.vsrc_base {
+            Some(vsrc_p) => {
+                let sec_mna = |pin: &str| -> Option<usize> {
+                    graph
+                        .node_names
+                        .get(&format!("{}.{pin}", comp.id))
+                        .and_then(|&n| node_to_mna(n))
+                };
+                let internals = [
+                    plan.internal_base,
+                    plan.internal_base + 1,
+                    plan.internal_base + 2,
+                    plan.internal_base + 3,
+                ];
+                let dynamic = super::super::spqr_build::stamp_linear_transformer_skeleton(
+                    &mut mna,
+                    &comp.id,
+                    &resolved_cfg,
+                    p1,
+                    p2,
+                    sec_mna("c"),
+                    sec_mna("d"),
+                    internals,
+                    vsrc_p,
+                    effective_rate,
+                    resolved_cfg.dc_bias_current,
+                );
+                for (port, child) in dynamic {
+                    let Some(kind) =
+                        one_port_kind_for_transformer_child(&child, effective_rate)
+                    else {
+                        return Err(format!(
+                            "transformer {}: unsupported dynamic child in general MNA",
+                            comp.id
+                        ));
+                    };
+                    synthetic_one_ports.push((port, kind));
+                }
+            }
+            None => {
+                let l_p = resolved_cfg.primary_inductance.max(1.0e-12);
+                let mid = Some(plan.internal_base);
+                mna.stamp_resistor(p1, mid, resolved_cfg.primary_dcr.max(1.0e-6));
+                let rp = 2.0 * effective_rate * l_p;
+                synthetic_one_ports.push((
+                    WdfPort {
+                        node_pos: mid,
+                        node_neg: p2,
+                        resistance: rp,
+                    },
+                    OnePortKind::Inductor(l_p),
+                ));
+            }
+        }
+    }
 
     // Step 4: Build WDF ports
     let (mut ports, port_node_pairs, passive_children, mut nl_port_resistances) = build_wdf_ports(
         &nl_terminals,
         &reactive_edges,
+        &synthetic_one_ports,
         graph,
         &node_to_mna,
         n_nl,
@@ -911,6 +1076,7 @@ struct VariableResistorCandidate {
     initial_conductance: f64,
 }
 
+#[allow(clippy::too_many_arguments)] // focused stamping helper of the MNA build
 fn stamp_passive_edges(
     all_edges: &[usize],
     nl_edge_set: &HashSet<usize>,
@@ -921,15 +1087,20 @@ fn stamp_passive_edges(
     effective_rate: f64,
     vcc_vs_idx: Option<usize>,
     vcvs_vsrc_base: &[(usize, usize)],
+    transformer_edge_set: &HashSet<usize>,
 ) -> (
     MnaSystem,
     Vec<(usize, OnePortKind)>,
     Vec<VariableResistorCandidate>,
+    Vec<usize>,
 ) {
     let mut mna = MnaSystem::new(num_mna_nodes, num_vsources);
     let mut reactive_edges: Vec<(usize, OnePortKind)> = Vec::new();
     let mut variable_resistor_candidates: Vec<VariableResistorCandidate> = Vec::new();
     let mut stamped_vcvs: HashSet<usize> = HashSet::new();
+    // Edge guard (pedalkernel-ffkl): edges that match NO branch below. The
+    // caller decides how loud to be (`report_dropped_edges`).
+    let mut dropped_edges: Vec<usize> = Vec::new();
 
     for &eidx in all_edges {
         if nl_edge_set.contains(&eidx) {
@@ -1009,6 +1180,14 @@ fn stamp_passive_edges(
             reactive_edges.push((eidx, OnePortKind::Capacitor(c)));
         } else if let Some(l) = comp.kind.inductance() {
             reactive_edges.push((eidx, OnePortKind::Inductor(l)));
+        } else if transformer_edge_set.contains(&eidx) {
+            // Stamped by the transformer skeleton plan in the caller
+            // (pedalkernel-ffkl) — accounted for, not dropped.
+        } else {
+            // No branch stamped this edge: without the guard the component
+            // would silently vanish from the compiled stage (the LA-2A
+            // T_out failure mode).
+            dropped_edges.push(eidx);
         }
     }
 
@@ -1023,7 +1202,28 @@ fn stamp_passive_edges(
         mna.stamp_voltage_source(vcc_mna, None, vcc_idx);
     }
 
-    (mna, reactive_edges, variable_resistor_candidates)
+    (mna, reactive_edges, variable_resistor_candidates, dropped_edges)
+}
+
+/// Convert a transformer-skeleton dynamic child (built for the WDF passive
+/// path) into the linear one-port kind the MultiNl stage's passive set
+/// understands. The Jiles-Atherton magnetizing core degrades to its LINEAR
+/// magnetizing inductance here (`L = rp / (2·fs)`, the same L its port
+/// resistance encodes) — the MultiNl passive one-ports are linear reactive
+/// elements. Plain-config transformers (no JA parameters) never produce a JA
+/// child, so nothing degrades for them.
+fn one_port_kind_for_transformer_child(
+    child: &DynNode,
+    effective_rate: f64,
+) -> Option<OnePortKind> {
+    match child {
+        DynNode::Leaf(LeafKind::OnePort { runtime, .. }) => Some(runtime.spec.kind),
+        DynNode::Leaf(LeafKind::JaMagnetizing(_)) => {
+            let rp = child.port_resistance();
+            Some(OnePortKind::Inductor(rp / (2.0 * effective_rate)))
+        }
+        _ => None,
+    }
 }
 
 fn pot_edge_is_wb_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId) -> bool {
@@ -1041,9 +1241,11 @@ fn pot_edge_is_wb_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId
 }
 
 /// Step 4: Build WDF ports (NL + reactive + adapted input).
+#[allow(clippy::too_many_arguments)] // focused port-assembly helper of the MNA build
 fn build_wdf_ports(
     nl_terminals: &[(NodeId, NodeId)],
     reactive_edges: &[(usize, OnePortKind)],
+    synthetic_one_ports: &[(WdfPort, OnePortKind)],
     graph: &CircuitGraph,
     node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
     n_nl: usize,
@@ -1090,6 +1292,30 @@ fn build_wdf_ports(
             MnaPortTerminals::maybe_differential(pos.map(MnaNodeId::new), neg.map(MnaNodeId::new)),
             *kind,
         ));
+    }
+
+    // Synthetic passive one-ports (pedalkernel-ffkl): reactive ports that do
+    // not correspond 1:1 to a graph edge — the transformer skeleton's leakage
+    // and magnetizing inductors (their terminals may be transformer-internal
+    // MNA nodes). Appended AFTER the edge-backed reactive ports so the
+    // `reactive_edges[k] ↔ passive_one_ports[k]` positional contract that
+    // `apply_triode_dc_qpoint` / `apply_cap_seed` rely on stays intact for
+    // k < reactive_edges.len(), and BEFORE the adapted port which must stay
+    // last.
+    for (port, kind) in synthetic_one_ports {
+        let (kind, port) = (*kind, port.clone());
+        port_node_pairs.push(WdfPortTerminals::maybe_differential(
+            port.node_pos,
+            port.node_neg,
+        ));
+        passive_one_ports.push(MnaOnePort::new(
+            MnaPortTerminals::maybe_differential(
+                port.node_pos.map(MnaNodeId::new),
+                port.node_neg.map(MnaNodeId::new),
+            ),
+            kind,
+        ));
+        ports.push(port);
     }
 
     // Adapted (input voltage source) port.
