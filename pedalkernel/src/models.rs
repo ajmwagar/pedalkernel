@@ -440,7 +440,7 @@ impl SpiceOpAmpModel {
             output_impedance: 75.0,
             output_capacitance: 20e-12,
             ota_iabc: 100e-6,
-            ota_vt: 25.85e-3,
+            ota_vt: pedalkernel_rt::SPICE_VT_27C,
             ota_gm: 0.0,
             ota_r_load: 10_000.0,
         }

@@ -29,7 +29,7 @@ use crate::elements::WdfRoot;
 pub struct OtaModel {
     /// Maximum bias current (A). CA3080 typical: 0.5mA.
     pub iabc_max: crate::Wave,
-    /// Thermal voltage (V). ~25.85mV at 20°C.
+    /// Thermal voltage (V). ≈25.86mV at the ngspice default 27°C.
     pub vt: crate::Wave,
     /// Output load resistance (Ω). Determines voltage gain from current output.
     pub r_load: crate::Wave,
@@ -46,7 +46,7 @@ impl OtaModel {
     pub fn ca3080() -> Self {
         Self {
             iabc_max: 0.5e-3, // 500µA max amplifier bias current
-            vt: 25.85e-3,     // Thermal voltage at 20°C
+            vt: crate::SPICE_VT_27C, // Thermal voltage at ngspice default 27°C
             r_load: 10_000.0, // Typical 10k load resistor
         }
     }

@@ -118,18 +118,10 @@ pub fn bjt_try_by_name(name: &str) -> Option<GummelPoonModel> {
     bjt_by_name(name).map(|s| bjt_from_spice(s))
 }
 
-/// Thermal voltage kT/q at the SPICE default analysis temperature
-/// TEMP = TNOM = 27 °C (300.15 K), using the CODATA-2018 constants modern
-/// ngspice uses (k = 1.380649e-23 J/K, q = 1.602176634e-19 C) ⇒ ≈ 25.8649 mV.
-///
-/// This must match ngspice exactly: BJT base current in low-β recombination
-/// regimes (ISE/NE-dominated, e.g. the BA283's BC184C at β≈2–6) scales as
-/// exp(vbe/(NE·Vt)), so the previous 25 °C value (0.02585) left a systematic
-/// +0.9 % Ib / +1.3 % Ic error at fixed junction voltages — which a shunt-
-/// feedback bias network (56k/68k) amplifies into a ~40 mV DC-root offset.
-/// Validated to <0.001 % per-device against ngspice `.op` in
-/// `pedalkernel-validate/tests/ba283_ib_diagnostic.rs`.
-const SPICE_VT_27C: f64 = 1.380649e-23 * 300.15 / 1.602176634e-19;
+// Shared ngspice-matching thermal voltage (27 °C, CODATA-2018) — see the
+// rustdoc on `pedalkernel_rt::SPICE_VT_27C` for the BA283 evidence. All
+// junction devices (BJT/diode/JFET/OTA) must use this single constant.
+use pedalkernel_rt::SPICE_VT_27C;
 
 fn bjt_from_spice(spice: &SpiceBjtModel) -> GummelPoonModel {
     GummelPoonModel {

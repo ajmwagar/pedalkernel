@@ -30,6 +30,24 @@ pub type Wave = f32;
 #[cfg(not(all(target_arch = "arm", target_os = "none")))]
 pub type Wave = f64;
 
+/// Thermal voltage kT/q at the SPICE default analysis temperature
+/// TEMP = TNOM = 27 °C (300.15 K), using the CODATA-2018 constants modern
+/// ngspice uses (k = 1.380649e-23 J/K, q = 1.602176634e-19 C) ⇒ ≈ 25.8649 mV.
+///
+/// This is the single source of truth for every junction-device thermal
+/// voltage (BJT, diode, JFET gate, OTA input pair). It must match ngspice
+/// exactly: junction currents scale as exp(v/(N·Vt)), so the historical
+/// 25 °C value (0.02585) left a systematic +0.9 % Ib / +1.3 % Ic error at
+/// fixed junction voltages — which a shunt-feedback bias network (e.g. the
+/// BA283's 56k/68k) amplifies into a ~40 mV DC-root offset. Validated to
+/// <0.001 % per-device against ngspice `.op` in
+/// `pedalkernel-validate/tests/ba283_ib_diagnostic.rs`.
+///
+/// Any code that *extracts* an ideality factor from a stored `n_vt` product
+/// (e.g. thermal drift in `stage.rs::apply_thermal`) must divide by this
+/// same constant, or the extracted N silently shifts.
+pub const SPICE_VT_27C: Wave = 1.380649e-23 * 300.15 / 1.602176634e-19;
+
 // ── Runtime math ─────────────────────────────────────────────────────────
 // On std targets, f64 inherent methods (sin, cos, exp, etc.) are available.
 // On no_std targets, we use libm. This module provides a uniform interface.
