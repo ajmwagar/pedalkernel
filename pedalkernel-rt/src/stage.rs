@@ -1475,6 +1475,21 @@ pub struct WdfStage {
     /// Compensates for passive attenuation in the tree topology.
     /// Computed automatically from the tree's impedance structure.
     pub compensation: crate::Wave,
+    /// Compile-time control-drive divider restoring series emitter
+    /// degeneration feedback for one-port BJT roots (pedalkernel-2alk).
+    ///
+    /// The one-port `BjtRoot` clamps `Vbe = vbe_bias + input·compensation`
+    /// (see [`RootKind::set_control_voltage`]) — the control terminal never
+    /// sees the emitter-node swing, so the series feedback an UNBYPASSED
+    /// emitter resistor provides in the real circuit (`v_be = v_b − i_e·R_E`)
+    /// is structurally severed and the stage runs at the undegenerated gain
+    /// `gm·R_loop`. The compiler derives the small-signal divider
+    /// `v_be/v_b = rπ / (rπ + (β+1)·R_E)` (≈ `1/(1 + gm·R_E)`) at the solved
+    /// Q-point and stores it here. Defaults to `1.0` (no-op): stages with a
+    /// bypassed emitter leg — where the cap shorts the emitter swing at audio
+    /// and the existing clamp is already correct — remain bit-identical.
+    #[cfg_attr(feature = "serde", serde(default = "default_control_divider"))]
+    pub control_divider: crate::Wave,
     /// Oversampler for antialiasing at nonlinear stages.
     pub oversampler: Oversampler,
     /// Base diode model (before thermal modulation). Stored so thermal
@@ -1794,6 +1809,7 @@ impl WdfStage {
             runtime_state,
             root,
             compensation: 1.0,
+            control_divider: 1.0,
             oversampler,
             base_diode_model: None,
             base_bjt_model: None,
@@ -2168,6 +2184,10 @@ impl WdfStage {
         let root = &mut self.root;
         let k_table = &self.k_table;
         let compensation = self.compensation;
+        // Emitter-degeneration control divider (pedalkernel-2alk): scales the
+        // CONTROL drive only (Vbe), never the tree VS drive. 1.0 for every
+        // stage except one-port BJT roots with an unbypassed emitter resistor.
+        let control_divider = self.control_divider;
         let output_probe = &self.output_probe;
         let source_probe = &self.fet_source_probe;
         let series_rectifier_divider = self.series_rectifier_divider;
@@ -2224,7 +2244,7 @@ impl WdfStage {
         // Skip for coupling-cap stages: Vgk is set after tree.reflected() inside
         // the oversampler closure using the cap's WDF state.
         if !has_coupling_cap {
-            root.set_control_voltage(grid_input, compensation, 0.0);
+            root.set_control_voltage(grid_input, compensation * control_divider, 0.0);
         }
 
         if source_probe.is_some() {
@@ -2331,7 +2351,7 @@ impl WdfStage {
                         .unwrap_or(0.0);
                     // AC grid voltage = total input minus cap's stored DC
                     let vgk_ac = sample * compensation - cap_v;
-                    root.set_control_voltage(vgk_ac, 1.0, 0.0);
+                    root.set_control_voltage(vgk_ac, control_divider, 0.0);
                 }
             }
 
@@ -6063,6 +6083,13 @@ pub struct StateSpaceStage {
 }
 
 /// serde default helper: `usize::MAX` (sentinel for "unbound node").
+/// Serde default for [`WdfStage::control_divider`]: 1.0 = no divider, so
+/// stages serialized before the field existed deserialize bit-identical.
+#[cfg(feature = "serde")]
+fn default_control_divider() -> crate::Wave {
+    1.0
+}
+
 pub fn usize_max() -> usize {
     usize::MAX
 }
