@@ -104,6 +104,32 @@ enum Command {
         #[arg(long)]
         fix: bool,
     },
+    /// Export a KiCad netlist (S-expression) from a .pedal file.
+    ///
+    /// Subcircuit use(...) instances are expanded before export, so the
+    /// netlist covers the full flattened circuit.
+    ExportKicad {
+        /// Path to the .pedal file.
+        file: String,
+        /// Output file (defaults to stdout).
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    /// Export a bill of materials from a .pedal file.
+    ///
+    /// Prints per-refdes rows (refdes, category, value, model, qty) plus an
+    /// aggregated view grouped by (category, value, model). A diode_pair
+    /// counts as 2 physical diodes.
+    ExportBom {
+        /// Path to the .pedal file.
+        file: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = cli::export_bom::BomFormat::Table)]
+        format: cli::export_bom::BomFormat,
+        /// Output file (defaults to stdout).
+        #[arg(short, long)]
+        output: Option<String>,
+    },
     /// List and search available component models (BJTs, JFETs, op-amps, transformers, etc.)
     ///
     /// Examples:
@@ -184,6 +210,12 @@ fn main() {
                 cli::diag::run(file.as_deref(), ipc.as_deref(), &knobs);
             }
         }
+        Command::ExportKicad { file, output } => cli::export_kicad::run(&file, output.as_deref()),
+        Command::ExportBom {
+            file,
+            format,
+            output,
+        } => cli::export_bom::run(&file, format, output.as_deref()),
         Command::Validate { paths, fix } => cli::validate::run(&paths, fix),
         Command::Models {
             model_type,

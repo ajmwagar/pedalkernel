@@ -190,6 +190,7 @@
 #[cfg(feature = "analysis")]
 pub mod analysis;
 pub mod board;
+pub mod bom;
 pub mod compiler;
 #[cfg(feature = "diag")]
 pub mod diag_ipc;

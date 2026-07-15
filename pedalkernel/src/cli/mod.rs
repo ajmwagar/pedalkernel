@@ -1,6 +1,8 @@
 pub mod debug;
 #[cfg(feature = "diag")]
 pub mod diag;
+pub mod export_bom;
+pub mod export_kicad;
 pub mod models;
 pub mod process;
 pub mod validate;
