@@ -339,15 +339,22 @@ fn bootstrap_distortion_250_golden() {
 
 /// Deck positions: Gain = 1.0 (host; gain-leg pot at min clamp), Volume = 1.0.
 ///
-/// IGNORED (honest engine gap, measured 2026-07-15): the compiled pedal
-/// leaks only ~1 mV RMS (golden 0.225 V; gap −47.5 dB), identical across
-/// Gain 0/0.5/1, Volume 0/0.5/1 and diagnostic variants without C1, without
-/// C5, without the diodes, and with `vref` renamed `vb` — the non-inverting
-/// LM741 stage itself is not propagating signal (gain-leg with the series
-/// C3→R1→pot to ground is the prime suspect for the opamp extraction).
-/// Un-ignore once the engine produces audio here; golden committed.
+/// ALIVE (was dead — fixed 2026-07-15, bead pedalkernel-svbi): the vref bypass
+/// cap C101 (a 4.5 V reference-shunt to GND) was fusing into the op-amp gain
+/// group and forcing the IIR/StateSpace LTI lowering; that lowering observes the
+/// output through the capacitor states while IC1.out is VCVS-driven, so the
+/// extracted transfer collapsed to ~0 and the stage leaked only ~1 mV RMS
+/// (golden 0.225 V; gap −47.5 dB). Fix (`rigid/mod.rs`): reference-shunt caps —
+/// a cap bypassing a bias/vref node to a rail — are excluded from the routing
+/// reactive-count AND from the linear stage's MNA. The stage now propagates:
+/// WDF RMS ≈ 0.405 V (gap ≈ +5.1 dB, WDF hotter; THD err ≈ 30.6 dB).
+///
+/// Residual +5 dB is the SEPARATE StateSpace non-inverting gain-calibration gap
+/// (C3 keeps the group on the LTI path — the RCA's C101-removed flip measured
+/// the same 0.405 V), analogous to the APB gain gap (pedalkernel-2alk); both are
+/// un-ignored with `gate=None` (sanity: not silent). Un-gate once that gain gap
+/// is closed; golden committed.
 #[test]
-#[ignore = "engine gap: compiled Distortion 250 leaks ~1 mV RMS (golden 0.225 V) — see doc comment"]
 fn distortion_250_wdf_vs_spice() {
     run_wdf_vs_spice(
         "distortion_250",
