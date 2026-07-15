@@ -1,0 +1,82 @@
+* ============================================================================
+* Sunflower Fuzz (PedalPCB) — Analogman Sunface / Fuzz Face, Ge NKT275
+* PedalKernel Kits Validation Circuit
+* ============================================================================
+*
+* Topology (mirrors sunflower.pedal in pedalkernel-pro/pedals/kits/):
+*   Classic Fuzz Face core in REAL polarities: -9 V rail (TC1044 charge pump
+*   modeled as an ideal source), PNP Ge pair, ground-referenced signal.
+*   1. Input    — CLEAN (50K trim, series rheostat) + C1 (1u) coupling
+*   2. Q1       — NKT275, emitter grounded, R2 (33K) collector load to -9 V
+*   3. Feedback — R1 (100K) Q2 emitter -> Q1 base (FF self-bias loop)
+*   4. Q2       — NKT275; FUZZ (B1K) emitter shunt with C2 (22u) wiper bypass
+*   5. Chain    — Q2 coll -> R3 (1K) -> BIAS (5K trim) -> SUNDIAL (B5K) ->
+*                 node A -> R4 (470R) -> -9 V; output tapped at node A
+*                 (the classic FF 8K2/470R divider point)
+*   6. Output   — C3 (10n) -> VOLUME (A250K) -> wiper -> out
+*
+* Refdes match the PedalPCB build doc (rev 8/16/23):
+*   https://docs.pedalpcb.com/project/Sunflower-PedalPCB.pdf
+* Power section (IC1 TC1044/D100/C100/C101/CLR/LED) omitted — ideal -9 V rail.
+*
+* Control positions (validation point, taper-unambiguous):
+*   Clean   = 0.0 -> 50R   (engine min clamp 0.1% of 50K)
+*   Fuzz    = 1.0 -> wiper at emitter end: top 1R, bottom 1K
+*   Bias    = 0.5 -> 2.5K  (linear trim)
+*   Sundial = 0.5 -> 2.5K  (B taper)
+*   Volume  = 1.0 -> top 250R (0.1% clamp), bottom 250K
+*
+* Transistor model: NKT275 from pedalkernel/models/transistors.model.
+* ============================================================================
+
+* ---- Supply (charge-pump rail as ideal source) ------------------------------
+VEE vee 0 DC -9
+
+* ---- Input: Clean trim + coupling -------------------------------------------
+Rclean v_in v_c1 50
+C1 v_c1 v_q1b 1u
+
+* ---- Q1 driver stage ---------------------------------------------------------
+Q1 v_q1c v_q1b 0 NKT275
+R2 vee v_q1c 33k
+
+* ---- Feedback: Q2 emitter -> Q1 base ----------------------------------------
+R1 v_q1b v_q2e 100k
+
+* ---- Q2 fuzz stage (base direct-coupled to Q1 collector) --------------------
+Q2 v_q2c v_q1c v_q2e NKT275
+
+* Fuzz pot (B1K) at 1.0: wiper at the emitter end -> full 1K bypassed by C2
+Rfuzz_top v_q2e v_fw 1
+Rfuzz_bot v_fw 0 1k
+C2 v_fw 0 22u
+
+* ---- Collector chain + classic FF output divider ----------------------------
+R3 v_q2c v_bias 1k
+Rbias v_bias v_sun 2.5k
+Rsun v_sun v_a 2.5k
+R4 v_a vee 470
+
+.MODEL NKT275 PNP(IS=1.5u BF=85 BR=8.0 NF=1.05 NR=1.05 VAF=40 VAR=20 IKF=50m IKR=20m ISE=10n ISC=1n NE=1.5 NC=1.3 RB=20 RE=0.5 RC=0.5 CJE=80p VJE=0.3 MJE=0.5 CJC=30p VJC=0.3 MJC=0.5 TF=1.2n TR=120n)
+
+* ---- Output: coupling + Volume (A250K at 1.0 = full) -------------------------
+C3 v_a v_vol 10n
+Rvol_top v_vol v_out 250
+Rvol_bot v_out 0 250k
+
+* Speed up UIC settling toward the FF operating point (real polarities)
+.IC V(v_q1b)=-0.13 V(v_q1c)=-0.6 V(v_q2e)=-0.45 V(v_q2c)=-4.5 V(v_a)=-8.0
+
+* ---- Standalone smoke test (stripped by the validation harness) -------------
+VIN v_in 0 SIN(0 0.1 1k)
+.TRAN 5.2083u 100m
+.CONTROL
+  set filetype=ascii
+  run
+  meas tran vout_rms RMS v(v_out) from=50m to=100m
+  meas tran vout_max MAX v(v_out) from=50m to=100m
+  meas tran vout_min MIN v(v_out) from=50m to=100m
+  meas tran vq2c_avg AVG v(v_q2c) from=50m to=100m
+  quit
+.ENDC
+.END
