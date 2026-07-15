@@ -300,16 +300,25 @@ fn bootstrap_sunflower_golden() {
 
 /// Deck positions: Clean=0.0, Fuzz=1.0, Bias=0.5, Sundial=0.5, Volume=1.0.
 ///
-/// IGNORED (honest engine gap, measured 2026-07-15): the compiled pedal is
-/// SILENT (WDF RMS < 1e-6 V vs golden 0.257 V) at every control setting
-/// probed (Volume 0/0.5/1 × Fuzz 0.5/1). The public fuzz_face example works,
-/// so the gap is specific to this faithful Sunface rendition — suspects are
-/// the series CLEAN rheostat at the input, the two-rheostat collector chain,
-/// and the classic FF output tap at the R4/SUNDIAL junction (node A) rather
-/// than the collector. Un-ignore once the engine produces audio here; the
-/// ngspice golden is already committed.
+/// STILL IGNORED — but the DC-bias half of the gap is now FIXED
+/// (pedalkernel-onu2, DC-closure edge set). Before: Q2's collector chain
+/// (`R3→BIAS→SUNDIAL→R4→rail`) lived in the downstream flow group, invisible
+/// to the group-local DC solve, so Q2 floated on gmin and the homotopy
+/// converged a saturated artifact (`PK_BIAS_QPOINT_DEBUG`: Q2 vbe 0.192 /
+/// vce 0.0036 V). After: the whole DC-closure is solved — Q2 vbe 0.152 /
+/// |vce| ≈ 5.68 V (matching ngspice's `.op` |vce| ≈ 6.1 V under the PNP-mirror
+/// convention), Q1 conducting.
+///
+/// REMAINING gap (OUT OF SCOPE for onu2, GAP 2 secondary on pedalkernel-a5ho):
+/// with the series CLEAN rheostat at the input, the MultiNL is driven via an
+/// adapted boundary-VS whose `s_nl_adapted` is ≈ 2.007× the in-node-injection
+/// derivation (`rigid/general.rs derive_scattering`, factor-2). The overdriven
+/// Ge BE junction rectifies and the coupling caps decay the output to ~1e-4 V
+/// RMS within ~100 ms — measured 2026-07-15: WDF RMS < 1e-3 V vs golden
+/// 0.257 V, gap ≈ −75 dB. Un-ignore once the adapted-port vs in-node injection
+/// derivations are reconciled; the ngspice golden is already committed.
 #[test]
-#[ignore = "engine gap: compiled Sunflower is silent at all control settings (golden RMS 0.257 V) — see doc comment"]
+#[ignore = "engine gap (post-onu2): DC bias now correct (Q2 |vce| ≈ 5.68 V), but the adapted-port injection factor-2 issue (GAP 2 secondary, not onu2) still decays output to ~1e-4 V vs golden 0.257 V — see doc comment"]
 fn sunflower_wdf_vs_spice() {
     run_wdf_vs_spice(
         "sunflower",
@@ -371,16 +380,27 @@ fn bootstrap_uberdrive_golden() {
 
 /// Deck positions: Drive/Tone/Volume = 0.5 (all B-taper, mids exact).
 ///
-/// IGNORED (honest engine gap, measured 2026-07-15): compile emits
-/// "injection guard [general-MNA]: group has boundary nodes but none is
-/// reachable from the global input — adapted input port falls back to the
-/// device input pin (mna#1[Q2.base,C8.b,R13.a])" and the output is SILENT
-/// (WDF RMS < 1e-6 V vs golden 0.519 V). The volume-pot wiper →R12→C8→ Q2
-/// output-follower crossing is not routed by the signal-flow layer — same
-/// family as the WiperDivider/straddling-pot work. Un-ignore once the
-/// follower group receives signal; golden committed.
+/// STILL IGNORED — DC bias FIXED (pedalkernel-onu2), audio still blocked by a
+/// SEPARATE gap (GAP 4b, pedalkernel-xki7). onu2 fixed the follower BIAS: the
+/// `vref` divider (R100/R101) lives in another flow group and `vref` is
+/// ac-ground-classified, so pre-onu2 both Q1 and Q2 floated to ~0 V and the DC
+/// solve "converged" in cutoff ("BJT group DC solve converged with ALL 1
+/// device(s) in cutoff"). Now, with the DC-closure edge set + the vref-class
+/// interior override, both conduct at ngspice's `.op`: Q1 vbe 0.613 / vce 5.42,
+/// Q2 vbe 0.611 / vce 5.70 (`PK_BIAS_QPOINT_DEBUG`; ngspice: Q1 0.613/5.41,
+/// Q2 0.611/5.69).
+///
+/// REMAINING gap (OUT OF SCOPE for onu2): compile still emits the injection
+/// guard "group has boundary nodes but none reachable from the global input —
+/// adapted input port falls back to the device input pin
+/// (mna#1[Q2.base,C8.b,R13.a])" and the output is SILENT (WDF RMS < 1e-6 V vs
+/// golden 0.519 V). The volume-pot wiper →R12→C8→ Q2 output-follower crossing
+/// is not ROUTED by the signal-flow layer (the WiperDivider/straddling-pot
+/// family — pedalkernel-xki7). A correctly-biased follower that never receives
+/// signal is still silent. Un-ignore once the follower group receives signal;
+/// golden committed.
 #[test]
-#[ignore = "engine gap: Q2 output-follower MNA group unreachable from input (injection guard), output silent — see doc comment"]
+#[ignore = "engine gap (post-onu2): follower DC bias now correct (Q1/Q2 conduct at .op), but the Q2 output-follower MNA group is still unreachable from input (injection guard, GAP 4b / pedalkernel-xki7) → output silent — see doc comment"]
 fn uberdrive_wdf_vs_spice() {
     run_wdf_vs_spice(
         "uberdrive",
@@ -404,14 +424,21 @@ fn bootstrap_little_green_scream_machine_golden() {
 
 /// Deck positions: Drive = 1.0 (taper-exact extreme), Tone/Volume = 0.5.
 ///
-/// IGNORED (honest engine gap, measured 2026-07-15): same injection-guard
-/// warning as the UberDrive (mna#1[C8.b,R12.a,Q2.base] unreachable from the
-/// global input) and the output is SILENT (WDF RMS < 1e-6 V vs golden
-/// 0.364 V). The TS808/SD-1 output follower behind the volume pot is the
-/// shared unsupported crossing. Un-ignore once the follower group receives
-/// signal; golden committed.
+/// STILL IGNORED — DC bias FIXED (pedalkernel-onu2), audio still far off. Same
+/// vref-follower bias fix as the UberDrive: Q2's base is biased through R12 to
+/// the ac-ground-classified `vref` divider in another flow group, so pre-onu2
+/// it floated to cutoff. Now Q2 conducts at ngspice's `.op` (vbe 0.613 /
+/// vce 5.43; `PK_BIAS_QPOINT_DEBUG`).
+///
+/// REMAINING gap (OUT OF SCOPE for onu2): the same injection-guard warning as
+/// the UberDrive (mna#1[C8.b,R12.a,Q2.base] unreachable from the global input,
+/// GAP 4b / pedalkernel-xki7). With the follower now biased, a little signal
+/// does leak (WDF RMS ≈ 3.5e-3 V, up from < 1e-6 V) but the output is still
+/// ~40 dB below golden 0.364 V because the volume-pot→follower crossing is not
+/// properly routed. Un-ignore once the follower group receives signal; golden
+/// committed.
 #[test]
-#[ignore = "engine gap: Q2 output-follower MNA group unreachable from input (injection guard), output silent — see doc comment"]
+#[ignore = "engine gap (post-onu2): follower DC bias now correct (Q2 conducts at .op) and leaks ~3.5e-3 V, but the Q2 output-follower crossing is still not routed (injection guard, GAP 4b / pedalkernel-xki7) → ~40 dB below golden — see doc comment"]
 fn little_green_scream_machine_wdf_vs_spice() {
     run_wdf_vs_spice(
         "little_green_scream_machine",

@@ -622,11 +622,47 @@ fn build_general_mna_from_edges_inner(
             && nl_comp_labels.iter().any(|l| l == &h.device_label)
     });
     if !has_named_bjt_hint {
-        if let Some(node_dc) = super::super::bias::solve_bjt_group_dc_qpoint(
+        // pedalkernel-onu2 (RCA GAPs 2a+4a on pedalkernel-a5ho): the DC solve
+        // must see the whole DC-CLOSURE of the group's BJT terminals, not the
+        // group-local edges alone — a bias network split across flow groups
+        // (sunflower's downstream collector chain, the uberdrive/LGSM `vref`
+        // divider) otherwise floats on gmin and the homotopy converges a
+        // saturated / cutoff artifact. This mirrors the blockwise caller,
+        // which already passes the whole plan's edges
+        // (`solve_blockwise_bjt_group_qpoint`). vref-class nodes crossed by
+        // the closure (ac-ground-classified bias dividers) are solved as
+        // interior instead of a 0 V rail. A group whose bias network is
+        // group-local gets the exact legacy edge list + empty overrides
+        // (closure adds nothing) and stays bit-for-bit identical.
+        let (dc_closure_edges, vref_overrides) = super::super::bias::bjt_dc_closure_edges(
             &nl_kinds,
             all_edges,
             graph,
             supply_voltage,
+        );
+        // The single-BJT seed-BAKE (below, in `apply_bjt_dc_qpoint`) is gated
+        // NARROWLY on a vref-class override actually being needed — NOT merely
+        // on the closure having grown. A grown closure alone is the common case
+        // (any single CE stage whose collector load returns to a rail through a
+        // pot/resistor in another flow group — e.g. the Big Muff's Sustain-pot
+        // Q3 collector chain): there the group-local linear vcc-injection
+        // `dc_bias` ALREADY biases the stage functionally, and overriding it
+        // with the (correct-but-near-saturation) closure op-point kills the
+        // small-signal gain the runtime relies on. The vref-follower case (GAP
+        // 4a) is different in kind: the base sits at a bypassed-divider virtual
+        // ground that is BOTH in another flow group AND unrepresentable in the
+        // runtime stage's own MNA, so without baking the seed the follower can
+        // only ever read cutoff. `vref_overrides` non-empty is precisely that
+        // signal. (The DC-closure EDGE SET improvement still applies to every
+        // group — it only fixes what the solve SEES; the bake gate decides
+        // whether we overwrite a working linear bias with it.)
+        let bake_cross_group_seed = !vref_overrides.is_empty();
+        if let Some(node_dc) = super::super::bias::solve_bjt_group_dc_qpoint_with_overrides(
+            &nl_kinds,
+            &dc_closure_edges,
+            graph,
+            supply_voltage,
+            &vref_overrides,
         ) {
             apply_bjt_dc_qpoint(
                 &mut stage,
@@ -635,6 +671,7 @@ fn build_general_mna_from_edges_inner(
                 &nl_kinds,
                 &reactive_edges,
                 graph,
+                bake_cross_group_seed,
             );
         }
     }
@@ -2498,6 +2535,7 @@ fn apply_bjt_dc_qpoint(
     nl_kinds: &[NonlinearKind],
     reactive_edges: &[(usize, OnePortKind)],
     graph: &CircuitGraph,
+    bake_cross_group_seed: bool,
 ) {
     let n_nl = stage.dc_bias.len();
     if n_nl == 0 || nl_terminals.len() < n_nl {
@@ -2617,6 +2655,21 @@ fn apply_bjt_dc_qpoint(
     // the runtime holds it; seeding/re-inverting would only perturb a working
     // set-point.  So single-BJT groups are left untouched here — byte-identical to
     // the pre-consolidation default (which never ran a BJT seed).
+    //
+    // EXCEPTION (pedalkernel-onu2, RCA GAP 4a): a single-BJT group whose base
+    // sits at a vref-class virtual ground (`bake_cross_group_seed` — set by the
+    // caller ONLY when a vref-class interior override was needed: the bypassed
+    // bias divider is in another flow group AND is unrepresentable in the
+    // runtime stage's own MNA, e.g. the uberdrive/LGSM `vref`-biased follower).
+    // There the premise above fails on both counts: the linear vcc-injection
+    // over the group-local MNA never saw the divider, and the runtime stage
+    // structurally CANNOT see it, so without baking the closure-solved op-point
+    // via `dc_qpoint_v` + `apply_dc_qpoint_seed` the follower only ever reads
+    // cutoff. This is deliberately NOT triggered by a merely-grown closure (a
+    // CE stage whose collector load returns to a rail through another group —
+    // the Big Muff Q3 Sustain chain): that stage's group-local linear `dc_bias`
+    // already biases it, and overwriting it with the near-saturation closure op
+    // would kill its small-signal gain.
     let n_bjt = nl_kinds
         .iter()
         .filter(|k| {
@@ -2628,7 +2681,7 @@ fn apply_bjt_dc_qpoint(
             )
         })
         .count();
-    if n_bjt < 2 {
+    if n_bjt < 2 && !bake_cross_group_seed {
         return;
     }
 
