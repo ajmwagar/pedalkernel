@@ -286,6 +286,7 @@ impl Component for OpAmp {
     fn footprint_ref(&self) -> (&'static str, &'static str) {
         let lib = match self.op_type {
             OpAmpType::Generic => "Amplifier_Operational:TL072",
+            OpAmpType::Tl071 => "Amplifier_Operational:TL071",
             OpAmpType::Tl072 => "Amplifier_Operational:TL072",
             OpAmpType::Tl082 => "Amplifier_Operational:TL082",
             OpAmpType::Jrc4558 => "Amplifier_Operational:JRC4558",

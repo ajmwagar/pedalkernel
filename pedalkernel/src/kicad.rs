@@ -120,6 +120,7 @@ fn value_str(kind: &dyn Component) -> String {
     if let Some(ot) = kind.op_amp_type() {
         return match ot {
             OpAmpType::Generic => "OpAmp".into(),
+            OpAmpType::Tl071 => "TL071".into(),
             OpAmpType::Tl072 => "TL072".into(),
             OpAmpType::Tl082 => "TL082".into(),
             OpAmpType::Jrc4558 => "JRC4558D".into(),

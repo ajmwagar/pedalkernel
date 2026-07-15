@@ -359,6 +359,10 @@ pub enum OpAmpType {
     /// Generic op-amp (defaults to TL072 characteristics)
     #[default]
     Generic,
+    /// TL071 - Single JFET-input op-amp, electrically identical to TL072
+    /// (slew: 13V/µs, GBW: 3MHz). Single package drops into an LM308 socket
+    /// (the "FET RAT" mod); the TL072 is a dual with a different pinout.
+    Tl071,
     /// TL072 - JFET input, fast, clean (slew: 13V/µs, GBW: 3MHz)
     /// Common in: Tube Screamer mods, Klon, modern pedals
     Tl072,
@@ -389,7 +393,7 @@ impl OpAmpType {
     /// Slew rate in V/µs - affects high frequency response and distortion character
     pub fn slew_rate(&self) -> f64 {
         match self {
-            OpAmpType::Generic | OpAmpType::Tl072 | OpAmpType::Tl082 => 13.0,
+            OpAmpType::Generic | OpAmpType::Tl071 | OpAmpType::Tl072 | OpAmpType::Tl082 => 13.0,
             OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 1.7,
             OpAmpType::Lm308 => 0.3,
             OpAmpType::Lm741 => 0.5,
@@ -402,7 +406,7 @@ impl OpAmpType {
     /// Gain-bandwidth product in Hz - affects frequency response
     pub fn gain_bandwidth(&self) -> f64 {
         match self {
-            OpAmpType::Generic | OpAmpType::Tl072 | OpAmpType::Tl082 => 3e6,
+            OpAmpType::Generic | OpAmpType::Tl071 | OpAmpType::Tl072 | OpAmpType::Tl082 => 3e6,
             OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 3e6,
             OpAmpType::Lm308 => 1e6,
             OpAmpType::Lm741 => 1e6,
@@ -415,7 +419,7 @@ impl OpAmpType {
     /// Maximum supply voltage (total V+ to V-)
     pub fn supply_max(&self) -> f64 {
         match self {
-            OpAmpType::Generic | OpAmpType::Tl072 | OpAmpType::Tl082 => 36.0,
+            OpAmpType::Generic | OpAmpType::Tl071 | OpAmpType::Tl072 | OpAmpType::Tl082 => 36.0,
             OpAmpType::Jrc4558 | OpAmpType::Rc4558 => 36.0,
             OpAmpType::Lm308 => 36.0,
             OpAmpType::Lm741 => 36.0,
@@ -1350,6 +1354,9 @@ fn parse_pnp(input: &str) -> IResult<&str, BoxComp> {
 
 fn opamp_type(input: &str) -> IResult<&str, OpAmpType> {
     alt((
+        // NOTE: "tl071"/"tl072"/"tl082" are all full 5-char tags, so none can
+        // prefix-shadow another in this `alt` chain.
+        value(OpAmpType::Tl071, tag("tl071")),
         value(OpAmpType::Tl072, tag("tl072")),
         value(OpAmpType::Tl082, tag("tl082")),
         value(OpAmpType::Jrc4558, alt((tag("jrc4558"), tag("4558")))),
@@ -4438,6 +4445,15 @@ pedal "Auto Wah" {
         let (_, (c, _)) = component_def("U1: opamp()").unwrap();
         assert_eq!(c.id, "U1");
         assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Generic));
+    }
+
+    #[test]
+    fn parse_opamp_tl071() {
+        let (_, (c, _)) = component_def("U1: opamp(tl071)").unwrap();
+        assert_eq!(c.kind.op_amp_type(), Some(OpAmpType::Tl071));
+        // Electrically identical to the TL072 (single vs dual package).
+        assert!((OpAmpType::Tl071.slew_rate() - 13.0).abs() < 0.1);
+        assert!((OpAmpType::Tl071.gain_bandwidth() - 3e6).abs() < 1e3);
     }
 
     #[test]
