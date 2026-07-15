@@ -1,0 +1,115 @@
+* ============================================================================
+* Little Green Scream Machine (PedalPCB) — hot-rodded Ibanez TS-808
+* PedalKernel Kits Validation Circuit
+* ============================================================================
+*
+* Topology (mirrors little_green_scream_machine.pedal in pedals/kits/):
+*   1. Input buffer — R1 (2.2M) pulldown; C1 (27n) -> R2 (1K) -> Q1 base
+*                     (R3 510K to VREF); follower, R4 (10K)
+*   2. Clipping     — IC1.1 non-inverting: C2 (1u) + R5 (10K to VREF);
+*                     gain leg R8 (2.4K) + C4 (100n) to VREF (fc 663 Hz);
+*                     feedback R6 (20K) + DRIVE (500KA) + C3 (51p);
+*                     clipper: D3+D2 series (anode at output, +half ~1.2V)
+*                     antiparallel D1 (-half ~0.6V) — asymmetric 2+1
+*   3. Active tone  — R9 (1K) -> node T (C5 220n shunt, R19 10K to VREF) ->
+*                     IC1.2 +in and TONE lug1; lug3 -> node B (-in);
+*                     wiper -> C6 (180n) -> R7 (220) -> gnd; feedback R10 (1K)
+*   4. Output       — R11 (1K) -> VOLUME (100KB, bottom to VREF); wiper ->
+*                     C8 (100n) -> Q2 base (R12 510K to VREF); follower
+*                     R13 (10K); R14 (100) -> C9 (10u) -> out, R15 (10K)
+*
+* Refdes match the PedalPCB build doc (rev 11.03.17):
+*   https://docs.pedalpcb.com/project/LGSM.v1.pdf
+*
+* House conventions: op-amps = ideal VCVS (1e5) — doc's OPA2134; VREF =
+* ideal 4.5 V source; power section (D4/C11/C7/R18/LED) omitted.
+* SUBSTITUTION (documented): Q1/Q2 2SC1815 -> 2N5088 model here AND in the
+* .pedal (followers are beta-insensitive).
+*
+* Control positions (validation point):
+*   Drive  = 1.0 -> 500K full (audio taper exact at the extreme)
+*          -> Av = 1 + 520K/2.4K = 218
+*   Tone   = 0.5 -> 10K / 10K   (B taper, unambiguous)
+*   Volume = 0.5 -> 50K / 50K   (B taper, unambiguous)
+*
+* Diode model: 1N914 params as legends screamer/sd1 decks.
+* ============================================================================
+
+* ---- Supply and VREF ---------------------------------------------------------
+VCC vcc 0 DC 9
+Vref v_ref 0 DC 4.5
+
+* ---- Input buffer -------------------------------------------------------------
+R1 v_in 0 2.2meg
+C1 v_in v_c1 27n
+R2 v_c1 v_q1b 1k
+R3 v_q1b v_ref 510k
+Q1 vcc v_q1b v_q1e Q2N5088
+R4 v_q1e 0 10k
+
+.MODEL Q2N5088 NPN(IS=18f BF=600 BR=4.0 NF=1.0 NR=1.0 VAF=100 VAR=25 IKF=50m IKR=10m ISE=5f NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.2 RC=0.3 CJE=6p VJE=0.7 MJE=0.33 CJC=4p VJC=0.7 MJC=0.33 TF=300p TR=30n)
+
+* ---- Clipping stage (IC1.1, non-inverting, ideal VCVS) ------------------------
+C2 v_q1e v_pos 1u
+R5 v_pos v_ref 10k
+Eu1 v_u1out 0 v_pos v_neg 100000
+
+* Gain leg to VREF (2.4K + 100n -> 663 Hz corner)
+R8 v_neg v_c4 2.4k
+C4 v_c4 v_ref 100n
+
+* Feedback: R6 + Drive (500KA at 1.0 = full 500K rheostat) + C3 HF rolloff
+R6 v_neg v_r6 20k
+Rdrive v_r6 v_u1out 500k
+C3 v_neg v_u1out 51p
+
+* Asymmetric clipper: D3+D2 series (anode at output) || D1 reversed
+D3 v_u1out v_d32 D1N914
+D2 v_d32 v_neg D1N914
+D1 v_neg v_u1out D1N914
+.MODEL D1N914 D(Is=4.35n N=1.906 Rs=0.6 Cjo=2p)
+
+* ---- Active tone stage (IC1.2) ------------------------------------------------
+R9 v_u1out v_t 1k
+C5 v_t 0 220n
+R19 v_t v_ref 10k
+* TONE (B20K at 0.5): lug1 = node T, lug3 = node B, wiper -> C6 -> R7 -> gnd
+Rtone_top v_t v_tw 10k
+Rtone_bot v_tw v_b 10k
+C6 v_tw v_c6r 180n
+R7 v_c6r 0 220
+R10 v_b v_u2out 1k
+Eu2 v_u2out 0 v_t v_b 100000
+
+* ---- Output stage --------------------------------------------------------------
+R11 v_u2out v_vol 1k
+* VOLUME (100KB at 0.5), bottom lug to VREF
+Rvol_top v_vol v_vw 50k
+Rvol_bot v_vw v_ref 50k
+C8 v_vw v_q2b 100n
+R12 v_q2b v_ref 510k
+Q2 vcc v_q2b v_q2e Q2N5088
+R13 v_q2e 0 10k
+R14 v_q2e v_r14 100
+C9 v_r14 v_out 10u
+R15 v_out 0 10k
+
+* Speed up UIC settling (followers bias near VREF minus a Vbe; pre-charge
+* coupling caps so v_out settles well inside the 100 ms window)
+.IC V(v_q1b)=4.45 V(v_q1e)=3.8 V(v_pos)=4.5 V(v_neg)=4.5 V(v_t)=4.5 V(v_b)=4.5
+.IC V(v_u1out)=4.5 V(v_u2out)=4.5 V(v_vol)=4.5 V(v_vw)=4.5 V(v_q2b)=4.5 V(v_q2e)=3.85 V(v_r14)=3.85 V(v_out)=0
+
+* ---- Standalone smoke test (stripped by the validation harness) ---------------
+VIN v_in 0 SIN(0 0.1 1k)
+.TRAN 5.2083u 100m
+.CONTROL
+  set filetype=ascii
+  run
+  meas tran vout_rms RMS v(v_out) from=50m to=100m
+  meas tran vout_max MAX v(v_out) from=50m to=100m
+  meas tran vout_min MIN v(v_out) from=50m to=100m
+  meas tran vu1_max MAX v(v_u1out) from=50m to=100m
+  meas tran vu1_min MIN v(v_u1out) from=50m to=100m
+  quit
+.ENDC
+.END
