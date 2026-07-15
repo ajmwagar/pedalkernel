@@ -98,11 +98,13 @@ R15 v_q2e v_r15 1k
 C9 v_r15 v_out 1u
 R16 v_out 0 100k
 
-* Speed up UIC settling (followers bias near VREF minus a Vbe)
-.IC V(v_q1b)=4.2 V(v_q1e)=3.55 V(v_pos)=4.5 V(v_neg)=4.5 V(v_q2b)=4.35 V(v_q2e)=3.7 V(v_a)=4.5 V(v_b)=4.5
-* Pre-charge coupling caps so v_out settles well inside the 100 ms window
-* (C9 x (R15+R16) alone is a 0.1 s tau from a cold start)
-.IC V(v_u2out)=4.5 V(v_c7)=0 V(v_vol)=0 V(v_vw)=0 V(v_r12)=0 V(v_r15)=3.7 V(v_out)=0
+* NOTE: no .IC lines on purpose. Under the harness's `.TRAN ... UIC`, any
+* .IC involving Q2's base node (fed only via R13 1M / C8) makes ngspice fail
+* at the initial timepoint ("trouble with q2n5088-instance"; bisected
+* 2026-07-15 — even the exact .OP voltages fail). The deck therefore cold-
+* starts under UIC and the kits harness uses a long golden (0.6 s) with a
+* 0.5 s comparison trim so the slow states (C8xR13 ~ 100 ms tau, C9x(R15+
+* R16) ~ 100 ms tau) are fully settled in the compared window.
 
 * ---- Standalone smoke test (stripped by the validation harness) ---------------
 VIN v_in 0 SIN(0 0.1 1k)

@@ -94,10 +94,13 @@ R14 v_q2e v_r14 100
 C9 v_r14 v_out 10u
 R15 v_out 0 10k
 
-* Speed up UIC settling (followers bias near VREF minus a Vbe; pre-charge
-* coupling caps so v_out settles well inside the 100 ms window)
-.IC V(v_q1b)=4.45 V(v_q1e)=3.8 V(v_pos)=4.5 V(v_neg)=4.5 V(v_t)=4.5 V(v_b)=4.5
-.IC V(v_u1out)=4.5 V(v_u2out)=4.5 V(v_vol)=4.5 V(v_vw)=4.5 V(v_q2b)=4.5 V(v_q2e)=3.85 V(v_r14)=3.85 V(v_out)=0
+* NOTE: no .IC lines on purpose. Under the harness's `.TRAN ... UIC`, .IC on
+* the follower base nodes makes ngspice fail at the initial timepoint
+* ("trouble with q2n5088-instance"; bisected 2026-07-15 on the uberdrive
+* deck — same follower structure here). The deck cold-starts under UIC and
+* the kits harness uses a long golden (0.6 s) with a 0.5 s comparison trim
+* so the slow states (C8xR12 ~ 51 ms tau, C9x(R14+R15) ~ 101 ms tau) are
+* fully settled in the compared window.
 
 * ---- Standalone smoke test (stripped by the validation harness) ---------------
 VIN v_in 0 SIN(0 0.1 1k)
