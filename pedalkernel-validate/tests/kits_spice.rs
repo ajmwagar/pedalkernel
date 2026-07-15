@@ -380,27 +380,32 @@ fn bootstrap_uberdrive_golden() {
 
 /// Deck positions: Drive/Tone/Volume = 0.5 (all B-taper, mids exact).
 ///
-/// STILL IGNORED — DC bias FIXED (pedalkernel-onu2), audio still blocked by a
-/// SEPARATE gap (GAP 4b, pedalkernel-xki7). onu2 fixed the follower BIAS: the
-/// `vref` divider (R100/R101) lives in another flow group and `vref` is
-/// ac-ground-classified, so pre-onu2 both Q1 and Q2 floated to ~0 V and the DC
-/// solve "converged" in cutoff ("BJT group DC solve converged with ALL 1
-/// device(s) in cutoff"). Now, with the DC-closure edge set + the vref-class
-/// interior override, both conduct at ngspice's `.op`: Q1 vbe 0.613 / vce 5.42,
-/// Q2 vbe 0.611 / vce 5.70 (`PK_BIAS_QPOINT_DEBUG`; ngspice: Q1 0.613/5.41,
-/// Q2 0.611/5.69).
-///
-/// REMAINING gap (OUT OF SCOPE for onu2): compile still emits the injection
-/// guard "group has boundary nodes but none reachable from the global input —
-/// adapted input port falls back to the device input pin
-/// (mna#1[Q2.base,C8.b,R13.a])" and the output is SILENT (WDF RMS < 1e-6 V vs
-/// golden 0.519 V). The volume-pot wiper →R12→C8→ Q2 output-follower crossing
-/// is not ROUTED by the signal-flow layer (the WiperDivider/straddling-pot
-/// family — pedalkernel-xki7). A correctly-biased follower that never receives
-/// signal is still silent. Un-ignore once the follower group receives signal;
-/// golden committed.
+/// STILL IGNORED — three of the four GAP-4b defects are now FIXED
+/// (pedalkernel-xki7); a FOURTH root cause (serial stage ORDERING of the
+/// newly-reachable output follower) remains and is out of xki7's scope. Layered
+/// history:
+///  - DC bias FIXED (pedalkernel-onu2): Q1/Q2 conduct at ngspice's `.op`
+///    (Q1 vbe 0.613 / vce 5.42, Q2 vbe 0.611 / vce 5.70; `PK_BIAS_QPOINT_DEBUG`).
+///  - Injection routing FIXED (pedalkernel-xki7): the injection guard
+///    "group has boundary nodes but none reachable" warning is GONE. Defect 1
+///    (cross the op-amp CONTROL pin in the boundary-reachability metric) makes
+///    `C7.b/R11.a` reachable (dist 8); Defect 2 (`boundary_supersedes_amp_pin`)
+///    lands the adapted-VS injection on that boundary instead of the Q2.base
+///    device pin, so the R11/VOLUME/R12/C8 volume network is no longer bypassed;
+///    Defect 3 (`pot_wiper_feeds_active_input` traces wiper→R12→C8→base through
+///    the series R/C chain) makes the Volume pot a live wiper-divider candidate.
+///  - REMAINING (GAP 4b-iv, NOT in the xki7 RCA): the Q2 output-follower MNA
+///    group is UNREACHABLE in the stage-ORDERING metric (that metric keeps the
+///    op-amp control pin UNcrossed on purpose — crossing it there re-scales
+///    serial order and regresses screamer/sd1/muff tone+volume). Both the
+///    follower and the R15/C9/`out` sink land in the unreachable MAX-band, so
+///    the follower is not chained to the tone-stage output: debug-trace shows
+///    the follower stage running with serial `in = 0.0` and its output driven
+///    only by its own DC bias. WDF RMS ≈ 1e-4 V vs golden 0.519 V. Un-ignore
+///    once the output-follower is serially ordered after the tone stage;
+///    golden committed.
 #[test]
-#[ignore = "engine gap (post-onu2): follower DC bias now correct (Q1/Q2 conduct at .op), but the Q2 output-follower MNA group is still unreachable from input (injection guard, GAP 4b / pedalkernel-xki7) → output silent — see doc comment"]
+#[ignore = "engine gap (GAP 4b-iv, post-xki7): injection guard GONE + injection now lands on the volume boundary (Defects 1-3 fixed), but the Q2 output-follower is still not serially ORDERED after the tone stage (unreachable MAX-band) → reads in=0.0 → output ~1e-4 V — see doc comment"]
 fn uberdrive_wdf_vs_spice() {
     run_wdf_vs_spice(
         "uberdrive",
@@ -424,21 +429,22 @@ fn bootstrap_little_green_scream_machine_golden() {
 
 /// Deck positions: Drive = 1.0 (taper-exact extreme), Tone/Volume = 0.5.
 ///
-/// STILL IGNORED — DC bias FIXED (pedalkernel-onu2), audio still far off. Same
-/// vref-follower bias fix as the UberDrive: Q2's base is biased through R12 to
-/// the ac-ground-classified `vref` divider in another flow group, so pre-onu2
-/// it floated to cutoff. Now Q2 conducts at ngspice's `.op` (vbe 0.613 /
-/// vce 5.43; `PK_BIAS_QPOINT_DEBUG`).
-///
-/// REMAINING gap (OUT OF SCOPE for onu2): the same injection-guard warning as
-/// the UberDrive (mna#1[C8.b,R12.a,Q2.base] unreachable from the global input,
-/// GAP 4b / pedalkernel-xki7). With the follower now biased, a little signal
-/// does leak (WDF RMS ≈ 3.5e-3 V, up from < 1e-6 V) but the output is still
-/// ~40 dB below golden 0.364 V because the volume-pot→follower crossing is not
-/// properly routed. Un-ignore once the follower group receives signal; golden
-/// committed.
+/// STILL IGNORED — same trajectory as the UberDrive: DC bias FIXED (onu2), the
+/// three injection defects FIXED (pedalkernel-xki7), a FOURTH ordering root
+/// cause remains.
+///  - Bias (onu2): Q2 conducts at ngspice's `.op` (vbe 0.613 / vce 5.43).
+///  - Injection (xki7): the injection guard warning is GONE. The LGSM output
+///    coupling is `VOLUME.w → C8 → Q2.base` (cap-first, a single series C); the
+///    Defect-3 chain trace now recognizes it, and Defects 1+2 land injection on
+///    the `VOLUME.a/R11.b` boundary rather than the Q2.base pin.
+///  - REMAINING (GAP 4b-iv): the Q2 output-follower is unreachable in the
+///    stage-ORDERING metric (op-amp control pin deliberately UNcrossed there),
+///    so it is not serially chained to the tone-stage output and runs with
+///    in ≈ 0.0. WDF RMS ≈ 1e-4 V vs golden 0.364 V. Un-ignore once the
+///    output-follower is serially ordered after the tone stage; golden
+///    committed.
 #[test]
-#[ignore = "engine gap (post-onu2): follower DC bias now correct (Q2 conducts at .op) and leaks ~3.5e-3 V, but the Q2 output-follower crossing is still not routed (injection guard, GAP 4b / pedalkernel-xki7) → ~40 dB below golden — see doc comment"]
+#[ignore = "engine gap (GAP 4b-iv, post-xki7): injection guard GONE + injection routed to the volume boundary (Defects 1-3 fixed), but the Q2 output-follower is still not serially ORDERED after the tone stage → reads in≈0.0 → output ~1e-4 V — see doc comment"]
 fn little_green_scream_machine_wdf_vs_spice() {
     run_wdf_vs_spice(
         "little_green_scream_machine",

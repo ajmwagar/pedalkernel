@@ -16,6 +16,7 @@
 //! 7. `create_nl_devices()` — NlDeviceKind / BjtTwoPort groups
 
 use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use super::super::classify::NonlinearKind;
 use super::super::component::EdgeKind;
@@ -1469,8 +1470,38 @@ fn build_wdf_ports(
                     _ => None,
                 }
             });
-            match (amp_pin, boundary.winner) {
-                (Some(m), _) => {
+            // Defect-2 precedence (pedalkernel-xki7): a reachable input BOUNDARY
+            // supersedes the amplifier device pin when injecting at the pin
+            // would bypass an in-group passive signal network (a BJT/FET
+            // follower fed through a volume divider — uberdrive/lgsm). Scoped
+            // to leave calibrated tube/photocoupler groups on the device pin.
+            let amp_pin_node = edge_indices.iter().find_map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                match comp.kind.signal_terminals() {
+                    super::super::component::SignalTerminals::Amplifier { input, .. } => {
+                        graph.node_names.get(&format!("{}.{}", comp.id, input)).copied()
+                    }
+                    _ => None,
+                }
+            });
+            let boundary_wins = match (amp_pin_node, boundary.winner, boundary.winner_node) {
+                (Some(pin_n), Some((bm, _)), Some(bnode)) => {
+                    boundary_supersedes_amp_pin(edge_indices, graph, pin_n, bnode)
+                        .then_some(bm)
+                }
+                _ => None,
+            };
+            match (boundary_wins, amp_pin, boundary.winner) {
+                (Some(bm), _, _) => {
+                    if inject_debug {
+                        eprintln!(
+                            "[PK_INJECT] branch=boundary-supersedes-amp-pin -> {}",
+                            name_of(Some(bm))
+                        );
+                    }
+                    Some(bm)
+                }
+                (None, Some(m), _) => {
                     if inject_debug {
                         eprintln!("[PK_INJECT] branch=amplifier-pin -> {}", name_of(Some(m)));
                     }
@@ -1495,13 +1526,13 @@ fn build_wdf_ports(
                     }
                     Some(m)
                 }
-                (None, Some((m, _))) => {
+                (None, None, Some((m, _))) => {
                     if inject_debug {
                         eprintln!("[PK_INJECT] branch=boundary-fallback -> {}", name_of(Some(m)));
                     }
                     Some(m)
                 }
-                (None, None) => {
+                (None, None, None) => {
                     report_unverified_injection("<none>", boundary.has_boundary_nodes)?;
                     None
                 }
@@ -1595,6 +1626,9 @@ struct InputBoundary {
     /// `(mna_index, is_transformer_winding)` of the input-nearest boundary
     /// node, if any is reachable from `in` under the directed metric.
     winner: Option<(usize, bool)>,
+    /// The graph `NodeId` of the winner (for tracing the in-group passive path
+    /// from the boundary to the amplifier pin — Defect-2 precedence).
+    winner_node: Option<NodeId>,
     /// The group has at least one boundary node (reachable or not).
     has_boundary_nodes: bool,
 }
@@ -1619,7 +1653,13 @@ fn find_input_boundary_node(
         }
     }
 
-    let dist = super::super::signal_flow::directed_signal_distances_from_in(graph);
+    // Injection-boundary reachability crosses amplifier control pins (op-amp
+    // `pos`) forward (pedalkernel-xki7, GAP 4b): a non-inverting op-amp is
+    // otherwise a directed dead-end and the downstream output-follower boundary
+    // is never reachable. Tube/BJT groups have no control pin, so this metric is
+    // byte-identical to the stage-ordering metric for them (LA-2A/pultec/neve
+    // unaffected); only op-amp-fed groups (uberdrive/lgsm) gain reachability.
+    let dist = super::super::signal_flow::boundary_reachable_distances_from_in(graph);
 
     // Transformer-winding ENTRY nodes: winding node in this MNA driven from
     // the outside — some sibling winding node of the same transformer lies
@@ -1676,6 +1716,7 @@ fn find_input_boundary_node(
     if boundary.is_empty() {
         return InputBoundary {
             winner: None,
+            winner_node: None,
             has_boundary_nodes: false,
         };
     }
@@ -1697,15 +1738,102 @@ fn find_input_boundary_node(
             boundary.iter().map(|n| dist.get(n)).collect::<Vec<_>>()
         );
     }
-    let winner = boundary
+    let winner_pick = boundary
         .iter()
         .filter_map(|&n| dist.get(&n).map(|&d| (d, n)))
         .min()
-        .and_then(|(_, n)| node_to_mna(n).map(|m| (m, winding_entry.contains(&n))));
+        .map(|(_, n)| n);
+    let winner =
+        winner_pick.and_then(|n| node_to_mna(n).map(|m| (m, winding_entry.contains(&n))));
     InputBoundary {
         winner,
+        winner_node: winner_pick.filter(|&n| node_to_mna(n).is_some()),
         has_boundary_nodes: true,
     }
+}
+
+/// Defect-2 precedence (pedalkernel-xki7): does the reachable input BOUNDARY
+/// node supersede the amplifier device pin as the injection target?
+///
+/// The legacy order (`(Some(m), _) => amplifier-pin`) always injected at the
+/// device's signal input pin even when a boundary node was forward-reachable
+/// from `in`. For a BJT emitter-follower output stage whose signal enters at an
+/// upstream boundary and passes THROUGH an in-group passive network (the volume
+/// pot + coupling: uberdrive `R11 -> VOLUME -> R12 -> C8 -> Q2.base`,
+/// lgsm `VOLUME -> C8 -> Q2.base`) to reach the base, pin injection silently
+/// bypasses that whole network — the Volume knob is stamped yet inert and the
+/// stage is driven by an unattenuated copy of its own input (or, pre-Defect-1,
+/// nothing at all). Injecting at the boundary instead lets the in-group MNA
+/// carry the divider.
+///
+/// TRUE iff ALL hold:
+/// 1. the amplifier input pin (`amp_pin_node`) is reachable from the boundary
+///    node through IN-GROUP PASSIVE edges only — so pin injection provably
+///    bypasses an in-group signal network, AND
+/// 2. the group's amplifier is NOT a vacuum tube and the group carries NO
+///    photocoupler variable-resistor. Tube stages (LA-2A V1..V4) and
+///    photocoupler cells were CALIBRATED against pin injection: their GR loop
+///    and the straddling-Gain-pot WiperDivider contract assume the device pin
+///    (general.rs photocoupler exclusion / pedalkernel-n0yy). Re-basing them to
+///    a boundary node re-scales the whole loop (measured +16.6 -> +5.0 dB on
+///    the LA-2A) — out of scope here. The BJT/FET follower classes carry no
+///    such calibration, so the physically-correct boundary injection is safe.
+fn boundary_supersedes_amp_pin(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    amp_pin_node: NodeId,
+    boundary_node: NodeId,
+) -> bool {
+    let edge_set: HashSet<usize> = edge_indices.iter().copied().collect();
+
+    // (2) calibration guard: skip tube and photocoupler groups.
+    let calibrated_class = edge_indices.iter().any(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        let tag = comp.kind.type_tag();
+        tag == "triode"
+            || tag == "pentode"
+            || tag == "variable-mu triode"
+            || tag == "photocoupler"
+    });
+    if calibrated_class {
+        return false;
+    }
+
+    // (1) trace IN-GROUP passive edges from the boundary node; reach the amp
+    //     pin? Passive-only so we never cross the device itself (which would
+    //     make every group trivially "reachable" and defeat the point).
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    visited.insert(boundary_node);
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    queue.push_back(boundary_node);
+    while let Some(node) = queue.pop_front() {
+        if node == amp_pin_node {
+            return true;
+        }
+        for &eidx in &edge_set {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            if !matches!(
+                comp.kind.signal_terminals(),
+                super::super::component::SignalTerminals::Passive
+            ) {
+                continue;
+            }
+            let next = if e.node_a == node {
+                Some(e.node_b)
+            } else if e.node_b == node {
+                Some(e.node_a)
+            } else {
+                None
+            };
+            if let Some(n) = next {
+                if visited.insert(n) {
+                    queue.push_back(n);
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Step 5: Derive scattering matrix + iterative Thevenin adaptation.
