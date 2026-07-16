@@ -6247,6 +6247,7 @@ pub(super) fn compute_group_terminals(
         // signal boundaries. AC ground nodes (VB+ bias junctions) are
         // detected by the graph builder from capacitor-bypassed dividers.
         if node == graph.gnd_node
+            || node == graph.vcc_node
             || graph.supply_nodes.contains(&node)
             || graph.ac_ground_nodes.contains(&node)
         {
