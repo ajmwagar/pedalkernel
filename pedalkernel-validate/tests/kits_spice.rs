@@ -394,18 +394,27 @@ fn bootstrap_uberdrive_golden() {
 ///    device pin, so the R11/VOLUME/R12/C8 volume network is no longer bypassed;
 ///    Defect 3 (`pot_wiper_feeds_active_input` traces wiper→R12→C8→base through
 ///    the series R/C chain) makes the Volume pot a live wiper-divider candidate.
-///  - REMAINING (GAP 4b-iv, NOT in the xki7 RCA): the Q2 output-follower MNA
-///    group is UNREACHABLE in the stage-ORDERING metric (that metric keeps the
-///    op-amp control pin UNcrossed on purpose — crossing it there re-scales
-///    serial order and regresses screamer/sd1/muff tone+volume). Both the
-///    follower and the R15/C9/`out` sink land in the unreachable MAX-band, so
-///    the follower is not chained to the tone-stage output: debug-trace shows
-///    the follower stage running with serial `in = 0.0` and its output driven
-///    only by its own DC bias. WDF RMS ≈ 1e-4 V vs golden 0.519 V. Un-ignore
-///    once the output-follower is serially ordered after the tone stage;
-///    golden committed.
+///  - ORDERING FIXED (pedalkernel-0lsv, GAP 4c): the Q2 output-follower group is
+///    now re-slotted OUT of the MAX-band via a per-group control-crossing retry
+///    (spqr_build `compute_group_flow_distances`) and reads its input from
+///    `node_signals` at the resolved boundary (processor.rs MultiNl injection
+///    read). Debug-trace confirms: follower ordered AFTER the tone stage and
+///    reading node C7.b (was serial in=0.0). The global ordering metric is
+///    UNCHANGED (screamer/sd1/muff byte-identical).
+///  - STILL BLOCKED — TWO independent pre-existing causes surfaced by the fix:
+///    (a) the IC2 active TONE stage compiles to a passive StateSpace whose op-amp
+///        nullor is not modelled, so it extracts 0 V at IC2.out — the follower is
+///        now correctly wired to a source that is itself dead (measured
+///        ss_output=0 for a real input). Active-opamp-as-passive-StateSpace; a
+///        DIFFERENT root cause than the follower ordering, out of 0lsv scope.
+///    (b) injection MAGNITUDE: DESIGN-E/F's general.rs VS-port adaptation (the
+///        ~2x fix) was MEASURED to be a net regression (halves inverting-amp gain,
+///        breaks mna_accuracy/tree_build/wdf_asymmetric_diodes) and was reverted.
+///    WDF RMS ≈ 1e-4 V vs golden 0.519 V (unchanged — blocked by (a)). Un-ignore
+///    once the tone stage models the op-amp and the injection magnitude is fixed
+///    with a gate that does not regress inverting amps; golden committed.
 #[test]
-#[ignore = "engine gap (GAP 4b-iv, post-xki7): injection guard GONE + injection now lands on the volume boundary (Defects 1-3 fixed), but the Q2 output-follower is still not serially ORDERED after the tone stage (unreachable MAX-band) → reads in=0.0 → output ~1e-4 V — see doc comment"]
+#[ignore = "engine gap (post-0lsv): follower now ORDERED after the tone stage + reads its boundary (GAP 4c fixed), but the IC2 active tone stage compiles to a passive StateSpace that extracts 0 V (op-amp nullor unmodelled) so the follower's source is dead; injection-magnitude fix reverted as a net regression → output ~1e-4 V — see doc comment"]
 fn uberdrive_wdf_vs_spice() {
     run_wdf_vs_spice(
         "uberdrive",
@@ -437,14 +446,20 @@ fn bootstrap_little_green_scream_machine_golden() {
 ///    coupling is `VOLUME.w → C8 → Q2.base` (cap-first, a single series C); the
 ///    Defect-3 chain trace now recognizes it, and Defects 1+2 land injection on
 ///    the `VOLUME.a/R11.b` boundary rather than the Q2.base pin.
-///  - REMAINING (GAP 4b-iv): the Q2 output-follower is unreachable in the
-///    stage-ORDERING metric (op-amp control pin deliberately UNcrossed there),
-///    so it is not serially chained to the tone-stage output and runs with
-///    in ≈ 0.0. WDF RMS ≈ 1e-4 V vs golden 0.364 V. Un-ignore once the
-///    output-follower is serially ordered after the tone stage; golden
-///    committed.
+///  - ORDERING FIXED (pedalkernel-0lsv, GAP 4c): the Q2 output-follower is now
+///    re-slotted out of the MAX-band and reads its input from `node_signals` at
+///    the `VOLUME.a/R11.b` boundary (R11 publishes). Debug-trace confirms the
+///    follower reads a non-zero, growing injected value (was serial in=0.0).
+///  - STILL BLOCKED — injection MAGNITUDE. With the follower wired, the injected
+///    level is ~40 dB below golden. DESIGN-E/F's general.rs VS-port adaptation
+///    (the ~2x magnitude fix) DID lift LGSM ~35× in a probe (RMS 1e-4 → 3.5e-3 V,
+///    gap −80 → −40 dB) but was MEASURED to be a net regression elsewhere
+///    (halves inverting-amp gain, breaks mna_accuracy/tree_build/
+///    wdf_asymmetric_diodes — all green on base) and was reverted. WDF RMS ≈
+///    1e-4 V vs golden 0.364 V. Un-ignore once the injection magnitude is fixed
+///    with a gate that does not regress inverting-amp groups; golden committed.
 #[test]
-#[ignore = "engine gap (GAP 4b-iv, post-xki7): injection guard GONE + injection routed to the volume boundary (Defects 1-3 fixed), but the Q2 output-follower is still not serially ORDERED after the tone stage → reads in≈0.0 → output ~1e-4 V — see doc comment"]
+#[ignore = "engine gap (post-0lsv): follower now ORDERED after the tone stage + reads the VOLUME.a/R11.b boundary (GAP 4c fixed, non-zero injected value), but the injection MAGNITUDE is ~40 dB low; DESIGN-E/F's VS-port adaptation (which lifted LGSM ~35×) was reverted as a net regression on inverting amps → output ~1e-4 V — see doc comment"]
 fn little_green_scream_machine_wdf_vs_spice() {
     run_wdf_vs_spice(
         "little_green_scream_machine",

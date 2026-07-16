@@ -1870,6 +1870,16 @@ fn derive_scattering(
     // physical rp (not adapted). Tight tolerance + more iters so the result no
     // longer depends on the seed; low-Z ports (e.g. an emitter follower) are
     // allowed to adapt below 1Ω.
+    // pedalkernel-0lsv (GAP 4c) — NOT adapting the input VS port. DESIGN-E/F
+    // proposed ALSO adapting the input (voltage-source) port at index n_total-1
+    // here to correct a claimed ~2x injection inflation into the output follower.
+    // MEASURED to be a net regression: adapting the VS port halves the small-
+    // signal gain of a standard inverting amp (Rf/Ri=10 -> 4.97) and shifts the
+    // asymmetric-diode clip levels — breaking mna_accuracy / tree_build::
+    // adaptor_gain / voltage_extraction::wdf_asymmetric_diodes (all green on the
+    // base). The VS port therefore stays UNADAPTED (pinned at the r_adapted
+    // placeholder), byte-identical to the base. The follower's injection MAGNITUDE
+    // is a separate, level-only concern (already-ignored kits) — a follow-up.
     let adapt_ports: Vec<usize> = (0..n_nl).collect();
     for _iter in 0..40 {
         let mut needs_recompute = false;
@@ -2422,7 +2432,15 @@ fn assemble_multi_nl_stage(
         debug_label: String::new(),
         bypass_serial: false,
         transformer_gain: 1.0,
-        injection_node_id: graph.in_node,
+        // Default = usize::MAX: the stage reads the SERIAL chain signal (the
+        // runtime injection read at processor.rs is gated on `!= usize::MAX`).
+        // Only an explicitly-wired output follower (spqr_build GAP-4c pass) sets a
+        // real boundary node here so it reads that node from `node_signals`
+        // instead of the serial 0.0 it would otherwise get in the MAX ordering
+        // band. Previously this was `graph.in_node`, which was never read; making
+        // it a sentinel keeps the general-MNA read path on `signal` for every
+        // non-follower stage (LA-2A/pultec/neve/tb303 byte-identical).
+        injection_node_id: usize::MAX,
         output_node_id: graph.out_node,
         recompute_pending: false,
         veb_bias_offset: 0.0,
