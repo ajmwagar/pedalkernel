@@ -130,6 +130,125 @@ pub(super) enum RigidOptimization {
     General,
 }
 
+/// Is `node` a hard reference (rail / ground / AC ground)?
+///
+/// These are the fixed-potential nodes a bias network divides between: chassis
+/// ground, the Vcc rail, any named supply rail, and any node the graph has
+/// already declared AC ground (large bypass caps, supply-pin nets).
+fn is_reference_node(node: NodeId, graph: &CircuitGraph) -> bool {
+    node == graph.gnd_node
+        || node == graph.vcc_node
+        || graph.supply_nodes.contains(&node)
+        || graph.ac_ground_nodes.contains(&node)
+}
+
+/// Detect a **reference-shunt cap**: a capacitor bypassing a *bias / reference*
+/// node to a rail (e.g. the 4.5 V vref divider tap C101 → GND in the
+/// Distortion 250).
+///
+/// Such a cap carries no signal — it only stabilises a DC reference. But when it
+/// fuses into an op-amp gain group its state trips the `reactive_count` guard in
+/// [`classify_rigid`], forcing the group onto the IIR/StateSpace LTI lowering.
+/// That lowering observes the output through the capacitor states while the op-amp
+/// output node is VCVS-driven, so the extracted transfer collapses to ~0 (the
+/// failure admitted in `rigid/iir.rs` and special-cased only for bridged-T). The
+/// group is then mis-lowered and the stage goes dead. Excluding these caps from
+/// the routing decision lets a vref-bypass-only op-amp group take the correct
+/// `BlackFeedback` path.
+///
+/// A cap qualifies when **one terminal is a hard reference node** (rail/gnd/AC
+/// ground) **and the other terminal is a bias node** — reachable to a rail
+/// through resistors only, never to the circuit input/output. The resistor-only
+/// traversal (never through caps or active devices) is what keeps genuine
+/// signal-path caps — a feedback integrator cap, a series gain-leg cap like C3,
+/// a coupling cap — from ever matching: those either touch no rail terminal or
+/// reach `in`/`out` through the resistive network.
+fn is_reference_shunt_cap(edge_idx: usize, graph: &CircuitGraph) -> bool {
+    use super::components::Capacitor;
+    let edge = &graph.edges[edge_idx];
+    // Must be an actual capacitor (not any other Reactive-kind element).
+    if graph.components[edge.comp_idx]
+        .kind
+        .as_any()
+        .downcast_ref::<Capacitor>()
+        .is_none()
+    {
+        return false;
+    }
+
+    let a_ref = is_reference_node(edge.node_a, graph);
+    let b_ref = is_reference_node(edge.node_b, graph);
+    // Cap between two rails (e.g. supply-to-gnd reservoir) is pure bias.
+    if a_ref && b_ref {
+        return true;
+    }
+    // Exactly one terminal must be a hard reference; the other is the candidate
+    // bias node.
+    let bias_candidate = match (a_ref, b_ref) {
+        (true, false) => edge.node_b,
+        (false, true) => edge.node_a,
+        _ => return false,
+    };
+    // The candidate must NOT already be a rail (guarded above) and must be a bias
+    // node: through resistors only, it reaches a rail but never `in`/`out`.
+    bias_node_reaches_only_rails(bias_candidate, graph)
+}
+
+/// Resistor-only BFS from `start`: returns true iff it reaches at least one rail
+/// and never reaches the circuit input or output node.
+///
+/// Traverses `EdgeKind::Linear` edges only (resistors and pot legs) — never caps
+/// or active devices — so coupling caps between a bias node and the signal path
+/// terminate the walk. This is the discriminator that keeps signal-path caps out
+/// of [`is_reference_shunt_cap`].
+fn bias_node_reaches_only_rails(start: NodeId, graph: &CircuitGraph) -> bool {
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    visited.insert(start);
+    queue.push_back(start);
+    let mut reaches_rail = false;
+    while let Some(node) = queue.pop_front() {
+        for eidx in 0..graph.edges.len() {
+            // Only walk resistive (Linear) edges — bias networks are resistive.
+            if !matches!(graph.effective_edge_kind(eidx), EdgeKind::Linear) {
+                continue;
+            }
+            let e = &graph.edges[eidx];
+            let to = if e.node_a == node {
+                e.node_b
+            } else if e.node_b == node {
+                e.node_a
+            } else {
+                continue;
+            };
+            if to == graph.in_node || to == graph.out_node {
+                // Bias node leaks onto the signal path → not a reference shunt.
+                return false;
+            }
+            if is_reference_node(to, graph) {
+                reaches_rail = true;
+                continue; // don't traverse through rails
+            }
+            if visited.insert(to) {
+                queue.push_back(to);
+            }
+        }
+    }
+    reaches_rail
+}
+
+/// Count of reactive edges in a group that are NOT reference-shunt caps — i.e.
+/// caps that actually participate in the signal transfer. Used by
+/// [`classify_rigid`] so a group whose only reactive elements are vref-bypass
+/// caps still takes the correct `BlackFeedback` path.
+fn signal_reactive_count(edge_indices: &[usize], graph: &CircuitGraph) -> usize {
+    edge_indices
+        .iter()
+        .filter(|&&eidx| matches!(graph.effective_edge_kind(eidx), EdgeKind::Reactive))
+        .filter(|&&eidx| !is_reference_shunt_cap(eidx, graph))
+        .count()
+}
+
 /// Select the cheapest correct strategy for a Rigid stage.
 ///
 /// Decision rules (applied in cost order):
@@ -168,7 +287,20 @@ pub(super) fn classify_rigid(
         //   - Sallen-Key: caps inside the opamp's R-node group
         // Without this, BlackFeedback computes only DC gain = Rf/Ri,
         // losing the filter's poles and zeros.
-        if stats.reactive_count > 0 {
+        // Reference-shunt caps (a vref/bias node bypassed to a rail, e.g. the
+        // Distortion 250's C101) carry no signal and must not force the IIR/SS
+        // lowering: that lowering observes the output through the cap states while
+        // the op-amp output is VCVS-driven → the extracted transfer collapses to
+        // ~0 and the stage goes dead. When a FlowGroup is available, count only
+        // the reactive elements that actually shape the signal transfer. If every
+        // reactive element is a reference shunt, fall through to BlackFeedback.
+        let effective_reactive = match _group {
+            Some(g) => signal_reactive_count(&g.all_edges(), graph),
+            // No group (R-node path): no edge list to inspect — preserve the
+            // original raw-count behaviour.
+            None => stats.reactive_count,
+        };
+        if effective_reactive > 0 {
             // Still perform the ControlledConductance coupling check when a
             // FlowGroup is available — that path is unsafe to lower to IIR.
             if let Some(g) = _group {
@@ -648,15 +780,32 @@ pub(super) fn build_rigid_from_group_with_hints(
     let stats = StageStats::from_edges(&edge_indices, graph);
     let optimization = classify_rigid(&stats, graph, group);
 
+    // Reference-shunt caps (vref/bias-node bypass to a rail, e.g. C101 in the
+    // Distortion 250) carry no signal. They must be kept out of the LTI stage's
+    // MNA: with the op-amp output VCVS-driven, the state-space c_out vector for
+    // such a bias-only capacitor state is ~0, and its presence collapses the
+    // whole extracted transfer to ~0 (the stage goes dead — see the c_out-zero
+    // admission in `rigid/iir.rs`). Dropping them reproduces the known-good
+    // "circuit minus the bias cap" behaviour while leaving genuine signal caps
+    // (feedback integrator cap, gain-leg C3, coupling caps) in place. Only the
+    // MNA-derived linear builders use this filtered list; nonideal-fx, pot
+    // bindings, and signal-node checks still see the full edge set.
+    let linear_edge_indices: Vec<usize> = edge_indices
+        .iter()
+        .copied()
+        .filter(|&eidx| !is_reference_shunt_cap(eidx, graph))
+        .collect();
+
     #[cfg(test)]
     eprintln!(
-        "  rigid: {:?} (vcvs={}, nl={}, linear={}, reactive={}, edges={})",
+        "  rigid: {:?} (vcvs={}, nl={}, linear={}, reactive={}, edges={}, linear_edges={})",
         optimization,
         stats.vcvs_count,
         stats.nl_count,
         stats.linear_count,
         stats.reactive_count,
-        edge_indices.len()
+        edge_indices.len(),
+        linear_edge_indices.len(),
     );
 
     // ── Single-pass fallthrough: cheapest → most expensive ──────────────
@@ -755,7 +904,7 @@ pub(super) fn build_rigid_from_group_with_hints(
         }
 
         if let Ok(built_iir) =
-            iir::build_iir_stage(&edge_indices, &pendant_trees, graph, sample_rate)
+            iir::build_iir_stage(&linear_edge_indices, &pendant_trees, graph, sample_rate)
         {
             // Validate: check for degenerate transfer function (all-zero numerator)
             let iir_data = built_iir.data;
@@ -832,7 +981,7 @@ pub(super) fn build_rigid_from_group_with_hints(
         // active-linear path for VCVS filters whose transfer cannot be reduced
         // to the current biquad extractor.
         if let Ok(ss) = state_space::build_state_space_stage(
-            &edge_indices,
+            &linear_edge_indices,
             &pendant_trees,
             graph,
             sample_rate,
@@ -849,7 +998,7 @@ pub(super) fn build_rigid_from_group_with_hints(
     if !allow_iir && stats.vcvs_count == 0 {
         let pendant_trees = Vec::new();
         if let Ok(ss) = state_space::build_state_space_stage(
-            &edge_indices,
+            &linear_edge_indices,
             &pendant_trees,
             graph,
             sample_rate,

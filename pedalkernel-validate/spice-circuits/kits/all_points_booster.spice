@@ -1,0 +1,64 @@
+* ============================================================================
+* All-Points Booster (PedalPCB) — EHX LPB-1 Linear Power Booster
+* PedalKernel Kits Validation Circuit
+* ============================================================================
+*
+* Topology (mirrors all_points_booster.pedal in pedalkernel-pro/pedals/kits/):
+*   Single 2N5088 NPN common-emitter booster.
+*   1. Input      — R1 (1M) pull-down + C1 (100n) coupling
+*   2. Bias       — R3 (1M, VCC->base) / R2 (100K, base->gnd) -> Vb = 0.82 V
+*   3. Gain stage — Q1 (2N5088), R4 (10K) collector load,
+*                   R5 (390R) unbypassed emitter degeneration
+*                   Av = R4/(R5+re) = 22x (+27 dB)
+*   4. Output     — C2 (100n) coupling -> VOLUME (A100K), wiper to out
+*
+* Refdes match the PedalPCB build doc (rev 12/19/23):
+*   https://docs.pedalpcb.com/project/APB-PedalPCB.pdf
+* Power section (D100/C100/CLR/LED) conditions the rail only — omitted,
+* VCC is an ideal 9 V source (legends-deck convention).
+*
+* Control positions (validation point):
+*   Volume = 1.0 (full) — taper-independent; top of pot = engine min clamp
+*   (0.1% of 100k = 100R), bottom = 100k.
+*
+* Transistor model: 2N5088 from pedalkernel/models/transistors.model.
+* ============================================================================
+
+* ---- Supply ----------------------------------------------------------------
+VCC vcc 0 DC 9
+
+* ---- Input -----------------------------------------------------------------
+R1 v_in 0 1meg
+C1 v_in v_base 100n
+
+* ---- Bias divider ----------------------------------------------------------
+R3 vcc v_base 1meg
+R2 v_base 0 100k
+
+* ---- Common-emitter gain stage ---------------------------------------------
+Q1 v_coll v_base v_emit 2N5088
+R4 vcc v_coll 10k
+R5 v_emit 0 390
+
+.MODEL 2N5088 NPN(IS=18f BF=600 BR=4.0 NF=1.0 NR=1.0 VAF=100 VAR=25 IKF=50m IKR=10m ISE=5f NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.2 RC=0.3 CJE=6p VJE=0.7 MJE=0.33 CJC=4p VJC=0.7 MJC=0.33 TF=300p TR=30n)
+
+* ---- Output coupling + Volume pot (A100K at 1.0 = full) ----------------------
+C2 v_coll v_lvl 100n
+Rvol_top v_lvl v_out 100
+Rvol_bot v_out 0 100k
+
+* Speed up UIC bias settling (survives harness strip)
+.IC V(v_base)=0.82 V(v_coll)=4.7 V(v_emit)=0.17
+
+* ---- Standalone smoke test (stripped by the validation harness) -------------
+VIN v_in 0 SIN(0 0.1 1k)
+.TRAN 5.2083u 100m
+.CONTROL
+  set filetype=ascii
+  run
+  meas tran vout_rms RMS v(v_out) from=50m to=100m
+  meas tran vout_max MAX v(v_out) from=50m to=100m
+  meas tran vout_min MIN v(v_out) from=50m to=100m
+  quit
+.ENDC
+.END

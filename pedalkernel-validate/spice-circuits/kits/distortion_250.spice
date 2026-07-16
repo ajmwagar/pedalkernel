@@ -1,0 +1,73 @@
+* ============================================================================
+* Distortion 250 (PedalPCB) — MXR Distortion+ / DOD 250 preamp, Ge spec
+* PedalKernel Kits Validation Circuit
+* ============================================================================
+*
+* Topology (mirrors distortion_250.pedal in pedalkernel-pro/pedals/kits/):
+*   1. Input   — C1 (1n) RF shunt; C2 (10n) + R2 (10K) into IC1.pos;
+*                R3 (1M) bias to VREF
+*   2. Gain    — IC1 (LM741) non-inverting; R4 (1M) feedback;
+*                gain leg pin2 -> C3 (47n) -> R1 (4K7) -> GAIN (B1M) -> gnd
+*                Av = 1 + 1M/(4.7K + Rgain)
+*   3. Clipper — pin6 -> C4 (1u) -> R5 (10K) -> D1/D2 (1N270 Ge antiparallel
+*                shunt) + C5 (1n) -> VOLUME (A10K) -> out
+*
+* Refdes match the PedalPCB build doc (rev 7/6/25):
+*   https://docs.pedalpcb.com/project/Dist250-PedalPCB.pdf
+*
+* House conventions (as legends decks):
+*   - Op-amp = ideal VCVS (gain 1e5). The real LM741 also rail-clips at max
+*     gain before the Ge shunt; not modeled here (documented simplification —
+*     final level is set by the Ge clamp either way).
+*   - VREF = ideal 4.5 V source (avoids the 0.5 s R100/C101 UIC settle; the
+*     engine's bias analysis is likewise instantaneous).
+*   - Power section (D100/C100/CLR/LED) omitted.
+*
+* Control positions (validation point, taper/clamp-unambiguous):
+*   Gain   = 1.0 (host) -> gain-leg pot at engine min clamp: 0.1% of 1M = 1K
+*   Volume = 1.0 (full) -> top 10R (0.1% clamp), bottom 10K
+*
+* Diode model: matched to the engine Ge model (IS=1u N=1.3 RS=3), squarely in
+* the 1N270 envelope.
+* ============================================================================
+
+* ---- Supply and VREF ---------------------------------------------------------
+VCC vcc 0 DC 9
+Vref v_ref 0 DC 4.5
+
+* ---- Input -------------------------------------------------------------------
+C1 v_in 0 1n
+C2 v_in v_r2 10n
+R2 v_r2 v_pos 10k
+R3 v_pos v_ref 1meg
+
+* ---- Non-inverting gain stage (ideal VCVS op-amp) ----------------------------
+Eu1 v_u1out 0 v_pos v_neg 100000
+R4 v_neg v_u1out 1meg
+C3 v_neg v_c3 47n
+R1 v_c3 v_gain 4.7k
+Rgain v_gain 0 1k
+
+* ---- Output clipper + volume -------------------------------------------------
+C4 v_u1out v_r5 1u
+R5 v_r5 v_clip 10k
+D1 v_clip 0 D1N270
+D2 0 v_clip D1N270
+.MODEL D1N270 D(IS=1u N=1.3 RS=3 CJO=2p)
+C5 v_clip 0 1n
+
+Rvol_top v_clip v_out 10
+Rvol_bot v_out 0 10k
+
+* ---- Standalone smoke test (stripped by the validation harness) --------------
+VIN v_in 0 SIN(0 0.1 1k)
+.TRAN 5.2083u 100m
+.CONTROL
+  set filetype=ascii
+  run
+  meas tran vout_rms RMS v(v_out) from=50m to=100m
+  meas tran vout_max MAX v(v_out) from=50m to=100m
+  meas tran vout_min MIN v(v_out) from=50m to=100m
+  quit
+.ENDC
+.END

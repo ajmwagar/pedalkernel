@@ -2206,6 +2206,226 @@ pub fn compile_via_spqr_with_options(
         )?;
     }
 
+    // ── Output-follower injection wiring (GAP 4c, pedalkernel-0lsv) ────────
+    // Runs BEFORE the sorts, where `stage_comp_ids[si]` is still 1:1 with
+    // `stages[si]` (the sorts move the fields we set along with each stage).
+    //
+    // A non-inverting output FOLLOWER (uberdrive/lgsm Q2 emitter follower, fed
+    // IC2.out -> C7 -> volume divider -> Q2.base) is a directed dead-end under the
+    // stage-ordering metric, so `compute_group_flow_distances` re-slots its group
+    // into the MAX-band retry (3a) — but its MultiNl stage still reads the serial
+    // `signal`, which is 0.0 there. Give it a value to read: set the MultiNl
+    // stage's `injection_node_id` to the upstream op-amp output node (IC2.out, a
+    // node the tone stage already produces) and make that upstream stage PUBLISH
+    // to `node_signals` (`output_node_id`). The follower's own in-group MNA (which
+    // spans C7 / R11 / VOLUME / R12 / C8) performs the volume division against the
+    // injected value — no new node_signals writer is needed (design variant b).
+    //
+    // GATE: only groups that are a directed dead-end (`directed` reaches no group
+    // node) yet reachable once op-amp control pins are crossed
+    // (`boundary_reachable` finite) qualify — exactly the 3a retry set. LA-2A /
+    // pultec / neve photocoupler and tube groups inject at a device pin (not a
+    // control-crossing boundary; no op-amp control pin exists to cross) and do NOT
+    // qualify, so their goldens stay byte-identical.
+    {
+        use super::graph::NodeId;
+        let follower_debug = std::env::var("PK_FOLLOWER_DEBUG").is_ok();
+        let directed = super::signal_flow::directed_signal_distances_from_in(&graph);
+        let boundary = super::signal_flow::boundary_reachable_distances_from_in(&graph);
+
+        let mut follower_injections: Vec<(NodeId, Vec<String>, Vec<String>)> = Vec::new();
+        for (gi, group) in feedback_groups.iter().enumerate() {
+            if group.has_feedback() || group.active_edges.is_empty() {
+                continue;
+            }
+            let edges = group.all_edges();
+            if edges.is_empty() {
+                continue;
+            }
+            let edge_set: std::collections::HashSet<usize> = edges.iter().copied().collect();
+            let group_nodes: std::collections::HashSet<NodeId> = edges
+                .iter()
+                .flat_map(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    [e.node_a, e.node_b]
+                })
+                .collect();
+            // Directed dead-end (no group node reachable under the base metric)
+            // yet reachable once control pins are crossed.
+            let directed_reachable = group_nodes.iter().any(|n| directed.contains_key(n));
+            let boundary_reachable = group_nodes.iter().any(|n| boundary.contains_key(n));
+            // Injection node = the group's INPUT BOUNDARY node: a group node also
+            // touched by an edge OUTSIDE this group (so an upstream stage drives
+            // it) and NOT a rail. Deterministic: nearest to `in` under the
+            // control-crossing metric, ties broken by NodeId. This mirrors
+            // general.rs `find_input_boundary_node`, so the runtime read node ==
+            // the compile-time adapted-VS injection boundary (uberdrive/lgsm:
+            // C7.b/R11.a).
+            let is_rail = |n: NodeId| {
+                n == graph.gnd_node
+                    || n == graph.vcc_node
+                    || graph.supply_nodes.contains(&n)
+                    || graph.ac_ground_nodes.contains(&n)
+            };
+            let boundary_nodes: std::collections::HashSet<NodeId> = graph
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(eidx, _)| !edge_set.contains(eidx))
+                .flat_map(|(_, e)| [e.node_a, e.node_b])
+                .filter(|n| group_nodes.contains(n) && !is_rail(*n))
+                .collect();
+            let inj_node = boundary_nodes
+                .iter()
+                .copied()
+                .filter(|n| boundary.contains_key(n) && *n != graph.in_node)
+                .min_by_key(|n| (*boundary.get(n).unwrap_or(&usize::MAX), *n));
+            if follower_debug {
+                let names: Vec<String> = group_nodes
+                    .iter()
+                    .map(|&n| {
+                        graph
+                            .node_names
+                            .iter()
+                            .find(|(_, &id)| id == n)
+                            .map(|(k, _)| k.clone())
+                            .unwrap_or_else(|| format!("n{n}"))
+                    })
+                    .collect();
+                let comps: Vec<String> = edges
+                    .iter()
+                    .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                    .collect();
+                eprintln!(
+                    "[PK_FOLLOWER] group {gi}: directed_reachable={directed_reachable} \
+                     boundary_reachable={boundary_reachable} inj_node={inj_node:?} \
+                     comps={comps:?} nodes={names:?}"
+                );
+            }
+            if directed_reachable || !boundary_reachable {
+                continue;
+            }
+            let Some(inj_node) = inj_node else {
+                continue;
+            };
+            let comp_ids: Vec<String> = edges
+                .iter()
+                .map(|&eidx| graph.components[graph.edges[eidx].comp_idx].id.clone())
+                .collect();
+            // Producer comps: components of OUTSIDE edges touching the injection
+            // boundary node — the upstream stage that drives it and must publish
+            // its per-sample value at `inj_node` to the bus (e.g. C7, whose `.a`
+            // is IC2.out and `.b` is the boundary). Ordered nearest-`in` first so
+            // the true upstream (not a same-node sibling shunt) is tried first.
+            let mut producers: Vec<(usize, String)> = graph
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(eidx, e)| {
+                    !edge_set.contains(eidx) && (e.node_a == inj_node || e.node_b == inj_node)
+                })
+                .map(|(_, e)| {
+                    let other = if e.node_a == inj_node { e.node_b } else { e.node_a };
+                    let d = boundary.get(&other).copied().unwrap_or(usize::MAX);
+                    (d, graph.components[e.comp_idx].id.clone())
+                })
+                .collect();
+            producers.sort();
+            let producer_ids: Vec<String> = producers.into_iter().map(|(_, id)| id).collect();
+            follower_injections.push((inj_node, comp_ids, producer_ids));
+        }
+
+        for (inj_node, comp_ids, producer_ids) in &follower_injections {
+            // Wire the follower's MultiNl stage to READ the injection node.
+            let mut wired = false;
+            for (si, stage) in stages.iter_mut().enumerate() {
+                if let Stage::MultiNl(m) = stage {
+                    if m.injection_node_id != usize::MAX {
+                        continue;
+                    }
+                    if stage_comp_ids[si].iter().any(|id| comp_ids.contains(id)) {
+                        m.injection_node_id = *inj_node;
+                        wired = true;
+                        if follower_debug {
+                            eprintln!(
+                                "  → output follower: MultiNl stage {si} reads node {inj_node} \
+                                 (injection), was serial-in 0.0"
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+            if !wired {
+                if follower_debug {
+                    eprintln!(
+                        "[PK_FOLLOWER] NOT wired: inj_node={inj_node} follower_comps={comp_ids:?}"
+                    );
+                }
+                continue;
+            }
+            // Make the upstream producer stage PUBLISH the injection node to the
+            // bus. The producer owns an outside edge touching `inj_node` (e.g. the
+            // tone-stage output coupling that terminates at C7.b).
+            for prod_id in producer_ids {
+                let mut published = false;
+                for (si, stage) in stages.iter_mut().enumerate() {
+                    if !stage_comp_ids[si].iter().any(|id| id == prod_id) {
+                        continue;
+                    }
+                    let ok = match stage {
+                        Stage::Wdf(w) if !w.bypass_serial && w.output_node_id == usize::MAX => {
+                            w.output_node_id = *inj_node;
+                            true
+                        }
+                        Stage::BlackFeedback(b)
+                            if !b.bypass_serial && b.output_node_id == usize::MAX =>
+                        {
+                            b.output_node_id = *inj_node;
+                            true
+                        }
+                        Stage::MultiNl(m)
+                            if !m.bypass_serial && m.output_node_id == usize::MAX =>
+                        {
+                            m.output_node_id = *inj_node;
+                            true
+                        }
+                        // The tone stage is typically a StateSpace (uberdrive
+                        // IC2). Setting its output_node_id makes it PUBLISH the
+                        // node to the bus; the runtime StateSpace path then routes
+                        // to node_signals instead of the serial chain, which is
+                        // correct here — the follower (the only consumer of the
+                        // tone output) reads it from the bus and re-drives serial.
+                        Stage::StateSpace(ss) if !ss.bypass_serial && ss.output_node_id == usize::MAX => {
+                            ss.output_node_id = *inj_node;
+                            true
+                        }
+                        // Already publishes some node (or is a bypass/serial-only
+                        // stage): if it already writes `inj_node`, we are done.
+                        Stage::Wdf(w) if w.output_node_id == *inj_node => true,
+                        Stage::BlackFeedback(b) if b.output_node_id == *inj_node => true,
+                        Stage::MultiNl(m) if m.output_node_id == *inj_node => true,
+                        Stage::StateSpace(ss) if ss.output_node_id == *inj_node => true,
+                        _ => false,
+                    };
+                    if ok {
+                        published = true;
+                        if follower_debug {
+                            eprintln!(
+                                "  → output follower: upstream stage {si} ({prod_id}) publishes \
+                                 node {inj_node} to bus"
+                            );
+                        }
+                        break;
+                    }
+                }
+                if published {
+                    break;
+                }
+            }
+        }
+    }
+
     // Defect B tertiary tiebreak: when two stages share a signal_flow_distance,
     // resolve their order DETERMINISTICALLY by the minimum stable component id
     // in each stage (netlist names are stable across compiles/processes). This
@@ -3922,6 +4142,94 @@ pub(super) fn build_spqr_stage_with_options(
                                     &mut wdf_stage.runtime_state,
                                 );
                             }
+                        }
+                    }
+                }
+            }
+
+            // (2c) Restore series emitter feedback for UNBYPASSED emitter
+            // degeneration (pedalkernel-2alk).
+            //
+            // The one-port BjtRoot's control clamp
+            // (`RootKind::set_control_voltage`: Vbe = vbe_bias + input·comp)
+            // never sees the emitter-node swing, so the series feedback an
+            // unbypassed R_E provides in the real circuit (v_be = v_b − i_e·R_E)
+            // is structurally severed — the stage runs at the UNDEGENERATED
+            // gain gm·R_loop (APB: 217× measured vs 20-22× theory/ngspice;
+            // R_E contributes only its ohmic loop drop).
+            //
+            // A bypass cap across R_E shorts the emitter swing at audio, so
+            // BYPASSED stages are already correct as compiled and must stay
+            // bit-identical (flip-proof: 100u across APB's R5 moved the WDF
+            // output only +0.15 dB) — the divider only engages when NO cap
+            // sits across the emitter leg.
+            //
+            // Compile-time divider at the solved Q-point.  The stage output
+            // is the ROOT PORT voltage, so the engine's raw Vbe→out transfer
+            // is gm·rp_root where rp_root = tree.port_resistance() — which
+            // includes the synthetic voltage-source rp (DEFAULT_VS_RP) and
+            // the folded base-bias network, NOT the physical collector load
+            // (APB: rp_root ≈ 20.5 kΩ vs R_C = 10 kΩ).  The divider therefore
+            // normalizes the loop to the physical load AND applies the series
+            // feedback factor F = 1 + gm·R_E·(β+1)/β:
+            //     divider = R_C / (rp_root · F)
+            //     ⇒ stage gain = gm·rp_root·divider = gm·R_C / F
+            // which is exactly the degenerated common-emitter small-signal
+            // gain (→ R_C/R_E as gm·R_E ≫ 1).  When R_C could not be located
+            // (half-rail Vce fallback upstream) the loop normalization is
+            // skipped and only the feedback factor 1/F applies.  K-tables are
+            // unaffected: their control axis is the Vbe OFFSET and the
+            // divider applies upstream of it.
+            let bjt_beta = match &wdf_stage.root {
+                RootKind::Bjt(b) => Some((b.model.bf as f64).max(1.0)),
+                _ => None,
+            };
+            if let (Some(beta), Some(dc)) = (bjt_beta, bjt_dc.as_ref()) {
+                if dc.r_degeneration > 0.0 && dc.gm > 0.0 {
+                    let emitter_node = match &nl_kind {
+                        super::classify::NonlinearKind::BjtNpn { emitter_node, .. }
+                        | super::classify::NonlinearKind::BjtPnp { emitter_node, .. } => {
+                            Some(*emitter_node)
+                        }
+                        _ => None,
+                    };
+                    // Bypass detection mirrors the (2b) pre-charge scan: any
+                    // capacitor from the emitter node to gnd/ac-ground.
+                    let emitter_bypassed = emitter_node.is_some_and(|emitter_node| {
+                        graph.edges.iter().any(|e| {
+                            let is_emitter_gnd = (e.node_a == emitter_node
+                                && (e.node_b == graph.gnd_node
+                                    || graph.ac_ground_nodes.contains(&e.node_b)))
+                                || (e.node_b == emitter_node
+                                    && (e.node_a == graph.gnd_node
+                                        || graph.ac_ground_nodes.contains(&e.node_a)));
+                            is_emitter_gnd
+                                && graph.components[e.comp_idx].kind.capacitance().is_some()
+                        })
+                    });
+                    if emitter_node.is_some() && !emitter_bypassed {
+                        // Series-feedback factor F = 1 + gm·R_E·(β+1)/β
+                        // (the (β+1)/β term carries the emitter current's
+                        // base-current component; equals rπ/(rπ+(β+1)·R_E)
+                        // as a divider, rπ = β/gm).
+                        let f = 1.0 + dc.gm * dc.r_degeneration * (beta + 1.0) / beta;
+                        let rp_root = wdf_stage.tree.port_resistance();
+                        let divider = if dc.r_load > 0.0 && rp_root.is_finite() && rp_root > 0.0
+                        {
+                            dc.r_load / (rp_root * f)
+                        } else {
+                            1.0 / f
+                        };
+                        if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+                            eprintln!(
+                                "[degen-divider] {}: gm={:.6} S beta={beta:.1} \
+                                 r_e={:.1} Ω r_load={:.1} Ω rp_root={rp_root:.1} Ω \
+                                 F={f:.4} divider={divider:.6}",
+                                comp.id, dc.gm, dc.r_degeneration, dc.r_load
+                            );
+                        }
+                        if divider.is_finite() && divider > 0.0 && divider < 1.0 {
+                            wdf_stage.control_divider = divider as pedalkernel_rt::Wave;
                         }
                     }
                 }
@@ -5771,6 +6079,20 @@ fn compute_group_flow_distances(
     let out_dist = bfs_distances(graph.out_node, graph);
     let span = graph.edges.len() + graph.components.len() + groups.len() + 1;
 
+    // GAP 4c (pedalkernel-0lsv) — MAX-band ordering retry. The base metric above
+    // (`directed_signal_distances_from_in`) does NOT cross an op-amp control pin
+    // (`pos`), so a non-inverting IC is a directed dead-end: a downstream output
+    // FOLLOWER (uberdrive/lgsm Q2 emitter follower, fed IC2.out -> C7 -> volume
+    // divider -> Q2.base) gets `min_dist == usize::MAX` and lands in the flat MAX
+    // band, so it is never serially chained after the tone stage and runs with a
+    // serial input of 0.0. The control-crossing metric
+    // `boundary_reachable_distances_from_in` DOES reach it. We consult it ONLY as
+    // a per-group RETRY for groups already stuck at MAX — the GLOBAL ordering
+    // metric (`node_dist`) that screamer/sd1/muff depend on is untouched, so their
+    // ordering is byte-identical.
+    let boundary_dist: HashMap<NodeId, usize> =
+        super::signal_flow::boundary_reachable_distances_from_in(graph);
+
     let min_dists: Vec<usize> = groups
         .iter()
         .map(|group| {
@@ -5788,12 +6110,40 @@ fn compute_group_flow_distances(
         })
         .collect();
 
+    // Control-crossing distance for a group stuck at `usize::MAX` under the
+    // directed metric. Finite only when a boundary node of the group is reachable
+    // once op-amp control pins are crossed (uberdrive/lgsm followers). Returns
+    // `None` for a group with no such node — keeping it in the flat MAX band.
+    let boundary_retry_dist = |group: &super::signal_flow::FlowGroup| -> Option<usize> {
+        let mut best = usize::MAX;
+        for &eidx in group.all_edges().iter() {
+            let e = &graph.edges[eidx];
+            if let Some(&d) = boundary_dist.get(&e.node_a) {
+                best = best.min(d);
+            }
+            if let Some(&d) = boundary_dist.get(&e.node_b) {
+                best = best.min(d);
+            }
+        }
+        (best != usize::MAX).then_some(best)
+    };
+
     let mut distances: Vec<usize> = groups
         .iter()
         .enumerate()
         .map(|(gi, group)| {
             let min_dist = min_dists[gi];
             if min_dist == usize::MAX {
+                // GAP 4c retry: an output follower behind a non-inverting op-amp
+                // is a directed dead-end under the base metric but reachable once
+                // control pins are crossed. Place it at the MAX-band base plus its
+                // control-crossing distance (same band form as the touches-output
+                // sink below) so it orders AFTER the reachable stages that feed it
+                // and among MAX-band peers by real distance. Falls back to the flat
+                // MAX band for groups the control-crossing metric still can't reach.
+                if let Some(bdist) = boundary_retry_dist(group) {
+                    return groups.len() * span + bdist;
+                }
                 return groups.len() * span;
             }
             let touches_output = group.all_edges().iter().any(|&eidx| {

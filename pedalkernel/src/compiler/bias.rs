@@ -3161,6 +3161,23 @@ pub(super) struct BjtDcQpoint {
     pub(super) vce: f64,
     /// Emitter-resistor DC drop (|Ie·RE|), to pre-charge the emitter bypass cap.
     pub(super) v_emitter: f64,
+    /// Emitter degeneration resistance R_E (Ω) from the located bias topology;
+    /// 0.0 when the emitter ties directly to its rail. Feeds the
+    /// unbypassed-emitter-degeneration control divider (pedalkernel-2alk).
+    /// Blockwise-path Q-points report 0.0 (the divider is a one-port
+    /// `BjtRoot`/`WdfStage` mechanism; blocks carry their own emitter leg).
+    pub(super) r_degeneration: f64,
+    /// Small-signal transconductance dIc/dVbe (S) at the solved Q-point
+    /// (central difference on the Gummel-Poon model). Feeds the
+    /// unbypassed-emitter-degeneration control divider (pedalkernel-2alk).
+    /// Blockwise-path Q-points report 0.0 (divider never engages there).
+    pub(super) gm: f64,
+    /// Collector load resistance R_C (Ω) — the direct collector→rail
+    /// resistor used for the Vce warm-start; 0.0 when not found (half-rail
+    /// Vce fallback). Feeds the unbypassed-emitter-degeneration control
+    /// divider (pedalkernel-2alk), which targets the physical stage gain
+    /// gm·R_C/(1+gm·R_E·(β+1)/β). Blockwise-path Q-points report 0.0.
+    pub(super) r_load: f64,
 }
 
 /// Single-port-WDF BJT DC Q-point (ko5g.4) — replaces the deleted
@@ -3317,10 +3334,29 @@ fn solve_wdf_bjt_dc_qpoint_inner(
     // still charges to the |Ie·RE| drop, so we report the magnitude.
     let v_emitter = (ie * re).abs();
 
+    // Small-signal transconductance gm = dIc/dVbe at the Q-point, by central
+    // difference on the same model evaluation used for Ic above (mirrors the
+    // solver's own finite-difference style).  Feeds the unbypassed-emitter
+    // degeneration control divider (pedalkernel-2alk); NOT used by the DC
+    // seed itself, so the solved vbe/vce stay bit-for-bit.
+    let gm_h = 1e-4;
+    let (ic_hi, _) = model.currents(
+        (vbe + gm_h) as pedalkernel_rt::Wave,
+        vbc_active as pedalkernel_rt::Wave,
+    );
+    let (ic_lo, _) = model.currents(
+        (vbe - gm_h) as pedalkernel_rt::Wave,
+        vbc_active as pedalkernel_rt::Wave,
+    );
+    let gm = ((ic_hi - ic_lo) as f64 / (2.0 * gm_h)).max(0.0);
+
     Ok(BjtDcQpoint {
         vbe,
         vce,
         v_emitter,
+        r_degeneration: re,
+        gm,
+        r_load: rc.unwrap_or(0.0),
     })
 }
 
@@ -3539,6 +3575,11 @@ pub(super) fn solve_blockwise_bjt_group_qpoint(
         // path hands `set_initial_prev_v`.
         vce: vc - ve,
         v_emitter: 0.0,
+        // Blockwise blocks model the emitter leg inside their K-method
+        // rungs; the one-port control divider never engages on this path.
+        r_degeneration: 0.0,
+        gm: 0.0,
+        r_load: 0.0,
     };
     if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
         eprintln!(
@@ -3549,6 +3590,157 @@ pub(super) fn solve_blockwise_bjt_group_qpoint(
         );
     }
     Ok(out)
+}
+
+/// DC-closure edge set for a BJT group's operating-point solve
+/// (pedalkernel-onu2, RCA GAPs 2a+4a on pedalkernel-a5ho).
+///
+/// [`solve_bjt_group_dc_qpoint`] stamps only the resistive edges it is HANDED.
+/// The general-MNA caller (`rigid/general.rs` Step 10) historically passed the
+/// flow-GROUP's own edges, so any part of a device's DC bias network that lives
+/// in another flow group was invisible:
+///
+/// - sunflower: Q2's collector chain (`R3→BIAS→SUNDIAL→R4→rail`) is in the
+///   DOWNSTREAM group, so the collector floated on `gmin` and the homotopy
+///   converged a saturated artifact (vbe 0.192 / vce 0.0036 V vs the real
+///   |vce| ≈ 4 V that the linear seed had already found);
+/// - uberdrive / LGSM: the `vref` divider (`R100/R101`) is in another group and
+///   `vref` hits no [`rail_dc_voltage`] arm, so base and vref floated to ~0 V
+///   and the solve "converged" with the follower in cutoff.
+///
+/// This returns `group_edges` plus every DC-CONDUCTING edge of the WHOLE graph
+/// transitively reachable from the group's BJT terminals — the same
+/// whole-network visibility the blockwise caller already gets by passing the
+/// full plan's edges (see [`solve_blockwise_bjt_group_qpoint`]). Traversal uses
+/// exactly the solver's own resistor filter (`EdgeKind::Linear` +
+/// `resistance() > 0`; caps/inductors/NL edges are not crossed) and TERMINATES
+/// at rail nodes ([`rail_dc_voltage`] `Some`) — a rail pins the potential, so
+/// networks on its far side cannot influence this group's DC.
+///
+/// The second return value is the set of **vref-class** nodes the traversal
+/// crossed (see [`vref_class_node`]): nodes the ac-ground classification would
+/// pin to 0 V DC even though their true DC level is set by their resistive
+/// divider (the SD-1/TS-808 `vref` idiom — big bypass cap + ≥3 signal edges,
+/// `graph.rs compute_ac_ground_nodes`). The caller hands these to
+/// [`solve_bjt_group_dc_qpoint_with_overrides`] so the solve treats them as
+/// INTERIOR (divider-solved) instead of a 0 V rail — otherwise a follower base
+/// biased `base → R → vref` reads 0 V and the solve "converges" in cutoff
+/// (the bias.rs:4064 quiescent-dead acceptance) despite a healthy real circuit.
+///
+/// Determinism / byte-identity: the group's edges pass through IN ORDER and
+/// added edges are appended SORTED by edge index, so a group whose bias network
+/// is fully group-local (BA283, fuzz_face_pnp, the legends fleet) hands the
+/// solver the exact legacy list and reproduces the legacy Newton sequence
+/// bit-for-bit.
+pub(super) fn bjt_dc_closure_edges(
+    nl_kinds: &[NonlinearKind],
+    group_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+) -> (Vec<usize>, HashSet<NodeId>) {
+    // Seed: the terminals of the same devices `solve_bjt_group_dc_qpoint`
+    // stamps (NPN/PNP with base ≠ collector; diode-connected BJTs excluded).
+    let mut reached: HashSet<NodeId> = HashSet::new();
+    for kind in nl_kinds {
+        match kind {
+            NonlinearKind::BjtNpn {
+                base_node,
+                collector_node,
+                emitter_node,
+                ..
+            }
+            | NonlinearKind::BjtPnp {
+                base_node,
+                collector_node,
+                emitter_node,
+                ..
+            } if base_node != collector_node => {
+                reached.insert(*base_node);
+                reached.insert(*collector_node);
+                reached.insert(*emitter_node);
+            }
+            _ => {}
+        }
+    }
+    if reached.is_empty() {
+        return (group_edges.to_vec(), HashSet::new());
+    }
+
+    // A rail terminates DC traversal — EXCEPT vref-class nodes, whose "rail"
+    // status (ac-ground ⇒ 0 V) is an AC artifact; their DC comes from the
+    // divider network the traversal must keep following.
+    let is_rail = |nd: NodeId| {
+        rail_dc_voltage(nd, graph, supply_voltage).is_some() && !vref_class_node(nd, graph)
+    };
+
+    // Fixpoint sweep over the whole graph's DC-conducting edges. An edge joins
+    // the closure when it touches a reached NON-RAIL node (expansion never
+    // crosses a rail); both its endpoints then become reached.
+    let mut member: HashSet<usize> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for eidx in 0..graph.edges.len() {
+            if member.contains(&eidx) {
+                continue;
+            }
+            if graph.effective_edge_kind(eidx) != EdgeKind::Linear {
+                continue;
+            }
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            let Some(r) = comp.kind.resistance() else {
+                continue;
+            };
+            if r <= 0.0 {
+                continue;
+            }
+            let via_a = reached.contains(&e.node_a) && !is_rail(e.node_a);
+            let via_b = reached.contains(&e.node_b) && !is_rail(e.node_b);
+            if !(via_a || via_b) {
+                continue;
+            }
+            member.insert(eidx);
+            grew |= reached.insert(e.node_a);
+            grew |= reached.insert(e.node_b);
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    // vref-class nodes actually reached by the resistive traversal: these must
+    // be solved as interior nodes, not read as 0 V rails.
+    let overrides: HashSet<NodeId> = reached
+        .iter()
+        .copied()
+        .filter(|&nd| vref_class_node(nd, graph))
+        .collect();
+
+    let in_group: HashSet<usize> = group_edges.iter().copied().collect();
+    let mut added: Vec<usize> = member
+        .into_iter()
+        .filter(|eidx| !in_group.contains(eidx))
+        .collect();
+    added.sort_unstable();
+
+    let mut out = group_edges.to_vec();
+    out.extend(added);
+    (out, overrides)
+}
+
+/// "vref-class" node (pedalkernel-onu2): classified AC-ground by the
+/// bypassed-bias-divider arm of `graph.rs compute_ac_ground_nodes` (large cap
+/// to ground + ≥3 signal edges — the SD-1/TS-808 `vref` idiom), yet NOT an
+/// actual DC rail: no declared supply voltage, not `gnd`/`vcc`. At DC the
+/// bypass cap is open and the node's true level is set by its resistive
+/// divider; resolving it through [`rail_dc_voltage`]'s ac-ground arm (0 V) is
+/// an AC-classification artifact that starves any DC bias solve consulting it.
+pub(super) fn vref_class_node(node: NodeId, graph: &CircuitGraph) -> bool {
+    node != graph.gnd_node
+        && node != graph.vcc_node
+        && !graph.supply_nodes.contains(&node)
+        && !graph.supply_voltages.contains_key(&node)
+        && graph.ac_ground_nodes.contains(&node)
 }
 
 /// Solve the **nonlinear** DC operating point of every BJT in the group.
@@ -3640,6 +3832,29 @@ pub(super) fn solve_bjt_group_dc_qpoint(
     graph: &CircuitGraph,
     supply_voltage: f64,
 ) -> Option<std::collections::HashMap<NodeId, f64>> {
+    // Legacy entry: no interior overrides. The blockwise caller and the unit
+    // tests go through here and keep the exact pre-onu2 rail resolution.
+    solve_bjt_group_dc_qpoint_with_overrides(
+        nl_kinds,
+        all_edges,
+        graph,
+        supply_voltage,
+        &HashSet::new(),
+    )
+}
+
+/// [`solve_bjt_group_dc_qpoint`] with an **interior-override** set
+/// (pedalkernel-onu2): nodes in `interior_overrides` are solved as interior
+/// unknowns even when [`rail_dc_voltage`] would resolve them (the vref-class
+/// ac-ground-artifact case — see [`bjt_dc_closure_edges`] /
+/// [`vref_class_node`]). An empty set reproduces the legacy solve bit-for-bit.
+pub(super) fn solve_bjt_group_dc_qpoint_with_overrides(
+    nl_kinds: &[NonlinearKind],
+    all_edges: &[usize],
+    graph: &CircuitGraph,
+    supply_voltage: f64,
+    interior_overrides: &HashSet<NodeId>,
+) -> Option<std::collections::HashMap<NodeId, f64>> {
     // Gather the BJTs (skip diode-connected: those are handled as 1-port diodes).
     struct BjtRef<'a> {
         model_name: &'a str,
@@ -3685,8 +3900,15 @@ pub(super) fn solve_bjt_group_dc_qpoint(
     // Full (unscaled) rail voltage, or None for an interior (solved) node.
     // (The shared resolver — see `rail_dc_voltage` — was extracted from this
     // closure verbatim for pedalkernel-0stg; delegation keeps one source of
-    // truth for rail resolution.)
-    let full_rail_v = |node: NodeId| -> Option<f64> { rail_dc_voltage(node, graph, supply_voltage) };
+    // truth for rail resolution.) Interior-override nodes (vref-class,
+    // pedalkernel-onu2) are forced interior so their divider sets their DC.
+    let full_rail_v = |node: NodeId| -> Option<f64> {
+        if interior_overrides.contains(&node) {
+            None
+        } else {
+            rail_dc_voltage(node, graph, supply_voltage)
+        }
+    };
 
     // Resistor list (linear conductances): (node_a, node_b, g).
     let mut resistors: Vec<(NodeId, NodeId, f64)> = Vec::new();
@@ -6101,5 +6323,106 @@ mod tests {
             solve_pentode_dc_qpoint(&[triode], &all_edges, &graph, 300.0),
             Err(PentodeQpointSkip::NotApplicable)
         ));
+    }
+
+    // ── pedalkernel-onu2: DC-closure for the general-MNA BJT group solve ─────
+
+    /// An NPN emitter follower whose base bias divider (`vref`, bypassed by a
+    /// large cap → ac-ground-classified) lives in ANOTHER flow group — the
+    /// uberdrive / LGSM (SD-1 / TS-808) input-buffer shape (RCA GAP 4a on
+    /// pedalkernel-a5ho). Pre-onu2 the group-local DC solve saw neither the
+    /// divider (other group) nor a real `vref` voltage (ac-ground arm reads
+    /// 0 V), converged the follower in CUTOFF, and the stage was silent from
+    /// sample 0. With the DC-closure edge set + vref-class interior override +
+    /// cross-group q-point seed the follower must pass AC at roughly unity.
+    ///
+    /// The extra `R5`/`C4` and `RL→gnd` legs make `vref` hit the ≥3-signal-edge
+    /// arm of `compute_ac_ground_nodes` (graph.rs) so the test exercises the
+    /// vref-class override, not just the plain-interior closure.
+    #[test]
+    fn follower_with_cross_group_vref_divider_passes_signal() {
+        let src = r#"pedal "follower_probe" {
+  supply 9V
+  components {
+    R100: resistor(33k)
+    R101: resistor(33k)
+    C101: cap(47u, electrolytic)
+    R2: resistor(10k)
+    C1: cap(47n)
+    R3: resistor(470k)
+    Q1: npn(2n5088)
+    R4: resistor(10k)
+    C2: cap(1u, electrolytic)
+    RL: resistor(100k)
+    R5: resistor(100k)
+    C4: cap(18n)
+    R6: resistor(100k)
+    C5: cap(18n)
+  }
+  nets {
+    vcc -> R100.a
+    R100.b -> R101.a, C101.a, vref
+    R101.b -> gnd
+    C101.b -> gnd
+    in -> R2.a
+    R2.b -> C1.a
+    C1.b -> Q1.base, R3.a
+    R3.b -> vref
+    vcc -> Q1.collector
+    Q1.emitter -> R4.a, C2.a
+    R4.b -> gnd
+    C2.b -> RL.a, out
+    RL.b -> gnd
+    R5.a -> vref
+    R5.b -> C4.a
+    C4.b -> gnd
+    R6.a -> vref
+    R6.b -> C5.a
+    C5.b -> gnd
+  }
+}"#;
+        let pedal = crate::dsl::parse_pedal_file(src).expect("parse follower probe");
+        let graph = CircuitGraph::from_pedal(&pedal);
+
+        // The vref net must actually be ac-ground-classified (the premise that
+        // makes this the vref-CLASS case) and vref-class per the new predicate.
+        let vref_node = *graph.node_names.get("vref").expect("vref node exists");
+        assert!(
+            graph.ac_ground_nodes.contains(&vref_node),
+            "test premise: vref must be ac-ground-classified (bypassed divider)"
+        );
+        assert!(
+            vref_class_node(vref_node, &graph),
+            "vref must be vref-class (ac-ground artifact, no declared DC)"
+        );
+
+        use pedalkernel_rt::PedalProcessor as _;
+        let mut proc = compile_via_spqr(&pedal, SR).expect("compile follower probe");
+        let n = (SR as usize) / 2;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let x = 0.05 * (2.0 * core::f64::consts::PI * 1000.0 * i as f64 / SR).sin();
+            out.push(proc.process(x));
+        }
+        // Steady-state window (transient + coupling caps settled).
+        let tail = &out[n / 2..];
+        let rms = (tail.iter().map(|v| v * v).sum::<f64>() / tail.len() as f64).sqrt();
+        let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+        // Input RMS = 0.05/√2 ≈ 0.0354; an emitter follower is ~unity. The
+        // cutoff-starved artifact read ~0 here. Loose band: alive and
+        // follower-scaled, not a precision gate.
+        assert!(
+            rms > 0.015,
+            "cross-group-vref follower must pass AC (steady-state rms {rms:.6} ≤ 0.015 → \
+             quiescent-dead; pre-onu2 artifact was ~0)"
+        );
+        assert!(
+            rms < 0.1,
+            "follower output should stay follower-scaled (rms {rms:.6} ≥ 0.1)"
+        );
+        assert!(
+            mean.abs() < 0.5,
+            "AC-coupled output should carry no large DC offset (mean {mean:.6})"
+        );
     }
 }

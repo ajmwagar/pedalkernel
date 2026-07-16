@@ -1,0 +1,122 @@
+* ============================================================================
+* UberDrive (PedalPCB) — Boss SD-1 Super OverDrive, verbatim stock circuit
+* PedalKernel Kits Validation Circuit
+* ============================================================================
+*
+* Topology (mirrors uberdrive.pedal in pedalkernel-pro/pedals/kits/):
+*   1. Input buffer — R1 (2M2) pulldown; R2 (10K) -> C1 (47n) -> Q1 base
+*                     (R3 470K to VREF); Q1 emitter follower, R4 (10K)
+*   2. Clipping     — IC1.1 non-inverting: C2 (18n) + R5 (100K to VREF);
+*                     gain leg R7 (4K7) + C3 (47n) to VREF;
+*                     feedback R6 (33K) + DRIVE (B1M);
+*                     clipper: D3+D1 series (anode at output, +half at ~1.2V)
+*                     antiparallel D2 (-half at ~0.6V) — the SD-1 2+1 asym
+*   3. Active tone  — R8 (10K) -> node A (C4 18n shunt) -> IC1.2 +in and
+*                     TONE lug1; lug3 -> node B (-in); wiper -> C5 (27n) ->
+*                     R9 (470R) -> gnd; feedback R10 (10K) || C6 (10n)
+*   4. Output       — C7 (1u) -> R11 (4K7) -> VOLUME (B10K); wiper -> R12
+*                     (22K) -> C8 (47n) -> Q2 base (R13 1M to VREF);
+*                     follower R14 (10K); R15 (1K) -> C9 (1u) -> out,
+*                     R16 (100K) pulldown
+*
+* Refdes match the PedalPCB build doc (rev 09.01.19):
+*   https://docs.pedalpcb.com/project/UberDrive.pdf
+*
+* House conventions: op-amps = ideal VCVS (1e5); VREF = ideal 4.5 V source;
+* power section (D100/C100/R102/LED) omitted.
+* SUBSTITUTION (documented): Q1/Q2 are 2SC732 in the doc — not in the model
+* library; 2N5088 used here AND in the .pedal (same high-beta class,
+* followers are beta-insensitive).
+*
+* Control positions (validation point — all B/linear pots at mid =
+* taper- and direction-unambiguous):
+*   Drive  = 0.5 -> 500K rheostat (Av = 1 + 533K/4.7K = 114)
+*   Tone   = 0.5 -> 10K / 10K
+*   Volume = 0.5 -> 5K / 5K
+*
+* Diode model: 1N916 = 1N914 die; same params as legends sd1.spice.
+* ============================================================================
+
+* ---- Supply and VREF ---------------------------------------------------------
+VCC vcc 0 DC 9
+Vref v_ref 0 DC 4.5
+
+* ---- Input buffer -------------------------------------------------------------
+R1 v_in 0 2.2meg
+R2 v_in v_r2 10k
+C1 v_r2 v_q1b 47n
+R3 v_q1b v_ref 470k
+Q1 vcc v_q1b v_q1e Q2N5088
+R4 v_q1e 0 10k
+
+.MODEL Q2N5088 NPN(IS=18f BF=600 BR=4.0 NF=1.0 NR=1.0 VAF=100 VAR=25 IKF=50m IKR=10m ISE=5f NE=1.5 ISC=0 NC=2.0 RB=10 RE=0.2 RC=0.3 CJE=6p VJE=0.7 MJE=0.33 CJC=4p VJC=0.7 MJC=0.33 TF=300p TR=30n)
+
+* ---- Clipping stage (IC1.1, non-inverting, ideal VCVS) ------------------------
+C2 v_q1e v_pos 18n
+R5 v_pos v_ref 100k
+Eu1 v_u1out 0 v_pos v_neg 100000
+
+* Gain leg to VREF
+R7 v_neg v_c3 4.7k
+C3 v_c3 v_ref 47n
+
+* Feedback: R6 + Drive (B1M at 0.5 = 500K rheostat)
+R6 v_neg v_r6 33k
+Rdrive v_r6 v_u1out 500k
+
+* Asymmetric clipper: D3+D1 series (anode at output) || D2 reversed
+D3 v_u1out v_d13 D1N916
+D1 v_d13 v_neg D1N916
+D2 v_neg v_u1out D1N916
+.MODEL D1N916 D(Is=4.35n N=1.906 Rs=0.6 Cjo=2p)
+
+* ---- Active tone stage (IC1.2) ------------------------------------------------
+R8 v_u1out v_a 10k
+C4 v_a 0 18n
+* TONE (B20K at 0.5): lug1 = node A, lug3 = node B, wiper -> C5 -> R9 -> gnd
+Rtone_top v_a v_tw 10k
+Rtone_bot v_tw v_b 10k
+C5 v_tw v_c5r 27n
+R9 v_c5r 0 470
+* Feedback R10 || C6
+R10 v_b v_u2out 10k
+C6 v_b v_u2out 10n
+Eu2 v_u2out 0 v_a v_b 100000
+
+* ---- Output stage --------------------------------------------------------------
+C7 v_u2out v_c7 1u
+R11 v_c7 v_vol 4.7k
+* VOLUME (B10K at 0.5)
+Rvol_top v_vol v_vw 5k
+Rvol_bot v_vw 0 5k
+R12 v_vw v_r12 22k
+C8 v_r12 v_q2b 47n
+R13 v_q2b v_ref 1meg
+Q2 vcc v_q2b v_q2e Q2N5088
+R14 v_q2e 0 10k
+R15 v_q2e v_r15 1k
+C9 v_r15 v_out 1u
+R16 v_out 0 100k
+
+* NOTE: no .IC lines on purpose. Under the harness's `.TRAN ... UIC`, any
+* .IC involving Q2's base node (fed only via R13 1M / C8) makes ngspice fail
+* at the initial timepoint ("trouble with q2n5088-instance"; bisected
+* 2026-07-15 — even the exact .OP voltages fail). The deck therefore cold-
+* starts under UIC and the kits harness uses a long golden (0.6 s) with a
+* 0.5 s comparison trim so the slow states (C8xR13 ~ 100 ms tau, C9x(R15+
+* R16) ~ 100 ms tau) are fully settled in the compared window.
+
+* ---- Standalone smoke test (stripped by the validation harness) ---------------
+VIN v_in 0 SIN(0 0.1 1k)
+.TRAN 5.2083u 100m
+.CONTROL
+  set filetype=ascii
+  run
+  meas tran vout_rms RMS v(v_out) from=50m to=100m
+  meas tran vout_max MAX v(v_out) from=50m to=100m
+  meas tran vout_min MIN v(v_out) from=50m to=100m
+  meas tran vu1_max MAX v(v_u1out) from=50m to=100m
+  meas tran vu1_min MIN v(v_u1out) from=50m to=100m
+  quit
+.ENDC
+.END

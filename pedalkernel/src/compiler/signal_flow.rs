@@ -66,6 +66,15 @@ struct ActiveElement {
     /// All output-side nodes (for BJT: both collector and emitter carry signal).
     /// Used for flow graph BFS starting points.
     output_nodes: Vec<NodeId>,
+    /// Optional CONTROL input node — the second signal-carrying input of an
+    /// amplifier that also drives the output (op-amp `pos` pin on a
+    /// non-inverting stage). Signal at this pin flows forward to the output the
+    /// same as the primary `input_node`. `None` for BJT/tube (`control` = None)
+    /// and for TwoPort elements. Crossed forward ONLY by the
+    /// boundary-reachability metric ([`forward_signal_adjacency`] with
+    /// `cross_control = true`), never by the stage-ordering / audio-path
+    /// metric — see the `cross_control` note there.
+    control_node: Option<NodeId>,
     /// Whether this element modulates an existing impedance in parallel with
     /// a passive element (NL/ControlledConductance shunt) rather than
     /// amplifying signal. Its input pin is a control pin outside the signal
@@ -107,12 +116,25 @@ fn find_active_elements(edge_indices: &[usize], graph: &CircuitGraph) -> Vec<Act
                     input_node: in_node,
                     output_node: out_node,
                     output_nodes: vec![out_node],
+                    control_node: None,
                     is_shunt_modulator: false,
                 });
             }
-            SignalTerminals::Amplifier { input, output, .. } => {
+            SignalTerminals::Amplifier {
+                input,
+                output,
+                control,
+            } => {
                 let in_node = resolve_pin(&comp.id, input, graph).unwrap_or(e.node_a);
                 let out_node = resolve_pin(&comp.id, output, graph).unwrap_or(e.node_b);
+                // The CONTROL pin (op-amp `pos`) is the non-inverting signal
+                // input. Resolved to a node here; crossed forward ONLY by the
+                // boundary-reachability metric (`forward_signal_adjacency` with
+                // `cross_control = true`), so a non-inverting op-amp stops being
+                // a directed dead-end for INJECTION-NODE finding — without
+                // perturbing the stage-ordering / audio-path metric.
+                let control_node =
+                    control.and_then(|pin| resolve_pin(&comp.id, pin, graph));
                 // Detect shunt modulator: any NL/ControlledConductance device
                 // whose port is in parallel with a passive element. Such devices
                 // modulate an existing impedance rather than amplifying signal —
@@ -147,6 +169,10 @@ fn find_active_elements(edge_indices: &[usize], graph: &CircuitGraph) -> Vec<Act
                     input_node: in_node,
                     output_node: out_node,
                     output_nodes,
+                    // A shunt modulator's control pin is off the signal path, so
+                    // do not cross it forward (would leak a directed edge into
+                    // the modulated network).
+                    control_node: if is_shunt_modulator { None } else { control_node },
                     is_shunt_modulator,
                 });
             }
@@ -823,7 +849,26 @@ pub(in crate::compiler) fn bfs_distances_from_in_node(
 pub(in crate::compiler) fn directed_signal_distances_from_in(
     graph: &CircuitGraph,
 ) -> HashMap<NodeId, usize> {
-    let fwd = forward_signal_adjacency(graph);
+    bfs_over_forward_adjacency(graph, false)
+}
+
+/// Like [`directed_signal_distances_from_in`], but ALSO crosses amplifier
+/// control pins (op-amp `pos`) forward — the injection-node reachability metric
+/// (pedalkernel-xki7, GAP 4b). Used ONLY by
+/// [`super::rigid::general`]'s injection-boundary search so a non-inverting
+/// op-amp stops being a directed dead-end for the downstream output follower,
+/// WITHOUT perturbing stage ordering / audio-path classification.
+pub(in crate::compiler) fn boundary_reachable_distances_from_in(
+    graph: &CircuitGraph,
+) -> HashMap<NodeId, usize> {
+    bfs_over_forward_adjacency(graph, true)
+}
+
+fn bfs_over_forward_adjacency(
+    graph: &CircuitGraph,
+    cross_control: bool,
+) -> HashMap<NodeId, usize> {
+    let fwd = forward_signal_adjacency(graph, cross_control);
 
     let mut visited: HashMap<NodeId, usize> = HashMap::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
@@ -849,7 +894,22 @@ pub(in crate::compiler) fn directed_signal_distances_from_in(
 /// passive edges conduct both ways, active devices conduct `input ->
 /// output_nodes` only, rails dead-end, `Tight` transformer coupled-links are
 /// crossed both directions.
-fn forward_signal_adjacency(graph: &CircuitGraph) -> HashMap<NodeId, Vec<NodeId>> {
+///
+/// `cross_control` (pedalkernel-xki7, GAP 4b): when true, ALSO cross an
+/// amplifier's CONTROL pin (op-amp `pos`) forward to the output. A non-inverting
+/// op-amp takes its signal at `pos`, so without this crossing everything
+/// downstream of it is a directed dead-end and the injection-node search never
+/// reaches a downstream group's boundary (uberdrive/lgsm output-follower). This
+/// is enabled ONLY for the injection-node reachability metric
+/// ([`boundary_reachable_distances_from_in`]); the stage-ordering and
+/// audio-path-classification metrics keep it FALSE, because feeding `pos -> out`
+/// into `compute_group_flow_distances` re-scales serial stage order (measured:
+/// regresses screamer/sd1/muff tone + volume tests). On an INVERTING stage `pos`
+/// is tied to a reference (vref/gnd) and the rail filter drops the edge anyway.
+fn forward_signal_adjacency(
+    graph: &CircuitGraph,
+    cross_control: bool,
+) -> HashMap<NodeId, Vec<NodeId>> {
     let rails = rail_nodes(graph);
     let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
     let active_elements = find_active_elements(&all_edges, graph);
@@ -878,6 +938,11 @@ fn forward_signal_adjacency(graph: &CircuitGraph) -> HashMap<NodeId, Vec<NodeId>
     for elem in &active_elements {
         for &out in &elem.output_nodes {
             add(elem.input_node, out);
+            if cross_control {
+                if let Some(ctrl) = elem.control_node {
+                    add(ctrl, out);
+                }
+            }
         }
     }
     // A plain two-port transformer couples primary↔secondary through magnetic
@@ -942,7 +1007,9 @@ pub(in crate::compiler) fn group_is_on_forward_audio_path(
     if seeds.contains(&graph.out_node) {
         return true;
     }
-    let fwd = forward_signal_adjacency(graph);
+    // Audio-path classification keeps the control pin UNcrossed (`false`) — same
+    // metric as stage ordering (pedalkernel-xki7 scoping).
+    let fwd = forward_signal_adjacency(graph, false);
     let mut visited: HashSet<NodeId> = seeds.iter().copied().collect();
     let mut queue: VecDeque<NodeId> = seeds.into_iter().collect();
     while let Some(node) = queue.pop_front() {
