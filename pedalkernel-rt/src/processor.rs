@@ -4303,7 +4303,23 @@ impl PedalProcessor for CompiledPedal {
                 } else {
                     unreachable!()
                 };
-                let mnl_input = signal;
+                // Injection read (mirrors the WDF feedforward path ~4199): a
+                // non-inverting output follower (uberdrive/lgsm) is ordered into
+                // the MAX band and receives no serial signal, so it must read the
+                // tone-stage output from node_signals at its resolved injection
+                // node. The in-group divider MNA (C7/R11/VOLUME/R12/C8) performs
+                // the volume division against that node. Fall back to the serial
+                // `signal` when the node was not written (or injection unset).
+                let mnl_input = if mnl.injection_node_id != usize::MAX {
+                    self.node_signals
+                        .iter()
+                        .rev()
+                        .find(|(nid, _)| *nid == mnl.injection_node_id)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(signal)
+                } else {
+                    signal
+                };
 
                 #[cfg(feature = "debug-trace")]
                 let pre = mnl_input;

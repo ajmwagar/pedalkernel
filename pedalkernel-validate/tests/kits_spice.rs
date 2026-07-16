@@ -300,16 +300,25 @@ fn bootstrap_sunflower_golden() {
 
 /// Deck positions: Clean=0.0, Fuzz=1.0, Bias=0.5, Sundial=0.5, Volume=1.0.
 ///
-/// IGNORED (honest engine gap, measured 2026-07-15): the compiled pedal is
-/// SILENT (WDF RMS < 1e-6 V vs golden 0.257 V) at every control setting
-/// probed (Volume 0/0.5/1 × Fuzz 0.5/1). The public fuzz_face example works,
-/// so the gap is specific to this faithful Sunface rendition — suspects are
-/// the series CLEAN rheostat at the input, the two-rheostat collector chain,
-/// and the classic FF output tap at the R4/SUNDIAL junction (node A) rather
-/// than the collector. Un-ignore once the engine produces audio here; the
-/// ngspice golden is already committed.
+/// STILL IGNORED — but the DC-bias half of the gap is now FIXED
+/// (pedalkernel-onu2, DC-closure edge set). Before: Q2's collector chain
+/// (`R3→BIAS→SUNDIAL→R4→rail`) lived in the downstream flow group, invisible
+/// to the group-local DC solve, so Q2 floated on gmin and the homotopy
+/// converged a saturated artifact (`PK_BIAS_QPOINT_DEBUG`: Q2 vbe 0.192 /
+/// vce 0.0036 V). After: the whole DC-closure is solved — Q2 vbe 0.152 /
+/// |vce| ≈ 5.68 V (matching ngspice's `.op` |vce| ≈ 6.1 V under the PNP-mirror
+/// convention), Q1 conducting.
+///
+/// REMAINING gap (OUT OF SCOPE for onu2, GAP 2 secondary on pedalkernel-a5ho):
+/// with the series CLEAN rheostat at the input, the MultiNL is driven via an
+/// adapted boundary-VS whose `s_nl_adapted` is ≈ 2.007× the in-node-injection
+/// derivation (`rigid/general.rs derive_scattering`, factor-2). The overdriven
+/// Ge BE junction rectifies and the coupling caps decay the output to ~1e-4 V
+/// RMS within ~100 ms — measured 2026-07-15: WDF RMS < 1e-3 V vs golden
+/// 0.257 V, gap ≈ −75 dB. Un-ignore once the adapted-port vs in-node injection
+/// derivations are reconciled; the ngspice golden is already committed.
 #[test]
-#[ignore = "engine gap: compiled Sunflower is silent at all control settings (golden RMS 0.257 V) — see doc comment"]
+#[ignore = "engine gap (post-onu2): DC bias now correct (Q2 |vce| ≈ 5.68 V), but the adapted-port injection factor-2 issue (GAP 2 secondary, not onu2) still decays output to ~1e-4 V vs golden 0.257 V — see doc comment"]
 fn sunflower_wdf_vs_spice() {
     run_wdf_vs_spice(
         "sunflower",
@@ -371,16 +380,41 @@ fn bootstrap_uberdrive_golden() {
 
 /// Deck positions: Drive/Tone/Volume = 0.5 (all B-taper, mids exact).
 ///
-/// IGNORED (honest engine gap, measured 2026-07-15): compile emits
-/// "injection guard [general-MNA]: group has boundary nodes but none is
-/// reachable from the global input — adapted input port falls back to the
-/// device input pin (mna#1[Q2.base,C8.b,R13.a])" and the output is SILENT
-/// (WDF RMS < 1e-6 V vs golden 0.519 V). The volume-pot wiper →R12→C8→ Q2
-/// output-follower crossing is not routed by the signal-flow layer — same
-/// family as the WiperDivider/straddling-pot work. Un-ignore once the
-/// follower group receives signal; golden committed.
+/// STILL IGNORED — three of the four GAP-4b defects are now FIXED
+/// (pedalkernel-xki7); a FOURTH root cause (serial stage ORDERING of the
+/// newly-reachable output follower) remains and is out of xki7's scope. Layered
+/// history:
+///  - DC bias FIXED (pedalkernel-onu2): Q1/Q2 conduct at ngspice's `.op`
+///    (Q1 vbe 0.613 / vce 5.42, Q2 vbe 0.611 / vce 5.70; `PK_BIAS_QPOINT_DEBUG`).
+///  - Injection routing FIXED (pedalkernel-xki7): the injection guard
+///    "group has boundary nodes but none reachable" warning is GONE. Defect 1
+///    (cross the op-amp CONTROL pin in the boundary-reachability metric) makes
+///    `C7.b/R11.a` reachable (dist 8); Defect 2 (`boundary_supersedes_amp_pin`)
+///    lands the adapted-VS injection on that boundary instead of the Q2.base
+///    device pin, so the R11/VOLUME/R12/C8 volume network is no longer bypassed;
+///    Defect 3 (`pot_wiper_feeds_active_input` traces wiper→R12→C8→base through
+///    the series R/C chain) makes the Volume pot a live wiper-divider candidate.
+///  - ORDERING FIXED (pedalkernel-0lsv, GAP 4c): the Q2 output-follower group is
+///    now re-slotted OUT of the MAX-band via a per-group control-crossing retry
+///    (spqr_build `compute_group_flow_distances`) and reads its input from
+///    `node_signals` at the resolved boundary (processor.rs MultiNl injection
+///    read). Debug-trace confirms: follower ordered AFTER the tone stage and
+///    reading node C7.b (was serial in=0.0). The global ordering metric is
+///    UNCHANGED (screamer/sd1/muff byte-identical).
+///  - STILL BLOCKED — TWO independent pre-existing causes surfaced by the fix:
+///    (a) the IC2 active TONE stage compiles to a passive StateSpace whose op-amp
+///        nullor is not modelled, so it extracts 0 V at IC2.out — the follower is
+///        now correctly wired to a source that is itself dead (measured
+///        ss_output=0 for a real input). Active-opamp-as-passive-StateSpace; a
+///        DIFFERENT root cause than the follower ordering, out of 0lsv scope.
+///    (b) injection MAGNITUDE: DESIGN-E/F's general.rs VS-port adaptation (the
+///        ~2x fix) was MEASURED to be a net regression (halves inverting-amp gain,
+///        breaks mna_accuracy/tree_build/wdf_asymmetric_diodes) and was reverted.
+///    WDF RMS ≈ 1e-4 V vs golden 0.519 V (unchanged — blocked by (a)). Un-ignore
+///    once the tone stage models the op-amp and the injection magnitude is fixed
+///    with a gate that does not regress inverting amps; golden committed.
 #[test]
-#[ignore = "engine gap: Q2 output-follower MNA group unreachable from input (injection guard), output silent — see doc comment"]
+#[ignore = "engine gap (post-0lsv): follower now ORDERED after the tone stage + reads its boundary (GAP 4c fixed), but the IC2 active tone stage compiles to a passive StateSpace that extracts 0 V (op-amp nullor unmodelled) so the follower's source is dead; injection-magnitude fix reverted as a net regression → output ~1e-4 V — see doc comment"]
 fn uberdrive_wdf_vs_spice() {
     run_wdf_vs_spice(
         "uberdrive",
@@ -404,14 +438,28 @@ fn bootstrap_little_green_scream_machine_golden() {
 
 /// Deck positions: Drive = 1.0 (taper-exact extreme), Tone/Volume = 0.5.
 ///
-/// IGNORED (honest engine gap, measured 2026-07-15): same injection-guard
-/// warning as the UberDrive (mna#1[C8.b,R12.a,Q2.base] unreachable from the
-/// global input) and the output is SILENT (WDF RMS < 1e-6 V vs golden
-/// 0.364 V). The TS808/SD-1 output follower behind the volume pot is the
-/// shared unsupported crossing. Un-ignore once the follower group receives
-/// signal; golden committed.
+/// STILL IGNORED — same trajectory as the UberDrive: DC bias FIXED (onu2), the
+/// three injection defects FIXED (pedalkernel-xki7), a FOURTH ordering root
+/// cause remains.
+///  - Bias (onu2): Q2 conducts at ngspice's `.op` (vbe 0.613 / vce 5.43).
+///  - Injection (xki7): the injection guard warning is GONE. The LGSM output
+///    coupling is `VOLUME.w → C8 → Q2.base` (cap-first, a single series C); the
+///    Defect-3 chain trace now recognizes it, and Defects 1+2 land injection on
+///    the `VOLUME.a/R11.b` boundary rather than the Q2.base pin.
+///  - ORDERING FIXED (pedalkernel-0lsv, GAP 4c): the Q2 output-follower is now
+///    re-slotted out of the MAX-band and reads its input from `node_signals` at
+///    the `VOLUME.a/R11.b` boundary (R11 publishes). Debug-trace confirms the
+///    follower reads a non-zero, growing injected value (was serial in=0.0).
+///  - STILL BLOCKED — injection MAGNITUDE. With the follower wired, the injected
+///    level is ~40 dB below golden. DESIGN-E/F's general.rs VS-port adaptation
+///    (the ~2x magnitude fix) DID lift LGSM ~35× in a probe (RMS 1e-4 → 3.5e-3 V,
+///    gap −80 → −40 dB) but was MEASURED to be a net regression elsewhere
+///    (halves inverting-amp gain, breaks mna_accuracy/tree_build/
+///    wdf_asymmetric_diodes — all green on base) and was reverted. WDF RMS ≈
+///    1e-4 V vs golden 0.364 V. Un-ignore once the injection magnitude is fixed
+///    with a gate that does not regress inverting-amp groups; golden committed.
 #[test]
-#[ignore = "engine gap: Q2 output-follower MNA group unreachable from input (injection guard), output silent — see doc comment"]
+#[ignore = "engine gap (post-0lsv): follower now ORDERED after the tone stage + reads the VOLUME.a/R11.b boundary (GAP 4c fixed, non-zero injected value), but the injection MAGNITUDE is ~40 dB low; DESIGN-E/F's VS-port adaptation (which lifted LGSM ~35×) was reverted as a net regression on inverting amps → output ~1e-4 V — see doc comment"]
 fn little_green_scream_machine_wdf_vs_spice() {
     run_wdf_vs_spice(
         "little_green_scream_machine",

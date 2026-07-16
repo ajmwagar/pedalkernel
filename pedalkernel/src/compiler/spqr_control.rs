@@ -184,67 +184,86 @@ fn pot_wiper_feeds_active_input(pedal: &PedalDef, comp_id: &str) -> bool {
         matches!(pin, Pin::ComponentPin { pin, .. } if ACTIVE_INPUT_PINS.contains(&pin.as_str()))
     };
 
-    // Collect every electrical node the wiper sits on (the wiper net's pins).
-    let wiper_is = |pin: &Pin| -> bool {
-        matches!(pin, Pin::ComponentPin { component, pin }
-            if component == comp_id && (pin == "w" || pin == "wiper"))
-    };
-
-    // Direct: wiper net also contains an active control input.
-    let direct = pedal.nets.iter().any(|net| {
-        let pins = core::iter::once(&net.from).chain(net.to.iter());
-        let has_wiper = core::iter::once(&net.from)
-            .chain(net.to.iter())
-            .any(wiper_is);
-        has_wiper && pins.clone().any(is_active_input)
-    });
-    if direct {
-        return true;
-    }
-
-    // Through a single series resistor (e.g. a grid-stopper between wiper and
-    // grid). Find resistors sharing the wiper net, then check if their other
-    // pin shares a net with an active control input.
-    let resistor_pin_on_wiper_net: Vec<(String, String)> = pedal
-        .nets
-        .iter()
-        .filter(|net| {
-            core::iter::once(&net.from)
-                .chain(net.to.iter())
-                .any(wiper_is)
-        })
-        .flat_map(|net| core::iter::once(&net.from).chain(net.to.iter()))
-        .filter_map(|pin| match pin {
-            Pin::ComponentPin { component, pin } => {
-                let is_resistor = pedal
-                    .components
-                    .iter()
-                    .find(|c| &c.id == component)
-                    .map(|c| c.kind.type_tag() == "resistor")
-                    .unwrap_or(false);
-                if is_resistor {
-                    let other = if pin == "a" { "b" } else { "a" };
-                    Some((component.clone(), other.to_string()))
-                } else {
-                    None
+    // Every pin sharing a net with `pin` (the electrical node it sits on).
+    let net_peers = |pin: &Pin| -> Vec<Pin> {
+        let mut peers: Vec<Pin> = Vec::new();
+        for net in &pedal.nets {
+            let all: Vec<&Pin> = core::iter::once(&net.from).chain(net.to.iter()).collect();
+            if all.iter().any(|p| *p == pin) {
+                for &p in &all {
+                    if p != pin && !peers.contains(p) {
+                        peers.push(p.clone());
+                    }
                 }
             }
-            _ => None,
-        })
-        .collect();
+        }
+        peers
+    };
 
-    resistor_pin_on_wiper_net.iter().any(|(rcomp, rpin)| {
-        pedal.nets.iter().any(|net| {
-            let touches_r = core::iter::once(&net.from)
-                .chain(net.to.iter())
-                .any(|pin| matches!(pin, Pin::ComponentPin { component, pin }
-                    if component == rcomp && pin == rpin));
-            let has_active = core::iter::once(&net.from)
-                .chain(net.to.iter())
-                .any(is_active_input);
-            touches_r && has_active
+    // If a pin belongs to a 2-terminal SERIES passive (resistor or cap), return
+    // the OTHER terminal of that element — the far end of the series link. `None`
+    // for active-device pins, pot pins, 3+ terminal parts, or unknown ids. The
+    // wiper→base coupling is a chain of such series R/C (uberdrive
+    // wiper→R12→C8→base, lgsm wiper→C8→base — GAP 4b, pedalkernel-xki7).
+    let series_far_pin = |pin: &Pin| -> Option<Pin> {
+        let Pin::ComponentPin { component, pin: pn } = pin else {
+            return None;
+        };
+        let comp = pedal.components.iter().find(|c| &c.id == component)?;
+        let tag = comp.kind.type_tag();
+        if tag != "resistor" && tag != "capacitor" {
+            return None;
+        }
+        // 2-terminal a/b element: the far terminal is the opposite lug.
+        let other = match pn.as_str() {
+            "a" => "b",
+            "b" => "a",
+            _ => return None,
+        };
+        Some(Pin::ComponentPin {
+            component: component.clone(),
+            pin: other.to_string(),
         })
-    })
+    };
+
+    // BFS from the wiper node across series R/C chains; succeed on reaching an
+    // active control input. Frontier holds NODE-representative pins (any pin on a
+    // node); we expand to the node's peers, then hop each peer that is a series
+    // R/C terminal to its far terminal (a new node), bounded by `visited`.
+    let wiper = Pin::ComponentPin {
+        component: comp_id.to_string(),
+        pin: "w".to_string(),
+    };
+    let wiper_alt = Pin::ComponentPin {
+        component: comp_id.to_string(),
+        pin: "wiper".to_string(),
+    };
+
+    let mut visited: Vec<Pin> = Vec::new();
+    let mut frontier: Vec<Pin> = vec![wiper.clone(), wiper_alt.clone()];
+    // Guard against pathological nets; the corpus chains are ≤ a few hops.
+    for _hop in 0..8 {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next: Vec<Pin> = Vec::new();
+        for start in &frontier {
+            for peer in net_peers(start) {
+                if is_active_input(&peer) {
+                    return true;
+                }
+                // Continue only through a series R/C to its far terminal.
+                if let Some(far) = series_far_pin(&peer) {
+                    if !visited.contains(&far) {
+                        visited.push(far.clone());
+                        next.push(far);
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    false
 }
 
 /// Find every stage that owns a pot and create ONE coordinated binding.

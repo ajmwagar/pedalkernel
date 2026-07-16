@@ -16,6 +16,7 @@
 //! 7. `create_nl_devices()` — NlDeviceKind / BjtTwoPort groups
 
 use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use super::super::classify::NonlinearKind;
 use super::super::component::EdgeKind;
@@ -622,11 +623,47 @@ fn build_general_mna_from_edges_inner(
             && nl_comp_labels.iter().any(|l| l == &h.device_label)
     });
     if !has_named_bjt_hint {
-        if let Some(node_dc) = super::super::bias::solve_bjt_group_dc_qpoint(
+        // pedalkernel-onu2 (RCA GAPs 2a+4a on pedalkernel-a5ho): the DC solve
+        // must see the whole DC-CLOSURE of the group's BJT terminals, not the
+        // group-local edges alone — a bias network split across flow groups
+        // (sunflower's downstream collector chain, the uberdrive/LGSM `vref`
+        // divider) otherwise floats on gmin and the homotopy converges a
+        // saturated / cutoff artifact. This mirrors the blockwise caller,
+        // which already passes the whole plan's edges
+        // (`solve_blockwise_bjt_group_qpoint`). vref-class nodes crossed by
+        // the closure (ac-ground-classified bias dividers) are solved as
+        // interior instead of a 0 V rail. A group whose bias network is
+        // group-local gets the exact legacy edge list + empty overrides
+        // (closure adds nothing) and stays bit-for-bit identical.
+        let (dc_closure_edges, vref_overrides) = super::super::bias::bjt_dc_closure_edges(
             &nl_kinds,
             all_edges,
             graph,
             supply_voltage,
+        );
+        // The single-BJT seed-BAKE (below, in `apply_bjt_dc_qpoint`) is gated
+        // NARROWLY on a vref-class override actually being needed — NOT merely
+        // on the closure having grown. A grown closure alone is the common case
+        // (any single CE stage whose collector load returns to a rail through a
+        // pot/resistor in another flow group — e.g. the Big Muff's Sustain-pot
+        // Q3 collector chain): there the group-local linear vcc-injection
+        // `dc_bias` ALREADY biases the stage functionally, and overriding it
+        // with the (correct-but-near-saturation) closure op-point kills the
+        // small-signal gain the runtime relies on. The vref-follower case (GAP
+        // 4a) is different in kind: the base sits at a bypassed-divider virtual
+        // ground that is BOTH in another flow group AND unrepresentable in the
+        // runtime stage's own MNA, so without baking the seed the follower can
+        // only ever read cutoff. `vref_overrides` non-empty is precisely that
+        // signal. (The DC-closure EDGE SET improvement still applies to every
+        // group — it only fixes what the solve SEES; the bake gate decides
+        // whether we overwrite a working linear bias with it.)
+        let bake_cross_group_seed = !vref_overrides.is_empty();
+        if let Some(node_dc) = super::super::bias::solve_bjt_group_dc_qpoint_with_overrides(
+            &nl_kinds,
+            &dc_closure_edges,
+            graph,
+            supply_voltage,
+            &vref_overrides,
         ) {
             apply_bjt_dc_qpoint(
                 &mut stage,
@@ -635,6 +672,7 @@ fn build_general_mna_from_edges_inner(
                 &nl_kinds,
                 &reactive_edges,
                 graph,
+                bake_cross_group_seed,
             );
         }
     }
@@ -1432,8 +1470,38 @@ fn build_wdf_ports(
                     _ => None,
                 }
             });
-            match (amp_pin, boundary.winner) {
-                (Some(m), _) => {
+            // Defect-2 precedence (pedalkernel-xki7): a reachable input BOUNDARY
+            // supersedes the amplifier device pin when injecting at the pin
+            // would bypass an in-group passive signal network (a BJT/FET
+            // follower fed through a volume divider — uberdrive/lgsm). Scoped
+            // to leave calibrated tube/photocoupler groups on the device pin.
+            let amp_pin_node = edge_indices.iter().find_map(|&eidx| {
+                let comp = &graph.components[graph.edges[eidx].comp_idx];
+                match comp.kind.signal_terminals() {
+                    super::super::component::SignalTerminals::Amplifier { input, .. } => {
+                        graph.node_names.get(&format!("{}.{}", comp.id, input)).copied()
+                    }
+                    _ => None,
+                }
+            });
+            let boundary_wins = match (amp_pin_node, boundary.winner, boundary.winner_node) {
+                (Some(pin_n), Some((bm, _)), Some(bnode)) => {
+                    boundary_supersedes_amp_pin(edge_indices, graph, pin_n, bnode)
+                        .then_some(bm)
+                }
+                _ => None,
+            };
+            match (boundary_wins, amp_pin, boundary.winner) {
+                (Some(bm), _, _) => {
+                    if inject_debug {
+                        eprintln!(
+                            "[PK_INJECT] branch=boundary-supersedes-amp-pin -> {}",
+                            name_of(Some(bm))
+                        );
+                    }
+                    Some(bm)
+                }
+                (None, Some(m), _) => {
                     if inject_debug {
                         eprintln!("[PK_INJECT] branch=amplifier-pin -> {}", name_of(Some(m)));
                     }
@@ -1458,13 +1526,13 @@ fn build_wdf_ports(
                     }
                     Some(m)
                 }
-                (None, Some((m, _))) => {
+                (None, None, Some((m, _))) => {
                     if inject_debug {
                         eprintln!("[PK_INJECT] branch=boundary-fallback -> {}", name_of(Some(m)));
                     }
                     Some(m)
                 }
-                (None, None) => {
+                (None, None, None) => {
                     report_unverified_injection("<none>", boundary.has_boundary_nodes)?;
                     None
                 }
@@ -1558,6 +1626,9 @@ struct InputBoundary {
     /// `(mna_index, is_transformer_winding)` of the input-nearest boundary
     /// node, if any is reachable from `in` under the directed metric.
     winner: Option<(usize, bool)>,
+    /// The graph `NodeId` of the winner (for tracing the in-group passive path
+    /// from the boundary to the amplifier pin — Defect-2 precedence).
+    winner_node: Option<NodeId>,
     /// The group has at least one boundary node (reachable or not).
     has_boundary_nodes: bool,
 }
@@ -1582,7 +1653,13 @@ fn find_input_boundary_node(
         }
     }
 
-    let dist = super::super::signal_flow::directed_signal_distances_from_in(graph);
+    // Injection-boundary reachability crosses amplifier control pins (op-amp
+    // `pos`) forward (pedalkernel-xki7, GAP 4b): a non-inverting op-amp is
+    // otherwise a directed dead-end and the downstream output-follower boundary
+    // is never reachable. Tube/BJT groups have no control pin, so this metric is
+    // byte-identical to the stage-ordering metric for them (LA-2A/pultec/neve
+    // unaffected); only op-amp-fed groups (uberdrive/lgsm) gain reachability.
+    let dist = super::super::signal_flow::boundary_reachable_distances_from_in(graph);
 
     // Transformer-winding ENTRY nodes: winding node in this MNA driven from
     // the outside — some sibling winding node of the same transformer lies
@@ -1639,6 +1716,7 @@ fn find_input_boundary_node(
     if boundary.is_empty() {
         return InputBoundary {
             winner: None,
+            winner_node: None,
             has_boundary_nodes: false,
         };
     }
@@ -1660,15 +1738,102 @@ fn find_input_boundary_node(
             boundary.iter().map(|n| dist.get(n)).collect::<Vec<_>>()
         );
     }
-    let winner = boundary
+    let winner_pick = boundary
         .iter()
         .filter_map(|&n| dist.get(&n).map(|&d| (d, n)))
         .min()
-        .and_then(|(_, n)| node_to_mna(n).map(|m| (m, winding_entry.contains(&n))));
+        .map(|(_, n)| n);
+    let winner =
+        winner_pick.and_then(|n| node_to_mna(n).map(|m| (m, winding_entry.contains(&n))));
     InputBoundary {
         winner,
+        winner_node: winner_pick.filter(|&n| node_to_mna(n).is_some()),
         has_boundary_nodes: true,
     }
+}
+
+/// Defect-2 precedence (pedalkernel-xki7): does the reachable input BOUNDARY
+/// node supersede the amplifier device pin as the injection target?
+///
+/// The legacy order (`(Some(m), _) => amplifier-pin`) always injected at the
+/// device's signal input pin even when a boundary node was forward-reachable
+/// from `in`. For a BJT emitter-follower output stage whose signal enters at an
+/// upstream boundary and passes THROUGH an in-group passive network (the volume
+/// pot + coupling: uberdrive `R11 -> VOLUME -> R12 -> C8 -> Q2.base`,
+/// lgsm `VOLUME -> C8 -> Q2.base`) to reach the base, pin injection silently
+/// bypasses that whole network — the Volume knob is stamped yet inert and the
+/// stage is driven by an unattenuated copy of its own input (or, pre-Defect-1,
+/// nothing at all). Injecting at the boundary instead lets the in-group MNA
+/// carry the divider.
+///
+/// TRUE iff ALL hold:
+/// 1. the amplifier input pin (`amp_pin_node`) is reachable from the boundary
+///    node through IN-GROUP PASSIVE edges only — so pin injection provably
+///    bypasses an in-group signal network, AND
+/// 2. the group's amplifier is NOT a vacuum tube and the group carries NO
+///    photocoupler variable-resistor. Tube stages (LA-2A V1..V4) and
+///    photocoupler cells were CALIBRATED against pin injection: their GR loop
+///    and the straddling-Gain-pot WiperDivider contract assume the device pin
+///    (general.rs photocoupler exclusion / pedalkernel-n0yy). Re-basing them to
+///    a boundary node re-scales the whole loop (measured +16.6 -> +5.0 dB on
+///    the LA-2A) — out of scope here. The BJT/FET follower classes carry no
+///    such calibration, so the physically-correct boundary injection is safe.
+fn boundary_supersedes_amp_pin(
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    amp_pin_node: NodeId,
+    boundary_node: NodeId,
+) -> bool {
+    let edge_set: HashSet<usize> = edge_indices.iter().copied().collect();
+
+    // (2) calibration guard: skip tube and photocoupler groups.
+    let calibrated_class = edge_indices.iter().any(|&eidx| {
+        let comp = &graph.components[graph.edges[eidx].comp_idx];
+        let tag = comp.kind.type_tag();
+        tag == "triode"
+            || tag == "pentode"
+            || tag == "variable-mu triode"
+            || tag == "photocoupler"
+    });
+    if calibrated_class {
+        return false;
+    }
+
+    // (1) trace IN-GROUP passive edges from the boundary node; reach the amp
+    //     pin? Passive-only so we never cross the device itself (which would
+    //     make every group trivially "reachable" and defeat the point).
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    visited.insert(boundary_node);
+    let mut queue: VecDeque<NodeId> = VecDeque::new();
+    queue.push_back(boundary_node);
+    while let Some(node) = queue.pop_front() {
+        if node == amp_pin_node {
+            return true;
+        }
+        for &eidx in &edge_set {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            if !matches!(
+                comp.kind.signal_terminals(),
+                super::super::component::SignalTerminals::Passive
+            ) {
+                continue;
+            }
+            let next = if e.node_a == node {
+                Some(e.node_b)
+            } else if e.node_b == node {
+                Some(e.node_a)
+            } else {
+                None
+            };
+            if let Some(n) = next {
+                if visited.insert(n) {
+                    queue.push_back(n);
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Step 5: Derive scattering matrix + iterative Thevenin adaptation.
@@ -1705,6 +1870,16 @@ fn derive_scattering(
     // physical rp (not adapted). Tight tolerance + more iters so the result no
     // longer depends on the seed; low-Z ports (e.g. an emitter follower) are
     // allowed to adapt below 1Ω.
+    // pedalkernel-0lsv (GAP 4c) — NOT adapting the input VS port. DESIGN-E/F
+    // proposed ALSO adapting the input (voltage-source) port at index n_total-1
+    // here to correct a claimed ~2x injection inflation into the output follower.
+    // MEASURED to be a net regression: adapting the VS port halves the small-
+    // signal gain of a standard inverting amp (Rf/Ri=10 -> 4.97) and shifts the
+    // asymmetric-diode clip levels — breaking mna_accuracy / tree_build::
+    // adaptor_gain / voltage_extraction::wdf_asymmetric_diodes (all green on the
+    // base). The VS port therefore stays UNADAPTED (pinned at the r_adapted
+    // placeholder), byte-identical to the base. The follower's injection MAGNITUDE
+    // is a separate, level-only concern (already-ignored kits) — a follow-up.
     let adapt_ports: Vec<usize> = (0..n_nl).collect();
     for _iter in 0..40 {
         let mut needs_recompute = false;
@@ -2257,7 +2432,15 @@ fn assemble_multi_nl_stage(
         debug_label: String::new(),
         bypass_serial: false,
         transformer_gain: 1.0,
-        injection_node_id: graph.in_node,
+        // Default = usize::MAX: the stage reads the SERIAL chain signal (the
+        // runtime injection read at processor.rs is gated on `!= usize::MAX`).
+        // Only an explicitly-wired output follower (spqr_build GAP-4c pass) sets a
+        // real boundary node here so it reads that node from `node_signals`
+        // instead of the serial 0.0 it would otherwise get in the MAX ordering
+        // band. Previously this was `graph.in_node`, which was never read; making
+        // it a sentinel keeps the general-MNA read path on `signal` for every
+        // non-follower stage (LA-2A/pultec/neve/tb303 byte-identical).
+        injection_node_id: usize::MAX,
         output_node_id: graph.out_node,
         recompute_pending: false,
         veb_bias_offset: 0.0,
@@ -2498,6 +2681,7 @@ fn apply_bjt_dc_qpoint(
     nl_kinds: &[NonlinearKind],
     reactive_edges: &[(usize, OnePortKind)],
     graph: &CircuitGraph,
+    bake_cross_group_seed: bool,
 ) {
     let n_nl = stage.dc_bias.len();
     if n_nl == 0 || nl_terminals.len() < n_nl {
@@ -2617,6 +2801,21 @@ fn apply_bjt_dc_qpoint(
     // the runtime holds it; seeding/re-inverting would only perturb a working
     // set-point.  So single-BJT groups are left untouched here — byte-identical to
     // the pre-consolidation default (which never ran a BJT seed).
+    //
+    // EXCEPTION (pedalkernel-onu2, RCA GAP 4a): a single-BJT group whose base
+    // sits at a vref-class virtual ground (`bake_cross_group_seed` — set by the
+    // caller ONLY when a vref-class interior override was needed: the bypassed
+    // bias divider is in another flow group AND is unrepresentable in the
+    // runtime stage's own MNA, e.g. the uberdrive/LGSM `vref`-biased follower).
+    // There the premise above fails on both counts: the linear vcc-injection
+    // over the group-local MNA never saw the divider, and the runtime stage
+    // structurally CANNOT see it, so without baking the closure-solved op-point
+    // via `dc_qpoint_v` + `apply_dc_qpoint_seed` the follower only ever reads
+    // cutoff. This is deliberately NOT triggered by a merely-grown closure (a
+    // CE stage whose collector load returns to a rail through another group —
+    // the Big Muff Q3 Sustain chain): that stage's group-local linear `dc_bias`
+    // already biases it, and overwriting it with the near-saturation closure op
+    // would kill its small-signal gain.
     let n_bjt = nl_kinds
         .iter()
         .filter(|k| {
@@ -2628,7 +2827,7 @@ fn apply_bjt_dc_qpoint(
             )
         })
         .count();
-    if n_bjt < 2 {
+    if n_bjt < 2 && !bake_cross_group_seed {
         return;
     }
 
