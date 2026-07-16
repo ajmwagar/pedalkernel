@@ -437,7 +437,13 @@ fn build_general_mna_from_edges_inner(
     }
 
     // Step 4: Build WDF ports
-    let (mut ports, port_node_pairs, passive_children, mut nl_port_resistances) = build_wdf_ports(
+    let (
+        mut ports,
+        port_node_pairs,
+        passive_children,
+        mut nl_port_resistances,
+        adapt_input_vs_port,
+    ) = build_wdf_ports(
         &nl_terminals,
         &reactive_edges,
         &synthetic_one_ports,
@@ -502,8 +508,14 @@ fn build_general_mna_from_edges_inner(
     }
 
     // Step 5: Derive scattering matrix + Thevenin adaptation
-    let (scattering, vcc_injection_vec) =
-        derive_scattering(&mna, &mut ports, &mut nl_port_resistances, n_nl, vcc_vs_idx)?;
+    let (scattering, vcc_injection_vec) = derive_scattering(
+        &mna,
+        &mut ports,
+        &mut nl_port_resistances,
+        n_nl,
+        vcc_vs_idx,
+        adapt_input_vs_port,
+    )?;
 
     let n_total = ports.len();
 
@@ -1339,6 +1351,14 @@ fn build_wdf_ports(
         Vec<WdfPortTerminals>,
         Vec<MnaOnePort>,
         Vec<f64>,
+        // `true` only when the adapted input (VS) port landed on an input
+        // BOUNDARY node that SUPERSEDED the amplifier device pin — the
+        // divider-fed high-Z follower case (uberdrive/lgsm). This is the sole
+        // condition under which `derive_scattering` also Thevenin-adapts the
+        // input VS port (see the gate at pedalkernel-ayjt). `false` for
+        // `in_node` / `amplifier-pin` / `boundary-fallback` injections, which
+        // keep the VS port pinned at the placeholder (byte-identical to base).
+        bool,
     ),
     String,
 > {
@@ -1447,6 +1467,10 @@ fn build_wdf_ports(
             .collect();
         format!("mna#{m}[{}]", names.join(","))
     };
+    // Set true ONLY when injection resolves via the boundary-supersedes-amp-pin
+    // arm below — the divider-fed high-Z follower topology. Gates the VS-port
+    // Thevenin adaptation in `derive_scattering`.
+    let mut injection_superseded_amp_pin = false;
     let injection_mna = if let Some(m) = node_to_mna(graph.in_node) {
         if inject_debug {
             eprintln!("[PK_INJECT] branch=in_node -> {}", name_of(Some(m)));
@@ -1499,6 +1523,12 @@ fn build_wdf_ports(
                             name_of(Some(bm))
                         );
                     }
+                    // Divider-fed high-Z follower: a reachable input boundary
+                    // superseded the amplifier device pin because injecting at
+                    // the pin would bypass an in-group passive divider. This is
+                    // the ONLY injection topology for which the VS port is also
+                    // Thevenin-adapted (magnitude fix), gated in derive_scattering.
+                    injection_superseded_amp_pin = true;
                     Some(bm)
                 }
                 (None, Some(m), _) => {
@@ -1551,6 +1581,7 @@ fn build_wdf_ports(
         port_node_pairs,
         passive_one_ports,
         nl_port_resistances,
+        injection_superseded_amp_pin,
     ))
 }
 
@@ -1843,6 +1874,10 @@ fn derive_scattering(
     nl_port_resistances: &mut [f64],
     n_nl: usize,
     vcc_vs_idx: Option<usize>,
+    // Gate for the input VS-port Thevenin adaptation (pedalkernel-ayjt). Only
+    // `true` for divider-fed high-Z followers (injection via the
+    // boundary-supersedes-amp-pin arm — uberdrive/lgsm). See comment below.
+    adapt_input_vs_port: bool,
 ) -> Result<(Vec<f64>, Option<Vec<f64>>), String> {
     let n_total = ports.len();
     let mut vcc_injection: Option<Vec<f64>> = None;
@@ -1870,17 +1905,32 @@ fn derive_scattering(
     // physical rp (not adapted). Tight tolerance + more iters so the result no
     // longer depends on the seed; low-Z ports (e.g. an emitter follower) are
     // allowed to adapt below 1Ω.
-    // pedalkernel-0lsv (GAP 4c) — NOT adapting the input VS port. DESIGN-E/F
-    // proposed ALSO adapting the input (voltage-source) port at index n_total-1
-    // here to correct a claimed ~2x injection inflation into the output follower.
-    // MEASURED to be a net regression: adapting the VS port halves the small-
+    // pedalkernel-ayjt (GAP 4c magnitude) — GATED input-VS-port adaptation.
+    // DESIGN-E/F proposed ALSO adapting the input (voltage-source) port at index
+    // n_total-1 to correct a ~2x injection inflation into the output follower.
+    // Applied UNCONDITIONALLY that is a net regression: it halves the small-
     // signal gain of a standard inverting amp (Rf/Ri=10 -> 4.97) and shifts the
     // asymmetric-diode clip levels — breaking mna_accuracy / tree_build::
     // adaptor_gain / voltage_extraction::wdf_asymmetric_diodes (all green on the
-    // base). The VS port therefore stays UNADAPTED (pinned at the r_adapted
-    // placeholder), byte-identical to the base. The follower's injection MAGNITUDE
-    // is a separate, level-only concern (already-ignored kits) — a follow-up.
-    let adapt_ports: Vec<usize> = (0..n_nl).collect();
+    // base). Those groups inject via `in_node` / `amplifier-pin` /
+    // `boundary-fallback`; their VS port sits at a REAL matched source rp (the
+    // Thevenin source resistance of the driving network), so adapting it a second
+    // time double-counts the impedance and mis-scales the gain.
+    //
+    // The divider-fed high-Z FOLLOWER case (uberdrive/lgsm) is different: it
+    // injects via the `boundary-supersedes-amp-pin` arm (`adapt_input_vs_port`),
+    // where the VS port lands at an in-group divider boundary and was left pinned
+    // at the 1000Ω placeholder rp — NOT the driving-point impedance the follower
+    // actually sees. Adapting S_ii -> 0 there sets the reference resistance to the
+    // real divider-source impedance, which is precisely what corrects the ~2x
+    // (measured ~35x lift on lgsm, RMS 1e-4 -> 3.5e-3 V). The gate is topological,
+    // not name-based: it fires iff the injection superseded the amplifier device
+    // pin because a reachable passive divider feeds a high-Z active input.
+    let adapt_ports: Vec<usize> = if adapt_input_vs_port {
+        (0..n_nl).chain(core::iter::once(n_total - 1)).collect()
+    } else {
+        (0..n_nl).collect()
+    };
     for _iter in 0..40 {
         let mut needs_recompute = false;
         for &i in &adapt_ports {

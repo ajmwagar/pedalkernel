@@ -431,20 +431,22 @@ fn bootstrap_uberdrive_golden() {
 ///    read). Debug-trace confirms: follower ordered AFTER the tone stage and
 ///    reading node C7.b (was serial in=0.0). The global ordering metric is
 ///    UNCHANGED (screamer/sd1/muff byte-identical).
-///  - STILL BLOCKED — TWO independent pre-existing causes surfaced by the fix:
-///    (a) the IC2 active TONE stage compiles to a passive StateSpace whose op-amp
-///        nullor is not modelled, so it extracts 0 V at IC2.out — the follower is
-///        now correctly wired to a source that is itself dead (measured
-///        ss_output=0 for a real input). Active-opamp-as-passive-StateSpace; a
-///        DIFFERENT root cause than the follower ordering, out of 0lsv scope.
-///    (b) injection MAGNITUDE: DESIGN-E/F's general.rs VS-port adaptation (the
-///        ~2x fix) was MEASURED to be a net regression (halves inverting-amp gain,
-///        breaks mna_accuracy/tree_build/wdf_asymmetric_diodes) and was reverted.
-///    WDF RMS ≈ 1e-4 V vs golden 0.519 V (unchanged — blocked by (a)). Un-ignore
-///    once the tone stage models the op-amp and the injection magnitude is fixed
-///    with a gate that does not regress inverting amps; golden committed.
+///  - MAGNITUDE FIXED (pedalkernel-ayjt): the VS-port Thevenin adaptation is now
+///    GATED to the divider-fed high-Z follower topology (the
+///    `boundary-supersedes-amp-pin` injection arm), so it lifts the follower here
+///    too WITHOUT regressing inverting-amp/asymmetric-diode groups (mna_accuracy/
+///    tree_build/wdf_asymmetric_diodes stay green). UberDrive lifts to WDF RMS
+///    ≈ 4.4e-3 V (gap −30 dB).
+///  - STILL BLOCKED (out of ayjt scope) — the IC2 active TONE stage compiles to a
+///    passive StateSpace whose op-amp nullor is not modelled, so it extracts 0 V
+///    at IC2.out — the follower is now correctly wired, at the correct magnitude,
+///    to a source that is itself dead (measured ss_output=0 for a real input).
+///    Active-opamp-as-passive-StateSpace; a DIFFERENT root cause (F-tone), out of
+///    this bead's scope. WDF RMS ≈ 4.4e-3 V vs golden 0.519 V. Un-ignore once the
+///    tone stage models the op-amp nullor (or routes to feedback_opamp); golden
+///    committed.
 #[test]
-#[ignore = "engine gap (post-0lsv): follower now ORDERED after the tone stage + reads its boundary (GAP 4c fixed), but the IC2 active tone stage compiles to a passive StateSpace that extracts 0 V (op-amp nullor unmodelled) so the follower's source is dead; injection-magnitude fix reverted as a net regression → output ~1e-4 V — see doc comment"]
+#[ignore = "engine gap (post-ayjt): injection magnitude now FIXED (gated VS-port adaptation), but the IC2 active tone stage compiles to a passive StateSpace that extracts 0 V (op-amp nullor unmodelled) so the follower's source is dead → output ~4e-3 V vs golden 0.519 V; needs the F-tone StateSpace op-amp-nullor fix (out of ayjt scope) — see doc comment"]
 fn uberdrive_wdf_vs_spice() {
     run_wdf_vs_spice(
         "uberdrive",
@@ -468,9 +470,9 @@ fn bootstrap_little_green_scream_machine_golden() {
 
 /// Deck positions: Drive = 1.0 (taper-exact extreme), Tone/Volume = 0.5.
 ///
-/// STILL IGNORED — same trajectory as the UberDrive: DC bias FIXED (onu2), the
-/// three injection defects FIXED (pedalkernel-xki7), a FOURTH ordering root
-/// cause remains.
+/// UN-IGNORED (pedalkernel-ayjt): the injection MAGNITUDE is fixed. Trajectory:
+/// DC bias FIXED (onu2), the three injection defects FIXED (xki7), the follower
+/// ordering FIXED (0lsv), and now the injection magnitude FIXED (ayjt).
 ///  - Bias (onu2): Q2 conducts at ngspice's `.op` (vbe 0.613 / vce 5.43).
 ///  - Injection (xki7): the injection guard warning is GONE. The LGSM output
 ///    coupling is `VOLUME.w → C8 → Q2.base` (cap-first, a single series C); the
@@ -480,16 +482,21 @@ fn bootstrap_little_green_scream_machine_golden() {
 ///    re-slotted out of the MAX-band and reads its input from `node_signals` at
 ///    the `VOLUME.a/R11.b` boundary (R11 publishes). Debug-trace confirms the
 ///    follower reads a non-zero, growing injected value (was serial in=0.0).
-///  - STILL BLOCKED — injection MAGNITUDE. With the follower wired, the injected
-///    level is ~40 dB below golden. DESIGN-E/F's general.rs VS-port adaptation
-///    (the ~2x magnitude fix) DID lift LGSM ~35× in a probe (RMS 1e-4 → 3.5e-3 V,
-///    gap −80 → −40 dB) but was MEASURED to be a net regression elsewhere
-///    (halves inverting-amp gain, breaks mna_accuracy/tree_build/
-///    wdf_asymmetric_diodes — all green on base) and was reverted. WDF RMS ≈
-///    1e-4 V vs golden 0.364 V. Un-ignore once the injection magnitude is fixed
-///    with a gate that does not regress inverting-amp groups; golden committed.
+///  - MAGNITUDE FIXED (pedalkernel-ayjt): the follower injects via the
+///    `boundary-supersedes-amp-pin` arm, so its input VS port sat pinned at the
+///    1000Ω placeholder rp instead of the driving-point impedance. general.rs
+///    now GATES the VS-port Thevenin adaptation to exactly that divider-fed
+///    high-Z follower topology (leaving `in_node`/`amplifier-pin`/
+///    `boundary-fallback` groups byte-identical, so the mna_accuracy/tree_build/
+///    wdf_asymmetric_diodes suites stay green). LGSM lifts ~35× (WDF RMS
+///    1e-4 → 3.5e-3 V, gap −69 → −34 dB) — matching the DESIGN-E/F probe.
+///  - RESIDUAL (separate, out of ayjt scope): WDF RMS ≈ 3.5e-3 V vs golden
+///    ≈ 0.17 V (settled-window; full-signal golden 0.364 V), a residual ~34 dB
+///    gap NOT from injection magnitude — same family as the UberDrive dead tone
+///    StateSpace source (op-amp nullor unmodelled). Gate stays `None` (asserts
+///    not-silence) until that separate stage-source defect closes; the magnitude
+///    revival is locked in here so it cannot silently regress.
 #[test]
-#[ignore = "engine gap (post-0lsv): follower now ORDERED after the tone stage + reads the VOLUME.a/R11.b boundary (GAP 4c fixed, non-zero injected value), but the injection MAGNITUDE is ~40 dB low; DESIGN-E/F's VS-port adaptation (which lifted LGSM ~35×) was reverted as a net regression on inverting amps → output ~1e-4 V — see doc comment"]
 fn little_green_scream_machine_wdf_vs_spice() {
     run_wdf_vs_spice(
         "little_green_scream_machine",
