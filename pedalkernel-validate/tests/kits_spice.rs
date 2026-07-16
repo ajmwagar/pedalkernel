@@ -456,6 +456,50 @@ fn uberdrive_wdf_vs_spice() {
     );
 }
 
+/// White-box guard for the injection-island fix (pedalkernel-cu4f).
+///
+/// UberDrive's IC2 tone stage compiles to a StateSpace whose input voltage
+/// source was stamped on the GLOBAL `in` node — a conductive ISLAND (R1.a/R2.a
+/// dead-ends at R2, never reaching IC2's op-amp nullor). That left the stage's
+/// discrete input vector `b` ALL ZERO, so the stage was undriven. The compiler
+/// now guards the `graph.in_node` injection arm with a G-connectivity
+/// reachability test (`mna_builder.rs`) and falls through to the reachable
+/// upstream boundary (IC1.out→R8), so `b` becomes NONZERO.
+///
+/// This is NOT the whole story: the end-to-end `uberdrive_wdf_vs_spice` stays
+/// `#[ignore]`d because a SEPARATE upstream active-stage AC-gain collapse
+/// (pedalkernel-aikl) still dominates the −30 dB output gap. This test only
+/// locks in the injection sub-fix so it cannot silently regress.
+#[test]
+fn uberdrive_tone_stage_is_driven() {
+    use pedalkernel_rt::processor::Stage;
+
+    let source = skip_if_missing!(
+        load_pro_pedal_sub("pedals/kits/uberdrive.pedal"),
+        "pedals/kits/uberdrive.pedal"
+    );
+    let def = parse_pedal_file(&source).expect("parse uberdrive");
+    let proc = compile_pedal(&def, SR).expect("compile uberdrive");
+
+    // The IC2 tone stage is the StateSpace group containing the op-amp IC2.
+    // Its input vector `b` must be nonzero — an all-zero `b` means the stage's
+    // injection landed on a disconnected island and the stage is undriven.
+    let mut found = false;
+    for st in proc.stages.iter() {
+        if let Stage::StateSpace(ss) = st {
+            let sum_abs: f64 = ss.ss.b_vector.iter().map(|v| v.abs()).sum();
+            found = true;
+            assert!(
+                sum_abs > 1e-9,
+                "uberdrive tone StateSpace stage input vector b is all-zero \
+                 (sum|b| = {sum_abs:.3e}): injection resolved to a disconnected \
+                 island — the injection-reachability guard regressed"
+            );
+        }
+    }
+    assert!(found, "no StateSpace stage found in compiled uberdrive");
+}
+
 // ============================================================================
 // LITTLE GREEN SCREAM MACHINE (TS-808)
 // ============================================================================

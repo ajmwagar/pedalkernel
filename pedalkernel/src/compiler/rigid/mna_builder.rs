@@ -295,12 +295,131 @@ pub(super) fn build_mna(
         Some((node_to_mna(input_node), node_to_mna(output_node)))
     };
 
+    // Nullor (op-amp) MNA nodes present in this stage. The op-amp is stamped
+    // into the B/C/D voltage-source blocks (`stamp_vcvs`), NOT the G matrix, so
+    // the signal-path BFS below never crosses the device — reachability to a
+    // nullor node means "wired to the op-amp's pins through passives".
+    let stage_nullor_mnas: Vec<usize> = graph
+        .nullor_pins
+        .iter()
+        .filter(|rec| {
+            edge_indices
+                .iter()
+                .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+        })
+        .flat_map(|rec| [rec.pos_node, rec.neg_node, rec.out_node])
+        .filter_map(node_to_mna)
+        .collect();
+
+    // Reactive coupling edges (capacitors / inductors). These are stamped as
+    // `reactive_one_ports`, NOT into `g_matrix`, but a coupling cap IS a valid AC
+    // signal path (Sallen-Key HPF: `in → C1 → C2 → op-amp.pos`), so the
+    // reachability BFS below must cross them too. Collect the MNA node pairs.
+    let reactive_edges: Vec<(usize, usize)> = reactive_one_ports
+        .iter()
+        .filter_map(|op| match (op.terminals.pos, op.terminals.neg) {
+            (Some(p), Some(q)) => Some((p.get(), q.get())),
+            _ => None,
+        })
+        .filter(|&(p, q)| p < num_nodes && q < num_nodes && p != q)
+        .collect();
+
+    // Signal-path reachability from the nullor nodes: BFS over nonzero
+    // off-diagonal conductances in `mna.g_matrix` PLUS reactive coupling edges.
+    // Used to reject an injection candidate that sits on an ISLAND disconnected
+    // from the op-amp (uberdrive: the global `in` node R1.a/R2.a dead-ends at R2,
+    // never touching IC2's nullor — resistively OR reactively). The op-amp itself
+    // is stamped into B/C/D (`stamp_vcvs`), never the G matrix, so the BFS never
+    // crosses the device. A stage with NO nullor is always "reachable" (the guard
+    // is a no-op → passive/single-stage groups keep their exact prior injection).
+    let g_reachable_from_nullor = |candidate: usize| -> bool {
+        if stage_nullor_mnas.is_empty() {
+            return true;
+        }
+        let n = num_nodes;
+        let mut visited = vec![false; n];
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for &start in &stage_nullor_mnas {
+            if start < n && !visited[start] {
+                visited[start] = true;
+                queue.push_back(start);
+            }
+        }
+        while let Some(i) = queue.pop_front() {
+            if i == candidate {
+                return true;
+            }
+            for j in 0..n {
+                if j != i && !visited[j] && mna.g_matrix[i * n + j].abs() > 0.0 {
+                    visited[j] = true;
+                    queue.push_back(j);
+                }
+            }
+            for &(p, q) in &reactive_edges {
+                let other = if p == i {
+                    Some(q)
+                } else if q == i {
+                    Some(p)
+                } else {
+                    None
+                };
+                if let Some(o) = other {
+                    if !visited[o] {
+                        visited[o] = true;
+                        queue.push_back(o);
+                    }
+                }
+            }
+        }
+        candidate < n && visited[candidate]
+    };
+
+    // Mid-chain active stage rescue: pick the group's boundary terminal that IS
+    // conductively wired to the op-amp (G-reachable from a nullor node), that is
+    // not the group's output terminal, and that is most upstream by signal-flow
+    // distance. For uberdrive's IC2 tone stage the terminals are
+    // [in-island, 14, IC1.out→R8, …, follower-out]; only the true upstream
+    // boundary (IC1.out→R8) reaches the nullor, so it wins — while the global-`in`
+    // island (dead-ended at R2) and the downstream follower node are rejected.
+    let mid_chain_reachable_input = || -> Option<usize> {
+        if stage_nullor_mnas.is_empty() {
+            return None;
+        }
+        let out_terminal = mid_chain_terminals().and_then(|(_, out)| out);
+        let d_in = crate::compiler::signal_flow::bfs_distances_from_in_node(graph);
+        let terminals = crate::compiler::spqr_build::compute_group_terminals(
+            edge_indices,
+            graph,
+            &[graph.in_node, graph.out_node],
+        );
+        terminals
+            .iter()
+            .copied()
+            .filter(|&t| !is_signal_ref(t))
+            .filter_map(|t| node_to_mna(t).map(|idx| (t, idx)))
+            .filter(|&(_, idx)| Some(idx) != out_terminal)
+            .filter(|&(_, idx)| g_reachable_from_nullor(idx))
+            // Most upstream (smallest distance from `in`) drives; ties broken by
+            // node id for determinism.
+            .min_by_key(|&(t, _)| (d_in.get(&t).copied().unwrap_or(usize::MAX), t))
+            .map(|(_, idx)| idx)
+    };
+
     // Input voltage source at injection node.
-    // Prefer graph.in_node if it's in this stage's MNA. Otherwise, fall
-    // back to the VCVS neg node (for multi-stage pedals where the global
-    // input is in a different stage), then to the mid-chain upstream terminal.
+    // Prefer graph.in_node if it's in this stage's MNA AND conductively reaches
+    // this stage's op-amp (a stage without a nullor passes this unconditionally).
+    // Otherwise fall back to the nearest reachable stage input, the reachable
+    // upstream boundary terminal (rescues a mid-chain active stage whose only
+    // claim to the global `in` is a dead-end island — uberdrive's IC2 tone
+    // stage), the VCVS neg node, then the raw mid-chain input as a last resort.
     let injection_mna = node_to_mna(graph.in_node)
-        .or_else(|| nearest_stage_input_node(&node_set, graph).and_then(node_to_mna))
+        .filter(|&idx| g_reachable_from_nullor(idx))
+        .or_else(|| {
+            nearest_stage_input_node(&node_set, graph)
+                .and_then(node_to_mna)
+                .filter(|&idx| g_reachable_from_nullor(idx))
+        })
+        .or_else(mid_chain_reachable_input)
         .or_else(|| {
             graph
                 .nullor_pins
