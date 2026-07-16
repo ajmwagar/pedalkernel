@@ -10,7 +10,11 @@ use crate::dsl::*;
 use std::fmt::Write;
 
 /// Human-readable value string for a component.
-fn value_str(kind: &dyn Component) -> String {
+///
+/// Covers every component kind (including switched R/C/L, tubes, BBDs,
+/// photocouplers, …) with a `type_tag()` fallback. Shared with the BOM
+/// exporter ([`crate::bom`]) so the downcast ladder lives in one place.
+pub(crate) fn value_str(kind: &dyn Component) -> String {
     // Switched components (check before generic resistance/capacitance/inductance)
     if let Some(rs) = kind.as_any().downcast_ref::<ResistorSwitched>() {
         let values = &rs.values;
