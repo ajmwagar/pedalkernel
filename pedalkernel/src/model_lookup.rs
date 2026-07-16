@@ -194,6 +194,7 @@ fn opamp_type_model_name(ot: &crate::dsl::OpAmpType) -> &'static str {
     use crate::dsl::OpAmpType;
     match ot {
         OpAmpType::Generic => "GENERIC",
+        OpAmpType::Tl071 => "TL071",
         OpAmpType::Tl072 => "TL072",
         OpAmpType::Tl082 => "TL082",
         OpAmpType::Jrc4558 => "JRC4558",
