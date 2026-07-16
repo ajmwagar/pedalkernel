@@ -3161,6 +3161,23 @@ pub(super) struct BjtDcQpoint {
     pub(super) vce: f64,
     /// Emitter-resistor DC drop (|Ie·RE|), to pre-charge the emitter bypass cap.
     pub(super) v_emitter: f64,
+    /// Emitter degeneration resistance R_E (Ω) from the located bias topology;
+    /// 0.0 when the emitter ties directly to its rail. Feeds the
+    /// unbypassed-emitter-degeneration control divider (pedalkernel-2alk).
+    /// Blockwise-path Q-points report 0.0 (the divider is a one-port
+    /// `BjtRoot`/`WdfStage` mechanism; blocks carry their own emitter leg).
+    pub(super) r_degeneration: f64,
+    /// Small-signal transconductance dIc/dVbe (S) at the solved Q-point
+    /// (central difference on the Gummel-Poon model). Feeds the
+    /// unbypassed-emitter-degeneration control divider (pedalkernel-2alk).
+    /// Blockwise-path Q-points report 0.0 (divider never engages there).
+    pub(super) gm: f64,
+    /// Collector load resistance R_C (Ω) — the direct collector→rail
+    /// resistor used for the Vce warm-start; 0.0 when not found (half-rail
+    /// Vce fallback). Feeds the unbypassed-emitter-degeneration control
+    /// divider (pedalkernel-2alk), which targets the physical stage gain
+    /// gm·R_C/(1+gm·R_E·(β+1)/β). Blockwise-path Q-points report 0.0.
+    pub(super) r_load: f64,
 }
 
 /// Single-port-WDF BJT DC Q-point (ko5g.4) — replaces the deleted
@@ -3317,10 +3334,29 @@ fn solve_wdf_bjt_dc_qpoint_inner(
     // still charges to the |Ie·RE| drop, so we report the magnitude.
     let v_emitter = (ie * re).abs();
 
+    // Small-signal transconductance gm = dIc/dVbe at the Q-point, by central
+    // difference on the same model evaluation used for Ic above (mirrors the
+    // solver's own finite-difference style).  Feeds the unbypassed-emitter
+    // degeneration control divider (pedalkernel-2alk); NOT used by the DC
+    // seed itself, so the solved vbe/vce stay bit-for-bit.
+    let gm_h = 1e-4;
+    let (ic_hi, _) = model.currents(
+        (vbe + gm_h) as pedalkernel_rt::Wave,
+        vbc_active as pedalkernel_rt::Wave,
+    );
+    let (ic_lo, _) = model.currents(
+        (vbe - gm_h) as pedalkernel_rt::Wave,
+        vbc_active as pedalkernel_rt::Wave,
+    );
+    let gm = ((ic_hi - ic_lo) as f64 / (2.0 * gm_h)).max(0.0);
+
     Ok(BjtDcQpoint {
         vbe,
         vce,
         v_emitter,
+        r_degeneration: re,
+        gm,
+        r_load: rc.unwrap_or(0.0),
     })
 }
 
@@ -3539,6 +3575,11 @@ pub(super) fn solve_blockwise_bjt_group_qpoint(
         // path hands `set_initial_prev_v`.
         vce: vc - ve,
         v_emitter: 0.0,
+        // Blockwise blocks model the emitter leg inside their K-method
+        // rungs; the one-port control divider never engages on this path.
+        r_degeneration: 0.0,
+        gm: 0.0,
+        r_load: 0.0,
     };
     if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
         eprintln!(

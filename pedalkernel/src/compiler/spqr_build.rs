@@ -4147,6 +4147,94 @@ pub(super) fn build_spqr_stage_with_options(
                 }
             }
 
+            // (2c) Restore series emitter feedback for UNBYPASSED emitter
+            // degeneration (pedalkernel-2alk).
+            //
+            // The one-port BjtRoot's control clamp
+            // (`RootKind::set_control_voltage`: Vbe = vbe_bias + input·comp)
+            // never sees the emitter-node swing, so the series feedback an
+            // unbypassed R_E provides in the real circuit (v_be = v_b − i_e·R_E)
+            // is structurally severed — the stage runs at the UNDEGENERATED
+            // gain gm·R_loop (APB: 217× measured vs 20-22× theory/ngspice;
+            // R_E contributes only its ohmic loop drop).
+            //
+            // A bypass cap across R_E shorts the emitter swing at audio, so
+            // BYPASSED stages are already correct as compiled and must stay
+            // bit-identical (flip-proof: 100u across APB's R5 moved the WDF
+            // output only +0.15 dB) — the divider only engages when NO cap
+            // sits across the emitter leg.
+            //
+            // Compile-time divider at the solved Q-point.  The stage output
+            // is the ROOT PORT voltage, so the engine's raw Vbe→out transfer
+            // is gm·rp_root where rp_root = tree.port_resistance() — which
+            // includes the synthetic voltage-source rp (DEFAULT_VS_RP) and
+            // the folded base-bias network, NOT the physical collector load
+            // (APB: rp_root ≈ 20.5 kΩ vs R_C = 10 kΩ).  The divider therefore
+            // normalizes the loop to the physical load AND applies the series
+            // feedback factor F = 1 + gm·R_E·(β+1)/β:
+            //     divider = R_C / (rp_root · F)
+            //     ⇒ stage gain = gm·rp_root·divider = gm·R_C / F
+            // which is exactly the degenerated common-emitter small-signal
+            // gain (→ R_C/R_E as gm·R_E ≫ 1).  When R_C could not be located
+            // (half-rail Vce fallback upstream) the loop normalization is
+            // skipped and only the feedback factor 1/F applies.  K-tables are
+            // unaffected: their control axis is the Vbe OFFSET and the
+            // divider applies upstream of it.
+            let bjt_beta = match &wdf_stage.root {
+                RootKind::Bjt(b) => Some((b.model.bf as f64).max(1.0)),
+                _ => None,
+            };
+            if let (Some(beta), Some(dc)) = (bjt_beta, bjt_dc.as_ref()) {
+                if dc.r_degeneration > 0.0 && dc.gm > 0.0 {
+                    let emitter_node = match &nl_kind {
+                        super::classify::NonlinearKind::BjtNpn { emitter_node, .. }
+                        | super::classify::NonlinearKind::BjtPnp { emitter_node, .. } => {
+                            Some(*emitter_node)
+                        }
+                        _ => None,
+                    };
+                    // Bypass detection mirrors the (2b) pre-charge scan: any
+                    // capacitor from the emitter node to gnd/ac-ground.
+                    let emitter_bypassed = emitter_node.is_some_and(|emitter_node| {
+                        graph.edges.iter().any(|e| {
+                            let is_emitter_gnd = (e.node_a == emitter_node
+                                && (e.node_b == graph.gnd_node
+                                    || graph.ac_ground_nodes.contains(&e.node_b)))
+                                || (e.node_b == emitter_node
+                                    && (e.node_a == graph.gnd_node
+                                        || graph.ac_ground_nodes.contains(&e.node_a)));
+                            is_emitter_gnd
+                                && graph.components[e.comp_idx].kind.capacitance().is_some()
+                        })
+                    });
+                    if emitter_node.is_some() && !emitter_bypassed {
+                        // Series-feedback factor F = 1 + gm·R_E·(β+1)/β
+                        // (the (β+1)/β term carries the emitter current's
+                        // base-current component; equals rπ/(rπ+(β+1)·R_E)
+                        // as a divider, rπ = β/gm).
+                        let f = 1.0 + dc.gm * dc.r_degeneration * (beta + 1.0) / beta;
+                        let rp_root = wdf_stage.tree.port_resistance();
+                        let divider = if dc.r_load > 0.0 && rp_root.is_finite() && rp_root > 0.0
+                        {
+                            dc.r_load / (rp_root * f)
+                        } else {
+                            1.0 / f
+                        };
+                        if std::env::var("PK_BIAS_QPOINT_DEBUG").is_ok() {
+                            eprintln!(
+                                "[degen-divider] {}: gm={:.6} S beta={beta:.1} \
+                                 r_e={:.1} Ω r_load={:.1} Ω rp_root={rp_root:.1} Ω \
+                                 F={f:.4} divider={divider:.6}",
+                                comp.id, dc.gm, dc.r_degeneration, dc.r_load
+                            );
+                        }
+                        if divider.is_finite() && divider > 0.0 && divider < 1.0 {
+                            wdf_stage.control_divider = divider as pedalkernel_rt::Wave;
+                        }
+                    }
+                }
+            }
+
             // Series-diode rectifier output extraction.
             //
             // For a diode root the stage normally reports the *junction* voltage

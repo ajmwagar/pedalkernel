@@ -147,7 +147,21 @@ fn run_wdf_vs_spice(
         );
         return;
     }
-    let golden = npy::read_f64(&golden_path).expect("read golden");
+    // Goldens are stored at the INTERNAL simulation rate (SR × OVERSAMPLE) on
+    // a uniform grid (see `SpiceRunner::resample_and_decimate`); take every
+    // OVERSAMPLE-th sample to land exactly on the SR grid the WDF runs at.
+    // Without this the sample-by-sample metrics compare a 48 kHz sine against
+    // a 192 kHz-sampled one (dominant reads 250 Hz) and floor at ~+3 dB even
+    // when the two waveforms match (measured 2026-07-15 on the APB after the
+    // pedalkernel-2alk emitter-degeneration fix: level gap −0.2 dB, yet
+    // normalized RMS error stuck at 2.9 dB = √(w²+g²)/g, the uncorrelated
+    // floor). RMS-level metrics are unaffected by the decimation.
+    let golden_internal = npy::read_f64(&golden_path).expect("read golden");
+    let golden: Vec<f64> = golden_internal
+        .iter()
+        .copied()
+        .step_by(OVERSAMPLE as usize)
+        .collect();
 
     // Compile the pedal
     let def = parse_pedal_file(&source).unwrap_or_else(|e| panic!("parse {pro_path}: {e}"));
@@ -268,21 +282,30 @@ fn bootstrap_all_points_booster_golden() {
 
 /// Deck positions: Volume = 1.0 (full, taper-independent).
 ///
-/// Report-only (legends screamer/sd1 precedent): the compiled booster is
-/// currently ~9.4 dB HOTTER than ngspice (WDF RMS 4.04 V vs golden 1.37 V,
-/// measured 2026-07-15) — the WDF gain is ~57× where the LPB-1 (and the
-/// deck) sit at ~20×, i.e. R5's emitter degeneration is under-effective in
-/// the compiled stage, and at that gain the WDF also rail-clips (THD error
-/// +65 dB). Surfacing the gap is the point of the independent golden; a
-/// hard gate would either mask it (loose) or block on a known engine gap
-/// (tight). Silence assertion still guards compile/processing health.
+/// ENFORCED level gate (pedalkernel-2alk, 2026-07-15). The APB was
+/// report-only because the compiled booster ran ~9.4 dB HOTTER than ngspice
+/// (WDF RMS 4.04 V vs golden 1.37 V) — R5's UNBYPASSED emitter degeneration
+/// was structurally severed in the one-port `BjtRoot` path (Vbe never saw
+/// the emitter swing → undegenerated gain ~57× vs the LPB-1's ~20×). The
+/// pedalkernel-2alk compile-time control divider restores the series
+/// feedback; the stage now sits at ~22× small-signal (10 mV) and the harness
+/// level gap collapsed to −0.2 dB (WDF RMS 1.33 V vs golden 1.37 V).
+///
+/// MEASURED (2026-07-15, settled-window trim): normalized RMS error −2.9 dB,
+/// peak error −1.3 dB → gates 1.0 dB / 2.0 dB (measured + house ~3 dB margin,
+/// legends screamer/sd1 precedent). THD stays REPORT-ONLY (`f64::INFINITY`
+/// slot): the booster runs into its headroom edge (golden THD ≈ −32 dB, a
+/// soft second-order compression, NOT hard clipping), and the WDF/ngspice
+/// clip-*character* differs by ~12.6 dB — a distinct axis from the level fix
+/// this bead targets, same family as the goldenrod Ge THD margin. The
+/// silence assertion still guards compile/processing health.
 #[test]
 fn all_points_booster_wdf_vs_spice() {
     run_wdf_vs_spice(
         "all_points_booster",
         "pedals/kits/all_points_booster.pedal",
         &[("Volume", 1.0)],
-        None,
+        Some((1.0, 2.0, f64::INFINITY)),
     );
 }
 
