@@ -2038,6 +2038,147 @@ pub(super) fn analyze_blockwise(
         }
     }
 
+    // ── Op-amp feedback co-residence (g64r sub-defect 2a) ──────────────────
+    //
+    // A blockwise op-amp clipper (SD-1/screamer/uberdrive class) is a VCVS
+    // whose forward gain is set by a passive FEEDBACK network from its output
+    // back to its inverting (neg) input plus a gain-leg from neg to an AC
+    // reference. The coupled MNA can only produce forward gain if that loop is
+    // CLOSED inside it — i.e. the VCVS's `neg` and `out` nodes are joined by
+    // passive coupling edges. When the op-amp is fed by an upstream buffer
+    // (serial cascade), the pendant-chain BFS above greedily absorbs those
+    // feedback resistors/caps into the DIODE blocks, leaving the coupling MNA
+    // with an OPEN loop (`neg`/`out` connected only through the VCVS itself) →
+    // `derive_scattering_matrix_general` collapses to ±I → zero forward gain.
+    //
+    // Fix: for each coupling VCVS whose feedback loop is NOT already closed by a
+    // passive coupling edge, pull the passive feedback network (traced from
+    // `neg`/`out` through linear/reactive edges, stopping at rails and the
+    // VCVS's own `pos` input) into the coupling set, removing those edges from
+    // whatever block claimed them. This is a NO-OP for pedals whose loop is
+    // already closed in coupling (e.g. SD-1, whose C_clip cap directly bridges
+    // out↔neg) → byte-identical.
+    {
+        let rail = |n: NodeId| -> bool {
+            n == graph.gnd_node
+                || n == graph.vcc_node
+                || graph.supply_nodes.contains(&n)
+                || graph.ac_ground_nodes.contains(&n)
+        };
+        let is_passive = |eidx: usize| -> bool {
+            matches!(
+                graph.effective_edge_kind(eidx),
+                EdgeKind::Linear | EdgeKind::Reactive
+            )
+        };
+
+        // VCVSs currently in the coupling set.
+        let coupling_vcvs_comps: Vec<usize> = coupling_edges
+            .iter()
+            .filter(|&&e| graph.effective_edge_kind(e) == EdgeKind::Vcvs)
+            .map(|&e| graph.edges[e].comp_idx)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Passive coupling adjacency (excludes the VCVS edges): used to test
+        // whether the feedback loop is ALREADY closed inside the coupling set.
+        let mut coupling_adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for &e in &coupling_edges {
+            if !is_passive(e) {
+                continue;
+            }
+            let ed = &graph.edges[e];
+            coupling_adj.entry(ed.node_a).or_default().push(ed.node_b);
+            coupling_adj.entry(ed.node_b).or_default().push(ed.node_a);
+        }
+        let connected_in_coupling = |a: NodeId, b: NodeId| -> bool {
+            if a == b {
+                return true;
+            }
+            let mut seen: HashSet<NodeId> = HashSet::new();
+            let mut stack = vec![a];
+            seen.insert(a);
+            while let Some(n) = stack.pop() {
+                if n == b {
+                    return true;
+                }
+                if let Some(nbrs) = coupling_adj.get(&n) {
+                    for &m in nbrs {
+                        if seen.insert(m) {
+                            stack.push(m);
+                        }
+                    }
+                }
+            }
+            false
+        };
+
+        // Sibling passive adjacency over ALL siblings (block-claimed or not),
+        // excluding the VCVS/NL edges themselves.
+        let mut sib_passive_adj: HashMap<NodeId, Vec<(usize, NodeId)>> = HashMap::new();
+        for &e in &sibling_edges {
+            if !is_passive(e) {
+                continue;
+            }
+            let ed = &graph.edges[e];
+            sib_passive_adj
+                .entry(ed.node_a)
+                .or_default()
+                .push((e, ed.node_b));
+            sib_passive_adj
+                .entry(ed.node_b)
+                .or_default()
+                .push((e, ed.node_a));
+        }
+
+        let mut pull: HashSet<usize> = HashSet::new();
+        for &comp_idx in &coupling_vcvs_comps {
+            let Some(pins) = graph.nullor_pins.iter().find(|p| p.comp_idx == comp_idx) else {
+                continue;
+            };
+            // Already-closed loop (SD-1) → nothing to do.
+            if connected_in_coupling(pins.neg_node, pins.out_node) {
+                continue;
+            }
+            // Open loop → trace the feedback network from neg/out through
+            // passive siblings, stopping at rails and the op-amp's own input.
+            let mut visited: HashSet<NodeId> = HashSet::new();
+            let mut queue: Vec<NodeId> = Vec::new();
+            for &start in &[pins.neg_node, pins.out_node] {
+                if !rail(start) && start != pins.pos_node && visited.insert(start) {
+                    queue.push(start);
+                }
+            }
+            while let Some(node) = queue.pop() {
+                let Some(nbrs) = sib_passive_adj.get(&node) else {
+                    continue;
+                };
+                for &(eidx, next) in nbrs {
+                    pull.insert(eidx);
+                    // Continue the trace across interior nodes, but never past a
+                    // rail or the op-amp's positive input (the forward path).
+                    if !rail(next) && next != pins.pos_node && visited.insert(next) {
+                        queue.push(next);
+                    }
+                }
+            }
+        }
+
+        // Move pulled edges into coupling, out of any block.
+        for &eidx in &pull {
+            for bl in block_linear.iter_mut() {
+                bl.retain(|&e| e != eidx);
+            }
+            for br in block_reactive.iter_mut() {
+                br.retain(|&e| e != eidx);
+            }
+            if !coupling_edges.contains(&eidx) {
+                coupling_edges.push(eidx);
+            }
+        }
+    }
+
     let block_order: Vec<usize> =
         signal_order_indices(&nl_blocks, graph).unwrap_or_else(|| (0..nl_blocks.len()).collect());
 
