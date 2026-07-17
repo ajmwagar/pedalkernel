@@ -323,25 +323,39 @@ fn bootstrap_sunflower_golden() {
 
 /// Deck positions: Clean=0.0, Fuzz=1.0, Bias=0.5, Sundial=0.5, Volume=1.0.
 ///
-/// STILL IGNORED — but the DC-bias half of the gap is now FIXED
-/// (pedalkernel-onu2, DC-closure edge set). Before: Q2's collector chain
-/// (`R3→BIAS→SUNDIAL→R4→rail`) lived in the downstream flow group, invisible
-/// to the group-local DC solve, so Q2 floated on gmin and the homotopy
-/// converged a saturated artifact (`PK_BIAS_QPOINT_DEBUG`: Q2 vbe 0.192 /
-/// vce 0.0036 V). After: the whole DC-closure is solved — Q2 vbe 0.152 /
-/// |vce| ≈ 5.68 V (matching ngspice's `.op` |vce| ≈ 6.1 V under the PNP-mirror
-/// convention), Q1 conducting.
+/// STILL IGNORED — TWO of the three layered defects are now FIXED; the third
+/// (a separate, pre-scoped engine gap) still zeroes the AC gain.
 ///
-/// REMAINING gap (OUT OF SCOPE for onu2, GAP 2 secondary on pedalkernel-a5ho):
-/// with the series CLEAN rheostat at the input, the MultiNL is driven via an
-/// adapted boundary-VS whose `s_nl_adapted` is ≈ 2.007× the in-node-injection
-/// derivation (`rigid/general.rs derive_scattering`, factor-2). The overdriven
-/// Ge BE junction rectifies and the coupling caps decay the output to ~1e-4 V
-/// RMS within ~100 ms — measured 2026-07-15: WDF RMS < 1e-3 V vs golden
-/// 0.257 V, gap ≈ −75 dB. Un-ignore once the adapted-port vs in-node injection
-/// derivations are reconciled; the ngspice golden is already committed.
+/// (1) DC bias — FIXED (pedalkernel-onu2, DC-closure edge set): Q2 vbe 0.152 /
+///     |vce| ≈ 5.68 V (matches ngspice `.op` under the PNP-mirror convention),
+///     Q1 conducting.
+///
+/// (2) Cross-group COLLECTOR-LOAD SPLIT — FIXED (pedalkernel-guwp): sunflower's
+///     coupled 2-Ge pair lands in a NON-feedback active group whose Q2 collector
+///     chain (`R3→BIAS→SUNDIAL→R4→gnd` + `C3→VOLUME→out`) lived in a SEPARATE
+///     flow group. The group's general-MNA solve therefore left Q2's collector a
+///     dangling node (~1 GΩ port self-reflection, ill-conditioned ~5-min solve)
+///     AND extracted the output in a stage that never saw the collector swing.
+///     The new `boundary_load::classify_collector_chain_into_out` + the
+///     `else`-branch fusion (`spqr_build.rs`) now fuse the whole chain into the
+///     coupled-Ge group's MNA — port resistances become physical (Q2.Vce
+///     ≈ 6.9 kΩ, not 1e9), the DC seed lands correct, and `out` (VOLUME.w)
+///     becomes a group extract node. Confirmed via `boundary_loads`:
+///     `CollectorChainIntoOut ⇒ FusedUpstream`.
+///
+/// (3) REMAINING (OUT OF SCOPE for guwp — GAP 2 secondary, pedalkernel-a5ho):
+///     with a CORRECT DC op-point and a healthy fused network, the coupled-Ge
+///     MultiNL still has a near-zero small-signal transfer — the adapted-port
+///     injection / `derive_scattering` factor-2 defect (the input VS port is not
+///     Thévenin-adapted for the `in_node` injection path). AC gain ≈ −80 dB, so
+///     the coupling caps decay the output to ~1e-7 V RMS (post-fusion the extract
+///     moved past the VOLUME divider, so it reads even lower than the pre-fusion
+///     ~1e-4 V leak) vs golden 0.257 V. Un-ignore once the adapted-port injection
+///     is reconciled; the topology + DC are already correct and the golden is
+///     committed. (Running this test now correctly reports SILENCE — the honest
+///     state: the amplifier core is dead pending defect 3, not mis-wired.)
 #[test]
-#[ignore = "engine gap (post-onu2): DC bias now correct (Q2 |vce| ≈ 5.68 V), but the adapted-port injection factor-2 issue (GAP 2 secondary, not onu2) still decays output to ~1e-4 V vs golden 0.257 V — see doc comment"]
+#[ignore = "engine gap: DC bias (onu2) + collector-chain split (guwp) now FIXED, but the adapted-port injection factor-2 defect (GAP 2 secondary, pedalkernel-a5ho) still zeroes the coupled-Ge AC gain → silent vs golden 0.257 V — see doc comment"]
 fn sunflower_wdf_vs_spice() {
     run_wdf_vs_spice(
         "sunflower",

@@ -1049,6 +1049,28 @@ pub enum BoundaryLoadSummary {
         /// Netlist component ids of the load network, sorted.
         component_ids: Vec<String>,
     },
+    /// A transistor COLLECTOR-load-and-output chain: the collector node feeds a
+    /// series resistor/rheostat chain (`R3 → BIAS → SUNDIAL`) to a tap node
+    /// carrying BOTH a grounded fixed resistor (`R4`) AND an output coupling cap
+    /// (`C3`) into a pot divider whose wiper is the global `out` (`VOLUME`).
+    /// The classic Fuzz-Face collector-load + output-divider (Sunflower). The
+    /// whole chain must fuse into the transistor group's MNA so the collector
+    /// sees a real load line AND `out` becomes a group extract node.
+    ///
+    /// NOTE (schema): appended at the END so postcard tags of pre-existing
+    /// variants stay stable (old cached blobs still deserialize).
+    CollectorChainIntoOut {
+        /// Output coupling capacitance in farads.
+        c: f64,
+        /// Netlist component id of the output-divider pot (the volume element).
+        pot_id: String,
+        /// Output-divider pot track (end-to-end) resistance in ohms.
+        r_pot: f64,
+        /// Grounded fixed resistance at the tap node in ohms (`R4`).
+        r_tap_fixed: f64,
+        /// Netlist component ids of the whole collector chain, sorted.
+        component_ids: Vec<String>,
+    },
 }
 
 /// Serializable POLICY OUTCOME: what the compiler did about an analyzed

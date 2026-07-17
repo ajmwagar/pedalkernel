@@ -397,6 +397,13 @@ pub fn compile_via_spqr_with_options(
     // skipped — the magnetic-coupling analogue of `bkm_consumed_comp_ids`.
     let mut xfmr_consumed_comp_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Component ids of a trailing collector-load-and-output chain fused into a
+    // non-feedback multi-BJT (Fuzz-Face / Sunflower) group's general-MNA build
+    // (their edges are solved inside that group's MNA). Groups made entirely of
+    // these ids are skipped — the non-feedback-branch analogue of the
+    // feedback-branch C1 output-fusion consumption (bead pedalkernel-guwp).
+    let mut collector_chain_consumed_comp_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     // Boundary-load decision table rows recorded during stage building;
     // resolved to final stage indices after the last stage sort.
     let mut pending_boundary_loads: Vec<super::boundary_load::PendingBoundaryLoad> = Vec::new();
@@ -584,6 +591,15 @@ pub fn compile_via_spqr_with_options(
         {
             #[cfg(test)]
             eprintln!("  → group {gi} already consumed by transformer-secondary reflection");
+            continue;
+        }
+        if !group_comp_ids.is_empty()
+            && group_comp_ids
+                .iter()
+                .all(|id| collector_chain_consumed_comp_ids.contains(id))
+        {
+            #[cfg(test)]
+            eprintln!("  → group {gi} already consumed by collector-chain output fusion");
             continue;
         }
 
@@ -1310,10 +1326,131 @@ pub fn compile_via_spqr_with_options(
             }
 
             // Process remaining non-pot edges through SPQR
-            let group_edges = remaining_edges;
+            let mut group_edges = remaining_edges;
             if group_edges.is_empty() {
                 continue;
             } // All edges were pots
+
+            // ── Collector-load-and-output chain fusion (Fuzz-Face / Sunflower,
+            // bead pedalkernel-guwp) ─────────────────────────────────────────
+            // A coupled multi-Ge fuzz pair lands in a NON-feedback active group
+            // (the R1 base↔emitter feedback is DC, not a passive cycle edge, so
+            // `has_feedback()` is false) and builds through THIS `else` branch —
+            // never the feedback-arm C1 output fusion at the top of the loop.
+            // Its Q2 collector chain (`R3→BIAS→SUNDIAL→R4→gnd` + `C3→VOLUME→out`)
+            // is a SEPARATE trailing flow group, so this group's general-MNA
+            // solve leaves the collector a dangling node (no load line, ~1 GΩ
+            // port self-reflection) AND extracts the output in a stage that
+            // never sees the collector swing → silence (−74.8 dB). Fuse the
+            // whole chain into THIS group's build set so the collector gets a
+            // real load line and `out` becomes a group extract node. ANALYSIS +
+            // POLICY (the same 2-BJT + dc_qpoint gate as the BA283 output
+            // fusion) live in `boundary_load`; the chain group is consumed via a
+            // skip-set (it may build before OR after this group), and the
+            // decision is recorded on `CompiledPedal::boundary_loads`.
+            let chain_analysis = super::boundary_load::analyze_trailing_output_load(
+                gi,
+                &feedback_groups,
+                &graph,
+                &cut_edges,
+            );
+            let mut chain_group_label = group_label.clone();
+            let mut chain_group_comp_ids = group_comp_ids.clone();
+            // Only the collector-chain shape fuses here; the BA283 / pot-load /
+            // pot-divider shapes belong to the feedback arm and never reach a
+            // non-feedback active group (so non-chain analyses are ignored and
+            // this whole block is byte-identical for every other pedal).
+            if let Some(load) = chain_analysis.as_ref().filter(|l| {
+                matches!(
+                    l.model,
+                    super::boundary_load::BoundaryLoadModel::CollectorChainIntoOut { .. }
+                )
+            }) {
+                let already_consumed = load.model.edges().iter().any(|&eidx| {
+                    collector_chain_consumed_comp_ids
+                        .contains(&graph.components[graph.edges[eidx].comp_idx].id)
+                });
+                let disposition = if already_consumed {
+                    // A chain group can only be consumed once (pathological
+                    // shared-chain shapes must not fuse twice).
+                    super::boundary_load::LoadDisposition::Unloaded {
+                        reason: "gate:load-group-already-consumed",
+                    }
+                } else {
+                    match super::boundary_load::gate_fusion(load, group, &graph, supply_voltage) {
+                        Ok(()) => {
+                            for &eidx in load.model.edges() {
+                                if !group_edges.contains(&eidx) {
+                                    group_edges.push(eidx);
+                                }
+                            }
+                            // The fused build set now owns the chain components;
+                            // refresh label / comp ids so later stage lookups
+                            // and the boundary-load stage_key see them.
+                            let mut names: Vec<String> = group_edges
+                                .iter()
+                                .map(|&eidx| {
+                                    graph.components[graph.edges[eidx].comp_idx].id.clone()
+                                })
+                                .collect();
+                            names.sort();
+                            names.dedup();
+                            #[cfg(debug_assertions)]
+                            {
+                                chain_group_label = names.join(",");
+                            }
+                            chain_group_comp_ids = names;
+                            for &eidx in load.model.edges() {
+                                collector_chain_consumed_comp_ids
+                                    .insert(graph.components[graph.edges[eidx].comp_idx].id.clone());
+                            }
+                            // Remove the standalone chain stage if it already
+                            // built (non-feedback order is enumeration order, so
+                            // it may precede OR follow this group).
+                            let mut chain_ids: Vec<String> = load
+                                .model
+                                .edges()
+                                .iter()
+                                .map(|&eidx| {
+                                    graph.components[graph.edges[eidx].comp_idx].id.clone()
+                                })
+                                .collect();
+                            chain_ids.sort();
+                            chain_ids.dedup();
+                            for idx in (0..stages.len()).rev() {
+                                if stage_comp_ids[idx] == chain_ids {
+                                    #[cfg(test)]
+                                    eprintln!(
+                                        "  [compile] group {gi}: removed standalone collector \
+                                         chain stage {idx} ({chain_ids:?}) — consumed by fusion"
+                                    );
+                                    stages.remove(idx);
+                                    stage_comp_ids.remove(idx);
+                                    break;
+                                }
+                            }
+                            super::boundary_load::LoadDisposition::FusedUpstream {
+                                consumed_group: load.group,
+                            }
+                        }
+                        Err(reason) => {
+                            super::boundary_load::LoadDisposition::Unloaded { reason }
+                        }
+                    }
+                };
+                pending_boundary_loads.push(super::boundary_load::PendingBoundaryLoad {
+                    stage_key: chain_group_comp_ids
+                        .iter()
+                        .min()
+                        .cloned()
+                        .unwrap_or_else(|| "~".to_string()),
+                    boundary_node: load.boundary_node,
+                    model: load.model.summarize(&graph),
+                    disposition: disposition.summarize(),
+                });
+            }
+            let group_label = chain_group_label;
+            let group_comp_ids = chain_group_comp_ids;
 
             let group_has_runtime_pot = group_edges
                 .iter()
