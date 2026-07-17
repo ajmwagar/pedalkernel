@@ -115,6 +115,20 @@ pub(super) enum BoundaryLoadModel {
         r_pot: f64,
         edges: Vec<usize>,
     },
+    /// A transistor COLLECTOR-load-and-output chain (the Fuzz-Face / Sunflower
+    /// shape): a target NL-device collector node feeds a series resistor /
+    /// rheostat chain (`R3 → BIAS → SUNDIAL`) to a tap node carrying BOTH a
+    /// grounded fixed resistor (`R4`) AND an output coupling cap (`C3`) into a
+    /// pot divider whose wiper is the global `out` (`VOLUME`, bottom grounded).
+    /// The whole chain fuses into the transistor group's MNA so the collector
+    /// gets a real load line and `out` becomes a group extract node.
+    CollectorChainIntoOut {
+        c: f64,
+        pot_id: String,
+        r_pot: f64,
+        r_tap_fixed: f64,
+        edges: Vec<usize>,
+    },
 }
 
 impl BoundaryLoadModel {
@@ -127,6 +141,7 @@ impl BoundaryLoadModel {
             BoundaryLoadModel::PassiveNetwork { edges } => edges,
             BoundaryLoadModel::SeriesCapIntoPotLoad { edges, .. } => edges,
             BoundaryLoadModel::PotDividerAtOut { edges, .. } => edges,
+            BoundaryLoadModel::CollectorChainIntoOut { edges, .. } => edges,
         }
     }
 
@@ -180,6 +195,19 @@ impl BoundaryLoadModel {
             } => BoundaryLoadSummary::PotDividerAtOut {
                 pot_id: pot_id.clone(),
                 r_pot: *r_pot,
+                component_ids: component_ids(edges),
+            },
+            BoundaryLoadModel::CollectorChainIntoOut {
+                c,
+                pot_id,
+                r_pot,
+                r_tap_fixed,
+                edges,
+            } => BoundaryLoadSummary::CollectorChainIntoOut {
+                c: *c,
+                pot_id: pot_id.clone(),
+                r_pot: *r_pot,
+                r_tap_fixed: *r_tap_fixed,
                 component_ids: component_ids(edges),
             },
         }
@@ -311,6 +339,12 @@ pub(super) fn analyze_trailing_output_load(
         return None;
     }
 
+    // NL-device COLLECTOR nodes of the target group — the only nodes the
+    // collector-load-chain shape (`classify_collector_chain_into_out`) may
+    // start its walk from. Derived from the same `classify_nonlinear` reading
+    // the fusion gate uses (physics, not names).
+    let collector_nodes = target_collector_nodes(target, graph);
+
     // Candidate trailing groups: passive, ≥2 edges, touching the global
     // `out`, no broker-cut edges.
     let candidates: Vec<(usize, Vec<usize>)> = groups
@@ -342,6 +376,9 @@ pub(super) fn analyze_trailing_output_load(
             classify_series_cap_into_fixed_load(edges, &target_nodes, graph)
                 .or_else(|| classify_series_cap_into_pot_load(edges, &target_nodes, graph))
                 .or_else(|| classify_pot_divider_at_out(edges, &target_nodes, graph))
+                .or_else(|| {
+                    classify_collector_chain_into_out(edges, &collector_nodes, graph)
+                })
         {
             return Some(TrailingOutputLoad {
                 group: *src_gi,
@@ -663,6 +700,279 @@ fn classify_pot_divider_at_out(
     ))
 }
 
+/// The NL-device COLLECTOR nodes of a flow group: for every distinct
+/// nonlinear component in the group, classify it and (if it is a 3-terminal
+/// BJT) collect its `collector_node`. Physics-derived (the constitutive
+/// classification), never a name — the same `classify_nonlinear` reading the
+/// fusion gate uses. The collector-chain classifier starts its walk ONLY from
+/// one of these, so a base/emitter chain can never match.
+fn target_collector_nodes(
+    target: &FlowGroup,
+    graph: &CircuitGraph,
+) -> std::collections::HashSet<NodeId> {
+    let mut nodes = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for &eidx in &target.all_edges() {
+        if graph.effective_edge_kind(eidx) != EdgeKind::Nonlinear {
+            continue;
+        }
+        let e = &graph.edges[eidx];
+        if !seen.insert(e.comp_idx) {
+            continue;
+        }
+        let comp = &graph.components[e.comp_idx];
+        if let Some((kind, _)) = comp.kind.classify_nonlinear(
+            &comp.id,
+            e.node_a,
+            e.node_b,
+            graph.gnd_node,
+            &graph.node_names,
+        ) {
+            match kind {
+                NonlinearKind::BjtNpn {
+                    base_node,
+                    collector_node,
+                    ..
+                }
+                | NonlinearKind::BjtPnp {
+                    base_node,
+                    collector_node,
+                    ..
+                } if base_node != collector_node => {
+                    nodes.insert(collector_node);
+                }
+                _ => {}
+            }
+        }
+    }
+    nodes
+}
+
+/// The Fuzz-Face / Sunflower COLLECTOR-load-and-output chain (bead
+/// pedalkernel-guwp): a transistor's collector node feeds a series
+/// resistor / rheostat chain into a tap node carrying BOTH a grounded fixed
+/// resistor AND an output coupling cap into a pot divider whose wiper is the
+/// global `out`. Concretely on Sunflower:
+///
+/// ```text
+///   Q2.collector → R3 → BIAS(rheostat) → SUNDIAL(rheostat) → nodeA
+///   nodeA → R4 → gnd                    (grounded fixed load)
+///   nodeA → C3 → VOLUME.a; VOLUME.w == out; VOLUME.b → gnd   (output divider)
+/// ```
+///
+/// The `boundary_node` returned is the target NL collector node the chain
+/// hangs off — the whole trailing group fuses into the transistor group's MNA
+/// so the collector gets a real load line AND `out` becomes a group extract
+/// node (the two halves of the -74.8 dB Sunflower silence).
+///
+/// EXACTNESS (so the three existing classifiers still own their shapes and
+/// this one never over-broadens): the trailing group must contain EXACTLY —
+/// one output coupling cap, one 3-terminal output-divider pot (wiper = `out`,
+/// bottom grounded), exactly one grounded fixed resistor at the tap node, and
+/// a non-empty chain of series 2-terminal resistors / rheostats from the tap
+/// node back to a collector node — with every group edge consumed and the
+/// interior nodes exclusive to the group. Any deviation returns `None`.
+fn classify_collector_chain_into_out(
+    edges: &[usize],
+    collector_nodes: &std::collections::HashSet<NodeId>,
+    graph: &CircuitGraph,
+) -> Option<(NodeId, BoundaryLoadModel)> {
+    let out = graph.out_node;
+    let is_gnd = |n: NodeId| n == graph.gnd_node || graph.ac_ground_nodes.contains(&n);
+    if collector_nodes.is_empty() || is_gnd(out) {
+        return None;
+    }
+
+    // Bucket the group edges by role. Any edge that is neither a cap, a pot,
+    // nor a fixed resistor makes the shape unrecognized.
+    let mut cap_edge: Option<(usize, NodeId, NodeId, f64)> = None; // (eidx, a, b, C)
+    let mut pot_edges: Vec<usize> = Vec::new(); // all pot half/rheostat edges
+    let mut series_r: Vec<(usize, NodeId, NodeId)> = Vec::new(); // non-grounded fixed R
+    let mut gnd_r: Vec<(usize, NodeId, f64)> = Vec::new(); // (eidx, hang node, R)
+    for &eidx in edges {
+        let e = &graph.edges[eidx];
+        let comp = &graph.components[e.comp_idx];
+        match graph.effective_edge_kind(eidx) {
+            EdgeKind::Reactive if comp.kind.capacitance().is_some() => {
+                if cap_edge.is_some() {
+                    return None; // exactly one coupling cap
+                }
+                cap_edge = Some((eidx, e.node_a, e.node_b, comp.kind.capacitance()?));
+            }
+            EdgeKind::Linear if comp.kind.is_pot() => pot_edges.push(eidx),
+            EdgeKind::Linear if comp.kind.resistance().is_some() => {
+                if is_gnd(e.node_a) || is_gnd(e.node_b) {
+                    let hang = if is_gnd(e.node_a) { e.node_b } else { e.node_a };
+                    gnd_r.push((eidx, hang, comp.kind.resistance()?));
+                } else {
+                    series_r.push((eidx, e.node_a, e.node_b));
+                }
+            }
+            _ => return None,
+        }
+    }
+    let (cap_eidx, cap_a, cap_b, c) = cap_edge?;
+
+    // ── The output divider: EXACTLY one 3-terminal pot, two half-edges
+    //    sharing wiper == `out`, track bottom grounded. Its track-top node is
+    //    the cap's downstream side. Any OTHER pot edges (a chain rheostat) are
+    //    2-terminal (no wiper) and stay in `chain_pot`. ──────────────────────
+    let mut divider: Option<(usize, NodeId)> = None; // (comp_idx, track-top node)
+    let mut r_pot_div = 0.0f64;
+    let mut div_pot_id = String::new();
+    let mut chain_pot: Vec<(usize, NodeId, NodeId)> = Vec::new();
+    {
+        // Group pot edges by component.
+        let mut by_comp: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for &eidx in &pot_edges {
+            by_comp
+                .entry(graph.edges[eidx].comp_idx)
+                .or_default()
+                .push(eidx);
+        }
+        for (comp_idx, ce) in &by_comp {
+            match ce.as_slice() {
+                // 3-terminal pot (two half-edges): candidate output divider.
+                [e0i, e1i] => {
+                    let e0 = &graph.edges[*e0i];
+                    let e1 = &graph.edges[*e1i];
+                    let w = [e0.node_a, e0.node_b]
+                        .into_iter()
+                        .find(|&n| n == e1.node_a || n == e1.node_b)?;
+                    if w != out {
+                        return None; // a 3-terminal pot not tapping `out` is not this shape
+                    }
+                    let top0 = if e0.node_a == w { e0.node_b } else { e0.node_a };
+                    let top1 = if e1.node_a == w { e1.node_b } else { e1.node_a };
+                    let top = if is_gnd(top1) {
+                        top0
+                    } else if is_gnd(top0) {
+                        top1
+                    } else {
+                        return None; // divider bottom must be grounded
+                    };
+                    if divider.is_some() {
+                        return None; // exactly one output divider
+                    }
+                    divider = Some((*comp_idx, top));
+                    r_pot_div = pot_track_resistance(graph, *comp_idx)?;
+                    div_pot_id = graph.components[*comp_idx].id.clone();
+                }
+                // 2-terminal rheostat: a series chain element.
+                [ei] => {
+                    let e = &graph.edges[*ei];
+                    if is_gnd(e.node_a) || is_gnd(e.node_b) {
+                        return None; // a chain rheostat is not grounded
+                    }
+                    chain_pot.push((*ei, e.node_a, e.node_b));
+                }
+                _ => return None,
+            }
+        }
+    }
+    let (_div_comp, pot_top) = divider?;
+
+    // The coupling cap bridges the tap node (nodeA) to the divider top.
+    let tap = if cap_b == pot_top {
+        cap_a
+    } else if cap_a == pot_top {
+        cap_b
+    } else {
+        return None; // the cap must feed the output divider's track top
+    };
+    if is_gnd(tap) || tap == out {
+        return None;
+    }
+
+    // EXACTLY one grounded fixed resistor, and it hangs off the tap node.
+    let [(_, r4_hang, r_tap_fixed)] = gnd_r.as_slice() else {
+        return None;
+    };
+    if *r4_hang != tap {
+        return None;
+    }
+
+    // ── Walk the series chain from the tap node back to a collector node,
+    //    consuming every series resistor and chain rheostat exactly once. ────
+    let mut chain: Vec<(usize, NodeId, NodeId)> = series_r.clone();
+    chain.extend(chain_pot.iter().copied());
+    let n_chain = chain.len();
+    if n_chain == 0 {
+        return None; // the chain must have at least one series element
+    }
+    let mut used = vec![false; chain.len()];
+    let mut node = tap;
+    let mut boundary: Option<NodeId> = None;
+    for _ in 0..=n_chain {
+        if collector_nodes.contains(&node) {
+            boundary = Some(node);
+            break;
+        }
+        // Exactly one unused chain edge must touch the current node.
+        let mut next: Option<(usize, NodeId)> = None;
+        for (i, &(_, a, b)) in chain.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let other = if a == node {
+                Some(b)
+            } else if b == node {
+                Some(a)
+            } else {
+                None
+            };
+            if let Some(o) = other {
+                if next.is_some() {
+                    return None; // a fork in the chain — not a simple series path
+                }
+                next = Some((i, o));
+            }
+        }
+        let (i, o) = next?; // dead end before reaching a collector
+        used[i] = true;
+        node = o;
+    }
+    let boundary = boundary?;
+    // Every chain element must have been consumed (no dangling series R/pot).
+    if used.iter().any(|&u| !u) {
+        return None;
+    }
+
+    // Interior exclusivity: the trailing network's interior nodes (tap, divider
+    // top, `out`, and every intermediate chain node except the collector
+    // boundary) must not be shared with edges outside the group — otherwise
+    // fusing/consuming the group would orphan a neighbor.
+    let mut interior: Vec<NodeId> = vec![tap, pot_top, out];
+    for &(_, a, b) in &chain {
+        if a != boundary {
+            interior.push(a);
+        }
+        if b != boundary {
+            interior.push(b);
+        }
+    }
+    interior.retain(|&n| !is_gnd(n));
+    if interior_nodes_shared_outside(edges, &interior, graph) {
+        return None;
+    }
+
+    // Sanity: the cap edge index is real (silences unused-binding lints and
+    // documents the consumed cap).
+    debug_assert!(edges.contains(&cap_eidx));
+
+    Some((
+        boundary,
+        BoundaryLoadModel::CollectorChainIntoOut {
+            c,
+            pot_id: div_pot_id,
+            r_pot: r_pot_div,
+            r_tap_fixed: *r_tap_fixed,
+            edges: edges.to_vec(),
+        },
+    ))
+}
+
 /// Fallback VISIBILITY model: a passive trailing group at `out` that attaches
 /// to the target group and contains at least one grounded shunt element (a
 /// series-only branch to `out` is an open circuit, not a load — e.g. the
@@ -728,7 +1038,12 @@ pub(super) fn gate_fusion(
 ) -> Result<(), &'static str> {
     match &load.model {
         BoundaryLoadModel::SeriesCapIntoLoad { .. }
-        | BoundaryLoadModel::SeriesCapIntoPotLoad { .. } => {
+        | BoundaryLoadModel::SeriesCapIntoPotLoad { .. }
+        | BoundaryLoadModel::CollectorChainIntoOut { .. } => {
+            // The collector chain fuses through the SAME 2-BJT + dc_qpoint gate:
+            // DC is unaffected by construction (the output coupling cap blocks
+            // DC; the tap node sees only the grounded fixed R at DC), exactly
+            // like the BA283 fixed-R / pot-load cases.
             gate_ba283_fusion(target, graph, supply_voltage)
         }
         BoundaryLoadModel::PotDividerAtOut { .. } => {
@@ -1347,6 +1662,62 @@ mod tests {
             }
         }"#;
 
+    /// Fuzz-Face / Sunflower shape (bead pedalkernel-guwp): a coupled 2-Ge-PNP
+    /// pair (Q1 CE → Q2 base DC-coupled, Q2 emitter → Q1 base 100k feedback:
+    /// ONE feedback flow group) whose Q2 COLLECTOR feeds a series
+    /// resistor→rheostat→rheostat chain (`R3 → BIAS → SUNDIAL`) to a tap node
+    /// carrying BOTH a grounded fixed resistor (`R4`) AND an output coupling cap
+    /// (`C3`) into a pot divider (`VOLUME`, wiper = `out`, bottom grounded).
+    /// PNP-mirror convention (engine vcc = real ground, engine gnd = real
+    /// −9 V), matching the real Sunflower file. The collector chain lives in a
+    /// SEPARATE flow group from the coupled pair — the split this bead fuses.
+    const FUZZ_FACE_COLLECTOR_CHAIN: &str = r#"
+        pedal "fuzz face collector chain" { supply 9V
+            components {
+                CLEAN: pot(50k, b)
+                C1:    cap(1u, electrolytic)
+                Q1:    pnp(nkt275)
+                R2:    resistor(33k)
+                R1:    resistor(100k)
+                Q2:    pnp(nkt275)
+                FUZZ:  pot(1k, b)
+                C2:    cap(22u, electrolytic)
+                R3:    resistor(1k)
+                BIAS:  pot(5k, b)
+                SUNDIAL: pot(5k, b)
+                R4:    resistor(470)
+                C3:    cap(10n)
+                VOLUME: pot(250k, a)
+            }
+            nets {
+                in -> CLEAN.a
+                CLEAN.b -> C1.a
+                C1.b -> Q1.base, R1.a
+                vcc -> Q1.emitter
+                Q1.collector -> R2.a, Q2.base
+                R2.b -> gnd
+                Q2.emitter -> R1.b, FUZZ.a
+                FUZZ.b -> vcc
+                FUZZ.w -> C2.a
+                C2.b -> vcc
+                Q2.collector -> R3.a
+                R3.b -> BIAS.a
+                BIAS.b -> SUNDIAL.a
+                SUNDIAL.b -> R4.a, C3.a
+                R4.b -> gnd
+                C3.b -> VOLUME.a
+                VOLUME.w -> out
+                VOLUME.b -> gnd
+            }
+            controls {
+                FUZZ.position    -> "Fuzz"    [0.0, 1.0] = 1.0
+                SUNDIAL.position -> "Sundial" [0.0, 1.0] = 0.5
+                VOLUME.position  -> "Volume"  [0.0, 1.0] = 0.7
+                BIAS.position    -> "Bias"    [0.0, 1.0] = 0.5
+                CLEAN.position   -> "Clean"   [0.0, 1.0] = 0.0
+            }
+        }"#;
+
     /// Reproduce the production grouping prelude (compile_via_spqr Step 1)
     /// up to the point the fusion call site sees: graph, merged flow groups,
     /// and the broker cut set.
@@ -1378,6 +1749,22 @@ mod tests {
             .iter()
             .position(|g| g.has_feedback())
             .expect("fixture should produce a feedback group")
+    }
+
+    /// The NON-feedback ACTIVE group that carries the transistor pair (the
+    /// Fuzz-Face / Sunflower coupled 2-Ge group — its base↔emitter feedback is
+    /// DC, so `has_feedback()` is false and it builds through the `else` arm).
+    fn active_bjt_group_index(groups: &[FlowGroup], graph: &CircuitGraph) -> usize {
+        groups
+            .iter()
+            .position(|g| {
+                !g.active_edges.is_empty()
+                    && g.all_edges().iter().any(|&e| {
+                        graph.effective_edge_kind(e)
+                            == super::super::component::EdgeKind::Nonlinear
+                    })
+            })
+            .expect("fixture should produce an active transistor group")
     }
 
     fn edge_index_of(graph: &CircuitGraph, comp_id: &str) -> usize {
@@ -1695,6 +2082,268 @@ mod tests {
             }
             other => panic!("expected Unloaded disposition, got {other:?}"),
         }
+    }
+
+    // ── Collector-load-and-output chain fusion (bead pedalkernel-guwp) ──────
+
+    /// Probe (ignored): dump the synthetic Fuzz-Face group split so the shape
+    /// the classifier walks is documented. Run with
+    /// `cargo test -p pedalkernel --lib boundary_load::tests::dump_fuzz_face -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_fuzz_face_groups() {
+        let (graph, groups, _cut) = groups_for(FUZZ_FACE_COLLECTOR_CHAIN);
+        let node_name = |n: NodeId| -> String {
+            graph
+                .node_names
+                .iter()
+                .filter(|(_, &id)| id == n)
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        for (gi, g) in groups.iter().enumerate() {
+            let mut ids: Vec<String> = g
+                .all_edges()
+                .iter()
+                .map(|&e| graph.components[graph.edges[e].comp_idx].id.clone())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            println!(
+                "group {gi}: fb={} active={} comps={:?}",
+                g.has_feedback(),
+                g.active_edges.len(),
+                ids
+            );
+        }
+        println!("out={}", node_name(graph.out_node));
+        let target_gi = active_bjt_group_index(&groups, &graph);
+        let cn = target_collector_nodes(&groups[target_gi], &graph);
+        let cn_names: Vec<String> = cn.iter().map(|&n| node_name(n)).collect();
+        println!("collector nodes: {cn_names:?}");
+    }
+
+    #[test]
+    fn fuzz_face_collector_chain_analyzes_and_passes_gate() {
+        let (graph, groups, cut_edges) = groups_for(FUZZ_FACE_COLLECTOR_CHAIN);
+        let target_gi = active_bjt_group_index(&groups, &graph);
+
+        let load = analyze_trailing_output_load(target_gi, &groups, &graph, &cut_edges)
+            .expect("Fuzz-Face collector chain should analyze to CollectorChainIntoOut");
+
+        // Boundary node = Q2's collector (the chain's stage-side entry).
+        let nq2c = *graph
+            .node_names
+            .get("Q2.collector")
+            .expect("Q2.collector node");
+        assert_eq!(
+            load.boundary_node, nq2c,
+            "the chain hangs off the Q2 collector node"
+        );
+
+        match &load.model {
+            BoundaryLoadModel::CollectorChainIntoOut {
+                c,
+                pot_id,
+                r_pot,
+                r_tap_fixed,
+                edges,
+            } => {
+                assert!((c - 10e-9).abs() < 1e-12, "C3 = 10n, got {c}");
+                assert_eq!(pot_id, "VOLUME");
+                assert!((r_pot - 250e3).abs() < 1e-3, "VOLUME = 250k, got {r_pot}");
+                assert!((r_tap_fixed - 470.0).abs() < 1e-6, "R4 = 470, got {r_tap_fixed}");
+                // R3 + BIAS + SUNDIAL + R4 + C3 + VOLUME(2 halves) = 7 edges.
+                assert_eq!(edges.len(), 7, "chain group = {{R3,BIAS,SUNDIAL,R4,C3,VOLUME×2}}");
+            }
+            other => panic!("expected CollectorChainIntoOut, got {other:?}"),
+        }
+
+        // The serializable summary names the whole chain.
+        match load.model.summarize(&graph) {
+            BoundaryLoadSummary::CollectorChainIntoOut {
+                pot_id,
+                component_ids,
+                ..
+            } => {
+                assert_eq!(pot_id, "VOLUME");
+                for id in ["R3", "BIAS", "SUNDIAL", "R4", "C3", "VOLUME"] {
+                    assert!(
+                        component_ids.contains(&id.to_string()),
+                        "summary should name {id}, got {component_ids:?}"
+                    );
+                }
+            }
+            other => panic!("expected CollectorChainIntoOut summary, got {other:?}"),
+        }
+
+        // POLICY: the coupled 2-Ge-PNP target with a dc_qpoint seed passes.
+        assert_eq!(
+            gate_fusion(&load, &groups[target_gi], &graph, 9.0),
+            Ok(()),
+            "2-BJT dc_qpoint target should fuse the collector chain"
+        );
+    }
+
+    /// Additivity guard: the THREE pre-existing classifiers must all return
+    /// `None` for the collector-chain shape (this classifier owns it alone), and
+    /// the collector-chain classifier must return `None` for the BA283 shape
+    /// (no collector chain — the cap hangs directly off the collector).
+    #[test]
+    fn collector_chain_classifiers_do_not_overlap() {
+        // Fuzz-Face shape: the three existing classifiers decline.
+        let (graph, groups, _cut) = groups_for(FUZZ_FACE_COLLECTOR_CHAIN);
+        let target_gi = active_bjt_group_index(&groups, &graph);
+        let mut target_nodes = std::collections::HashSet::new();
+        let mut chain_group_edges: Option<Vec<usize>> = None;
+        for (gi, g) in groups.iter().enumerate() {
+            if gi == target_gi {
+                for &e in &g.all_edges() {
+                    target_nodes.insert(graph.edges[e].node_a);
+                    target_nodes.insert(graph.edges[e].node_b);
+                }
+            } else if !g.active_edges.is_empty() {
+                continue;
+            } else {
+                let edges = g.all_edges();
+                let touches_out = edges.iter().any(|&e| {
+                    graph.edges[e].node_a == graph.out_node
+                        || graph.edges[e].node_b == graph.out_node
+                });
+                if touches_out {
+                    chain_group_edges = Some(edges);
+                }
+            }
+        }
+        let chain = chain_group_edges.expect("chain group touches out");
+        assert!(
+            classify_series_cap_into_fixed_load(&chain, &target_nodes, &graph).is_none(),
+            "BA283 fixed-R classifier must not claim the collector chain"
+        );
+        assert!(
+            classify_series_cap_into_pot_load(&chain, &target_nodes, &graph).is_none(),
+            "pot-load classifier must not claim the collector chain"
+        );
+        assert!(
+            classify_pot_divider_at_out(&chain, &target_nodes, &graph).is_none(),
+            "pot-divider classifier must not claim the collector chain"
+        );
+
+        // BA283 shape: the collector-chain classifier declines (Cout hangs
+        // directly off the collector — no series chain, and the load is a plain
+        // grounded R, not the divider-at-out shape).
+        let (bgraph, bgroups, _bcut) = groups_for(TWO_BJT_FB_AMP);
+        let btarget = feedback_group_index(&bgroups);
+        let bcollectors = target_collector_nodes(&bgroups[btarget], &bgraph);
+        for (gi, g) in bgroups.iter().enumerate() {
+            if gi == btarget || !g.active_edges.is_empty() {
+                continue;
+            }
+            let edges = g.all_edges();
+            assert!(
+                classify_collector_chain_into_out(&edges, &bcollectors, &bgraph).is_none(),
+                "collector-chain classifier must not claim the BA283 Cout→RL shape"
+            );
+        }
+    }
+
+    /// End-to-end: the synthetic Fuzz-Face compiles with the collector chain
+    /// FUSED into the coupled 2-Ge MultiNl stage — one `FusedUpstream` row, the
+    /// fused stage owns the VOLUME pot as an in-stage variable-G element
+    /// (`PotInMultiNlStage`), no WiperDivider is synthesized for VOLUME, the DC
+    /// operating point is seeded to the correct conducting Q-point, `out`
+    /// becomes a group extract node, and the runtime is finite/stable.
+    ///
+    /// HONESTY (bead pedalkernel-guwp): the fusion is the correct TOPOLOGY fix —
+    /// it removes the ~1 GΩ dangling-collector self-reflection (port
+    /// resistances become physical: Q2.Vce ≈ 6.9 kΩ, not 1e9) and puts the
+    /// collector load line AND the `out` extraction in ONE solved network. It
+    /// does NOT by itself restore AUDIO: the coupled-Ge MultiNl stage still has
+    /// a near-zero small-signal transfer (the adapted-port injection / GAP-2
+    /// factor-2 defect scoped OUT of this bead, pedalkernel-a5ho). So this test
+    /// asserts the fusion IS applied and the stage is finite/DC-stable — NOT a
+    /// gain floor. Tighten to an audio assertion once the adapted-injection
+    /// defect is closed.
+    #[test]
+    fn compiled_fuzz_face_fuses_collector_chain_into_one_solved_network() {
+        use pedalkernel_rt::PedalProcessor as _;
+        let mut compiled = compile_fixture(FUZZ_FACE_COLLECTOR_CHAIN);
+
+        let binding = compiled
+            .boundary_loads
+            .iter()
+            .find(|b| {
+                matches!(
+                    b.model,
+                    BoundaryLoadSummary::CollectorChainIntoOut { .. }
+                )
+            })
+            .expect("one CollectorChainIntoOut boundary-load row expected")
+            .clone();
+        assert_eq!(
+            binding.disposition,
+            pedalkernel_rt::processor::BoundaryLoadDisposition::FusedUpstream,
+            "the collector chain must be fused"
+        );
+        assert!(
+            matches!(
+                compiled.stages[binding.upstream_stage],
+                super::super::compiled::Stage::MultiNl(_)
+            ),
+            "the fused stage is the coupled 2-Ge general-MNA stage"
+        );
+
+        // The VOLUME pot is owned by the fused stage, in-MNA (no WiperDivider).
+        let ctrl = compiled
+            .controls
+            .iter()
+            .find(|c| c.component_id == "VOLUME")
+            .expect("Volume control binding should exist");
+        assert!(
+            matches!(
+                ctrl.target,
+                super::super::compiled::ControlTarget::PotInMultiNlStage(..)
+            ),
+            "fused VOLUME should be PotInMultiNlStage, got {:?}",
+            ctrl.target
+        );
+        assert!(
+            compiled
+                .wiper_dividers
+                .iter()
+                .all(|w| w.pot_comp_id != "VOLUME"),
+            "no WiperDivider for the in-MNA fused VOLUME pot"
+        );
+
+        // The standalone collector-chain stage was consumed: VOLUME is owned by
+        // EXACTLY the fused stage (no separate pot-divider stage remains).
+        let vol_owners: Vec<usize> = compiled
+            .stages
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, s)| s.control_target_for_pot(idx, "VOLUME").map(|_| idx))
+            .collect();
+        assert_eq!(
+            vol_owners,
+            vec![binding.upstream_stage],
+            "VOLUME must be owned only by the fused stage (standalone chain consumed)"
+        );
+
+        // Runtime is finite and DC-stable on silence (the fusion did not
+        // introduce a NaN/blowup); this is the correctness floor for the
+        // topology fix. Audio gain is a separate follow-on (see doc comment).
+        for _ in 0..8_000 {
+            let y = compiled.process(0.0);
+            assert!(y.is_finite(), "fused stage DC output must be finite");
+        }
+        let mut nonfinite = false;
+        for s in 0..4_800 {
+            let x = 0.05 * (2.0 * core::f64::consts::PI * 1_000.0 * s as f64 / 48_000.0).sin();
+            let y = compiled.process(x);
+            nonfinite |= !y.is_finite();
+        }
+        assert!(!nonfinite, "fused stage must stay finite under a tone");
     }
 
     // ── Fleet reality locks (lkf1.3): the widened analysis against the REAL

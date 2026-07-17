@@ -578,6 +578,20 @@ pub fn format_boundary_model(m: &BoundaryLoadSummary) -> String {
             si_value(*r_pot, "Ω"),
             component_ids.join(",")
         ),
+        BoundaryLoadSummary::CollectorChainIntoOut {
+            c,
+            pot_id,
+            r_pot,
+            r_tap_fixed,
+            component_ids,
+        } => format!(
+            "CollectorChainIntoOut{{{} → {} tap ∥ {}:{} pot; {}}}",
+            si_value(*c, "F"),
+            si_value(*r_tap_fixed, "Ω"),
+            pot_id,
+            si_value(*r_pot, "Ω"),
+            component_ids.join(",")
+        ),
     }
 }
 
