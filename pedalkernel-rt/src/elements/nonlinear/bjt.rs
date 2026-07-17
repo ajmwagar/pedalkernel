@@ -1044,8 +1044,26 @@ impl NlDeviceGroupIv for BjtTwoPort {
 
     fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
         match port {
-            0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent (Ge ~0.32V, Si ~0.83V)
-            _ => (-self.v_max, self.v_max),     // Vce: full swing
+            // Vbe: IS-dependent forward clamp (Ge ~0.32V, Si ~0.83V) that prevents
+            // the base-emitter exponential from blowing up under FORWARD bias.
+            // Asymmetric by polarity: only the FORWARD-conducting side needs the
+            // tight `vbe_max` wall (that is where the exp is stiff). The REVERSE
+            // side is a cutoff junction — `exp(v_int<0)→0`, no blow-up — so a tight
+            // symmetric wall there is not a physical bound but a spurious ABSORBING
+            // attractor: a seeded-conducting port driven across cutoff under AC
+            // latches at ±vbe_max (gm→0, no restoring force) → dead stage. Leaving
+            // the reverse side free to `v_max` lets the coupled solve keep pulling
+            // it back toward its conducting basin. Byte-identical for any device
+            // that never approaches the reverse wall (all validated conducting
+            // BJTs). `vbe_int = sign · v_port`, so forward maps to `-` for PNP.
+            0 => {
+                if self.is_pnp {
+                    (-self.vbe_max, self.v_max) // PNP forward = v_port < 0
+                } else {
+                    (-self.v_max, self.vbe_max) // NPN forward = v_port > 0
+                }
+            }
+            _ => (-self.v_max, self.v_max), // Vce: full swing
         }
     }
 
@@ -1277,8 +1295,18 @@ impl NlDeviceGroupIv for EbersMollTwoPort {
 
     fn v_clamp_port(&self, port: usize) -> (crate::Wave, crate::Wave) {
         match port {
-            0 => (-self.vbe_max, self.vbe_max), // Vbe: IS-dependent
-            _ => (-self.v_max, self.v_max),     // Vce: full swing
+            // Vbe: forward-only IS-dependent clamp (see BjtTwoPort::v_clamp_port for
+            // the full rationale — the reverse side is a cutoff junction with no
+            // exp blow-up, so a tight symmetric wall there is a spurious absorbing
+            // latch, not a physical bound). `vbe_int = sign · v_port`.
+            0 => {
+                if self.is_pnp {
+                    (-self.vbe_max, self.v_max) // PNP forward = v_port < 0
+                } else {
+                    (-self.v_max, self.vbe_max) // NPN forward = v_port > 0
+                }
+            }
+            _ => (-self.v_max, self.v_max), // Vce: full swing
         }
     }
 
@@ -1768,6 +1796,40 @@ mod gummel_poon_tests {
         assert!(
             ic_pnp > 0.0,
             "PNP Ic should be positive (internal polarity)"
+        );
+    }
+
+    /// The Vbe (port 0) clamp is FORWARD-only and polarity-aware: it bounds the
+    /// conducting side at the IS-dependent `vbe_max` (exp blow-up), but leaves the
+    /// REVERSE/cutoff side free to the full swing. A tight symmetric wall on the
+    /// reverse side is a spurious ABSORBING latch — a seeded-conducting port driven
+    /// across cutoff under AC pins there (gm→0, no restoring force) → dead stage
+    /// (the sunflower Ge-Fuzz-Face / pedalkernel-aikl failure mode).
+    #[test]
+    fn vbe_clamp_is_forward_only_by_polarity() {
+        use crate::elements::nonlinear::solver::NlDeviceGroupIv;
+
+        // NPN: forward = v_port > 0 → tight upper wall, free reverse lower.
+        let npn = BjtTwoPort::new(GummelPoonModel::by_name("2N3904"));
+        let (lo, hi) = npn.v_clamp_port(0);
+        assert!(hi > 0.0 && hi <= 1.0, "NPN forward clamp tight ≤1V: {hi}");
+        assert!(lo < -10.0, "NPN reverse side free to full swing: {lo}");
+
+        // PNP: forward = v_port < 0 → tight lower wall, free reverse upper.
+        // (Ge PNP: the reverse side is exactly where the latch used to land.)
+        let pnp = BjtTwoPort::new_pnp(GummelPoonModel::by_name("2N3906"));
+        let (lo, hi) = pnp.v_clamp_port(0);
+        assert!(lo < 0.0 && lo >= -1.0, "PNP forward clamp tight ≤1V: {lo}");
+        assert!(hi > 10.0, "PNP reverse side free to full swing: {hi}");
+
+        // A reverse-driven PNP port must NOT be pinned at the old symmetric
+        // `+vbe_max` reverse wall (~0.3V for Ge): the free reverse side lets the
+        // coupled solve pull it back toward its conducting basin.
+        let vbe_max = pnp.vbe_max;
+        assert!(
+            hi > vbe_max + 0.5,
+            "PNP reverse clamp must be well past the old vbe_max wall \
+             (was {vbe_max}, now {hi})"
         );
     }
 
@@ -2485,15 +2547,20 @@ mod ebers_moll_tests {
         assert_eq!(em.n_ports(), 2);
     }
 
-    /// v_clamp_port returns asymmetric bounds: IS-dependent for port 0 (Vbe),
-    /// symmetric large range for port 1 (Vce).
+    /// v_clamp_port bounds the FORWARD-conducting side of Vbe at the IS-dependent
+    /// `vbe_max` (exp blow-up protection) and leaves the REVERSE/cutoff side free
+    /// to the full `v_max` swing (no exponential to bound; a tight reverse wall is
+    /// a spurious latch — see BjtTwoPort::v_clamp_port). em_2n3904 is NPN, so the
+    /// forward side is the upper bound.
     #[test]
     fn ebers_moll_v_clamp_port_bounds() {
-        let em = em_2n3904();
+        let em = em_2n3904(); // NPN
         let (lo, hi) = em.v_clamp_port(0);
-        assert!(lo < 0.0, "Vbe lower clamp should be negative");
-        assert!(hi > 0.0, "Vbe upper clamp should be positive");
-        assert!(hi <= 1.0, "Vbe clamp should not exceed 1.0V");
+        // Forward (upper for NPN): tight IS-dependent wall ≤ 1.0V.
+        assert!(hi > 0.0, "Vbe forward clamp should be positive");
+        assert!(hi <= 1.0, "Vbe forward clamp should not exceed 1.0V");
+        // Reverse (lower for NPN): free to the full swing, no tight wall.
+        assert!(lo < -10.0, "Vbe reverse side should be free to full swing");
 
         let (lo2, hi2) = em.v_clamp_port(1);
         assert!(lo2 < -10.0, "Vce lower clamp should be large negative");
