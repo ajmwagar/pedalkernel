@@ -343,19 +343,34 @@ fn bootstrap_sunflower_golden() {
 ///     becomes a group extract node. Confirmed via `boundary_loads`:
 ///     `CollectorChainIntoOut ⇒ FusedUpstream`.
 ///
-/// (3) REMAINING (OUT OF SCOPE for guwp — GAP 2 secondary, pedalkernel-a5ho):
-///     with a CORRECT DC op-point and a healthy fused network, the coupled-Ge
-///     MultiNL still has a near-zero small-signal transfer — the adapted-port
-///     injection / `derive_scattering` factor-2 defect (the input VS port is not
-///     Thévenin-adapted for the `in_node` injection path). AC gain ≈ −80 dB, so
-///     the coupling caps decay the output to ~1e-7 V RMS (post-fusion the extract
-///     moved past the VOLUME divider, so it reads even lower than the pre-fusion
-///     ~1e-4 V leak) vs golden 0.257 V. Un-ignore once the adapted-port injection
-///     is reconciled; the topology + DC are already correct and the golden is
-///     committed. (Running this test now correctly reports SILENCE — the honest
-///     state: the amplifier core is dead pending defect 3, not mis-wired.)
+/// (3) ADAPTED-PORT INPUT INJECTION — FIXED (pedalkernel-guwp):
+///     `in_node` injection into the HIGH-Z control input (base/grid) of a coupled
+///     ≥2-active-device NL group now Thévenin-adapts the input VS port
+///     (`injection_feeds_coupled_high_z_active_input`, `rigid/general.rs`). The
+///     injected wave's coupling into Q1.Vbe went `s_nl_adapted` ≈ 0.076 → 0.55
+///     (the input VS-port rp adapts 1 Ω → ~56 kΩ, self-reflection → 0). This
+///     narrowly extends the F-mag/ayjt follower adaptation WITHOUT touching the
+///     inverting op-amp+diode groups (they inject into a low-Z virtual-ground
+///     summing pin — never a base/grid — so the predicate is false and they stay
+///     byte-identical: mna_accuracy/adaptor_gain/wdf_asymmetric_diodes green).
+///
+/// (4) REMAINING (OUT OF SCOPE for guwp — Q1 runtime DC operating point,
+///     pedalkernel-a5ho / -aikl): with the input now correctly coupled, the
+///     coupled-Ge MultiNL STILL produces ~0 AC gain because Q1 converges at a
+///     WRONG runtime operating point — Q1.Vbe pins POSITIVE (≈ +0.30 V), i.e.
+///     the Ge PNP base-emitter is reverse-biased → Q1 in cutoff → no
+///     transconductance. At startup the stage swings ~50 mV (`raw_out` varies)
+///     then collapses to a frozen DC as the NR settles on the cutoff root; the
+///     DC blocker then correctly reads ~0. Root: post-fusion the group's DC
+///     closure is group-local so `bake_cross_group_seed` (`rigid/general.rs`,
+///     gated on `!vref_overrides.is_empty()`) is FALSE — the correct cross-group
+///     q-point IS solved but NOT baked into `v_prev`, so the runtime NR
+///     warm-starts from the linear `dc_bias` and lands the cutoff artifact.
+///     WDF RMS ≈ 0 V (< 1e-6) vs golden 0.257 V. Un-ignore once Q1's runtime
+///     seed lands the conducting root; the topology, output extraction, DC seed
+///     math, and input coupling are all now correct.
 #[test]
-#[ignore = "engine gap: DC bias (onu2) + collector-chain split (guwp) now FIXED, but the adapted-port injection factor-2 defect (GAP 2 secondary, pedalkernel-a5ho) still zeroes the coupled-Ge AC gain → silent vs golden 0.257 V — see doc comment"]
+#[ignore = "engine gap: DC bias (onu2) + collector-chain split (guwp) + adapted-port input injection (guwp) now FIXED, but Q1 converges at a WRONG runtime DC op-point (Vbe pins positive → PNP cutoff → ~0 AC gain) because the correct cross-group q-point is not baked into v_prev (bake gate false when the closure is group-local) → silent vs golden 0.257 V; needs the Q1 seed-bake fix (pedalkernel-a5ho/-aikl) — see doc comment"]
 fn sunflower_wdf_vs_spice() {
     run_wdf_vs_spice(
         "sunflower",

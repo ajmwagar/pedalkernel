@@ -445,6 +445,7 @@ fn build_general_mna_from_edges_inner(
         adapt_input_vs_port,
     ) = build_wdf_ports(
         &nl_terminals,
+        &nl_kinds,
         &reactive_edges,
         &synthetic_one_ports,
         graph,
@@ -1333,10 +1334,110 @@ fn pot_edge_is_wb_half(graph: &CircuitGraph, comp_id: &str, a: NodeId, b: NodeId
     (a == w_node && b == b_node) || (a == b_node && b == w_node)
 }
 
+/// `true` when the group's audio-entry node REACHES (through in-group passive
+/// edges only — a coupling cap / input trim pot / grid-stopper) the HIGH-Z
+/// control input (base / grid) of a NONLINEAR active device, AND the group holds
+/// ≥2 such coupled active devices (a coupled-NL group solved by grouped NR — the
+/// Fuzz-Face 2-Ge pair). This is the discharge condition that admits the in-node
+/// VS-port Thevenin adaptation for sunflower (pedalkernel-guwp) without touching
+/// the inverting-op-amp+diode cases, which inject into a low-Z VIRTUAL-GROUND
+/// summing pin (an op-amp/nullor pin, never a BJT base or tube grid) — so this
+/// returns `false` for them.
+///
+/// Passive-only reachability (never crossing an active device itself, matching
+/// `boundary_supersedes_amp_pin`) is what separates the two: sunflower's `in`
+/// reaches `Q1.base` through CLEAN→C1 (both passive); the op-amp summing node
+/// has NO passive path to any base/grid (there are none), so the predicate is
+/// false.
+///
+/// Scoped to base/grid because those are the ports the compiler records with a
+/// node (`BjtNpn/BjtPnp.base_node`, `Triode/Pentode.grid_node`); JFET/MOSFET
+/// carry no node here and never form a coupled ≥2 active-input group in the
+/// corpus, so they are excluded (and stay byte-identical).
+fn injection_feeds_coupled_high_z_active_input(
+    nl_kinds: &[NonlinearKind],
+    injection_mna: Option<usize>,
+    edge_indices: &[usize],
+    graph: &CircuitGraph,
+    node_to_mna: &dyn Fn(NodeId) -> Option<usize>,
+) -> bool {
+    let Some(inj) = injection_mna else {
+        return false;
+    };
+    // High-Z control-input MNA nodes of the group's active NL devices.
+    let mut control_mnas: Vec<usize> = Vec::new();
+    for kind in nl_kinds {
+        let control_node = match kind {
+            NonlinearKind::BjtNpn { base_node, .. }
+            | NonlinearKind::BjtPnp { base_node, .. } => Some(*base_node),
+            NonlinearKind::Triode {
+                grid_node: Some(grid),
+                ..
+            }
+            | NonlinearKind::Pentode {
+                grid_node: Some(grid),
+                ..
+            } => Some(*grid),
+            _ => None,
+        };
+        if let Some(cn) = control_node {
+            if let Some(m) = node_to_mna(cn) {
+                control_mnas.push(m);
+            }
+        }
+    }
+    // Coupled-NL group requirement: ≥2 active devices with a high-Z control pin.
+    if control_mnas.len() < 2 {
+        return false;
+    }
+    if control_mnas.contains(&inj) {
+        return true;
+    }
+    // Passive-only BFS from the injection node: does it reach ANY control pin
+    // through in-group Passive edges (coupling cap / input trim pot / grid
+    // stopper)? Never crosses an active device (so we can't trivially reach a
+    // base through the transistor itself).
+    let edge_set: HashSet<usize> = edge_indices.iter().copied().collect();
+    let mut visited: HashSet<usize> = HashSet::new();
+    visited.insert(inj);
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    queue.push_back(inj);
+    while let Some(m) = queue.pop_front() {
+        for &eidx in &edge_set {
+            let e = &graph.edges[eidx];
+            let comp = &graph.components[e.comp_idx];
+            if !matches!(
+                comp.kind.signal_terminals(),
+                super::super::component::SignalTerminals::Passive
+            ) {
+                continue;
+            }
+            let (ma, mb) = (node_to_mna(e.node_a), node_to_mna(e.node_b));
+            let next = if ma == Some(m) {
+                mb
+            } else if mb == Some(m) {
+                ma
+            } else {
+                None
+            };
+            if let Some(n) = next {
+                if control_mnas.contains(&n) {
+                    return true;
+                }
+                if visited.insert(n) {
+                    queue.push_back(n);
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Step 4: Build WDF ports (NL + reactive + adapted input).
 #[allow(clippy::too_many_arguments)] // focused port-assembly helper of the MNA build
 fn build_wdf_ports(
     nl_terminals: &[(NodeId, NodeId)],
+    nl_kinds: &[NonlinearKind],
     reactive_edges: &[(usize, OnePortKind)],
     synthetic_one_ports: &[(WdfPort, OnePortKind)],
     graph: &CircuitGraph,
@@ -1351,13 +1452,19 @@ fn build_wdf_ports(
         Vec<WdfPortTerminals>,
         Vec<MnaOnePort>,
         Vec<f64>,
-        // `true` only when the adapted input (VS) port landed on an input
-        // BOUNDARY node that SUPERSEDED the amplifier device pin — the
-        // divider-fed high-Z follower case (uberdrive/lgsm). This is the sole
-        // condition under which `derive_scattering` also Thevenin-adapts the
-        // input VS port (see the gate at pedalkernel-ayjt). `false` for
-        // `in_node` / `amplifier-pin` / `boundary-fallback` injections, which
-        // keep the VS port pinned at the placeholder (byte-identical to base).
+        // `true` when `derive_scattering` should ALSO Thevenin-adapt the input
+        // (VS) port at index `n_total-1`. Two topologies qualify (see the gate
+        // at pedalkernel-ayjt / pedalkernel-guwp):
+        //   1. the adapted input port landed on an input BOUNDARY node that
+        //      SUPERSEDED the amplifier device pin — the divider-fed high-Z
+        //      follower case (uberdrive/lgsm); and
+        //   2. `in_node` injection whose node is the HIGH-Z control input
+        //      (base/grid) of a coupled ≥2-active-device NL group (the
+        //      Fuzz-Face 2-Ge pair — sunflower).
+        // `false` for the inverting op-amp + diode cases (`in_node` into a
+        // virtual-ground summing pin, `amplifier-pin`, `boundary-fallback`),
+        // which keep the VS port pinned at the placeholder (byte-identical to
+        // base).
         bool,
     ),
     String,
@@ -1467,13 +1574,35 @@ fn build_wdf_ports(
             .collect();
         format!("mna#{m}[{}]", names.join(","))
     };
-    // Set true ONLY when injection resolves via the boundary-supersedes-amp-pin
-    // arm below — the divider-fed high-Z follower topology. Gates the VS-port
-    // Thevenin adaptation in `derive_scattering`.
-    let mut injection_superseded_amp_pin = false;
+    // Gates the input-VS-port Thevenin adaptation in `derive_scattering`. Set
+    // true in TWO cases: (a) the `in_node` injection lands on the HIGH-Z control
+    // input (base/grid) of a coupled ≥2-active-device NL group — the Fuzz-Face
+    // 2-Ge pair, sunflower (pedalkernel-guwp); (b) injection resolves via the
+    // boundary-supersedes-amp-pin arm below — the divider-fed high-Z follower
+    // (uberdrive/lgsm).
+    let mut adapt_input_vs_port = false;
     let injection_mna = if let Some(m) = node_to_mna(graph.in_node) {
         if inject_debug {
             eprintln!("[PK_INJECT] branch=in_node -> {}", name_of(Some(m)));
+        }
+        // pedalkernel-guwp: a coupled-NL group whose audio entry IS a high-Z
+        // active control input (base/grid) needs the injected source impedance
+        // adapted to what that high-Z node actually sees (else the coupled NR
+        // gets a mis-scaled source and produces ~0 AC gain — sunflower was
+        // -135 dB / silent). Inverting op-amp+diode groups inject `in_node`
+        // into a virtual-ground summing pin (never a base/grid) → predicate
+        // false → byte-identical.
+        if injection_feeds_coupled_high_z_active_input(
+            nl_kinds,
+            Some(m),
+            edge_indices,
+            graph,
+            node_to_mna,
+        ) {
+            if inject_debug {
+                eprintln!("[PK_INJECT]   in_node feeds coupled high-Z active input -> adapt VS port");
+            }
+            adapt_input_vs_port = true;
         }
         Some(m)
     } else {
@@ -1525,10 +1654,10 @@ fn build_wdf_ports(
                     }
                     // Divider-fed high-Z follower: a reachable input boundary
                     // superseded the amplifier device pin because injecting at
-                    // the pin would bypass an in-group passive divider. This is
-                    // the ONLY injection topology for which the VS port is also
-                    // Thevenin-adapted (magnitude fix), gated in derive_scattering.
-                    injection_superseded_amp_pin = true;
+                    // the pin would bypass an in-group passive divider. The VS
+                    // port is Thevenin-adapted (magnitude fix), gated in
+                    // derive_scattering (see also the coupled-NL in_node case).
+                    adapt_input_vs_port = true;
                     Some(bm)
                 }
                 (None, Some(m), _) => {
@@ -1581,7 +1710,7 @@ fn build_wdf_ports(
         port_node_pairs,
         passive_one_ports,
         nl_port_resistances,
-        injection_superseded_amp_pin,
+        adapt_input_vs_port,
     ))
 }
 
@@ -1874,9 +2003,11 @@ fn derive_scattering(
     nl_port_resistances: &mut [f64],
     n_nl: usize,
     vcc_vs_idx: Option<usize>,
-    // Gate for the input VS-port Thevenin adaptation (pedalkernel-ayjt). Only
-    // `true` for divider-fed high-Z followers (injection via the
-    // boundary-supersedes-amp-pin arm — uberdrive/lgsm). See comment below.
+    // Gate for the input VS-port Thevenin adaptation (pedalkernel-ayjt /
+    // pedalkernel-guwp). `true` for (a) divider-fed high-Z followers
+    // (boundary-supersedes-amp-pin arm — uberdrive/lgsm) and (b) `in_node`
+    // injection into the high-Z control input of a coupled ≥2-active-device NL
+    // group (the Fuzz-Face 2-Ge pair — sunflower). See comment below.
     adapt_input_vs_port: bool,
 ) -> Result<(Vec<f64>, Option<Vec<f64>>), String> {
     let n_total = ports.len();
