@@ -798,13 +798,28 @@ fn merge_shared_active_node_sccs(
 pub(in crate::compiler) fn bfs_distances_from_in_node(
     graph: &CircuitGraph,
 ) -> HashMap<NodeId, usize> {
+    bfs_distances_from_node(graph, graph.in_node)
+}
+
+/// Rail-blocked, UNDIRECTED hop distance from an arbitrary seed node.
+///
+/// Same traversal as [`bfs_distances_from_in_node`] (rails are dead-ends
+/// except as the seed itself), generalized to any starting node. Used by
+/// `mid_chain_terminals()` (pedalkernel-pmv1) seeded from `graph.out_node` to
+/// pick, among 3+ boundary terminals of a mid-chain group, the one that's
+/// actually closest to (and therefore leads toward) the circuit's output —
+/// rather than the first terminal in NodeId order.
+pub(in crate::compiler) fn bfs_distances_from_node(
+    graph: &CircuitGraph,
+    seed: NodeId,
+) -> HashMap<NodeId, usize> {
     let rails = rail_nodes(graph);
     let mut visited: HashMap<NodeId, usize> = HashMap::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
-    visited.insert(graph.in_node, 0);
-    queue.push_back(graph.in_node);
+    visited.insert(seed, 0);
+    queue.push_back(seed);
     while let Some(node) = queue.pop_front() {
-        if rails.contains(&node) && node != graph.in_node {
+        if rails.contains(&node) && node != seed {
             continue;
         }
         let dist = visited[&node];
