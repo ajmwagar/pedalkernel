@@ -6292,7 +6292,13 @@ impl StateSpaceStage {
         let n = self.ss.n_states;
         let sample = input * self.compensation;
 
-        // x[n] = A · x[n-1] + b · u[n]  (into pre-allocated work buffer)
+        // x[n] = A · x[n-1] + b · u[n]  (into pre-allocated work buffer).
+        // The recursion stays LINEAR here — no per-sample nonlinearity is
+        // applied to the state. A saturating clip fed back into A·x[n-1]
+        // would distort the internal node-voltage/source-current states
+        // every sample, which corrupts genuinely bounded resonant ring-up
+        // into a spurious nonzero DC fixed point once the ring-up amplitude
+        // approaches the clip threshold (see pedalkernel-xz6.5 diagnosis).
         let has_b_minus = self.ss.b_vector.len() >= n * 2;
         for i in 0..n {
             let mut v = self.ss.b_vector[i] * sample;
@@ -6307,12 +6313,19 @@ impl StateSpaceStage {
         }
         self.prev_input = sample;
 
-        // Op-amp rail saturation: tanh soft-clip state variables.
-        // v_rail and inv_v_rail are precomputed (supply voltage is constant).
-        let v_rail = self.v_rail;
-        let inv_v_rail = self.inv_v_rail;
+        // Divergence guard: this is NOT the op-amp rail model (that's applied
+        // to the output below). This exists solely to catch a genuinely
+        // UNSTABLE state-space realization (e.g. a user-dialed operating
+        // point past the real analog instability boundary) before it turns
+        // into NaN/Inf. It only engages on actual blow-up — a bounded
+        // resonant signal never approaches this threshold — so it must not
+        // shape or compress ordinary, stable signals.
+        const DIVERGENCE_MULTIPLE: crate::Wave = 100.0;
+        let divergence_threshold = self.v_rail * DIVERGENCE_MULTIPLE;
         for x in &mut self.work[..n] {
-            *x = v_rail * crate::fast_math::fast_tanh(*x * inv_v_rail);
+            if !x.is_finite() || x.abs() > divergence_threshold {
+                *x = 0.0;
+            }
         }
         self.ss.x[..n].copy_from_slice(&self.work[..n]);
 
@@ -6322,7 +6335,14 @@ impl StateSpaceStage {
             y_raw += self.ss.c_vector[i] * self.work[i];
         }
 
+        // Op-amp output rail saturation: tanh soft-clip belongs at the
+        // output node (physically real — an op-amp's output stage is what
+        // actually saturates), not smeared across internal states.
+        y_raw = self.v_rail * crate::fast_math::fast_tanh(y_raw * self.inv_v_rail);
+
         // 2-sample moving average: kills Nyquist (-1 eigenvalue) parasitics.
+        // Averages the physical (already rail-clipped) output, matching the
+        // prior ordering relative to `prev_output`.
         let y = (y_raw + self.ss.prev_output) * 0.5;
         self.ss.prev_output = y_raw;
         flush_denormal(y)
