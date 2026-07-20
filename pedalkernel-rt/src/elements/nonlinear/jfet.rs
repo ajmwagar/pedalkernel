@@ -87,7 +87,7 @@ impl JfetModel {
     /// Returns the external-convention derivative (same sign convention as
     /// `gate_source_current`).
     #[inline]
-    pub fn gate_source_conductance(&self, vgs: f64) -> f64 {
+    pub fn gate_source_conductance(&self, vgs: crate::Wave) -> crate::Wave {
         let sign = if self.is_n_channel { 1.0 } else { -1.0 };
         let vgs_int = sign * vgs;
         let arg = (vgs_int / (self.n * VT)).min(40.0);

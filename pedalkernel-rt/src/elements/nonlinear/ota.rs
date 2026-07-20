@@ -236,13 +236,13 @@ impl super::solver::NlDeviceIv for OtaRoot {
     /// - `Iout = Iabc * tanh(v / (2*Vt))`
     /// - `dIout/dVdiff = Iabc / (2*Vt) * sech²(v / (2*Vt))`
     #[inline]
-    fn iv(&self, v: f64) -> (f64, f64) {
+    fn iv(&self, v: crate::Wave) -> (crate::Wave, crate::Wave) {
         (self.output_current(v), self.output_current_derivative(v))
     }
 
     /// OTA differential input clamp: ±200mV (well beyond hard saturation at ~40mV).
     #[inline]
-    fn v_clamp(&self) -> (f64, f64) {
+    fn v_clamp(&self) -> (crate::Wave, crate::Wave) {
         (-0.2, 0.2)
     }
 }

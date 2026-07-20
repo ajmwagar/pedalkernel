@@ -369,7 +369,7 @@ impl VariMuThreePort {
     /// VariMuThreePort evaluates `vak = v[1]` directly (no voltage offset),
     /// so this is equivalent to `new_with_v_max` — the supply voltage sets
     /// the upper plate-voltage clamp only.
-    pub fn new_gnd_referenced(model: VariMuModel, supply_voltage: f64) -> Self {
+    pub fn new_gnd_referenced(model: VariMuModel, supply_voltage: crate::Wave) -> Self {
         Self::new_with_v_max(model, supply_voltage)
     }
 

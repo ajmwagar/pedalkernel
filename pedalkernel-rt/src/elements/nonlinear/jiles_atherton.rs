@@ -591,7 +591,7 @@ fn ja_field_step(p: &JaCoreModel, h: Wave, h_prev: Wave, m_prev: Wave) -> (Wave,
     // Sub-step count: bound |dH| per step so M can't jump more than ~Ms/64 at
     // the steepest slope (~Ms/a). nsub = ceil(|dH| * (Ms/a) / (Ms/64) ... )
     // simplified to |dH| / a scaled — cheap and conservative.
-    let n = (math::abs(dh_total) / (0.25 * p.a)).ceil();
+    let n = math::ceil(math::abs(dh_total) / (0.25 * p.a));
     let nsub = (n as usize).clamp(1, 256);
     let dh = dh_total / nsub as Wave;
 
