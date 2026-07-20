@@ -361,7 +361,7 @@ impl PentodeThreePort {
     /// the MNA reference node. Port-1 waves represent actual plate voltage above
     /// GND (positive, 0..supply_voltage). No offset is needed; the clamp is
     /// adjusted accordingly.
-    pub fn new_gnd_referenced(model: PentodeModel, supply_voltage: f64) -> Self {
+    pub fn new_gnd_referenced(model: PentodeModel, supply_voltage: crate::Wave) -> Self {
         let v_max = supply_voltage.max(1.0);
         Self {
             v_max,

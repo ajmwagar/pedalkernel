@@ -38,19 +38,19 @@ pub struct NlPortLinearization {
     /// Device family name (`Triode`, `BjtNpn2P`, `Diode`, ...).
     pub device: String,
     /// Operating-point voltage at this port (the NR warm-start `v_prev`).
-    pub v_op: f64,
+    pub v_op: crate::Wave,
     /// Self conductance `di/dv` at the operating point (the companion `g`).
     /// For a port `k` this is the diagonal Jacobian term `∂i_k/∂v_k`.
-    pub gm: f64,
+    pub gm: crate::Wave,
     /// Companion small-signal resistance `1/gm` (∞ reported as `f64::INFINITY`).
-    pub r_companion: f64,
+    pub r_companion: crate::Wave,
     /// Cross transconductance for grouped multi-port devices.
     ///
     /// For a BJT CE port this is `∂Ic/∂Vbe` (the textbook `gm`); for a
     /// BE port it is `∂Ib/∂Vce`. `None` for single-port devices.
-    pub cross_gm: Option<f64>,
+    pub cross_gm: Option<crate::Wave>,
     /// Adapted WDF port resistance for this NL port (`nl_port_resistances[k]`).
-    pub port_resistance: f64,
+    pub port_resistance: crate::Wave,
 }
 
 /// A compile-time MNA / scattering snapshot of one `MultiNlStage`.
@@ -76,13 +76,13 @@ pub struct MnaStageSnapshot {
     /// (`[NL_0..NL_{n-1}, passive_0..passive_{m-1}, (vcc?), adapted]`).
     pub port_labels: Vec<String>,
     /// Per-port adaptor resistances (full adaptor ordering).
-    pub port_resistances: Vec<f64>,
+    pub port_resistances: Vec<crate::Wave>,
 
     /// Full **standard** scattering matrix `S` (`n_total × n_total`, row-major).
     ///
     /// Reconstructed from the adaptor's power-normalized matrix `S̄` via
     /// `S[i][j] = S̄[i][j] · √(R_i / R_j)`.
-    pub s_full: Vec<f64>,
+    pub s_full: Vec<crate::Wave>,
     /// Side length of `s_full` (== `n_ports_total`).
     pub s_dim: usize,
 
@@ -90,24 +90,24 @@ pub struct MnaStageSnapshot {
     pub nl_linearization: Vec<NlPortLinearization>,
 
     /// Adapted NL port resistances (`nl_port_resistances`, length `n_nl`).
-    pub nl_port_resistances: Vec<f64>,
+    pub nl_port_resistances: Vec<crate::Wave>,
 
     /// Node-voltage output extraction coefficients (`extract_coeffs`), if the
     /// stage reads its output via direct node-voltage extraction.
-    pub extraction_coeffs: Option<Vec<f64>>,
+    pub extraction_coeffs: Option<Vec<crate::Wave>>,
     /// Extraction VS coefficient (`extract_vs`).
-    pub extraction_vs: f64,
+    pub extraction_vs: crate::Wave,
 
     /// Voltage-source injection vector (`vs_injection`), if the input is
     /// injected as an ideal VS rather than an adapted WDF port.
-    pub vs_injection: Option<Vec<f64>>,
+    pub vs_injection: Option<Vec<crate::Wave>>,
 
     /// Output NL port index (`output_port`).
     pub output_port: usize,
     /// Passive attenuation compensation factor (`compensation`).
-    pub compensation: f64,
+    pub compensation: crate::Wave,
     /// Supply voltage used for DC bias (`supply_voltage`).
-    pub supply_voltage: f64,
+    pub supply_voltage: crate::Wave,
     /// Whether the stage is off the serial audio path (`bypass_serial`).
     pub bypass_serial: bool,
 }
@@ -122,7 +122,7 @@ pub struct DiagSnapshot {
     /// Source file path (set by the std host).
     pub source_path: String,
     /// Sample rate the pedal was compiled at.
-    pub sample_rate: f64,
+    pub sample_rate: crate::Wave,
     /// Total number of stages in `CompiledPedal::stages`.
     pub stage_count: usize,
     /// Per-stage kind labels (e.g. `Wdf`, `MultiNl`, `Iir`), in stage order.

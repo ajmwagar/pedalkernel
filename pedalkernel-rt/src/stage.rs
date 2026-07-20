@@ -7474,11 +7474,11 @@ impl MultiNlStage {
         use alloc::vec::Vec;
         let mut out: Vec<crate::diag::NlPortLinearization> = Vec::with_capacity(self.n_nl);
         let v_prev = &self.v_prev;
-        let recip = |g: crate::Wave| -> f64 {
+        let recip = |g: crate::Wave| -> crate::Wave {
             if g.abs() > 1e-30 {
                 1.0 / g
             } else {
-                f64::INFINITY
+                crate::Wave::INFINITY
             }
         };
 
