@@ -14,6 +14,9 @@ rust-version = "1.80"
 default = ["std"]
 std = []
 serde = ["dep:serde"]
+# Force `Wave = f32` regardless of target. Used on an f64 host to compile a
+# blob whose serialized width matches an f32 (embedded) device.
+wave-f32 = []
 biquad-table = []
 debug-trace = ["std"]
 fault-injection = ["std"]

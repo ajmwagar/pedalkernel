@@ -16,7 +16,7 @@ pub(super) fn calibrate_output(compiled: &mut CompiledPedal) {
     // pre_gain stays at 1.0.
 
     let output_gain = measure_output_gain(compiled);
-    compiled.output_gain = output_gain;
+    compiled.output_gain = output_gain as crate::Wave;
     compiled.reset();
 }
 
@@ -43,18 +43,18 @@ fn measure_output_gain(pedal: &mut CompiledPedal) -> f64 {
 
     // Warm up (128 samples — let caps settle)
     for i in 0..128usize {
-        let _ = pedal.process(amp * (two_pi_f * i as f64 / sr).sin());
+        let _ = pedal.process((amp * (two_pi_f * i as f64 / sr as f64).sin()) as crate::Wave);
     }
 
     // Measure steady-state output RMS
     let mut sum_sq = 0.0;
     let measure_len = n - 128;
     for i in 128..n {
-        let input = amp * (two_pi_f * i as f64 / sr).sin();
+        let input = (amp * (two_pi_f * i as f64 / sr as f64).sin()) as crate::Wave;
         let out = pedal.process(input);
         sum_sq += out * out;
     }
-    let output_rms = (sum_sq / measure_len as f64).sqrt();
+    let output_rms = (sum_sq as f64 / measure_len as f64).sqrt();
     let input_rms = amp / std::f64::consts::SQRT_2;
 
     if output_rms < 1e-10 {

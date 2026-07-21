@@ -75,7 +75,11 @@ pub(in crate::compiler) fn build_iir_stage(
         #[cfg(test)]
         eprintln!("IIR dc_gain={dc_gain:.4} vs_idx={vs_idx} out_mna={out_mna:?}");
         return Ok(BuiltIir {
-            data: IirData::new(vec![dc_gain, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate),
+            data: IirData::new(
+                vec![dc_gain, 0.0, 0.0],
+                vec![1.0, 0.0, 0.0],
+                sample_rate as crate::Wave,
+            ),
             reactive_one_ports,
             input_node_id,
             output_node_id,
@@ -118,13 +122,23 @@ pub(in crate::compiler) fn build_iir_stage(
         let a_coeffs = vec![1.0, -2.0 * cos_w0 / a0, (1.0 - alpha) / a0];
 
         if iir_coeffs_are_stable_and_finite(&b_coeffs, &a_coeffs) {
-            let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate);
-            iir.r_fb = rf;
-            iir.r_crit = r_crit;
-            iir.r_series_base = params.r_series;
-            iir.c_shunt_base = params.c_shunt;
-            iir.r_series_product = params.r_series[0] * params.r_series[1];
-            iir.c_shunt_product = params.c_shunt[0] * params.c_shunt[1];
+            let mut iir = IirData::new(
+                b_coeffs.iter().map(|&v| v as crate::Wave).collect(),
+                a_coeffs.iter().map(|&v| v as crate::Wave).collect(),
+                sample_rate as crate::Wave,
+            );
+            iir.r_fb = rf as crate::Wave;
+            iir.r_crit = r_crit as crate::Wave;
+            iir.r_series_base = [
+                params.r_series[0] as crate::Wave,
+                params.r_series[1] as crate::Wave,
+            ];
+            iir.c_shunt_base = [
+                params.c_shunt[0] as crate::Wave,
+                params.c_shunt[1] as crate::Wave,
+            ];
+            iir.r_series_product = (params.r_series[0] * params.r_series[1]) as crate::Wave;
+            iir.c_shunt_product = (params.c_shunt[0] * params.c_shunt[1]) as crate::Wave;
             return Ok(BuiltIir {
                 data: iir,
                 reactive_one_ports,
@@ -140,19 +154,27 @@ pub(in crate::compiler) fn build_iir_stage(
         vs_idx,
         out_mna,
         None,
-        sample_rate,
+        sample_rate as crate::Wave,
         None,
     ) {
-        if iir_coeffs_are_stable_and_finite(&b_coeffs, &a_coeffs) {
-            let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate);
+        let b_check: Vec<f64> = b_coeffs.iter().map(|&v| v as f64).collect();
+        let a_check: Vec<f64> = a_coeffs.iter().map(|&v| v as f64).collect();
+        if iir_coeffs_are_stable_and_finite(&b_check, &a_check) {
+            let mut iir = IirData::new(b_coeffs, a_coeffs, sample_rate as crate::Wave);
             // For non-bridged-T circuits, feedback_params will be None here.
             if let Some(params) = feedback_params {
-                iir.r_fb = params.rf;
-                iir.r_crit = params.r_crit;
-                iir.r_series_base = params.r_series;
-                iir.c_shunt_base = params.c_shunt;
-                iir.r_series_product = params.r_series[0] * params.r_series[1];
-                iir.c_shunt_product = params.c_shunt[0] * params.c_shunt[1];
+                iir.r_fb = params.rf as crate::Wave;
+                iir.r_crit = params.r_crit as crate::Wave;
+                iir.r_series_base = [
+                    params.r_series[0] as crate::Wave,
+                    params.r_series[1] as crate::Wave,
+                ];
+                iir.c_shunt_base = [
+                    params.c_shunt[0] as crate::Wave,
+                    params.c_shunt[1] as crate::Wave,
+                ];
+                iir.r_series_product = (params.r_series[0] * params.r_series[1]) as crate::Wave;
+                iir.c_shunt_product = (params.c_shunt[0] * params.c_shunt[1]) as crate::Wave;
             }
             return Ok(BuiltIir {
                 data: iir,
@@ -164,8 +186,13 @@ pub(in crate::compiler) fn build_iir_stage(
     }
 
     // Fallback: state-space reduction → extract biquad if 2nd order
-    let (a_d, b_d, c_out, n_states, d_feedthrough) =
-        mna.build_state_space_matrices(&reactive_one_ports, vs_idx, out_mna, None, sample_rate);
+    let (a_d, b_d, c_out, n_states, d_feedthrough) = mna.build_state_space_matrices(
+        &reactive_one_ports,
+        vs_idx,
+        out_mna,
+        None,
+        sample_rate as crate::Wave,
+    );
 
     if n_states <= 2 && n_states > 0 {
         // b_d contains two packed vectors: b_plus[0..n] and b_minus[n..2n]
@@ -189,9 +216,11 @@ pub(in crate::compiler) fn build_iir_stage(
             let b1 = c_out[0] * bm[0] - d_feedthrough * a_val;
             let b = vec![b0, b1];
             let a = vec![1.0, -a_val];
-            if iir_coeffs_are_stable_and_finite(&b, &a) {
+            let b_check: Vec<f64> = b.iter().map(|&v| v as f64).collect();
+            let a_check: Vec<f64> = a.iter().map(|&v| v as f64).collect();
+            if iir_coeffs_are_stable_and_finite(&b_check, &a_check) {
                 return Ok(BuiltIir {
-                    data: IirData::new(b, a, sample_rate),
+                    data: IirData::new(b, a, sample_rate as crate::Wave),
                     reactive_one_ports,
                     input_node_id,
                     output_node_id,
@@ -227,9 +256,11 @@ pub(in crate::compiler) fn build_iir_stage(
             let b2 = num_z0_m + d_feedthrough * da2;
             let b = vec![b0, b1, b2];
             let a = vec![1.0, da1, da2];
-            if iir_coeffs_are_stable_and_finite(&b, &a) {
+            let b_check: Vec<f64> = b.iter().map(|&v| v as f64).collect();
+            let a_check: Vec<f64> = a.iter().map(|&v| v as f64).collect();
+            if iir_coeffs_are_stable_and_finite(&b_check, &a_check) {
                 return Ok(BuiltIir {
-                    data: IirData::new(b, a, sample_rate),
+                    data: IirData::new(b, a, sample_rate as crate::Wave),
                     reactive_one_ports,
                     input_node_id,
                     output_node_id,
@@ -271,7 +302,7 @@ pub(in crate::compiler) fn build_biquad_table(
     let n_dims = control_labels.len();
     let total_entries = steps.checked_pow(n_dims as u32)?;
     let mut coeffs = Vec::with_capacity(total_entries * 5);
-    let invalid_coeffs = [f64::NAN; 5];
+    let invalid_coeffs = [crate::Wave::NAN; 5];
 
     // Identify pot edges: for each control label, find the pot component edges
     // and their MNA node pairs. We'll re-stamp these at each grid point.
@@ -407,7 +438,7 @@ pub(in crate::compiler) fn build_biquad_table(
             let n2 = node_to_mna(e.node_b);
 
             let resistance_for = |position: f64| {
-                let tapered = pot.taper.apply(position);
+                let tapered = pot.taper.apply(position as crate::Wave) as f64;
                 match pot.leg {
                     PotLeg::TwoTerminal | PotLeg::AToWiper => (tapered * pot.max_r).max(1.0),
                     PotLeg::WiperToB => ((1.0 - tapered) * pot.max_r).max(1.0),
@@ -420,7 +451,7 @@ pub(in crate::compiler) fn build_biquad_table(
             let pos = dim_positions[pot.dim];
             let new_r = resistance_for(pos);
             let new_g = 1.0 / new_r;
-            let delta_g = new_g - old_g;
+            let delta_g = (new_g - old_g) as crate::Wave;
 
             // Apply delta to G matrix (same pattern as stamp_resistor)
             if let Some(p) = n1 {
@@ -440,9 +471,20 @@ pub(in crate::compiler) fn build_biquad_table(
         // Extract biquad from modified MNA. The generic table path must use
         // the actual MNA/state-space transfer function; oscillator-specific
         // synthesis is selected elsewhere, not for every active VCVS filter.
-        let biquad = mna.build_iir(reactive_one_ports, vs_idx, out_mna, None, sample_rate, None);
+        let biquad = mna.build_iir(
+            reactive_one_ports,
+            vs_idx,
+            out_mna,
+            None,
+            sample_rate as crate::Wave,
+            None,
+        );
 
-        if let Some((b, a)) = biquad.filter(|(b, a)| iir_coeffs_are_stable_and_finite(b, a)) {
+        if let Some((b, a)) = biquad.filter(|(b, a)| {
+            let b_check: Vec<f64> = b.iter().map(|&v| v as f64).collect();
+            let a_check: Vec<f64> = a.iter().map(|&v| v as f64).collect();
+            iir_coeffs_are_stable_and_finite(&b_check, &a_check)
+        }) {
             coeffs.push(b.first().copied().unwrap_or(0.0));
             coeffs.push(b.get(1).copied().unwrap_or(0.0));
             coeffs.push(b.get(2).copied().unwrap_or(0.0));
@@ -455,7 +497,7 @@ pub(in crate::compiler) fn build_biquad_table(
                 vs_idx,
                 out_mna,
                 None,
-                sample_rate,
+                sample_rate as crate::Wave,
             );
             if n_states <= 2 && n_states > 0 {
                 let has_two = b_d.len() >= 2 * n_states;
@@ -472,7 +514,9 @@ pub(in crate::compiler) fn build_biquad_table(
                     let b1 = c_out[0] * bm[0] - d_ft * a_val;
                     let b = [b0, b1, 0.0];
                     let a = [1.0, -a_val, 0.0];
-                    if iir_coeffs_are_stable_and_finite(&b, &a) {
+                    let b_check = [b[0] as f64, b[1] as f64, b[2] as f64];
+                    let a_check = [a[0] as f64, a[1] as f64, a[2] as f64];
+                    if iir_coeffs_are_stable_and_finite(&b_check, &a_check) {
                         coeffs.extend_from_slice(&[b0, b1, 0.0, -a_val, 0.0]);
                     } else {
                         coeffs.extend_from_slice(&invalid_coeffs);
@@ -495,7 +539,9 @@ pub(in crate::compiler) fn build_biquad_table(
                     let b2 = nz0m + d_ft * da2;
                     let b = [b0, b1, b2];
                     let a = [1.0, da1, da2];
-                    if iir_coeffs_are_stable_and_finite(&b, &a) {
+                    let b_check = [b[0] as f64, b[1] as f64, b[2] as f64];
+                    let a_check = [a[0] as f64, a[1] as f64, a[2] as f64];
+                    if iir_coeffs_are_stable_and_finite(&b_check, &a_check) {
                         coeffs.extend_from_slice(&[b0, b1, b2, da1, da2]);
                     } else {
                         coeffs.extend_from_slice(&invalid_coeffs);

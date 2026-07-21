@@ -243,23 +243,23 @@ pub struct SplitCompiledPedal {
 impl SplitCompiledPedal {
     /// Process with no FX loop — direct connection from pre to post.
     pub fn process(&mut self, input: f64) -> f64 {
-        let send = self.pre.process(input);
-        self.post.process(send)
+        let send = self.pre.process(input as crate::Wave);
+        self.post.process(send) as f64
     }
 
     /// Process the pre-section only, returning the FX send signal.
     pub fn process_pre(&mut self, input: f64) -> f64 {
-        self.pre.process(input)
+        self.pre.process(input as crate::Wave) as f64
     }
 
     /// Process the post-section only, taking the FX return signal.
     pub fn process_post(&mut self, fx_return: f64) -> f64 {
-        self.post.process(fx_return)
+        self.post.process(fx_return as crate::Wave) as f64
     }
 
     pub fn set_sample_rate(&mut self, rate: f64) {
-        self.pre.set_sample_rate(rate);
-        self.post.set_sample_rate(rate);
+        self.pre.set_sample_rate(rate as crate::Wave);
+        self.post.set_sample_rate(rate as crate::Wave);
     }
 
     pub fn reset(&mut self) {
@@ -270,22 +270,22 @@ impl SplitCompiledPedal {
     pub fn set_control(&mut self, label: &str, value: f64) {
         // Try both halves — controls are partitioned but the user shouldn't
         // need to know which half a control belongs to.
-        self.pre.set_control(label, value);
-        self.post.set_control(label, value);
+        self.pre.set_control(label, value as crate::Wave);
+        self.post.set_control(label, value as crate::Wave);
     }
 
     /// Get the input impedance of the split pedal (Ω).
     ///
     /// Returns the input impedance of the pre-section.
     pub fn input_impedance(&self) -> f64 {
-        self.pre.input_impedance()
+        self.pre.input_impedance() as f64
     }
 
     /// Get the output impedance of the split pedal (Ω).
     ///
     /// Returns the output impedance of the post-section.
     pub fn output_impedance(&self) -> f64 {
-        self.post.output_impedance()
+        self.post.output_impedance() as f64
     }
 }
 

@@ -71,7 +71,7 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
     if _dims == 1 {
         // 1D: sweep b_tree, use RootKind's process method directly
         let root = &mut stage.root;
-        Some(sweep_1d(|b| root.process(b, rp), DEFAULT_STEPS_1D))
+        Some(sweep_1d(|b| root.process(b as crate::Wave, rp as crate::Wave) as f64, DEFAULT_STEPS_1D))
     } else {
         // 2D devices need control voltage sweep — use set_control_voltage + process
         let (ctrl_min, ctrl_max) = match &stage.root {
@@ -106,8 +106,8 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
                 let b = b_min + tb * (b_max - b_min);
                 // Reset NR warm-start state for clean cold-start solve
                 root.reset_nr_state();
-                root.set_control_voltage(ctrl, 1.0, 0.0);
-                let a = root.process(b, rp);
+                root.set_control_voltage(ctrl as crate::Wave, 1.0, 0.0);
+                let a = root.process(b as crate::Wave, rp as crate::Wave);
                 if !a.is_finite() {
                     nan_count += 1;
                 }
@@ -125,10 +125,10 @@ pub(super) fn generate_k_table(stage: &mut WdfStage) -> Option<KTable> {
 
         let mut t = KTable {
             dims: 2,
-            b_min,
-            b_max,
-            ctrl_min,
-            ctrl_max,
+            b_min: b_min as crate::Wave,
+            b_max: b_max as crate::Wave,
+            ctrl_min: ctrl_min as crate::Wave,
+            ctrl_max: ctrl_max as crate::Wave,
             steps,
             entries,
             inv_b_scale: 0.0,
@@ -146,7 +146,7 @@ pub(super) fn generate_k_table_for_spec(stage: &mut WdfStage, spec: KMethodSpec)
             return None;
         }
         let root = &mut stage.root;
-        Some(sweep_1d(|b| root.process(b, rp), DEFAULT_STEPS_1D))
+        Some(sweep_1d(|b| root.process(b as crate::Wave, rp as crate::Wave) as f64, DEFAULT_STEPS_1D))
     } else if spec.axes == [KMethodAxis::IncidentWave, KMethodAxis::DeviceControl] {
         generate_k_table(stage)
     } else {
@@ -205,13 +205,13 @@ fn biased_single_diode_reflection(model: DiodeModel, rp: f64, b_tree: f64, bias:
 }
 
 fn diode_current(model: DiodeModel, v: f64) -> f64 {
-    let x = (v / model.n_vt).clamp(-80.0, 80.0);
-    model.is * (math::exp(x) - 1.0)
+    let x = (v / model.n_vt as f64).clamp(-80.0, 80.0);
+    (model.is as f64 * (math::exp(x as crate::Wave) as f64 - 1.0))
 }
 
 fn diode_conductance(model: DiodeModel, v: f64) -> f64 {
-    let x = (v / model.n_vt).clamp(-80.0, 80.0);
-    model.is * math::exp(x) / model.n_vt
+    let x = (v / model.n_vt as f64).clamp(-80.0, 80.0);
+    model.is as f64 * math::exp(x as crate::Wave) as f64 / model.n_vt as f64
 }
 
 /// Sweep a 1D NL root across the input domain.
@@ -233,8 +233,8 @@ fn sweep_1d<F: FnMut(f64) -> f64>(mut f: F, steps: usize) -> KTable {
 
     let mut t = KTable {
         dims: 1,
-        b_min,
-        b_max,
+        b_min: b_min as crate::Wave,
+        b_max: b_max as crate::Wave,
         ctrl_min: 0.0,
         ctrl_max: 0.0,
         steps,
@@ -274,10 +274,10 @@ fn sweep_2d<F: FnMut(f64, f64) -> f64>(
 
     let mut t = KTable {
         dims: 2,
-        b_min,
-        b_max,
-        ctrl_min,
-        ctrl_max,
+        b_min: b_min as crate::Wave,
+        b_max: b_max as crate::Wave,
+        ctrl_min: ctrl_min as crate::Wave,
+        ctrl_max: ctrl_max as crate::Wave,
         steps,
         entries,
         inv_b_scale: 0.0,

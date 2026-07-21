@@ -31,15 +31,15 @@ pub fn jfet_try_by_name(name: &str) -> Option<JfetModel> {
 
 fn jfet_from_spice(s: &SpiceJfetModel) -> JfetModel {
     JfetModel {
-        vto: s.vto,
-        beta: s.beta,
-        lambda: s.lambda,
-        gate_is: s.is,
-        n: s.n,
-        rd: s.rd,
-        rs: s.rs,
-        cgs: s.cgs,
-        cgd: s.cgd,
+        vto: s.vto as crate::Wave,
+        beta: s.beta as crate::Wave,
+        lambda: s.lambda as crate::Wave,
+        gate_is: s.is as crate::Wave,
+        n: s.n as crate::Wave,
+        rd: s.rd as crate::Wave,
+        rs: s.rs as crate::Wave,
+        cgs: s.cgs as crate::Wave,
+        cgd: s.cgd as crate::Wave,
         is_n_channel: s.is_n_channel,
     }
 }
@@ -64,12 +64,12 @@ pub fn triode_try_by_name(name: &str) -> Option<TriodeModel> {
 
 fn triode_from_spice(spice: &SpiceTriodeModel) -> TriodeModel {
     TriodeModel {
-        mu: spice.mu,
-        kp: spice.kp,
-        kvb: spice.kvb,
-        ex: spice.ex,
-        kg1: spice.kg1,
-        rp: spice.rp,
+        mu: spice.mu as crate::Wave,
+        kp: spice.kp as crate::Wave,
+        kvb: spice.kvb as crate::Wave,
+        ex: spice.ex as crate::Wave,
+        kg1: spice.kg1 as crate::Wave,
+        rp: spice.rp as crate::Wave,
     }
 }
 
@@ -93,15 +93,15 @@ pub fn pentode_try_by_name(name: &str) -> Option<PentodeModel> {
 
 fn pentode_from_spice(spice: &SpicePentodeModel) -> PentodeModel {
     PentodeModel {
-        mu: spice.mu,
-        kp: spice.kp,
-        kvb: spice.kvb,
-        ex: spice.ex,
-        kvb2: spice.kvb2,
-        vg2_default: spice.vg2_default,
-        kg1: spice.kg1,
-        kg2: spice.kg2,
-        rp: spice.rp,
+        mu: spice.mu as crate::Wave,
+        kp: spice.kp as crate::Wave,
+        kvb: spice.kvb as crate::Wave,
+        ex: spice.ex as crate::Wave,
+        kvb2: spice.kvb2 as crate::Wave,
+        vg2_default: spice.vg2_default as crate::Wave,
+        kg1: spice.kg1 as crate::Wave,
+        kg2: spice.kg2 as crate::Wave,
+        rp: spice.rp as crate::Wave,
     }
 }
 
@@ -125,31 +125,31 @@ use pedalkernel_rt::SPICE_VT_27C;
 
 fn bjt_from_spice(spice: &SpiceBjtModel) -> GummelPoonModel {
     GummelPoonModel {
-        is: spice.is,
-        bf: spice.bf,
-        br: spice.br,
-        nf: spice.nf,
-        nr: spice.nr,
+        is: spice.is as crate::Wave,
+        bf: spice.bf as crate::Wave,
+        br: spice.br as crate::Wave,
+        nf: spice.nf as crate::Wave,
+        nr: spice.nr as crate::Wave,
         vt: SPICE_VT_27C,
-        vaf: spice.vaf,
-        var: spice.var,
-        ikf: spice.ikf,
-        ikr: spice.ikr,
-        ise: spice.ise,
-        ne: spice.ne,
-        isc: spice.isc,
-        nc: spice.nc,
-        cje: spice.cje,
-        vje: spice.vje,
-        mje: spice.mje,
-        cjc: spice.cjc,
-        vjc: spice.vjc,
-        mjc: spice.mjc,
-        rb: spice.rb,
-        re: spice.re,
-        rc: spice.rc,
-        tf: spice.tf,
-        tr: spice.tr,
+        vaf: spice.vaf as crate::Wave,
+        var: spice.var as crate::Wave,
+        ikf: spice.ikf as crate::Wave,
+        ikr: spice.ikr as crate::Wave,
+        ise: spice.ise as crate::Wave,
+        ne: spice.ne as crate::Wave,
+        isc: spice.isc as crate::Wave,
+        nc: spice.nc as crate::Wave,
+        cje: spice.cje as crate::Wave,
+        vje: spice.vje as crate::Wave,
+        mje: spice.mje as crate::Wave,
+        cjc: spice.cjc as crate::Wave,
+        vjc: spice.vjc as crate::Wave,
+        mjc: spice.mjc as crate::Wave,
+        rb: spice.rb as crate::Wave,
+        re: spice.re as crate::Wave,
+        rc: spice.rc as crate::Wave,
+        tf: spice.tf as crate::Wave,
+        tr: spice.tr as crate::Wave,
         is_pnp: spice.is_pnp,
     }
 }
@@ -169,13 +169,13 @@ pub fn opamp_try_by_name(name: &str) -> Option<OpAmpModel> {
 
 fn opamp_from_spice(spice: &SpiceOpAmpModel) -> OpAmpModel {
     OpAmpModel {
-        open_loop_gain: spice.open_loop_gain,
-        gbw: spice.gbw,
-        slew_rate: spice.slew_rate,
-        v_rail_pos: spice.v_rail_pos,
-        v_rail_neg: spice.v_rail_neg,
-        output_impedance: spice.output_impedance,
-        output_capacitance: spice.output_capacitance,
+        open_loop_gain: spice.open_loop_gain as crate::Wave,
+        gbw: spice.gbw as crate::Wave,
+        slew_rate: spice.slew_rate as crate::Wave,
+        v_rail_pos: spice.v_rail_pos as crate::Wave,
+        v_rail_neg: spice.v_rail_neg as crate::Wave,
+        output_impedance: spice.output_impedance as crate::Wave,
+        output_capacitance: spice.output_capacitance as crate::Wave,
     }
 }
 

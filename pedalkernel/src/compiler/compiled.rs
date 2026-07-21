@@ -26,11 +26,15 @@ pub(crate) fn extract_precomputed_from_compiled(
         };
         let adaptor = mnl.adaptor();
         let n = adaptor.num_ports();
-        let scattering = adaptor.power_scattering().to_vec();
-        let port_resistances = adaptor.port_resistances();
-        let vs_injection = mnl.vs_injection().map(ToOwned::to_owned);
-        let extract_coeffs = mnl.extract_coeffs().map(ToOwned::to_owned);
-        let extract_vs = mnl.extract_vs();
+        let scattering = adaptor.power_scattering().iter().map(|&v| v as f64).collect();
+        let port_resistances = adaptor.port_resistances().iter().map(|&v| v as f64).collect();
+        let vs_injection = mnl
+            .vs_injection()
+            .map(|v| v.iter().map(|&x| x as f64).collect());
+        let extract_coeffs = mnl
+            .extract_coeffs()
+            .map(|v| v.iter().map(|&x| x as f64).collect());
+        let extract_vs = mnl.extract_vs() as f64;
 
         stages.push(PrecomputedStage {
             stage_type: 1, // MultiNL
@@ -47,9 +51,17 @@ pub(crate) fn extract_precomputed_from_compiled(
                 stage_index: stage_idx,
                 n_ports: n,
                 has_vs_injection: table.has_vs_injection(),
-                resistances: table.resistances().to_vec(),
-                matrices: table.matrices().to_vec(),
-                injections: table.injections().to_vec(),
+                resistances: table.resistances().iter().map(|&v| v as f64).collect(),
+                matrices: table
+                    .matrices()
+                    .iter()
+                    .map(|row| row.iter().map(|&v| v as f64).collect())
+                    .collect(),
+                injections: table
+                    .injections()
+                    .iter()
+                    .map(|row| row.iter().map(|&v| v as f64).collect())
+                    .collect(),
             });
         }
     }

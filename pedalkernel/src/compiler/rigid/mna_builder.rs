@@ -169,7 +169,7 @@ pub(super) fn build_mna(
                 if comp.kind.is_pot() {
                     comp.kind.stamp_mna(&comp.id, n1, n2, &mut mna, sample_rate);
                 } else if let Some(r) = comp.kind.resistance() {
-                    mna.stamp_resistor(n1, n2, r);
+                    mna.stamp_resistor(n1, n2, r as crate::Wave);
                 }
             }
             EdgeKind::Reactive => {
@@ -180,7 +180,7 @@ pub(super) fn build_mna(
                                 n1.map(MnaNodeId::new),
                                 n2.map(MnaNodeId::new),
                             ),
-                            OnePortKind::Capacitor(c),
+                            OnePortKind::Capacitor(c as crate::Wave),
                         ));
                     }
                 }
@@ -191,7 +191,7 @@ pub(super) fn build_mna(
                                 n1.map(MnaNodeId::new),
                                 n2.map(MnaNodeId::new),
                             ),
-                            OnePortKind::Inductor(l),
+                            OnePortKind::Inductor(l as crate::Wave),
                         ));
                     }
                 }
@@ -224,7 +224,7 @@ pub(super) fn build_mna(
                     node_to_mna(*node)
                 };
                 let gm = linear_ota_transconductance(comp.kind.op_amp_type());
-                mna.stamp_vccs(pin_fn("out"), None, pin_fn("pos"), pin_fn("neg"), gm);
+                mna.stamp_vccs(pin_fn("out"), None, pin_fn("pos"), pin_fn("neg"), gm as crate::Wave);
             }
             _ => {} // Skip NL, Behavioral
         }

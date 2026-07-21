@@ -254,7 +254,7 @@ impl PedalboardProcessor {
         let n = chain.len();
         let loading = if n > 1 {
             (0..n - 1)
-                .map(|_| InterstageLoading::transparent(sample_rate))
+                .map(|_| InterstageLoading::transparent(sample_rate as crate::Wave))
                 .collect()
         } else {
             Vec::new()
@@ -314,7 +314,7 @@ impl PedalboardProcessor {
         let n = chain.len();
         let loading = if n > 1 {
             (0..n - 1)
-                .map(|_| InterstageLoading::transparent(sample_rate))
+                .map(|_| InterstageLoading::transparent(sample_rate as crate::Wave))
                 .collect()
         } else {
             Vec::new()
@@ -340,10 +340,10 @@ impl PedalboardProcessor {
             })?;
 
             for ctrl in &pedal_def.controls {
-                proc.set_control(&ctrl.label, ctrl.default);
+                proc.set_control(&ctrl.label, ctrl.default as crate::Wave);
             }
             for (label, val) in &entry.overrides {
-                proc.set_control(label, *val);
+                proc.set_control(label, *val as crate::Wave);
             }
 
             Ok((pedal_def.name.clone(), proc))
@@ -406,12 +406,12 @@ impl PedalboardProcessor {
 
             // Apply default control values from the .pedal file
             for ctrl in &pedal_def.controls {
-                proc.set_control(&ctrl.label, ctrl.default);
+                proc.set_control(&ctrl.label, ctrl.default as crate::Wave);
             }
 
             // Apply overrides from the .board file
             for (label, val) in &entry.overrides {
-                proc.set_control(label, *val);
+                proc.set_control(label, *val as crate::Wave);
             }
 
             Ok((pedal_def.name.clone(), proc))
@@ -536,7 +536,8 @@ impl PedalboardProcessor {
         sample_rate: f64,
     ) {
         if junction_index < self.loading.len() {
-            self.loading[junction_index] = InterstageLoading::new(source, load, sample_rate);
+            self.loading[junction_index] =
+                InterstageLoading::new(source, load, sample_rate as crate::Wave);
         }
     }
 
@@ -550,7 +551,7 @@ impl PedalboardProcessor {
                 ChainSlot::Pedal(p) => {
                     if !p.bypassed {
                         if let Some(ref proc) = p.processor {
-                            return proc.input_impedance();
+                            return proc.input_impedance() as f64;
                         }
                     }
                 }
@@ -573,7 +574,7 @@ impl PedalboardProcessor {
                 ChainSlot::Pedal(p) => {
                     if !p.bypassed {
                         if let Some(ref proc) = p.processor {
-                            return proc.output_impedance();
+                            return proc.output_impedance() as f64;
                         }
                     }
                 }
@@ -592,15 +593,15 @@ fn process_slot(slot: &mut PedalSlot, signal: f64) -> f64 {
     if slot.bypassed {
         signal
     } else if let Some(ref mut proc) = slot.processor {
-        proc.process(signal)
+        proc.process(signal as crate::Wave) as f64
     } else {
         signal // dry passthrough (failed pedal)
     }
 }
 
 impl PedalProcessor for PedalboardProcessor {
-    fn process(&mut self, input: f64) -> f64 {
-        let mut signal = input;
+    fn process(&mut self, input: crate::Wave) -> crate::Wave {
+        let mut signal = input as f64;
         let n = self.chain.len();
         for i in 0..n {
             match &mut self.chain[i] {
@@ -623,13 +624,13 @@ impl PedalProcessor for PedalboardProcessor {
             }
             // Apply interstage loading between this slot and the next.
             if i < self.loading.len() {
-                signal = self.loading[i].process(signal);
+                signal = self.loading[i].process(signal as crate::Wave) as f64;
             }
         }
-        signal
+        signal as crate::Wave
     }
 
-    fn set_sample_rate(&mut self, rate: f64) {
+    fn set_sample_rate(&mut self, rate: crate::Wave) {
         for chain_slot in &mut self.chain {
             match chain_slot {
                 ChainSlot::Pedal(slot) => {
@@ -638,7 +639,7 @@ impl PedalProcessor for PedalboardProcessor {
                     }
                 }
                 ChainSlot::FxLoop(fx) => {
-                    fx.amp.set_sample_rate(rate);
+                    fx.amp.set_sample_rate(rate as f64);
                     for slot in &mut fx.effects {
                         if let Some(ref mut proc) = slot.processor {
                             proc.set_sample_rate(rate);
@@ -682,7 +683,8 @@ impl PedalProcessor for PedalboardProcessor {
     /// - `"idx:__bypass__"` toggles bypass (value > 0.5 = bypassed)
     /// - `"fx_loop:mix"` controls the FX loop wet/dry blend (first loop)
     /// - `"fx_loop_N:mix"` controls the Nth FX loop's mix (0-indexed)
-    fn set_control(&mut self, label: &str, value: f64) {
+    fn set_control(&mut self, label: &str, value: crate::Wave) {
+        let value = value as f64;
         // FX loop controls: "fx_loop:mix", "fx_loop_N:mix", "fx_loop:Knob", "fx_loop_N:Knob"
         if let Some(rest) = label.strip_prefix("fx_loop") {
             // Determine which FX loop index and which knob label
@@ -728,7 +730,7 @@ impl PedalProcessor for PedalboardProcessor {
                     if remainder == "__bypass__" {
                         slot.bypassed = value > 0.5;
                     } else if let Some(ref mut proc) = slot.processor {
-                        proc.set_control(remainder, value);
+                        proc.set_control(remainder, value as crate::Wave);
                     }
                 }
             }
@@ -772,7 +774,7 @@ impl BoardSwitcherProcessor {
 }
 
 impl PedalProcessor for BoardSwitcherProcessor {
-    fn process(&mut self, input: f64) -> f64 {
+    fn process(&mut self, input: crate::Wave) -> crate::Wave {
         if let Some(board) = self.boards.get_mut(self.active) {
             board.process(input)
         } else {
@@ -780,7 +782,7 @@ impl PedalProcessor for BoardSwitcherProcessor {
         }
     }
 
-    fn set_sample_rate(&mut self, rate: f64) {
+    fn set_sample_rate(&mut self, rate: crate::Wave) {
         for board in &mut self.boards {
             board.set_sample_rate(rate);
         }
@@ -792,7 +794,7 @@ impl PedalProcessor for BoardSwitcherProcessor {
         }
     }
 
-    fn set_control(&mut self, label: &str, value: f64) {
+    fn set_control(&mut self, label: &str, value: crate::Wave) {
         if label == "__switch_board__" {
             let idx = value as usize;
             if idx < self.boards.len() {
@@ -841,7 +843,7 @@ impl PedalSwitcherProcessor {
 }
 
 impl PedalProcessor for PedalSwitcherProcessor {
-    fn process(&mut self, input: f64) -> f64 {
+    fn process(&mut self, input: crate::Wave) -> crate::Wave {
         if let Some(pedal) = self.pedals.get_mut(self.active) {
             pedal.process(input)
         } else {
@@ -849,7 +851,7 @@ impl PedalProcessor for PedalSwitcherProcessor {
         }
     }
 
-    fn set_sample_rate(&mut self, rate: f64) {
+    fn set_sample_rate(&mut self, rate: crate::Wave) {
         for pedal in &mut self.pedals {
             pedal.set_sample_rate(rate);
         }
@@ -861,7 +863,7 @@ impl PedalProcessor for PedalSwitcherProcessor {
         }
     }
 
-    fn set_control(&mut self, label: &str, value: f64) {
+    fn set_control(&mut self, label: &str, value: crate::Wave) {
         if label == "__switch_pedal__" {
             let idx = value as usize;
             if idx < self.pedals.len() {

@@ -133,7 +133,7 @@ pub(super) fn build_spring_tanks(
             ));
         }
 
-        let tank = SpringTank::new(rt_model(spring.tank_type), sample_rate);
+        let tank = SpringTank::new(rt_model(spring.tank_type), sample_rate as crate::Wave);
         springs.push(SpringBinding {
             tank,
             // Per-instance default wet/dry (spec §6): 0.33 — a tasteful spring
@@ -304,11 +304,11 @@ fn upsert_control(
             target,
             targets: Vec::new(),
             component_id: ctrl.component.clone(),
-            max_resistance: max_r,
+            max_resistance: max_r as crate::Wave,
             taper,
-            range: ctrl.range,
+            range: (ctrl.range.0 as crate::Wave, ctrl.range.1 as crate::Wave),
         });
     }
     // (Re-)apply the declared default so the new target receives it.
-    compiled.set_control(&ctrl.label, ctrl.default);
+    compiled.set_control(&ctrl.label, ctrl.default as crate::Wave);
 }

@@ -1361,7 +1361,7 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
         };
         let model = super::helpers::triode_model(model_name);
         let v_max = self.supply_voltage.max(1.0);
-        let mut root = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(model, v_max)
+        let mut root = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(model, v_max as crate::Wave)
             .with_parallel_count(self.parallel_count);
         root.set_vgk(trial.v_control as pedalkernel_rt::Wave);
 
@@ -1373,7 +1373,7 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
         let h = 1e-3_f64; // larger h to stay above f32 noise floor (~1e-7)
         let mut root2 = pedalkernel_rt::elements::nonlinear::TriodeRoot::new_with_v_max(
             super::helpers::triode_model(model_name),
-            v_max,
+            v_max as crate::Wave,
         )
         .with_parallel_count(self.parallel_count);
         root2.set_vgk((trial.v_control + h) as pedalkernel_rt::Wave);
@@ -2286,7 +2286,7 @@ fn solve_triode_dc_qpoint_inner(
         // model's default bias (6386: -2 V) and solve the plate load line with
         // the Raffensperger model, not the Koren triode model.
         let model = vari_mu_model(model_name);
-        let mut triode = VariMuTriodeRoot::new_with_v_max(model, supply_voltage)
+        let mut triode = VariMuTriodeRoot::new_with_v_max(model, supply_voltage as crate::Wave)
             .with_parallel_count(parallel_count);
         let vgk = triode.vgk_bias();
         triode.set_vgk(vgk);
@@ -2296,7 +2296,7 @@ fn solve_triode_dc_qpoint_inner(
         let mut hi = max_ia;
         let residual = |ia: f64, triode: &mut VariMuTriodeRoot| -> f64 {
             let vpk = (plate_rail_v - ia * r_plate).max(0.0);
-            ia - triode.plate_current(vpk)
+            ia - triode.plate_current(vpk as crate::Wave) as f64
         };
 
         let mut flo = residual(lo, &mut triode);
@@ -2336,7 +2336,7 @@ fn solve_triode_dc_qpoint_inner(
             ));
         }
         return Ok(TriodeDcQpoint {
-            vgk,
+            vgk: vgk as f64,
             vpk,
             v_cathode,
             ia,
@@ -3323,7 +3323,7 @@ fn solve_wdf_bjt_dc_qpoint_inner(
     };
     let vcc = supply_voltage.abs();
     let vce = match rc {
-        Some(rc) => (vcc - ic * rc - ie * re).clamp(0.0, vcc),
+        Some(rc) => (vcc - ic as f64 * rc - ie as f64 * re).clamp(0.0, vcc),
         None => vcc * 0.5,
     };
     let vce = if is_pnp { -vce } else { vce };
@@ -3332,7 +3332,7 @@ fn solve_wdf_bjt_dc_qpoint_inner(
     // the emitter bypass cap so its RE·CE time-constant transient does not
     // appear at startup.  For PNP the emitter returns to VCC; the cap across RE
     // still charges to the |Ie·RE| drop, so we report the magnitude.
-    let v_emitter = (ie * re).abs();
+    let v_emitter = (ie as f64 * re).abs();
 
     // Small-signal transconductance gm = dIc/dVbe at the Q-point, by central
     // difference on the same model evaluation used for Ic above (mirrors the
@@ -3457,7 +3457,7 @@ pub(super) fn bjt_model_conduction_seed(
 /// fixed "conducting Vbe" window tuned for silicon rejects germanium
 /// operating points that genuinely conduct at 0.12-0.25 V.
 pub(super) fn bjt_nominal_conduction_vbe(model: &GummelPoonModel) -> f64 {
-    (model.nf * model.vt * (1.0e-3_f64 / model.is).ln()).clamp(0.1, 0.8)
+    (model.nf as f64 * model.vt as f64 * (1.0e-3_f64 / model.is as f64).ln()).clamp(0.1, 0.8)
 }
 
 /// Blockwise-path REAL BJT bias solve (pedalkernel-y9hz, USER DIRECTIVE).

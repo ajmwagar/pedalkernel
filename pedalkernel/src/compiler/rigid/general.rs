@@ -422,15 +422,15 @@ fn build_general_mna_from_edges_inner(
             None => {
                 let l_p = resolved_cfg.primary_inductance.max(1.0e-12);
                 let mid = Some(plan.internal_base);
-                mna.stamp_resistor(p1, mid, resolved_cfg.primary_dcr.max(1.0e-6));
+                mna.stamp_resistor(p1, mid, resolved_cfg.primary_dcr.max(1.0e-6) as crate::Wave);
                 let rp = 2.0 * effective_rate * l_p;
                 synthetic_one_ports.push((
                     WdfPort {
                         node_pos: mid,
                         node_neg: p2,
-                        resistance: rp,
+                        resistance: rp as crate::Wave,
                     },
-                    OnePortKind::Inductor(l_p),
+                    OnePortKind::Inductor(l_p as crate::Wave),
                 ));
             }
         }
@@ -1247,7 +1247,7 @@ fn stamp_passive_edges(
                     leaf,
                     mna_pos: n1,
                     mna_neg: n2,
-                    initial_conductance: 1.0 / initial_r,
+                    initial_conductance: 1.0 / initial_r as f64,
                 });
             }
         } else if comp.kind.is_jfet() || comp.kind.type_tag() == "photocoupler" {
@@ -1265,15 +1265,15 @@ fn stamp_passive_edges(
                     leaf,
                     mna_pos: n1,
                     mna_neg: n2,
-                    initial_conductance: 1.0 / initial_r,
+                    initial_conductance: 1.0 / initial_r as f64,
                 });
             }
         } else if let Some(r) = comp.kind.resistance() {
-            mna.stamp_resistor(n1, n2, r);
+            mna.stamp_resistor(n1, n2, r as crate::Wave);
         } else if let Some(c) = comp.kind.capacitance() {
-            reactive_edges.push((eidx, OnePortKind::Capacitor(c)));
+            reactive_edges.push((eidx, OnePortKind::Capacitor(c as crate::Wave)));
         } else if let Some(l) = comp.kind.inductance() {
-            reactive_edges.push((eidx, OnePortKind::Inductor(l)));
+            reactive_edges.push((eidx, OnePortKind::Inductor(l as crate::Wave)));
         } else if transformer_edge_set.contains(&eidx) {
             // Stamped by the transformer skeleton plan in the caller
             // (pedalkernel-ffkl) — accounted for, not dropped.
@@ -1314,7 +1314,7 @@ fn one_port_kind_for_transformer_child(
         DynNode::Leaf(LeafKind::OnePort { runtime, .. }) => Some(runtime.spec.kind),
         DynNode::Leaf(LeafKind::JaMagnetizing(_)) => {
             let rp = child.port_resistance();
-            Some(OnePortKind::Inductor(rp / (2.0 * effective_rate)))
+            Some(OnePortKind::Inductor((rp as f64 / (2.0 * effective_rate)) as crate::Wave))
         }
         _ => None,
     }
@@ -1469,7 +1469,7 @@ fn build_wdf_ports(
     ),
     String,
 > {
-    let r_nl_default = 1000.0;
+    let r_nl_default: f64 = 1000.0;
     let mut ports = Vec::with_capacity(n_nl + reactive_edges.len() + 1);
     let mut port_node_pairs = Vec::new();
     let mut nl_port_resistances = vec![r_nl_default; n_nl];
@@ -1481,7 +1481,7 @@ fn build_wdf_ports(
         ports.push(WdfPort {
             node_pos: pos,
             node_neg: neg,
-            resistance: nl_port_resistances[i],
+            resistance: nl_port_resistances[i] as crate::Wave,
         });
         port_node_pairs.push(WdfPortTerminals::maybe_differential(pos, neg));
     }
@@ -1492,7 +1492,7 @@ fn build_wdf_ports(
         let e = &graph.edges[*eidx];
         let pos = node_to_mna(e.node_a);
         let neg = node_to_mna(e.node_b);
-        let rp = kind.rp(effective_rate);
+        let rp = kind.rp(effective_rate as crate::Wave);
         ports.push(WdfPort {
             node_pos: pos,
             node_neg: neg,
@@ -1701,7 +1701,7 @@ fn build_wdf_ports(
     ports.push(WdfPort {
         node_pos: injection_mna,
         node_neg: None,
-        resistance: r_adapted,
+        resistance: r_adapted as crate::Wave,
     });
     port_node_pairs.push(WdfPortTerminals::maybe_single_ended(injection_mna));
 
@@ -2018,7 +2018,7 @@ fn derive_scattering(
         if s.iter().any(|v| !v.is_finite()) {
             return Err("Scattering matrix contains NaN/Inf".to_string());
         }
-        vcc_injection = Some(vcc_inj);
+        vcc_injection = Some(vcc_inj.iter().map(|&v| v as f64).collect());
         s
     } else {
         let s = mna.derive_scattering_matrix_general(ports);
@@ -2071,7 +2071,7 @@ fn derive_scattering(
                 if z_th.is_finite() && z_th > 1e-3 {
                     ports[i].resistance = z_th;
                     if i < n_nl {
-                        nl_port_resistances[i] = z_th;
+                        nl_port_resistances[i] = z_th as f64;
                     }
                     needs_recompute = true;
                 }
@@ -2086,7 +2086,7 @@ fn derive_scattering(
                 break;
             }
             scattering = s;
-            vcc_injection = Some(inj);
+            vcc_injection = Some(inj.iter().map(|&v| v as f64).collect());
         } else {
             let s = mna.derive_scattering_matrix_general(ports);
             if s.iter().any(|v| !v.is_finite()) {
@@ -2096,7 +2096,7 @@ fn derive_scattering(
         }
     }
 
-    Ok((scattering, vcc_injection))
+    Ok((scattering.iter().map(|&v| v as f64).collect(), vcc_injection))
 }
 
 /// Step 6: Compute DC bias from VCC injection vector.
@@ -2261,13 +2261,13 @@ fn create_nl_devices(
                     if *is_vari_mu {
                         let model = vari_mu_model(model_name);
                         groups.push(NlDeviceGroupKind::VariMuThreePort(
-                            VariMuThreePort::new_gnd_referenced(model, supply_voltage)
+                            VariMuThreePort::new_gnd_referenced(model, supply_voltage as crate::Wave)
                                 .with_parallel_count(*parallel_count),
                         ));
                     } else {
                         let model = triode_model(model_name);
                         groups.push(NlDeviceGroupKind::TriodeThreePort(
-                            TriodeThreePort::new_gnd_referenced(model, supply_voltage)
+                            TriodeThreePort::new_gnd_referenced(model, supply_voltage as crate::Wave)
                                 .with_parallel_count(*parallel_count),
                         ));
                     }
@@ -2279,7 +2279,7 @@ fn create_nl_devices(
                     // per DSL element — the pedal def instantiates separate elements).
                     let model = pentode_model(model_name);
                     groups.push(NlDeviceGroupKind::PentodeThreePort(
-                        PentodeThreePort::new_gnd_referenced(model, supply_voltage),
+                        PentodeThreePort::new_gnd_referenced(model, supply_voltage as crate::Wave),
                     ));
                     offset += 2;
                 }
@@ -2393,9 +2393,10 @@ fn assemble_multi_nl_stage(
     init_hints: &[crate::dsl::InitHint],
     r_adapted: f64,
 ) -> Result<MultiNlStage, String> {
-    let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering, n_nl, n_passive);
-    let port_resistances: Vec<f64> = ports.iter().map(|p| p.resistance).collect();
-    let adaptor = RTypeAdaptor::new(scattering, &port_resistances);
+    let scattering_wave: Vec<crate::Wave> = scattering.iter().map(|&v| v as crate::Wave).collect();
+    let scattering_blocks = MultiNlScattering::from_full_matrix(&scattering_wave, n_nl, n_passive);
+    let port_resistances: Vec<crate::Wave> = ports.iter().map(|p| p.resistance).collect();
+    let adaptor = RTypeAdaptor::new(scattering_wave, &port_resistances);
     let extract_coeffs = extract_output_nodes.map(|out| {
         let (out_pos, out_neg) = out.as_tuple();
         mna.derive_node_extraction_coeffs(&ports, out_pos, out_neg)
@@ -2573,10 +2574,10 @@ fn assemble_multi_nl_stage(
     Ok(MultiNlStage {
         adaptor,
         nl_devices,
-        nl_port_resistances,
+        nl_port_resistances: nl_port_resistances.iter().map(|&v| v as crate::Wave).collect(),
         passive_one_ports,
         passive_runtime_state,
-        passive_sample_rate: effective_rate,
+        passive_sample_rate: effective_rate as crate::Wave,
         pot_children: variable_resistor_candidates
             .iter()
             .map(|ps| ps.leaf.clone())
@@ -2590,11 +2591,11 @@ fn assemble_multi_nl_stage(
                     ps.mna_pos.map(MnaNodeId::new),
                     ps.mna_neg.map(MnaNodeId::new),
                 ),
-                conductance: ps.initial_conductance,
+                conductance: ps.initial_conductance as crate::Wave,
             })
             .collect(),
         n_nl,
-        v_prev: initial_v.clone(),
+        v_prev: initial_v.iter().map(|&v| v as crate::Wave).collect(),
         scattering: scattering_blocks,
         oversampler: Oversampler::new(oversampling),
         compensation: 1.0,
@@ -2603,7 +2604,7 @@ fn assemble_multi_nl_stage(
         recompute_data: Some(ScatteringRecomputeData {
             mna,
             port_node_pairs,
-            adapted_resistance: r_adapted,
+            adapted_resistance: r_adapted as crate::Wave,
             vs_source_index: None,
             vcc_vs_index: vcc_vs_idx,
             extract_output_nodes,
@@ -2637,18 +2638,18 @@ fn assemble_multi_nl_stage(
         bias_pot_id: None,
         bias_emitter_r: 470.0,
         interp_table: None,
-        dc_bias,
-        vcc_bias_all,
+        dc_bias: dc_bias.iter().map(|&v| v as crate::Wave).collect(),
+        vcc_bias_all: vcc_bias_all.iter().map(|&v| v as crate::Wave).collect(),
         vcc_vs_index: vcc_vs_idx,
-        supply_voltage,
+        supply_voltage: supply_voltage as crate::Wave,
         dc_blocker_x1: 0.0,
         dc_blocker_y1: 0.0,
         dc_ramp: initial_dc_ramp,
         initial_dc_ramp,
-        initial_v_prev: initial_v.clone(),
+        initial_v_prev: initial_v.iter().map(|&v| v as crate::Wave).collect(),
         // Seed v_prev_2 from initial_v so the linear extrapolation warm-start
         // begins near the operating point rather than at zero.
-        v_prev_2: initial_v.clone(),
+        v_prev_2: initial_v.iter().map(|&v| v as crate::Wave).collect(),
         nr_workspace,
         work_b_passive: vec![0.0; n_passive],
         work_known_a: vec![0.0; n_nl],
@@ -2704,23 +2705,23 @@ fn apply_triode_dc_qpoint(
 
     // Set NR warm-start voltages.
     if stage.v_prev.len() >= 2 {
-        stage.v_prev[0] = dc.vgk;
-        stage.v_prev[1] = dc.vpk;
+        stage.v_prev[0] = dc.vgk as crate::Wave;
+        stage.v_prev[1] = dc.vpk as crate::Wave;
     }
     if stage.initial_v_prev.len() >= 2 {
-        stage.initial_v_prev[0] = dc.vgk;
-        stage.initial_v_prev[1] = dc.vpk;
+        stage.initial_v_prev[0] = dc.vgk as crate::Wave;
+        stage.initial_v_prev[1] = dc.vpk as crate::Wave;
     }
     if stage.v_prev_2.len() >= 2 {
-        stage.v_prev_2[0] = dc.vgk;
-        stage.v_prev_2[1] = dc.vpk;
+        stage.v_prev_2[0] = dc.vgk as crate::Wave;
+        stage.v_prev_2[1] = dc.vpk as crate::Wave;
     }
     if is_vari_mu {
         if !stage.dc_bias.is_empty() {
-            stage.dc_bias[0] = dc.vgk;
+            stage.dc_bias[0] = dc.vgk as crate::Wave;
         }
         if !stage.vcc_bias_all.is_empty() {
-            stage.vcc_bias_all[0] = dc.vgk;
+            stage.vcc_bias_all[0] = dc.vgk as crate::Wave;
         }
         // The Q-point has already been solved and seeded. Starting the DC ramp
         // at zero would pull the grid port back to cold 0 V for the first 256
@@ -2756,7 +2757,7 @@ fn apply_triode_dc_qpoint(
         }
         if let Some(&one_port) = stage.passive_one_ports.get(k) {
             one_port.wdf_set_one_port_state(
-                pedalkernel_rt::boundary_math::OnePortState::CapacitorVoltage(dc.v_cathode),
+                pedalkernel_rt::boundary_math::OnePortState::CapacitorVoltage(dc.v_cathode as crate::Wave),
                 &mut stage.passive_runtime_state,
             );
         }
@@ -2779,16 +2780,16 @@ fn apply_pentode_dc_qpoint(
 ) {
     // NR warm-start voltages at the solved op.
     if stage.v_prev.len() >= 2 {
-        stage.v_prev[0] = dc.vg1k;
-        stage.v_prev[1] = dc.vpk;
+        stage.v_prev[0] = dc.vg1k as crate::Wave;
+        stage.v_prev[1] = dc.vpk as crate::Wave;
     }
     if stage.initial_v_prev.len() >= 2 {
-        stage.initial_v_prev[0] = dc.vg1k;
-        stage.initial_v_prev[1] = dc.vpk;
+        stage.initial_v_prev[0] = dc.vg1k as crate::Wave;
+        stage.initial_v_prev[1] = dc.vpk as crate::Wave;
     }
     if stage.v_prev_2.len() >= 2 {
-        stage.v_prev_2[0] = dc.vg1k;
-        stage.v_prev_2[1] = dc.vpk;
+        stage.v_prev_2[0] = dc.vg1k as crate::Wave;
+        stage.v_prev_2[1] = dc.vpk as crate::Wave;
     }
 
     // Circuit-true screen voltage (None = unwired screen, model default stands).
@@ -2823,7 +2824,7 @@ fn apply_pentode_dc_qpoint(
         }
         if let Some(&one_port) = stage.passive_one_ports.get(k) {
             one_port.wdf_set_one_port_state(
-                pedalkernel_rt::boundary_math::OnePortState::CapacitorVoltage(dc.v_cathode),
+                pedalkernel_rt::boundary_math::OnePortState::CapacitorVoltage(dc.v_cathode as crate::Wave),
                 &mut stage.passive_runtime_state,
             );
         }
@@ -3321,7 +3322,7 @@ fn dominant_bias_tau(
         };
         let e = &graph.edges[*eidx];
         let r_series = r_thev(e.node_a) + r_thev(e.node_b);
-        let tau = c * r_series;
+        let tau = c as f64 * r_series;
         if trace {
             let comp = &graph.components[e.comp_idx];
             eprintln!(

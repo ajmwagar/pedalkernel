@@ -218,6 +218,11 @@ pub mod wav;
 /// Audio processor trait for pedals — re-exported from pedalkernel-rt.
 pub use pedalkernel_rt::PedalProcessor;
 
+/// Runtime audio scalar (`f64` on the host, `f32` under `wave-f32` / on device),
+/// re-exported so `crate::Wave` resolves in the compiler when it casts f64
+/// computations to the runtime types' scalar at the storage boundary.
+pub use pedalkernel_rt::Wave;
+
 // ---------------------------------------------------------------------------
 // JACK real-time audio engine (requires `jack-rt` feature)
 // ---------------------------------------------------------------------------
