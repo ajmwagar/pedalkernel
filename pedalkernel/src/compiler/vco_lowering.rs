@@ -250,10 +250,10 @@ pub(super) fn lower_vcos(
 
         // The cem3340/as3340/v3340 model variants share the PolyBLEP body
         // (1 V/oct, saw/tri/pulse); the variant is metadata for layout/BOM.
-        let mut rt_vco = pedalkernel_rt::elements::Vco::new(sample_rate);
+        let mut rt_vco = pedalkernel_rt::elements::Vco::new(sample_rate as crate::Wave);
         // Base frequency = the vco()'s declared frequency; CV maps relative to
         // it at 1 V/oct (cv=0 -> base_freq, +1 V -> octave up).
-        rt_vco.set_base_freq(vco.base_freq);
+        rt_vco.set_base_freq(vco.base_freq as crate::Wave);
 
         vcos.push(VcoBinding {
             vco: rt_vco,

@@ -259,7 +259,7 @@ impl Component for PhotocouplerComp {
         };
         Some(DynNode::PhotocouplerNode(
             comp_id.to_string(),
-            PhotocouplerElem::new(model, sample_rate),
+            PhotocouplerElem::new(model, sample_rate as crate::Wave),
         ))
     }
 

@@ -96,7 +96,7 @@ pub(super) fn build_bbd_delay_lines(pedal: &PedalDef, sample_rate: f64) -> Vec<B
                 BbdType::Mn3007 => BbdModel::mn3007(),
                 BbdType::Mn3005 => BbdModel::mn3005(),
             };
-            Some(BbdDelayLine::new(model, sample_rate))
+            Some(BbdDelayLine::new(model, sample_rate as crate::Wave))
         })
         .collect()
 }
@@ -291,16 +291,16 @@ pub(super) fn bind_bbd_runtime(pedal: &PedalDef, compiled: &mut CompiledPedal, s
                     LfoWaveformDsl::SampleAndHold => crate::elements::LfoWaveform::SampleAndHold,
                 };
                 let base_freq = 1.0 / (2.0 * std::f64::consts::PI * lfo.timing_r * lfo.timing_c);
-                let mut osc = crate::elements::Lfo::new(waveform, sample_rate);
-                osc.set_rate(base_freq);
+                let mut osc = crate::elements::Lfo::new(waveform, sample_rate as crate::Wave);
+                osc.set_rate(base_freq as crate::Wave);
 
                 lfo_binding_idx.insert(comp.id.clone(), compiled.lfos.len());
                 compiled.lfos.push(LfoBinding {
                     lfo: osc,
                     target: ModulationTarget::BbdClock { bbd_idx },
-                    bias,
-                    range,
-                    base_freq,
+                    bias: bias as crate::Wave,
+                    range: range as crate::Wave,
+                    base_freq: base_freq as crate::Wave,
                     lfo_id: comp.id.clone(),
                 });
             }
@@ -343,7 +343,7 @@ pub(super) fn bind_bbd_runtime(pedal: &PedalDef, compiled: &mut CompiledPedal, s
             && pot_reaches_bbd_output(&pot.id, pedal, &bbd_id_to_idx)
         {
             compiled.bbd_mix_pot_id = Some(pot.id.clone());
-            compiled.bbd_wet_mix = ctrl.default.clamp(0.0, 1.0);
+            compiled.bbd_wet_mix = ctrl.default.clamp(0.0, 1.0) as crate::Wave;
         }
     }
 }
@@ -378,15 +378,15 @@ fn upsert_control(
             target,
             targets: Vec::new(),
             component_id: ctrl.component.clone(),
-            max_resistance: max_r,
+            max_resistance: max_r as crate::Wave,
             taper,
-            range: ctrl.range,
+            range: (ctrl.range.0 as crate::Wave, ctrl.range.1 as crate::Wave),
         });
     }
     // (Re-)apply the declared default so the new target receives it —
     // bind_controls applied defaults before this pass retargeted/added the
     // binding. Non-pot targets have no smoother; set_control is direct.
-    compiled.set_control(&ctrl.label, ctrl.default);
+    compiled.set_control(&ctrl.label, ctrl.default as crate::Wave);
 }
 
 /// Resolve a pot to a BBD/LFO control target by scanning nets.

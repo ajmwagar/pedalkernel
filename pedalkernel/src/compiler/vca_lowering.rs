@@ -130,7 +130,7 @@ pub(super) fn lower_vcas(pedal: &PedalDef, sample_rate: f64) -> Result<Vec<VcaBi
             vca: pedalkernel_rt::elements::Vca::new(),
             // ADSR is only used in trigger-gated mode; `trigger_idx: None`
             // selects CV-driven mode (gain owned by VcaCv routing).
-            envelope: pedalkernel_rt::elements::AdsrEnvelope::new(sample_rate),
+            envelope: pedalkernel_rt::elements::AdsrEnvelope::new(sample_rate as crate::Wave),
             trigger_idx: None,
             input_node_id: usize::MAX,  // serial chain input
             output_node_id: usize::MAX, // serial chain output
@@ -244,12 +244,12 @@ pub(super) fn bind_vca_runtime(pedal: &PedalDef, compiled: &mut CompiledPedal, s
                 };
 
                 let envelope = crate::elements::EnvelopeFollower::from_rc(
-                    ef.attack_r,
-                    ef.attack_c,
-                    ef.release_r,
-                    ef.release_c,
-                    ef.sensitivity_r,
-                    sample_rate,
+                    ef.attack_r as crate::Wave,
+                    ef.attack_c as crate::Wave,
+                    ef.release_r as crate::Wave,
+                    ef.release_c as crate::Wave,
+                    ef.sensitivity_r as crate::Wave,
+                    sample_rate as crate::Wave,
                 );
                 // Detector tap (audit gap G1 machinery): feed-forward taps
                 // read interior/input nodes, feedback taps the chain output.
@@ -257,8 +257,8 @@ pub(super) fn bind_vca_runtime(pedal: &PedalDef, compiled: &mut CompiledPedal, s
                 compiled.envelopes.push(EnvelopeBinding {
                     envelope,
                     target: ModulationTarget::VcaCv { vca_idx },
-                    bias: sink.bias,
-                    range: sink.range,
+                    bias: sink.bias as crate::Wave,
+                    range: sink.range as crate::Wave,
                     env_id: comp.id.clone(),
                     tap,
                 });

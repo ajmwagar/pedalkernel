@@ -175,10 +175,10 @@ pub fn compile_via_spqr_with_options(
             output_gain: 1.0,
             rail_saturation: RailSaturation::None,
             rail_sat_oversampler: Oversampler::new(options.oversampling),
-            sample_rate,
+            sample_rate: sample_rate as crate::Wave,
             controls: Vec::new(),
             gain_range: (0.0, 1.0),
-            supply_voltage,
+            supply_voltage: supply_voltage as crate::Wave,
             oversampling: options.oversampling,
             lfos: Vec::new(),
             envelopes: Vec::new(),
@@ -188,7 +188,7 @@ pub fn compile_via_spqr_with_options(
             vcos: Vec::new(),
             vcas: Vec::new(),
             thermal: if options.thermal {
-                Some(ThermalModel::silicon_standard(sample_rate))
+                Some(ThermalModel::silicon_standard(sample_rate as crate::Wave))
             } else {
                 None
             },
@@ -224,7 +224,7 @@ pub fn compile_via_spqr_with_options(
             detector_led_coupling: None,
             initialized: false,
         };
-        compiled.set_supply_voltage(supply_voltage);
+        compiled.set_supply_voltage(supply_voltage as crate::Wave);
         super::spqr_control::bind_controls(pedal, &mut compiled);
         super::dsp_block::bind_runtime_all(pedal, &mut compiled, sample_rate)?;
         return Ok(compiled);
@@ -245,10 +245,10 @@ pub fn compile_via_spqr_with_options(
             output_gain: 1.0,
             rail_saturation: RailSaturation::None,
             rail_sat_oversampler: Oversampler::new(options.oversampling),
-            sample_rate,
+            sample_rate: sample_rate as crate::Wave,
             controls: Vec::new(),
             gain_range: (0.0, 1.0),
-            supply_voltage,
+            supply_voltage: supply_voltage as crate::Wave,
             oversampling: options.oversampling,
             lfos: Vec::new(),
             envelopes: Vec::new(),
@@ -290,7 +290,7 @@ pub fn compile_via_spqr_with_options(
             detector_led_coupling: None,
             initialized: false,
         };
-        compiled.set_supply_voltage(supply_voltage);
+        compiled.set_supply_voltage(supply_voltage as crate::Wave);
         super::spqr_control::bind_controls(pedal, &mut compiled);
         super::dsp_block::bind_runtime_all(pedal, &mut compiled, sample_rate)?;
         return Ok(compiled);
@@ -887,12 +887,12 @@ pub fn compile_via_spqr_with_options(
                                     })
                                     .sum();
                                 if rf > 0.0 {
-                                    opamp.set_gain(rf / ri);
-                                    wdf.feedback_ri = ri;
+                                    opamp.set_gain((rf / ri) as crate::Wave);
+                                    wdf.feedback_ri = ri as crate::Wave;
                                     if let Some(pot_id) = ri_pot_id {
                                         wdf.feedback_ri_pot_id = Some(pot_id);
-                                        wdf.feedback_ri_fixed_r = ri_fixed - ri_pot_max_r * 0.5;
-                                        wdf.feedback_ri_pot_max_r = ri_pot_max_r;
+                                        wdf.feedback_ri_fixed_r = (ri_fixed - ri_pot_max_r * 0.5) as crate::Wave;
+                                        wdf.feedback_ri_pot_max_r = ri_pot_max_r as crate::Wave;
                                         wdf.feedback_ri_pot_taper = ri_pot_taper;
                                     }
                                 }
@@ -992,7 +992,7 @@ pub fn compile_via_spqr_with_options(
                                             .kind
                                             .pot_taper()
                                             .unwrap_or(crate::dsl::PotTaper::B);
-                                        ri_fixed += ri_pot_taper.apply(0.5) * max_r;
+                                        ri_fixed += ri_pot_taper.apply(0.5) as f64 * max_r;
                                         visited.insert(other);
                                         if !is_gnd(other) {
                                             frontier.push(other);
@@ -1016,15 +1016,15 @@ pub fn compile_via_spqr_with_options(
                         }
 
                         if ri_fixed > 0.0 {
-                            bf.set_ri(ri_fixed);
+                            bf.set_ri(ri_fixed as crate::Wave);
                         }
                         // Store ground-leg pot mapping for runtime Ri updates
                         if let Some(pot_id) = ri_pot_id {
                             let fixed_without_pot =
-                                ri_fixed - ri_pot_taper.apply(0.5) * ri_pot_max_r;
+                                ri_fixed - ri_pot_taper.apply(0.5) as f64 * ri_pot_max_r;
                             bf.ri_pot_comp_id = Some(pot_id);
-                            bf.ri_fixed_r = fixed_without_pot;
-                            bf.ri_pot_max_r = ri_pot_max_r;
+                            bf.ri_fixed_r = fixed_without_pot as crate::Wave;
+                            bf.ri_pot_max_r = ri_pot_max_r as crate::Wave;
                             bf.ri_pot_taper = ri_pot_taper;
                         }
                     }
@@ -2967,10 +2967,10 @@ pub fn compile_via_spqr_with_options(
         output_gain: 1.0,
         rail_saturation: RailSaturation::None,
         rail_sat_oversampler: Oversampler::new(options.oversampling),
-        sample_rate,
+        sample_rate: sample_rate as crate::Wave,
         controls: Vec::new(),
         gain_range: (0.0, 1.0),
-        supply_voltage,
+        supply_voltage: supply_voltage as crate::Wave,
         oversampling: options.oversampling,
         lfos: Vec::new(),
         envelopes,
@@ -2980,7 +2980,7 @@ pub fn compile_via_spqr_with_options(
         vcos: Vec::new(),
         vcas: Vec::new(),
         thermal: if options.thermal {
-            Some(ThermalModel::silicon_standard(sample_rate))
+            Some(ThermalModel::silicon_standard(sample_rate as crate::Wave))
         } else {
             None
         },
@@ -3023,7 +3023,7 @@ pub fn compile_via_spqr_with_options(
         detector_led_coupling: None,
         initialized: false,
     };
-    compiled.set_supply_voltage(supply_voltage);
+    compiled.set_supply_voltage(supply_voltage as crate::Wave);
 
     // Boundary-load decision table diagnostic (bead pedalkernel-lkf1.2) —
     // cfg(test)-gated like the other `[compile]` prints; purely additive, no
@@ -3508,7 +3508,7 @@ pub(super) fn with_voltage_source(passive_tree: DynNode) -> DynNode {
 pub(super) fn with_voltage_source_rp(passive_tree: DynNode, rp: f64) -> DynNode {
     let vs = DynNode::Leaf(LeafKind::VoltageSource(WdfVoltageSource {
         voltage: 0.0,
-        rp,
+        rp: rp as crate::Wave,
         is_cathode_bias: false,
         port_name: None,
     }));
@@ -3943,7 +3943,7 @@ pub(super) fn build_spqr_stage_with_options(
                         // Filtered out above; unreachable.
                         crate::dsl::InitState::NodeVoltage { .. } => 0.0,
                     };
-                    bjt.set_initial_prev_v(vce);
+                    bjt.set_initial_prev_v(vce as crate::Wave);
                 }
             }
             // Set the supply voltage on tube roots so the WDF voltage source (VS =
@@ -3951,10 +3951,10 @@ pub(super) fn build_spqr_stage_with_options(
             // would default to 500 V, shifting the plate operating point and gain by
             // ~8 dB versus the correct 250 V operating point.
             match &mut root {
-                RootKind::Triode(t) => t.set_v_max(supply_voltage.max(1.0)),
-                RootKind::VariMu(t) => t.set_v_max(supply_voltage.max(1.0)),
-                RootKind::Pentode(p) => p.set_v_max(supply_voltage.max(1.0)),
-                RootKind::Bjt(b) => b.set_v_max(supply_voltage.abs().max(1.0)),
+                RootKind::Triode(t) => t.set_v_max(supply_voltage.max(1.0) as crate::Wave),
+                RootKind::VariMu(t) => t.set_v_max(supply_voltage.max(1.0) as crate::Wave),
+                RootKind::Pentode(p) => p.set_v_max(supply_voltage.max(1.0) as crate::Wave),
+                RootKind::Bjt(b) => b.set_v_max(supply_voltage.abs().max(1.0) as crate::Wave),
                 _ => {}
             }
             // Seed the TriodeRoot with the DC Q-point from load-line analysis.
@@ -4353,7 +4353,7 @@ pub(super) fn build_spqr_stage_with_options(
                         let rp_root = wdf_stage.tree.port_resistance();
                         let divider = if dc.r_load > 0.0 && rp_root.is_finite() && rp_root > 0.0
                         {
-                            dc.r_load / (rp_root * f)
+                            dc.r_load / (rp_root as f64 * f)
                         } else {
                             1.0 / f
                         };
@@ -4436,7 +4436,7 @@ pub(super) fn build_spqr_stage_with_options(
                     // Source-side series resistance feeding the anode (R1).
                     let r_series = series_r_at(anode);
                     if r_load > 0.0 && (r_series + r_load).is_finite() {
-                        wdf_stage.series_rectifier_divider = Some(r_load / (r_series + r_load));
+                        wdf_stage.series_rectifier_divider = Some((r_load / (r_series + r_load)) as crate::Wave);
                     }
                 }
             }
@@ -4611,7 +4611,7 @@ fn build_passive_rtype_stage(
                 .as_any()
                 .downcast_ref::<super::components::Potentiometer>()
             {
-                let mut child = DynNode::Pot(comp.id.clone(), pot.max_r, 0.5, pot.taper);
+                let mut child = DynNode::Pot(comp.id.clone(), pot.max_r as crate::Wave, 0.5, pot.taper);
                 if pot_edge_is_aw_half_for_build(graph, &comp.id, edge.node_a, edge.node_b) {
                     if let DynNode::Leaf(ref mut leaf) = child {
                         leaf.set_complement();
@@ -4719,7 +4719,7 @@ fn build_passive_rtype_stage(
         }
 
         if let Some(r) = comp.kind.resistance() {
-            mna.stamp_resistor(n1, n2, r);
+            mna.stamp_resistor(n1, n2, r as crate::Wave);
         } else if comp.kind.capacitance().is_some() || comp.kind.inductance().is_some() {
             let child = comp.kind.make_leaf(&comp.id, sample_rate)?;
             let rp = child.port_resistance();
@@ -4754,7 +4754,7 @@ fn build_passive_rtype_stage(
     let (extraction_coeffs, mut extraction_vs) =
         mna.derive_extraction_coeffs(&ports, 0, output_mna, None);
     if let Some(gain) = transformer_voltage_gain {
-        extraction_vs = gain;
+        extraction_vs = gain as crate::Wave;
     }
 
     if scattering.iter().any(|v| !v.is_finite())
@@ -4895,7 +4895,7 @@ fn try_build_convergence_sum(
                     comp_id: comp.id.clone(),
                     na,
                     nb,
-                    max_r: pot.max_r,
+                    max_r: pot.max_r as crate::Wave,
                     taper: pot.taper,
                     is_aw,
                     position: 0.5,
@@ -4906,7 +4906,7 @@ fn try_build_convergence_sum(
                 fixed_branches.push(FixedBranch {
                     na,
                     nb,
-                    conductance: 1.0 / r,
+                    conductance: (1.0 / r) as crate::Wave,
                 });
             }
         }
@@ -5079,12 +5079,12 @@ pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
                 WdfPort {
                     node_pos: a,
                     node_neg: b,
-                    resistance: rp,
+                    resistance: rp as crate::Wave,
                 },
-                DynNode::Inductor(Some(format!("{comp_id}.{name}")), l, rp),
+                DynNode::Inductor(Some(format!("{comp_id}.{name}")), l as crate::Wave, rp as crate::Wave),
             ));
         } else {
-            mna.stamp_resistor(a, b, SHORT_R);
+            mna.stamp_resistor(a, b, SHORT_R as crate::Wave);
         }
     }
 
@@ -5102,7 +5102,7 @@ pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
         const SHORT_R: f64 = 1.0e-6;
         const MIN_L: f64 = 1.0e-12;
         if !(l.is_finite() && l > MIN_L) {
-            mna.stamp_resistor(a, b, SHORT_R);
+            mna.stamp_resistor(a, b, SHORT_R as crate::Wave);
             return;
         }
 
@@ -5111,18 +5111,18 @@ pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
             DynNode::JaMagnetizingWithDcBias(
                 Some(format!("{comp_id}.Lm")),
                 model,
-                sample_rate,
-                rp,
+                sample_rate as crate::Wave,
+                rp as crate::Wave,
                 dc_bias_current as pedalkernel_rt::Wave,
             )
         } else {
-            DynNode::Inductor(Some(format!("{comp_id}.Lm")), l, rp)
+            DynNode::Inductor(Some(format!("{comp_id}.Lm")), l as crate::Wave, rp as crate::Wave)
         };
         dynamic.push((
             WdfPort {
                 node_pos: a,
                 node_neg: b,
-                resistance: rp,
+                resistance: rp as crate::Wave,
             },
             node,
         ));
@@ -5130,7 +5130,7 @@ pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
 
     let mut dynamic = Vec::new();
 
-    mna.stamp_resistor(p_pos, Some(p_series), cfg.primary_dcr.max(SHORT_R));
+    mna.stamp_resistor(p_pos, Some(p_series), cfg.primary_dcr.max(SHORT_R) as crate::Wave);
     add_inductor_or_short(
         mna,
         &mut dynamic,
@@ -5152,7 +5152,7 @@ pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
         l_leak_s,
         sample_rate,
     );
-    mna.stamp_resistor(Some(s_series), s_pos, cfg.secondary_dcr.max(SHORT_R));
+    mna.stamp_resistor(Some(s_series), s_pos, cfg.secondary_dcr.max(SHORT_R) as crate::Wave);
 
     add_magnetizing_branch(
         mna,
@@ -5169,7 +5169,7 @@ pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
         .core_loss_resistance
         .filter(|r| r.is_finite() && *r > 0.0)
     {
-        mna.stamp_resistor(Some(p_core), p_neg, rc);
+        mna.stamp_resistor(Some(p_core), p_neg, rc as crate::Wave);
     }
 
     if cfg.capacitance.is_finite() && cfg.capacitance > MIN_C {
@@ -5178,9 +5178,9 @@ pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
             WdfPort {
                 node_pos: Some(p_core),
                 node_neg: Some(s_core),
-                resistance: rp,
+                resistance: rp as crate::Wave,
             },
-            DynNode::Capacitor(Some(format!("{comp_id}.Cp")), cfg.capacitance, rp),
+            DynNode::Capacitor(Some(format!("{comp_id}.Cp")), cfg.capacitance as crate::Wave, rp as crate::Wave),
         ));
     }
 
@@ -5191,7 +5191,7 @@ pub(in crate::compiler) fn stamp_linear_transformer_skeleton(
         s_neg,
         vsrc_p,
         vsrc_p + 1,
-        n,
+        n as crate::Wave,
     );
 
     dynamic
@@ -6008,7 +6008,7 @@ fn build_ground_clip_stage(
             }
         }
         if let Some(voltage) = zener_voltage {
-            let model = crate::elements::ZenerModel::new(voltage);
+            let model = crate::elements::ZenerModel::new(voltage as crate::Wave);
             (
                 super::stage::RootKind::ZenerPair(crate::elements::ZenerPairRoot::new(model)),
                 None,
@@ -6519,14 +6519,14 @@ fn compute_wdf_fet_dc_qpoint(
                 let model = super::helpers::jfet_model(model_name, *is_n_channel);
                 let mut root = pedalkernel_rt::elements::nonlinear::JfetRoot::new(model);
                 root.set_vgs(vgs as pedalkernel_rt::Wave);
-                root.drain_current(vds as pedalkernel_rt::Wave)
+                root.drain_current(vds as pedalkernel_rt::Wave) as f64
             }
             NonlinearKind::Mosfet {
                 mosfet_type,
                 is_n_channel,
             } => {
                 let model = super::helpers::mosfet_model(*mosfet_type, *is_n_channel);
-                model.ids(vgs as pedalkernel_rt::Wave, vds as pedalkernel_rt::Wave)
+                model.ids(vgs as pedalkernel_rt::Wave, vds as pedalkernel_rt::Wave) as f64
             }
             _ => 0.0,
         }

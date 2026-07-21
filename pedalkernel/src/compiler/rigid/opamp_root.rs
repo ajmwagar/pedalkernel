@@ -343,15 +343,15 @@ pub(in crate::compiler) fn make_opamp_root(
     bias_v_max: Option<(f64, f64)>,
 ) -> OpAmpRoot {
     let mut root = if config.inverting {
-        OpAmpRoot::new_inverting(config.model, config.gain)
+        OpAmpRoot::new_inverting(config.model, config.gain as crate::Wave)
     } else {
-        OpAmpRoot::new_non_inverting(config.model, config.gain)
+        OpAmpRoot::new_non_inverting(config.model, config.gain as crate::Wave)
     };
-    root.set_sample_rate(sample_rate);
+    root.set_sample_rate(sample_rate as crate::Wave);
     if let Some((pos, neg)) = bias_v_max {
-        root.set_v_rails(pos, neg);
+        root.set_v_rails(pos as crate::Wave, neg as crate::Wave);
     } else {
-        root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5));
+        root.set_v_max((supply_voltage / 2.0 - 1.5).max(0.5) as crate::Wave);
     }
     root
 }

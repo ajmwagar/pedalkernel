@@ -166,7 +166,7 @@ pub(super) fn create_root(
             (RootKind::Mosfet(MosfetRoot::new(model)), None)
         }
         NonlinearKind::Zener { voltage } => {
-            let model = ZenerModel::new(*voltage);
+            let model = ZenerModel::new(*voltage as crate::Wave);
             (RootKind::Zener(ZenerRoot::new(model)), None)
         }
         NonlinearKind::Ota => {

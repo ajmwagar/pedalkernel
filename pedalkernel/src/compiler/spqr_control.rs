@@ -69,17 +69,20 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
             .unwrap_or(0.5);
         let position = ctrl
             .taper
-            .apply(ctrl.range.0 + default * (ctrl.range.1 - ctrl.range.0));
+            .apply(
+                (ctrl.range.0 as f64 + default * (ctrl.range.1 as f64 - ctrl.range.0 as f64))
+                    as crate::Wave,
+            );
         output_dividers
             .entry(ctrl.component_id.clone())
             .and_modify(|(existing_stage_idx, existing_position, existing_taper)| {
                 if *stage_idx >= *existing_stage_idx {
                     *existing_stage_idx = *stage_idx;
-                    *existing_position = position;
+                    *existing_position = position as f64;
                     *existing_taper = ctrl.taper;
                 }
             })
-            .or_insert((*stage_idx, position, ctrl.taper));
+            .or_insert((*stage_idx, position as f64, ctrl.taper));
     }
 
     // Materialize the dividers AND register a WiperDivider target on each
@@ -90,7 +93,7 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
             .push(super::compiled::WiperDivider {
                 after_stage_idx: *after_stage_idx,
                 pot_comp_id: pot_comp_id.clone(),
-                position: *position,
+                position: *position as crate::Wave,
                 taper: *taper,
             });
         for ctrl in compiled.controls.iter_mut() {
@@ -121,7 +124,7 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
             compiled
                 .pot_smoothers
                 .push(super::compiled::SmoothedParam::new(
-                    ctrl.default,
+                    ctrl.default as crate::Wave,
                     i,
                     compiled.sample_rate,
                 ));
@@ -141,7 +144,7 @@ pub(super) fn bind_controls(pedal: &PedalDef, compiled: &mut CompiledPedal) {
     // leaf and re-derives the scattering, so the compiled baseline IS the
     // declared default and the sweep is monotonic across the full range.
     for ctrl in &pedal.controls {
-        compiled.set_control_immediate(&ctrl.label, ctrl.default);
+        compiled.set_control_immediate(&ctrl.label, ctrl.default as crate::Wave);
     }
 }
 
@@ -338,8 +341,8 @@ fn find_pot_bindings(
         target: primary,
         targets: std::mem::take(&mut targets),
         component_id: comp_id.to_string(),
-        max_resistance: max_r,
+        max_resistance: max_r as crate::Wave,
         taper,
-        range: ctrl.range,
+        range: (ctrl.range.0 as crate::Wave, ctrl.range.1 as crate::Wave),
     }]
 }

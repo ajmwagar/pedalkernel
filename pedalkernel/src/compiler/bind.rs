@@ -131,9 +131,9 @@ pub(super) fn build_controls(
             target,
             targets: Vec::new(),
             component_id: ctrl.component.clone(),
-            max_resistance: max_r,
+            max_resistance: max_r as crate::Wave,
             taper,
-            range: ctrl.range,
+            range: (ctrl.range.0 as crate::Wave, ctrl.range.1 as crate::Wave),
         });
     }
 
@@ -320,8 +320,8 @@ pub(super) fn build_lfo_bindings(
             };
 
             let base_freq = 1.0 / (2.0 * std::f64::consts::PI * lfo.timing_r * lfo.timing_c);
-            let mut lfo = crate::elements::Lfo::new(waveform, sample_rate);
-            lfo.set_rate(base_freq);
+            let mut lfo = crate::elements::Lfo::new(waveform, sample_rate as crate::Wave);
+            lfo.set_rate(base_freq as crate::Wave);
 
             let mut created_all_jfet_binding = false;
 
@@ -368,9 +368,9 @@ pub(super) fn build_lfo_bindings(
                                     lfos.push(LfoBinding {
                                         lfo: lfo.clone(),
                                         target,
-                                        bias,
-                                        range,
-                                        base_freq,
+                                        bias: bias as crate::Wave,
+                                        range: range as crate::Wave,
+                                        base_freq: base_freq as crate::Wave,
                                         lfo_id: comp.id.clone(),
                                     });
                                 }
@@ -406,12 +406,12 @@ pub(super) fn build_envelope_bindings(
             .downcast_ref::<crate::compiler::components::EnvelopeFollower>()
         {
             let envelope = crate::elements::EnvelopeFollower::from_rc(
-                ef.attack_r,
-                ef.attack_c,
-                ef.release_r,
-                ef.release_c,
-                ef.sensitivity_r,
-                sample_rate,
+                ef.attack_r as crate::Wave,
+                ef.attack_c as crate::Wave,
+                ef.release_r as crate::Wave,
+                ef.release_c as crate::Wave,
+                ef.sensitivity_r as crate::Wave,
+                sample_rate as crate::Wave,
             );
 
             let mut unused_flag = false;
@@ -437,8 +437,8 @@ pub(super) fn build_envelope_bindings(
                                     envelopes.push(EnvelopeBinding {
                                         envelope: envelope.clone(),
                                         target,
-                                        bias,
-                                        range,
+                                        bias: bias as crate::Wave,
+                                        range: range as crate::Wave,
                                         env_id: comp.id.clone(),
                                         // Legacy 6-pass builder (no runtime
                                         // Stage list): global-input tap.
@@ -662,12 +662,12 @@ pub(super) fn build_envelope_jfet_bindings(
             continue;
         };
         let envelope = crate::elements::EnvelopeFollower::from_rc(
-            ef.attack_r,
-            ef.attack_c,
-            ef.release_r,
-            ef.release_c,
-            ef.sensitivity_r,
-            sample_rate,
+            ef.attack_r as crate::Wave,
+            ef.attack_c as crate::Wave,
+            ef.release_r as crate::Wave,
+            ef.release_c as crate::Wave,
+            ef.sensitivity_r as crate::Wave,
+            sample_rate as crate::Wave,
         );
         // Detector tap: resolve the `EF.in -> <node>` net to its runtime
         // signal source (global input vs. a specific stage's output).
@@ -709,8 +709,8 @@ pub(super) fn build_envelope_jfet_bindings(
                                 stage_idx,
                                 comp_id: target_comp.clone(),
                             },
-                            bias: sink.bias,
-                            range: sink.range,
+                            bias: sink.bias as crate::Wave,
+                            range: sink.range as crate::Wave,
                             env_id: comp.id.clone(),
                             tap,
                         });

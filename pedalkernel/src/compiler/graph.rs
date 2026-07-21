@@ -3854,8 +3854,8 @@ pub(super) fn make_leaf(
             info.switch_id.clone(),
             info.path_index,
             info.num_paths,
-            FORK_R_ACTIVE,
-            FORK_R_INACTIVE,
+            FORK_R_ACTIVE as crate::Wave,
+            FORK_R_INACTIVE as crate::Wave,
         );
     }
 

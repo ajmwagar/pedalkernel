@@ -54,15 +54,15 @@ impl Component for Resistor {
         mna: &mut MnaSystem,
         _sample_rate: f64,
     ) -> StampResult {
-        mna.stamp_resistor(n1, n2, self.value);
+        mna.stamp_resistor(n1, n2, self.value as crate::Wave);
         StampResult::Stamped
     }
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         if self.value.is_infinite() {
-            Some(DynNode::Resistor(Some(comp_id.to_string()), OPEN_CIRCUIT_R))
+            Some(DynNode::Resistor(Some(comp_id.to_string()), OPEN_CIRCUIT_R as crate::Wave))
         } else {
-            Some(DynNode::Resistor(Some(comp_id.to_string()), self.value))
+            Some(DynNode::Resistor(Some(comp_id.to_string()), self.value as crate::Wave))
         }
     }
 
@@ -169,7 +169,7 @@ impl Component for Capacitor {
     ) -> StampResult {
         let rp = 1.0 / (2.0 * sample_rate * self.config.value);
         StampResult::Reactive {
-            dyn_node: DynNode::Capacitor(Some(comp_id.to_string()), self.config.value, rp),
+            dyn_node: DynNode::Capacitor(Some(comp_id.to_string()), self.config.value as crate::Wave, rp as crate::Wave),
             rp,
         }
     }
@@ -192,18 +192,18 @@ impl Component for Capacitor {
             };
             Some(DynNode::LeakyCapacitor(
                 Some(comp_id.to_string()),
-                self.config.value,
-                rp,
-                leakage_decay,
-                self.config.da,
+                self.config.value as crate::Wave,
+                rp as crate::Wave,
+                leakage_decay as crate::Wave,
+                self.config.da.map(|v| v as crate::Wave),
                 0.0,
-                da_rate,
+                da_rate as crate::Wave,
             ))
         } else {
             Some(DynNode::Capacitor(
                 Some(comp_id.to_string()),
-                self.config.value,
-                1.0 / (2.0 * sample_rate * self.config.value),
+                self.config.value as crate::Wave,
+                (1.0 / (2.0 * sample_rate * self.config.value)) as crate::Wave,
             ))
         }
     }
@@ -324,7 +324,7 @@ impl Component for Inductor {
     ) -> StampResult {
         let rp = 2.0 * sample_rate * self.value;
         StampResult::Reactive {
-            dyn_node: DynNode::Inductor(Some(comp_id.to_string()), self.value, rp),
+            dyn_node: DynNode::Inductor(Some(comp_id.to_string()), self.value as crate::Wave, rp as crate::Wave),
             rp,
         }
     }
@@ -332,8 +332,8 @@ impl Component for Inductor {
     fn make_leaf(&self, comp_id: &str, sample_rate: f64) -> Option<DynNode> {
         Some(DynNode::Inductor(
             Some(comp_id.to_string()),
-            self.value,
-            2.0 * sample_rate * self.value,
+            self.value as crate::Wave,
+            (2.0 * sample_rate * self.value) as crate::Wave,
         ))
     }
 
@@ -427,11 +427,11 @@ impl Component for Potentiometer {
     ) -> StampResult {
         let initial_pos = 0.5;
         let tapered_pos = self.taper.apply(initial_pos);
-        let r = (tapered_pos * self.max_r).max(1.0);
+        let r = (tapered_pos * self.max_r as crate::Wave).max(1.0);
         mna.stamp_resistor(n1, n2, r);
         StampResult::Pot {
-            dyn_node: DynNode::Pot(comp_id.to_string(), self.max_r, initial_pos, self.taper),
-            initial_conductance: 1.0 / r,
+            dyn_node: DynNode::Pot(comp_id.to_string(), self.max_r as crate::Wave, initial_pos, self.taper),
+            initial_conductance: 1.0 / r as f64,
         }
     }
 
@@ -444,13 +444,13 @@ impl Component for Potentiometer {
         let initial_pos = 0.5;
         let tapered_pos = self.taper.apply(initial_pos);
         // a→w half: R_aw = pos * max_R
-        let r_aw = (tapered_pos * self.max_r).max(1.0);
+        let r_aw = (tapered_pos * self.max_r as crate::Wave).max(1.0);
         let n_a = (ctx.pin_to_mna)("a");
         let n_w = (ctx.pin_to_mna)("w").or_else(|| (ctx.pin_to_mna)("wiper"));
         mna.stamp_resistor(n_a, n_w, r_aw);
 
         // w→b half: R_wb = (1-pos) * max_R
-        let r_wb = ((1.0 - tapered_pos) * self.max_r).max(1.0);
+        let r_wb = ((1.0 - tapered_pos) * self.max_r as crate::Wave).max(1.0);
         let n_b = (ctx.pin_to_mna)("b");
         mna.stamp_resistor(n_w, n_b, r_wb);
 
@@ -462,7 +462,7 @@ impl Component for Potentiometer {
         let tapered_pos = self.taper.apply(initial_pos);
         Some(DynNode::Pot(
             comp_id.to_string(),
-            self.max_r,
+            self.max_r as crate::Wave,
             initial_pos,
             self.taper,
         ))
@@ -589,14 +589,14 @@ impl Component for Tempco {
         mna: &mut MnaSystem,
         _sample_rate: f64,
     ) -> StampResult {
-        mna.stamp_resistor(n1, n2, self.resistance);
+        mna.stamp_resistor(n1, n2, self.resistance as crate::Wave);
         StampResult::Stamped
     }
 
     fn make_leaf(&self, comp_id: &str, _sample_rate: f64) -> Option<DynNode> {
         Some(DynNode::Resistor(
             Some(comp_id.to_string()),
-            self.resistance,
+            self.resistance as crate::Wave,
         ))
     }
 
@@ -674,7 +674,7 @@ impl Component for CapSwitched {
             if c.is_finite() && c > 0.0 {
                 let rp = 1.0 / (2.0 * sample_rate * c);
                 return StampResult::Reactive {
-                    dyn_node: DynNode::Capacitor(Some(comp_id.to_string()), c, rp),
+                    dyn_node: DynNode::Capacitor(Some(comp_id.to_string()), c as crate::Wave, rp as crate::Wave),
                     rp,
                 };
             }
@@ -689,8 +689,8 @@ impl Component for CapSwitched {
         if c.is_finite() && c > 0.0 {
             Some(DynNode::Capacitor(
                 Some(comp_id.to_string()),
-                c,
-                1.0 / (2.0 * sample_rate * c),
+                c as crate::Wave,
+                (1.0 / (2.0 * sample_rate * c)) as crate::Wave,
             ))
         } else {
             None
@@ -768,7 +768,7 @@ impl Component for InductorSwitched {
             if l.is_finite() && l > 0.0 {
                 let rp = 2.0 * sample_rate * l;
                 return StampResult::Reactive {
-                    dyn_node: DynNode::Inductor(Some(comp_id.to_string()), l, rp),
+                    dyn_node: DynNode::Inductor(Some(comp_id.to_string()), l as crate::Wave, rp as crate::Wave),
                     rp,
                 };
             }
@@ -783,8 +783,8 @@ impl Component for InductorSwitched {
         if l.is_finite() && l > 0.0 {
             Some(DynNode::Inductor(
                 Some(comp_id.to_string()),
-                l,
-                2.0 * sample_rate * l,
+                l as crate::Wave,
+                (2.0 * sample_rate * l) as crate::Wave,
             ))
         } else {
             None
@@ -860,7 +860,7 @@ impl Component for ResistorSwitched {
     ) -> StampResult {
         if let Some(&r) = self.values.first() {
             if r.is_finite() && r > 0.0 {
-                mna.stamp_resistor(n1, n2, r);
+                mna.stamp_resistor(n1, n2, r as crate::Wave);
             }
         }
         StampResult::Stamped
@@ -872,9 +872,9 @@ impl Component for ResistorSwitched {
         // F7 phase 2.
         let &r = self.values.first()?;
         if r.is_infinite() {
-            Some(DynNode::Resistor(Some(comp_id.to_string()), OPEN_CIRCUIT_R))
+            Some(DynNode::Resistor(Some(comp_id.to_string()), OPEN_CIRCUIT_R as crate::Wave))
         } else if r.is_finite() && r > 0.0 {
-            Some(DynNode::Resistor(Some(comp_id.to_string()), r))
+            Some(DynNode::Resistor(Some(comp_id.to_string()), r as crate::Wave))
         } else {
             None
         }

@@ -90,26 +90,31 @@ impl Component for TransformerComp {
         let l_secondary = l_primary / (n * n);
         let secondary = Box::new(DynNode::Inductor(
             None,
-            l_secondary,
-            2.0 * sample_rate * l_secondary,
+            l_secondary as crate::Wave,
+            (2.0 * sample_rate * l_secondary) as crate::Wave,
         ));
         if let Some(n_tertiary) = config.tertiary_turns_ratio {
             let l_tertiary = l_primary / (n_tertiary * n_tertiary);
             let tertiary = Box::new(DynNode::Inductor(
                 None,
-                l_tertiary,
-                2.0 * sample_rate * l_tertiary,
+                l_tertiary as crate::Wave,
+                (2.0 * sample_rate * l_tertiary) as crate::Wave,
             ));
             let r_sec = secondary.port_resistance();
             let r_ter = tertiary.port_resistance();
             let adaptor =
-                crate::tree::RTypeAdaptor::three_winding_transformer(n, n_tertiary, r_sec, r_ter);
+                crate::tree::RTypeAdaptor::three_winding_transformer(
+                    n as crate::Wave,
+                    n_tertiary as crate::Wave,
+                    r_sec,
+                    r_ter,
+                );
             Some(DynNode::RType {
                 adaptor,
                 children: vec![secondary, tertiary],
             })
         } else {
-            Some(DynNode::TransformerNode(secondary, n))
+            Some(DynNode::TransformerNode(secondary, n as crate::Wave))
         }
     }
 

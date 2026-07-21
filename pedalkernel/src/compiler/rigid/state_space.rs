@@ -37,7 +37,7 @@ pub(in crate::compiler) fn build_state_space_stage(
         built.vs_idx,
         built.output_mna,
         None,
-        sample_rate,
+        sample_rate as crate::Wave,
     );
 
     if n_states == 0 {
@@ -87,10 +87,10 @@ pub(in crate::compiler) fn build_state_space_stage(
             // matches that exact conductance for an exact delta update.
             1 => {
                 let position = 0.5;
-                let r = (pot.taper.apply(position) * pot.max_r).max(1.0);
+                let r = (pot.taper.apply(position) * pot.max_r as crate::Wave).max(1.0);
                 pot_bindings.push(StateSpacePotBinding {
                     comp_id: comp.id.clone(),
-                    max_r: pot.max_r,
+                    max_r: pot.max_r as crate::Wave,
                     taper: pot.taper,
                     position,
                     terminals: MnaPortTerminals::maybe_differential(
@@ -132,10 +132,10 @@ pub(in crate::compiler) fn build_state_space_stage(
                 };
 
                 // a→w segment: R_aw = pos·max_R (tracks `position` directly).
-                let r_aw = (pot.taper.apply(0.5) * pot.max_r).max(1.0);
+                let r_aw = (pot.taper.apply(0.5) * pot.max_r as crate::Wave).max(1.0);
                 pot_bindings.push(StateSpacePotBinding {
                     comp_id: format!("{}__aw", comp.id),
-                    max_r: pot.max_r,
+                    max_r: pot.max_r as crate::Wave,
                     taper: pot.taper,
                     position: 0.5,
                     terminals: MnaPortTerminals::maybe_differential(
@@ -150,10 +150,10 @@ pub(in crate::compiler) fn build_state_space_stage(
                 // matches the `stamp_mna_multi` complement form
                 // (1−taper.apply(0.5)) so the first delta is exact. The
                 // `complement: true` flag makes `set_pot` track 1−taper(pos).
-                let r_wb = ((1.0 - pot.taper.apply(0.5)) * pot.max_r).max(1.0);
+                let r_wb = ((1.0 - pot.taper.apply(0.5)) * pot.max_r as crate::Wave).max(1.0);
                 pot_bindings.push(StateSpacePotBinding {
                     comp_id: format!("{}__wb", comp.id),
-                    max_r: pot.max_r,
+                    max_r: pot.max_r as crate::Wave,
                     taper: pot.taper,
                     position: 0.5,
                     terminals: MnaPortTerminals::maybe_differential(
@@ -181,13 +181,13 @@ pub(in crate::compiler) fn build_state_space_stage(
         vs_idx: built.vs_idx,
         output_pos: built.output_mna,
         output_neg: None,
-        sample_rate,
+        sample_rate: sample_rate as crate::Wave,
         d_feedthrough,
         prev_output: 0.0,
         variable_resistors: Vec::new(),
     };
 
-    let mut stage = StateSpaceStage::new(ss, supply_voltage);
+    let mut stage = StateSpaceStage::new(ss, supply_voltage as crate::Wave);
     stage.bind_ports(input_node_id, output_node_id);
     stage.pot_bindings = pot_bindings;
     if !stage.pot_bindings.is_empty() {

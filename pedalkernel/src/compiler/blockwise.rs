@@ -32,7 +32,7 @@ fn push_coupling_port(
     let port_idx = ports.len();
     ports.push(CircuitMappedPort::new(
         graph_terminals.map(GraphNodeId::new),
-        PortSpec::new(mna_terminals.map(MnaNodeId::new), resistance),
+        PortSpec::new(mna_terminals.map(MnaNodeId::new), resistance as crate::Wave),
     ));
     port_idx
 }
@@ -354,7 +354,7 @@ fn lower_block_stages(
                         bias_node_voltages,
                     ) {
                         Ok(vbe) => {
-                            bjt.set_bias(vbe);
+                            bjt.set_bias(vbe as crate::Wave);
                             #[cfg(test)]
                             eprintln!("  Block {bi}: BJT bias = {vbe:.3}V (from circuit)");
                         }
@@ -378,7 +378,7 @@ fn lower_block_stages(
                                 supply_voltage,
                             ) {
                                 Ok(dc) => {
-                                    bjt.set_bias(dc.vbe);
+                                    bjt.set_bias(dc.vbe as crate::Wave);
                                     // Warm-start the NR at the solved Vce
                                     // (mirrors the WDF call-site), unless an
                                     // explicit init { } hint owns the state.
@@ -387,7 +387,7 @@ fn lower_block_stages(
                                         init_hints.iter().any(|h| &h.device_label == id)
                                     });
                                     if !has_hint && dc.vce.is_finite() {
-                                        bjt.set_initial_prev_v(dc.vce);
+                                        bjt.set_initial_prev_v(dc.vce as crate::Wave);
                                     }
                                     #[cfg(test)]
                                     eprintln!(
@@ -408,7 +408,7 @@ fn lower_block_stages(
                         }
                     }
 
-                    bjt.set_v_max(supply_voltage.abs().max(1.0));
+                    bjt.set_v_max(supply_voltage.abs().max(1.0) as crate::Wave);
                 }
             }
 
@@ -944,7 +944,11 @@ fn build_differential_diode_rung_stage(
     let cap_comp = &graph.components[graph.edges[reactive_edge].comp_idx];
     let capacitance = cap_comp.kind.capacitance()?;
     let cap_rp = 1.0 / (2.0 * sample_rate * capacitance);
-    let cap = super::dyn_node::DynNode::Capacitor(Some(cap_comp.id.clone()), capacitance, cap_rp);
+    let cap = super::dyn_node::DynNode::Capacitor(
+        Some(cap_comp.id.clone()),
+        capacitance as crate::Wave,
+        cap_rp as crate::Wave,
+    );
     let tree = super::spqr_build::with_voltage_source_rp(cap, 1_000.0);
 
     let model_name = bjt_model_name_for_comp(left_comp_idx, graph)?;
@@ -962,7 +966,7 @@ fn build_differential_diode_rung_stage(
         .unwrap_or(100_000.0);
     let i_tail = ((supply_voltage - 0.6).max(0.1) / bias_resistance).max(1.0e-9);
     let root = pedalkernel_rt::stage::RootKind::DiffPair(
-        pedalkernel_rt::elements::DiffPairRoot::from_gummel_poon(&model, i_tail),
+        pedalkernel_rt::elements::DiffPairRoot::from_gummel_poon(&model, i_tail as crate::Wave),
     );
     let oversampler = pedalkernel_rt::oversampling::Oversampler::new(
         pedalkernel_rt::oversampling::OversamplingFactor::X1,
@@ -994,7 +998,7 @@ fn build_input_differential_pair_stage(
     let model = super::helpers::gummel_poon_model(&model_name);
     let i_tail = (supply_voltage.max(1.0) / 100_000.0).max(1.0e-9);
     let root = pedalkernel_rt::stage::RootKind::DiffPair(
-        pedalkernel_rt::elements::DiffPairRoot::from_gummel_poon(&model, i_tail),
+        pedalkernel_rt::elements::DiffPairRoot::from_gummel_poon(&model, i_tail as crate::Wave),
     );
     let oversampler = pedalkernel_rt::oversampling::Oversampler::new(
         pedalkernel_rt::oversampling::OversamplingFactor::X1,
@@ -1112,32 +1116,32 @@ fn build_diode_ladder_core(
     let v_max = (supply_voltage + 5.0).max(supply_voltage * 1.01).max(1.0);
     let tail_current_table = generate_diode_ladder_tail_current_table(
         blocks.len(),
-        n_vt,
-        model.is,
+        n_vt as f64,
+        model.is as f64,
         r_min,
         r_max,
         v_min,
         v_max,
     );
     let i_tail_bias = tail_current_table.lookup_2d(
-        (cutoff_bias_resistance + cutoff_max_resistance * 0.5).clamp(r_min, r_max),
-        supply_voltage.clamp(v_min, v_max),
+        ((cutoff_bias_resistance + cutoff_max_resistance * 0.5).clamp(r_min, r_max)) as crate::Wave,
+        (supply_voltage.clamp(v_min, v_max)) as crate::Wave,
     );
     let i_tail_max = tail_current_table
-        .lookup_2d(r_min, v_max)
+        .lookup_2d(r_min as crate::Wave, v_max as crate::Wave)
         .max(i_tail_bias * 1.01);
-    let tanh_table = super::k_method::generate_differential_ladder_tanh_table(n_vt);
+    let tanh_table = super::k_method::generate_differential_ladder_tanh_table(n_vt as f64);
 
     Some(pedalkernel_rt::stage::DiodeLadderCore::new(
         tanh_table,
-        cap_values,
-        sample_rate,
+        cap_values.iter().map(|&v| v as crate::Wave).collect(),
+        sample_rate as crate::Wave,
         alpha,
         n_vt,
         tail_current_table,
         i_tail_bias,
         i_tail_max,
-        cutoff_bias_resistance,
+        cutoff_bias_resistance as crate::Wave,
     ))
 }
 
@@ -1174,10 +1178,10 @@ fn generate_diode_ladder_tail_current_table(
 
     let mut table = pedalkernel_rt::stage::KTable {
         dims: 2,
-        b_min: r_min,
-        b_max: r_max,
-        ctrl_min: v_min,
-        ctrl_max: v_max,
+        b_min: r_min as crate::Wave,
+        b_max: r_max as crate::Wave,
+        ctrl_min: v_min as crate::Wave,
+        ctrl_max: v_max as crate::Wave,
         steps,
         entries,
         inv_b_scale: 0.0,
@@ -2712,7 +2716,7 @@ fn try_build_blockwise_inner(
             })
             .unwrap_or(100_000.0);
         let i_bias = (supply_voltage - v_be).max(0.1) / r_bias_value;
-        let gm = i_bias / vt;
+        let gm = i_bias / vt as f64;
         let r_source_cascade = (1.0 / gm).clamp(10.0, 10_000.0); // 1/gm, clamped
 
         #[cfg(test)]
@@ -2788,7 +2792,7 @@ fn try_build_blockwise_inner(
                 // whose small-signal output impedance is set by that rung's
                 // own DC bias current.
                 let block_source_r = if bi == 0 {
-                    first_block_source_r
+                    first_block_source_r as crate::Wave
                 } else if matches!(
                     plan.blocks.get(bi).map(|block| &block.topology),
                     Some(BlockTopology::DifferentialDiodeRung { .. })
@@ -2797,20 +2801,20 @@ fn try_build_blockwise_inner(
                     // buffered cascade. Their local cross-capacitor WDF was
                     // built with the rung primitive's own source impedance;
                     // do not replace it with the old single-ended 1/gm guess.
-                    1_000.0
+                    1_000.0 as crate::Wave
                 } else {
                     match &wdf.root {
                         pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => root
                             .model
                             .dynamic_resistance_from_sources(&[(
-                                supply_voltage,
-                                block_bias_resistance,
+                                supply_voltage as crate::Wave,
+                                block_bias_resistance as crate::Wave,
                             )])
                             .clamp(10.0, 10_000.0),
                         _ => {
                             let i_bias = (supply_voltage - v_be).max(0.1) / block_bias_resistance;
-                            let gm = i_bias / vt;
-                            (1.0 / gm).clamp(10.0, 10_000.0)
+                            let gm = i_bias / vt as f64;
+                            (1.0 / gm).clamp(10.0, 10_000.0) as crate::Wave
                         }
                     }
                 };
@@ -2821,8 +2825,8 @@ fn try_build_blockwise_inner(
                         pedalkernel_rt::stage::RootKind::DiffPair(_),
                         Some(BlockTopology::DifferentialDiodeRung { .. }),
                     ) => Some(pedalkernel_rt::stage::DiodeCutoffCalibration {
-                        bias_voltage: supply_voltage,
-                        bias_resistance: block_bias_resistance,
+                        bias_voltage: supply_voltage as crate::Wave,
+                        bias_resistance: block_bias_resistance as crate::Wave,
                         cv_resistance: None,
                         min_rp: 10.0,
                         max_rp: 100_000.0,
@@ -2839,7 +2843,7 @@ fn try_build_blockwise_inner(
                     pedalkernel_rt::stage::RootKind::ExplicitSingleDiode(root) => {
                         Some(super::k_method::generate_biased_single_diode_k_table(
                             root.model,
-                            wdf.tree.port_resistance(),
+                            wdf.tree.port_resistance() as f64,
                         ))
                     }
                     _ => super::k_method::generate_k_table(wdf),
@@ -2954,7 +2958,7 @@ fn try_build_blockwise_inner(
                 return Some(vec![BuiltStage::SerialDelayedFeedback(
                     pedalkernel_rt::stage::SerialDelayedFeedbackStage::new(
                         rung_stages,
-                        force_serial_feedback_gain,
+                        force_serial_feedback_gain as crate::Wave,
                     ),
                 )]);
             }
@@ -3248,7 +3252,7 @@ fn try_build_blockwise_inner(
             } else {
                 node_to_mna.get(&e.node_b).copied()
             };
-            mna.stamp_resistor(n1, n2, r);
+            mna.stamp_resistor(n1, n2, r as crate::Wave);
 
             let pot_meta = comp
                 .kind
@@ -3266,8 +3270,8 @@ fn try_build_blockwise_inner(
                 node_b: n2,
                 graph_node_a: (!ground_rails.contains(&e.node_a)).then_some(e.node_a),
                 graph_node_b: (!ground_rails.contains(&e.node_b)).then_some(e.node_b),
-                resistance: r,
-                pot_max_resistance: pot_meta.map(|(max_r, _)| max_r),
+                resistance: r as crate::Wave,
+                pot_max_resistance: pot_meta.map(|(max_r, _)| max_r as crate::Wave),
                 taper: pot_meta
                     .map(|(_, taper)| taper)
                     .unwrap_or(pedalkernel_rt::pot_taper::PotTaper::B),
@@ -3306,7 +3310,7 @@ fn try_build_blockwise_inner(
             if let Some(rung_ports) = differential_rung_ports(block, graph) {
                 let rp = k_method_block(&sub_stages[kbi])
                     .map(|block| block.nominal_vs_rp)
-                    .unwrap_or(r_source_cascade);
+                    .unwrap_or(r_source_cascade as crate::Wave);
                 for (label, node, role) in [
                     (
                         "diff_pos",
@@ -3323,7 +3327,7 @@ fn try_build_blockwise_inner(
                         &mut ports,
                         WdfPortTerminals::single_ended(node),
                         WdfPortTerminals::maybe_single_ended(node_to_mna.get(&node).copied()),
-                        rp,
+                        rp as f64,
                     );
                     push_k_method_port(&mut sub_stages, kbi, role, &ports, port_idx);
                     #[cfg(test)]
@@ -3340,7 +3344,7 @@ fn try_build_blockwise_inner(
                         &mut ports,
                         WdfPortTerminals::differential(rung_ports.top_left, rung_ports.top_right),
                         WdfPortTerminals::differential(left_idx, right_idx),
-                        rp,
+                        rp as f64,
                     );
                     push_k_method_port(
                         &mut sub_stages,
@@ -3381,12 +3385,12 @@ fn try_build_blockwise_inner(
                 let mna_idx = node_to_mna[&pn];
                 let rp = k_method_block(&sub_stages[kbi])
                     .map(|block| block.nominal_vs_rp)
-                    .unwrap_or(r_source_cascade);
+                    .unwrap_or(r_source_cascade as crate::Wave);
                 let port_idx = push_coupling_port(
                     &mut ports,
                     WdfPortTerminals::single_ended(pn),
                     WdfPortTerminals::single_ended(mna_idx),
-                    rp,
+                    rp as f64,
                 );
                 push_k_method_port(
                     &mut sub_stages,
@@ -3463,12 +3467,12 @@ fn try_build_blockwise_inner(
                 .get(bi)
                 .and_then(k_method_block)
                 .map(|block| block.rp)
-                .unwrap_or(r_source_cascade);
+                .unwrap_or(r_source_cascade as crate::Wave);
             let scattering_idx = push_coupling_port(
                 &mut ports,
                 WdfPortTerminals::single_ended(output_node),
                 WdfPortTerminals::single_ended(mna_idx),
-                rp,
+                rp as f64,
             );
             feedback_port_map.push((bi, scattering_idx));
             used_ports.insert(output_node);
@@ -3585,7 +3589,7 @@ fn try_build_blockwise_inner(
                 WdfPortTerminals::maybe_differential(node_a, node_b),
                 rp,
             );
-            let kind = OnePortKind::Capacitor(capacitance);
+            let kind = OnePortKind::Capacitor(capacitance as crate::Wave);
             let state_slot = coupling_runtime_state.allocate_one_port(kind);
             let one_port_idx = coupling_one_ports.len();
             coupling_one_ports.push(RuntimeOnePort::new(
@@ -3779,8 +3783,8 @@ fn try_build_blockwise_inner(
                             node_b: None,
                             graph_node_a: None,
                             graph_node_b: None,
-                            resistance: (pot.max_r * 0.5).max(1.0e-3),
-                            pot_max_resistance: Some(pot.max_r),
+                            resistance: (pot.max_r * 0.5).max(1.0e-3) as crate::Wave,
+                            pot_max_resistance: Some(pot.max_r as crate::Wave),
                             taper: pot.taper,
                             invert_control: false,
                         });
@@ -3844,7 +3848,7 @@ fn try_build_blockwise_inner(
             output_block,
             output_port_index,
             output_extraction,
-            supply_voltage,
+            supply_voltage: supply_voltage as crate::Wave,
             vs_port_map,
             cutoff_cv_port,
             shared_diode_cutoff_pot,

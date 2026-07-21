@@ -30,11 +30,11 @@ impl TapeHeadComp {
     fn ja_model(&self) -> JaCoreModel {
         let c = &self.config;
         JaCoreModel {
-            ms: c.ja_ms,
-            a: c.ja_a,
-            alpha: c.ja_alpha,
-            k: c.ja_k,
-            c: c.ja_c,
+            ms: c.ja_ms as crate::Wave,
+            a: c.ja_a as crate::Wave,
+            alpha: c.ja_alpha as crate::Wave,
+            k: c.ja_k as crate::Wave,
+            c: c.ja_c as crate::Wave,
             // The voltage law uses kv (H = kv*V), not Ampere's law, so the
             // geometry only needs to be sane positives for `is_complete()`.
             n_turns: 100.0,
@@ -100,12 +100,12 @@ impl Component for TapeHeadComp {
         Some(DynNode::TapeHeadVoltage(
             Some(comp_id.to_string()),
             self.ja_model(),
-            c.kv,
-            c.isat,
-            c.gp,
-            c.h_bias,
-            sample_rate,
-            c.rp,
+            c.kv as crate::Wave,
+            c.isat as crate::Wave,
+            c.gp as crate::Wave,
+            c.h_bias as crate::Wave,
+            sample_rate as crate::Wave,
+            c.rp as crate::Wave,
         ))
     }
 

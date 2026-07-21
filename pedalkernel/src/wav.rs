@@ -90,12 +90,12 @@ pub fn render_to_wav<P: PedalProcessor>(
     path: &Path,
     sample_rate: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    pedal.set_sample_rate(sample_rate as f64);
+    pedal.set_sample_rate(sample_rate as crate::Wave);
     pedal.reset();
 
     let mut writer = WavWriter::create(path, wav_spec(sample_rate))?;
     for &sample in input {
-        let out = pedal.process(sample);
+        let out = pedal.process(sample as crate::Wave);
         writer.write_sample(out as f32)?;
     }
     writer.finalize()?;

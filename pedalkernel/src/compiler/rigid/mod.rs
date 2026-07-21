@@ -547,12 +547,12 @@ fn extract_pot_bindings(
             };
             bindings.push(IirPotBinding {
                 comp_id: comp.id.clone(),
-                max_r: pot.max_r,
-                fixed_series_r,
-                ri,
+                max_r: pot.max_r as crate::Wave,
+                fixed_series_r: fixed_series_r as crate::Wave,
+                ri: ri as crate::Wave,
                 position: 0.5, // default
                 role,
-                feedback_r,
+                feedback_r: feedback_r as crate::Wave,
                 non_inverting,
             });
         } else if let Some(r) = comp.kind.resistance() {
@@ -566,7 +566,7 @@ fn extract_pot_bindings(
     // Set fixed_series_r on all pot bindings
     for b in &mut bindings {
         if b.role != IirPotRole::GroundLeg {
-            b.fixed_series_r = fixed_r;
+            b.fixed_series_r = fixed_r as crate::Wave;
         }
     }
 
@@ -834,18 +834,18 @@ pub(super) fn build_rigid_from_group_with_hints(
             if config.rf > 0.0 {
                 let fx = collect_nonideal_fx(&edge_indices, graph, sample_rate);
                 let mut stage = super::stage::BlackFeedbackStage::new(
-                    config.rf,
-                    config.ri,
+                    config.rf as crate::Wave,
+                    config.ri as crate::Wave,
                     inverting,
                     &fx,
-                    sample_rate,
+                    sample_rate as crate::Wave,
                 );
                 // Apply bias-derived asymmetric rail limits directly
                 if let Some((pos, neg)) = bias_v_max {
-                    stage.set_v_rails(pos, neg);
+                    stage.set_v_rails(pos as crate::Wave, neg as crate::Wave);
                 } else {
                     let v = (supply_voltage / 2.0 - 1.5).max(0.5);
-                    stage.set_v_rails(v, v);
+                    stage.set_v_rails(v as crate::Wave, v as crate::Wave);
                 }
 
                 for &eidx in &g.feedback_edges {
@@ -854,10 +854,13 @@ pub(super) fn build_rigid_from_group_with_hints(
                         if let Some(max_r) = comp.kind.resistance() {
                             let taper = comp.kind.pot_taper().unwrap_or(crate::dsl::PotTaper::B);
                             stage.pot_comp_id = Some(comp.id.clone());
-                            stage.pot_fixed_r = (config.rf - max_r).max(0.0);
-                            stage.pot_max_r = max_r;
+                            stage.pot_fixed_r = (config.rf - max_r).max(0.0) as crate::Wave;
+                            stage.pot_max_r = max_r as crate::Wave;
                             stage.pot_taper = taper;
-                            stage.set_rf((stage.pot_fixed_r + taper.apply(0.5) * max_r).max(1.0));
+                            stage.set_rf(
+                                (stage.pot_fixed_r + taper.apply(0.5) * max_r as crate::Wave)
+                                    .max(1.0),
+                            );
                             break;
                         }
                     }
@@ -898,8 +901,11 @@ pub(super) fn build_rigid_from_group_with_hints(
             !a_rail || !b_rail
         });
         if !has_signal_node {
-            let iir =
-                super::stage::IirData::new(vec![1.0, 0.0, 0.0], vec![1.0, 0.0, 0.0], sample_rate);
+            let iir = super::stage::IirData::new(
+                vec![1.0, 0.0, 0.0],
+                vec![1.0, 0.0, 0.0],
+                sample_rate as crate::Wave,
+            );
             return Ok(BuiltStage::Iir(IirStage::new(iir)));
         }
 
@@ -921,11 +927,11 @@ pub(super) fn build_rigid_from_group_with_hints(
                     .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
                 for f in &mut fx {
                     if let super::component::NonIdealFx::RailSaturation { v_max } = f {
-                        *v_max = actual_v_max;
+                        *v_max = actual_v_max as crate::Wave;
                     }
                 }
                 if !fx.is_empty() {
-                    stage.set_nonideal_fx(fx, sample_rate);
+                    stage.set_nonideal_fx(fx, sample_rate as crate::Wave);
                 }
                 if let Some(g) = group {
                     stage.pot_bindings = extract_pot_bindings(g, &edge_indices, graph);
@@ -1056,15 +1062,15 @@ pub(super) fn build_rigid_from_group_with_hints(
                         .unwrap_or_else(|| (supply_voltage / 2.0 - 1.5).max(0.5));
                     for f in &mut fx {
                         if let super::component::NonIdealFx::RailSaturation { v_max } = f {
-                            *v_max = actual_v_max;
+                            *v_max = actual_v_max as crate::Wave;
                         }
                     }
                     let stage = super::stage::BlackFeedbackStage::new(
-                        config.rf,
-                        config.ri,
+                        config.rf as crate::Wave,
+                        config.ri as crate::Wave,
                         inverting,
                         &fx,
-                        sample_rate,
+                        sample_rate as crate::Wave,
                     );
                     return Ok(BuiltStage::BlackFeedback(stage));
                 }
@@ -1075,7 +1081,7 @@ pub(super) fn build_rigid_from_group_with_hints(
                 let iir = super::stage::IirData::new(
                     vec![1.0, 0.0, 0.0],
                     vec![1.0, 0.0, 0.0],
-                    sample_rate,
+                    sample_rate as crate::Wave,
                 );
                 Ok(BuiltStage::Iir(IirStage::new(iir)))
             } else {
@@ -1241,12 +1247,26 @@ fn try_build_linear_feedback_wdf_adaptor(
     let shelf_comp = &graph.components[graph.edges[shelf_edge].comp_idx];
     let shelf_r = shelf_comp.kind.resistance()?;
 
-    let zi = DynNode::VoltageSource(0.0, input_r);
+    let zi = DynNode::VoltageSource(0.0, input_r as crate::Wave);
     let cap_rp = 1.0 / (2.0 * sample_rate * cap);
-    let cap_node = DynNode::Capacitor(Some(cap_comp.id.clone()), cap, cap_rp);
-    let pot_aw = DynNode::Pot(format!("{pot_id}__aw"), pot_max, 0.5, pot_taper);
-    let pot_wb = DynNode::Pot(format!("{pot_id}__wb"), pot_max, 0.5, pot_taper);
-    let shelf = DynNode::Resistor(Some(shelf_comp.id.clone()), shelf_r);
+    let cap_node = DynNode::Capacitor(
+        Some(cap_comp.id.clone()),
+        cap as crate::Wave,
+        cap_rp as crate::Wave,
+    );
+    let pot_aw = DynNode::Pot(
+        format!("{pot_id}__aw"),
+        pot_max as crate::Wave,
+        0.5,
+        pot_taper,
+    );
+    let pot_wb = DynNode::Pot(
+        format!("{pot_id}__wb"),
+        pot_max as crate::Wave,
+        0.5,
+        pot_taper,
+    );
+    let shelf = DynNode::Resistor(Some(shelf_comp.id.clone()), shelf_r as crate::Wave);
     let shelf_parallel = DynNode::Parallel(Box::new(shelf), Box::new(pot_wb));
     let reactive_branch = DynNode::Series(
         Box::new(DynNode::Series(Box::new(cap_node), Box::new(pot_aw))),
@@ -1256,7 +1276,7 @@ fn try_build_linear_feedback_wdf_adaptor(
         let comp = &graph.components[graph.edges[eidx].comp_idx];
         let r = comp.kind.resistance()?;
         DynNode::Parallel(
-            Box::new(DynNode::Resistor(Some(comp.id.clone()), r)),
+            Box::new(DynNode::Resistor(Some(comp.id.clone()), r as crate::Wave)),
             Box::new(reactive_branch),
         )
     } else {
@@ -1265,7 +1285,7 @@ fn try_build_linear_feedback_wdf_adaptor(
 
     let config = opamp_root::extract_opamp_config(group, true, graph).ok()?;
     let mut opamp = opamp_root::make_opamp_root(&config, sample_rate, supply_voltage, bias_v_max);
-    opamp.set_gbw_gain((zf.port_resistance() / input_r).abs().max(1.0));
+    opamp.set_gbw_gain((zf.port_resistance() / input_r as crate::Wave).abs().max(1.0));
 
     let input_node = other(input_edge, neg)?;
     let mut stage = WdfStage::new(

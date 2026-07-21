@@ -149,9 +149,9 @@ pub(super) fn build_delay_line_bindings(
         .filter_map(|component| {
             let delay = component.kind.as_any().downcast_ref::<DelayLineComp>()?;
             let mut delay_line = pedalkernel_rt::elements::DelayLine::new(
-                delay.min_delay,
-                delay.max_delay,
-                sample_rate,
+                delay.min_delay as crate::Wave,
+                delay.max_delay as crate::Wave,
+                sample_rate as crate::Wave,
                 delay.interpolation,
             );
             delay_line.set_medium(delay.medium);
@@ -161,11 +161,11 @@ pub(super) fn build_delay_line_bindings(
             // reads without clamping onto the buffer-max position. The base
             // delay range / normalized law is unchanged.
             let max_ratio = taps.iter().cloned().fold(1.0_f64, f64::max);
-            delay_line.ensure_tap_capacity(max_ratio);
+            delay_line.ensure_tap_capacity(max_ratio as crate::Wave);
 
             Some(DelayLineBinding {
                 delay_line,
-                taps,
+                taps: taps.iter().map(|&t| t as crate::Wave).collect(),
                 // Default 50/50 (historical); a mix pot would override via the
                 // runtime mix binding. No mix pot is wired in space_echo (the
                 // wet bus is engine-gated, see space_echo SIMPLIFICATIONS #4),
@@ -351,16 +351,16 @@ fn bind_speed_mod_lfos(
                     LfoWaveformDsl::SampleAndHold => crate::elements::LfoWaveform::SampleAndHold,
                 };
                 let base_freq = 1.0 / (2.0 * std::f64::consts::PI * lfo.timing_r * lfo.timing_c);
-                let mut osc = crate::elements::Lfo::new(waveform, sample_rate);
-                osc.set_rate(base_freq);
+                let mut osc = crate::elements::Lfo::new(waveform, sample_rate as crate::Wave);
+                osc.set_rate(base_freq as crate::Wave);
 
                 bound_lfo.insert(comp.id.clone(), ());
                 compiled.lfos.push(LfoBinding {
                     lfo: osc,
                     target: ModulationTarget::DelaySpeed { delay_idx: dl_idx },
-                    bias,
-                    range,
-                    base_freq,
+                    bias: bias as crate::Wave,
+                    range: range as crate::Wave,
+                    base_freq: base_freq as crate::Wave,
                     lfo_id: comp.id.clone(),
                 });
             }
@@ -397,13 +397,13 @@ fn upsert_control(
             target,
             targets: Vec::new(),
             component_id: ctrl.component.clone(),
-            max_resistance: max_r,
+            max_resistance: max_r as crate::Wave,
             taper,
-            range: ctrl.range,
+            range: (ctrl.range.0 as crate::Wave, ctrl.range.1 as crate::Wave),
         });
     }
     // (Re-)apply the declared default so the new target receives it.
-    compiled.set_control(&ctrl.label, ctrl.default);
+    compiled.set_control(&ctrl.label, ctrl.default as crate::Wave);
 }
 
 /// Resolve a pot to a delay-line control target by scanning nets.

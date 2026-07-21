@@ -25,9 +25,13 @@ extern crate std;
 ///
 /// Desktop builds use `f64` to preserve regression-test precision and analysis
 /// output. Embedded Cortex-M builds use `f32`, matching the M7 FPU.
-#[cfg(all(target_arch = "arm", target_os = "none"))]
+// `f32` on embedded ARM, or anywhere the `wave-f32` feature is set — the latter
+// lets an f64 host compile a blob whose serialized scalar width matches an f32
+// device (postcard is not self-describing, so the widths must agree). Compiler
+// math still runs in f64; only the stored/serialized runtime values are f32.
+#[cfg(any(all(target_arch = "arm", target_os = "none"), feature = "wave-f32"))]
 pub type Wave = f32;
-#[cfg(not(all(target_arch = "arm", target_os = "none")))]
+#[cfg(not(any(all(target_arch = "arm", target_os = "none"), feature = "wave-f32")))]
 pub type Wave = f64;
 
 /// Thermal voltage kT/q at the SPICE default analysis temperature

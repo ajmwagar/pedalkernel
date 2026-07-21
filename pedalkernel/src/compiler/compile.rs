@@ -312,10 +312,13 @@ fn compile_subcircuit_equipment(
         rail_sat_oversampler: crate::oversampling::Oversampler::new(
             crate::oversampling::OversamplingFactor::X1,
         ),
-        sample_rate,
+        sample_rate: sample_rate as crate::Wave,
         controls: Vec::new(),
         gain_range: (1.0, 1.0),
-        supply_voltage: pedal.supplies.first().map_or(9.0, |s| s.config.voltage),
+        supply_voltage: pedal
+            .supplies
+            .first()
+            .map_or(9.0, |s| s.config.voltage as crate::Wave),
         lfos: Vec::new(),
         envelopes: Vec::new(),
         bbds: Vec::new(),
