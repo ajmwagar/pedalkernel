@@ -25,12 +25,19 @@
 //!         working levels (the asymmetric even-harmonic colour the transformer
 //!         core showed only survives at very low drive in this WDF lowering);
 //!         `harmonic_character` now asserts measurable colour, not even-dom.
-//!       - the head is resistive (no integrator), so the passband is FLAT; the
-//!         post-stage playback EQ now propagates as a live WDF PassiveRType
-//!         stage (all-passive-drop fix, 2026-06-14): `frequency_response`
-//!         asserts the measured flat shape (~+4 dB, ~0.18 dB ripple at default
-//!         Tone) and `tone_control_has_authority` is now GREEN (Tone has ~3 dB
-//!         of monotone broadband authority, was previously dropped/inert).
+//!       - the head itself is resistive (no integrator); the post-stage
+//!         playback EQ (R_bump/C_bump/R_hf/C_hf/Tone) is what shapes the
+//!         passband, and now correctly SHARES the makeup amp's MNA group
+//!         (pedalkernel-6vy.5's feedback_summing_nodes partitioner exemption
+//!         realizes the .pedal file's note-4 "future refinement" — the EQ was
+//!         previously dropped from the signal path, giving a falsely-flat
+//!         passband). `frequency_response_shows_hf_rolloff` asserts the real
+//!         shape: comparatively flat 80 Hz-2 kHz, then a monotonic HF rolloff
+//!         (tape treble loss) above 2 kHz. `tone_control_has_authority` is
+//!         GREEN (Tone has real, large authority over that HF corner — at its
+//!         minimum the rheostat shunts the HF node hard enough to silence the
+//!         signal almost entirely, which is the correct behavior for the
+//!         schematic's 2-terminal rheostat wiring, not a bug).
 
 mod audio_analysis;
 
@@ -179,44 +186,87 @@ fn harmonic_character_is_measurable() {
 }
 
 // ===========================================================================
-// (4) FREQUENCY RESPONSE — flat passband (measured)
+// (4) FREQUENCY RESPONSE — playback EQ shapes the passband (measured)
 // ===========================================================================
 //
-// UPDATED 2026-06-14 (all-passive-drop fix): the post-head playback EQ
-// (R_bump/C_bump/R_hf/C_hf/Tone) is now LOWERED IN-CIRCUIT as a WDF
-// PassiveRType stage — previously it was silently dropped by SPQR, so the old
-// comment ("still does not propagate ... passband is flat at the head's bare
-// resistive level") described the BROKEN path. With the EQ in the path the
-// passband sits a few dB higher (measured ~+4.0 dB at 50 Hz rising gently to
-// ~+4.2 dB at 8 kHz at default Tone) and is still essentially flat (measured
-// ripple ~0.18 dB, 50 Hz - 8 kHz) — the EQ is a gentle broadband tilt at the
-// default Tone position, not a steep shelf. The Tone control's authority over
-// this shape is exercised by `tone_control_has_authority` below (now green).
-// The honest measured shape is what this test asserts.
+// UPDATED (pedalkernel-6vy.5, partitioner fix): the post-head playback EQ
+// (R_bump/C_bump/R_hf/C_hf/Tone) now correctly shares one MNA group with the
+// makeup amp (U2's feedback divider pulls the whole EQ network in through the
+// `feedback_summing_nodes` exemption in compiler/signal_flow.rs), so it
+// finally shapes the output the way the schematic says it should — this is
+// the "future refinement" note 4 of the .pedal file names directly
+// ("PLAYBACK EQ IS FLAT in v1... does not propagate through the stage
+// extraction"). The OLD version of this test asserted the flat-passband gap
+// itself (ripple ~0.18 dB) as if it were the intended behavior; per Rule 9,
+// a test must encode why the behavior matters, and "the EQ has no effect" was
+// never the intent — R_hf/C_hf/Tone exist specifically to roll off HF ("tape
+// treble loss", see the .pedal file's module doc). This test now asserts the
+// EQ's actual job: a comparatively flat low-mid band with a real, monotonic
+// HF rolloff above ~2 kHz.
+//
+// MEASURED (default Tone=0.6, Drive=0.35, Output=0.5, in=0.03):
+//   50 Hz -1.21 / 80 Hz -1.14 / 120 Hz -1.09 / 250 Hz -1.05 / 500 Hz -1.05 /
+//   1000 Hz -1.06 / 2000 Hz -1.12 / 4000 Hz -1.36 / 8000 Hz -2.37 dB.
+// Flattest region is 250 Hz-2 kHz (ripple ~0.07 dB there); HF rolloff is
+// clearly visible and monotonic from 2 kHz up (-1.12 -> -1.36 -> -2.37 dB).
+// `tone_control_has_authority` below independently exercises the Tone pot's
+// effect on this same HF corner.
 
 #[test]
-fn frequency_response_is_flat_passband() {
+fn frequency_response_shows_hf_rolloff() {
     let ctl = [("Drive", 0.35f64), ("Output", 0.5)];
-    let freqs = [
-        50.0, 80.0, 120.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0,
-    ];
-    let mut resp = Vec::new();
-    for &f in &freqs {
+    let low_mid_freqs = [80.0, 120.0, 250.0, 500.0, 1000.0, 2000.0];
+    let hf_freqs = [2000.0, 4000.0, 8000.0];
+
+    let mut low_mid = Vec::new();
+    for &f in &low_mid_freqs {
         let g = gain_db_at(f, 0.03, &ctl);
-        println!("[freq] {f:>6.0} Hz : {g:>6.1} dB");
-        resp.push((f, g));
+        println!("[freq] {f:>6.0} Hz : {g:>6.2} dB");
+        low_mid.push(g);
+    }
+    let mut hf = Vec::new();
+    for &f in &hf_freqs {
+        let g = gain_db_at(f, 0.03, &ctl);
+        println!("[freq] {f:>6.0} Hz : {g:>6.2} dB");
+        hf.push(g);
     }
 
-    let hi = resp.iter().map(|(_, g)| *g).fold(f64::MIN, f64::max);
-    let lo = resp.iter().map(|(_, g)| *g).fold(f64::MAX, f64::min);
-    let ripple = hi - lo;
-    println!("[freq] passband ripple 50 Hz-8 kHz = {ripple:.2} dB");
-
-    // Honest measured shape: flat to within ~1 dB across the band (measured
-    // ~0.18 dB at default Tone with the EQ now in-circuit).
+    // (a) The low-mid band (80 Hz - 2 kHz, below the HF corner) stays
+    // comparatively flat -- the EQ's job is HF rolloff, not a mid-band tilt.
+    // Measured ripple ~0.16 dB there; assert a generous 0.75 dB ceiling so this
+    // isn't hair-triggered on measurement noise, while still being clearly
+    // tighter than the full-band behavior asserted in (b).
+    let lo_hi = low_mid.iter().cloned().fold(f64::MIN, f64::max);
+    let lo_lo = low_mid.iter().cloned().fold(f64::MAX, f64::min);
+    let low_mid_ripple = lo_hi - lo_lo;
+    println!("[freq] low-mid (80 Hz-2 kHz) ripple = {low_mid_ripple:.2} dB");
     assert!(
-        ripple < 1.0,
-        "voltage head + non-propagating playback EQ => flat passband; ripple={ripple:.2} dB"
+        low_mid_ripple < 0.75,
+        "low-mid band should stay comparatively flat (EQ's job is HF rolloff, \
+         not a mid-band tilt); ripple={low_mid_ripple:.2} dB"
+    );
+
+    // (b) HF rolloff is real and monotonic from 2 kHz up: each higher
+    // frequency point must be no louder than the last (tape treble loss).
+    for w in hf.windows(2) {
+        assert!(
+            w[1] <= w[0] + 0.05,
+            "HF rolloff should be monotonically non-increasing 2 kHz-8 kHz \
+             (tape treble loss), got {hf:?}"
+        );
+    }
+
+    // (c) The rolloff has real magnitude: 8 kHz must sit measurably below the
+    // flat low-mid reference (measured delta ~1.3 dB; assert >= 1.0 dB so this
+    // fails if the EQ's HF corner is ever dropped from the signal path again).
+    let flat_ref = low_mid.iter().cloned().sum::<f64>() / low_mid.len() as f64;
+    let hf_drop = flat_ref - hf.last().unwrap();
+    println!("[freq] 8 kHz drop below low-mid reference = {hf_drop:.2} dB");
+    assert!(
+        hf_drop >= 1.0,
+        "playback EQ's HF rolloff should measurably attenuate 8 kHz relative \
+         to the flat low-mid band (tape treble loss); drop={hf_drop:.2} dB, \
+         expected >= 1.0 dB"
     );
 }
 
