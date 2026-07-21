@@ -164,8 +164,14 @@ fn load_mfb_lpf() -> Option<String> {
 fn compiled_dc_gain(src: &str, cutoff: f64, resonance: f64) -> f64 {
     let pedal = parse_pedal_file(src).expect("parse mfb_lpf.pedal");
     let mut proc = compile_pedal(&pedal, SAMPLE_RATE).expect("compile mfb_lpf.pedal");
-    proc.set_control("Cutoff", cutoff);
-    proc.set_control("Resonance", resonance);
+    // `set_control` only sets a smoother TARGET that ramps during `process()`;
+    // a one-shot compile-then-read-matrices (no samples processed) never
+    // advances it, so every grid point would silently read back the same
+    // compile-time-default position. `set_control_immediate` applies the
+    // value synchronously (see pedalkernel-rt/src/processor.rs and the
+    // project's headless-CLAP-controls memory note).
+    proc.set_control_immediate("Cutoff", cutoff);
+    proc.set_control_immediate("Resonance", resonance);
 
     let ss = proc
         .stages
@@ -249,13 +255,30 @@ fn compiled_dc_gain(src: &str, cutoff: f64, resonance: f64) -> f64 {
 /// oracle ratio, computed exactly from the compiled matrices, is what
 /// actually encodes "the impedance divider is being modeled."
 #[test]
-#[ignore] // GOLDEN ANCHOR (Phase 0, pedalkernel-6vy.2): fails on current engine
-          // — the compiled StateSpace stage is UNSTABLE (n_states=1,
-          // eigenvalue=-1.337, |eigenvalue|>1) because build_mna stamps zero
-          // source impedance at the injection node, which the Schur-
-          // complement elimination reduces to a single (wrong) state instead
-          // of the physically-correct 2 states (C1, C2). Remove #[ignore]
-          // once cross-stage R_th injection lands and this passes.
+#[ignore] // GOLDEN ANCHOR (Phase 0, pedalkernel-6vy.2), STILL RED after Phase
+          // B1 (pedalkernel-6vy.5): the B1 partitioner fix (feedback_summing_nodes
+          // exemption in compiler/signal_flow.rs) unifies the feedback divider
+          // into U1's own MNA group, and the GAIN MAGNITUDE now matches this
+          // oracle to <0.01% relative at all 9 grid points (verified externally
+          // with set_control_immediate — this test's plain set_control only
+          // arms a smoother TARGET that a one-shot compile+read never
+          // advances, so it was already unable to distinguish grid points
+          // before this comment; fixed above in compiled_dc_gain, but the
+          // remaining gap is real, not a harness artifact). The ONE remaining
+          // discrepancy is a UNIFORM SIGN FLIP: measured is +|oracle| where
+          // the oracle expects -|oracle| — reads as an output-tap polarity
+          // convention (c_vector / output_pos-output_neg selection) for this
+          // newly-merged rigid group, not a grouping error. Also: n_states is
+          // 3 (not the hoped-for 2) with one eigenvalue sitting at EXACTLY
+          // -1.0 (marginal, unit-circle boundary — see
+          // mfb_lpf_current_engine_state_space_is_unstable, renamed-in-place
+          // to check this instead of the old |eig|=1.337 divergence). Both
+          // remaining gaps are inside build_state_space_matrices
+          // (pedalkernel-rt/src/tree.rs), the exact territory
+          // pedalkernel-ge7 escalated as out of scope for a narrow fix — left
+          // DEFERRED, not silently patched here. Remove #[ignore] once the
+          // sign convention is fixed (and ideally the parasitic -1 eigenvalue
+          // resolved too, though that alone doesn't block the gain assertion).
 fn mfb_lpf_dc_gain_matches_zin_oracle() {
     let Some(src) = load_mfb_lpf() else {
         eprintln!("  SKIP: pedalkernel-pro repo not found (public CI)");
@@ -287,13 +310,44 @@ fn mfb_lpf_dc_gain_matches_zin_oracle() {
     );
 }
 
-/// Documents the CURRENT (buggy) engine's instability as a distinct,
-/// checkable fact from the gain-magnitude mismatch above. NOT `#[ignore]`d —
-/// this assertion is written to describe today's actual (broken) behavior,
-/// so it should PASS now and must be revisited/updated once Phase 1+ lands
-/// (a correct fix should make this stage stable, at which point this test
-/// should be changed to assert stability instead — see Rule 12: a
-/// stage-passes/all-fixed claim is wrong if this still measures |eig|>1).
+/// UPDATED (pedalkernel-6vy.5, Approach B / Phase B1): the partitioner
+/// exemption (`feedback_summing_nodes` in `compiler/signal_flow.rs`) now
+/// unifies the feedback divider (Cutoff_R1, C1, R_q_floor, Resonance) into
+/// U1's own group, eliminating the zero-Zin cross-stage injection bug ge7
+/// diagnosed. Measured effect: n_states went from 1 (Schur-eliminated down
+/// from the true 2 physical caps, C1+C2, discarding a state) to 3 (C1, C2,
+/// PLUS one more from folding Rb1/Rb2/R_in/R_out into the same MNA — the
+/// vref/input-coupling nodes were already pendants of this group even
+/// BEFORE this fix, confirmed via `PK_DEBUG_GROUPS`-style group-boundary
+/// tracing; they are not newly swallowed by this change).
+///
+/// This is NOT the clean "n_states=2, strictly stable" outcome Phase B1
+/// originally hoped for. What's actually verified:
+/// - The gain MAGNITUDE now tracks the Zin-oracle almost exactly (measured
+///   vs expected agree to <0.01% relative at all 9 grid points when driven
+///   via `set_control_immediate` instead of `set_control` — see the
+///   `mfb_lpf_dc_gain_matches_zin_oracle` doc comment below for why
+///   `set_control` alone can't observe this).
+/// - The SIGN is flipped: measured is `+|oracle|`, oracle expects
+///   `-|oracle|`. Uniform across the whole grid — this reads as an output
+///   polarity/tap convention mismatch (e.g. `output_pos`/`output_neg`
+///   selection or c_vector sign for this newly-merged rigid group), not a
+///   grouping error. NOT investigated further here — out of scope for the
+///   signal_flow.rs partitioner change this bead covers.
+/// - Every grid point has one eigenvalue at EXACTLY -1.0 (not `> 1.0` like
+///   the old bug, not `< 1.0` strictly stable either) — a marginal,
+///   boundary-of-unit-circle mode, structurally identical at every (Cutoff,
+///   Resonance) position tested. `build_state_space_matrices`'s own comment
+///   (tree.rs ~1737) calls out "parasitic -1 eigenvalues that are difficult
+///   to filter cleanly" — this looks like that same parasitic mode
+///   resurfacing for this specific merged-group topology, not the acute
+///   |eig|=1.337 divergence from before. Asserting strict stability
+///   (`|eigenvalue| < 1.0`) would be FALSE; this test asserts the honest
+///   current fact (marginal, not divergent) instead. Fixing the sign flip
+///   and/or the parasitic mode is StateSpace-matrix-builder work
+///   (pedalkernel-rt/src/tree.rs), the same territory pedalkernel-ge7
+///   escalated as out of scope for a narrow fix — left DEFERRED, not
+///   silently papered over here.
 #[test]
 fn mfb_lpf_current_engine_state_space_is_unstable() {
     let Some(src) = load_mfb_lpf() else {
@@ -312,17 +366,29 @@ fn mfb_lpf_current_engine_state_space_is_unstable() {
         .expect("MFB LPF must compile a StateSpace stage");
 
     assert_eq!(
-        ss.ss.n_states, 1,
-        "expected today's known-buggy 1-state reduction (physically the circuit \
-         has 2 reactive elements, C1 and C2) — if this changed, re-derive this test"
+        ss.ss.n_states, 3,
+        "expected the post-B1 3-state reduction (C1, C2, plus the folded \
+         Rb1/Rb2/R_in/R_out MNA) — if this changed, re-derive this test"
     );
-    let eigenvalue = ss.ss.a_matrix[0];
+    let n = ss.ss.n_states;
+    let a = &ss.ss.a_matrix;
+
+    // det(A + I) == 0 iff -1 is an eigenvalue of A (direct 3x3 cofactor
+    // expansion — no linear-algebra dep needed for a fixed n=3).
+    let m: Vec<f64> = (0..n * n)
+        .map(|k| a[k] + if k % n == k / n { 1.0 } else { 0.0 })
+        .collect();
+    let det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
+        + m[2] * (m[3] * m[7] - m[4] * m[6]);
     assert!(
-        eigenvalue.abs() > 1.0,
-        "expected the CURRENT engine's compiled MFB LPF to be unstable \
-         (|eigenvalue| > 1), measured eigenvalue={eigenvalue} — if this is now \
-         stable, the underlying bug's behavior changed and this diagnostic \
-         test (and the mfb_lpf_dc_gain_matches_zin_oracle ignore reason) needs \
+        det.abs() < 1e-6,
+        "expected a parasitic marginal eigenvalue at exactly -1.0 (det(A+I) \
+         should be ~0), measured det(A+I)={det:.3e} for a_matrix={a:?} — this is \
+         a DIFFERENT symptom from the old |eig|=1.337 divergence (n_states was 1 \
+         then, is 3 now after the B1 partitioner fix). If this is no longer true \
+         (stage is now strictly stable, all |eigenvalue| < 1.0, or newly \
+         divergent), the underlying behavior changed and this diagnostic test \
+         (and the mfb_lpf_dc_gain_matches_zin_oracle ignore reason) needs \
          updating"
     );
 }

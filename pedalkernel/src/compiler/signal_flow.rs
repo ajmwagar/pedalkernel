@@ -1416,6 +1416,79 @@ fn claim_passive_edges(
         visited
     };
 
+    // Feedback-summing nodes: an amplifier's input (inverting) terminal that
+    // is itself an endpoint of a feedback edge (the classic MFB topology —
+    // U1.neg is fed by BOTH the upstream divider AND the feedback R/C back
+    // from U1.out). For such a node, the network hanging off its non-feedback
+    // side is not an independent upstream stage but the other half of the
+    // feedback divider that sets closed-loop gain (-Zf/Zin) — it must stay
+    // with the op-amp. Ordinary makeup stages (feedback lands on the input
+    // terminal too, but the upstream side is a genuinely separate EQ) are
+    // NOT distinguished by this set alone; see `feedback_summing_reachable`
+    // below, which additionally requires the upstream network to be reached
+    // without crossing any barrier.
+    let feedback_summing_nodes: HashSet<NodeId> = scc
+        .iter()
+        .map(|&i| active_elements[i].input_node)
+        .filter(|node| {
+            !rails.contains(node)
+                && feedback_edges.iter().any(|&eidx| {
+                    let e = &graph.edges[eidx];
+                    e.node_a == *node || e.node_b == *node
+                })
+        })
+        .collect();
+
+    // Nodes reachable from a feedback-summing node through PASSIVE, non-
+    // active, non-feedback edges, without crossing rails, BFS barriers, or
+    // the op-amp's own input/output nodes (`input_terminals`,
+    // `group_output_nodes`). This is the MFB "other half of the divider":
+    // from U1.neg, walk through Resonance/R_q_floor/C1/Cutoff_R1 toward `in`,
+    // stopping at the `in` barrier itself (already in `bfs_barriers`) rather
+    // than inventing a new stop set. Seed nodes (feedback_summing_nodes) are
+    // exempt from the input-terminal stop so the walk can leave the summing
+    // node in the first place — mirrors the `seed_outputs` exemption in
+    // `feedback_loop_nodes` above.
+    let feedback_summing_reachable: HashSet<NodeId> = {
+        let mut visited: HashSet<NodeId> = HashSet::new();
+        let mut queue: VecDeque<NodeId> = VecDeque::new();
+        for &seed in &feedback_summing_nodes {
+            if visited.insert(seed) {
+                queue.push_back(seed);
+            }
+        }
+        while let Some(node) = queue.pop_front() {
+            if bfs_barriers.contains(&node) {
+                continue;
+            }
+            for &eidx in edge_indices {
+                if active_edges.contains(&eidx) || feedback_edges.contains(&eidx) {
+                    continue;
+                }
+                let e = &graph.edges[eidx];
+                let other = if e.node_a == node {
+                    e.node_b
+                } else if e.node_b == node {
+                    e.node_a
+                } else {
+                    continue;
+                };
+                if rails.contains(&other) {
+                    continue;
+                }
+                let is_own_terminal =
+                    input_terminals.contains(&other) || group_output_nodes.contains(&other);
+                if is_own_terminal && !feedback_summing_nodes.contains(&other) {
+                    continue;
+                }
+                if visited.insert(other) {
+                    queue.push_back(other);
+                }
+            }
+        }
+        visited
+    };
+
     let upstream_of_inputs = |node: NodeId| -> bool {
         if !bound_enabled {
             return false;
@@ -1424,6 +1497,9 @@ fn claim_passive_edges(
             return false;
         }
         if feedback_loop_nodes.contains(&node) {
+            return false;
+        }
+        if feedback_summing_reachable.contains(&node) {
             return false;
         }
         match (d_in.get(&node), input_pin_dist) {
@@ -1489,12 +1565,22 @@ fn claim_passive_edges(
             // never expand from them, so claiming such coupling edges is
             // the ordinary, safe behavior (input caps from `in`, input
             // resistors from a previous stage's output).
-            let far = if input_terminals.contains(&e.node_a) {
-                e.node_b
-            } else {
+            let near = if input_terminals.contains(&e.node_a) {
                 e.node_a
+            } else {
+                e.node_b
             };
-            if bfs_barriers.contains(&far) || !upstream_of_inputs(far) {
+            let far = if near == e.node_a { e.node_b } else { e.node_a };
+            // Feedback-summing exemption: if the NEAR endpoint (the input
+            // terminal this edge lands on) is itself a feedback-summing node
+            // (MFB: U1.neg fed by both the divider and the feedback R/C),
+            // this edge is the divider's own coupling into the summing
+            // junction — always claim it, matching the barrier exemption
+            // below.
+            if feedback_summing_nodes.contains(&near)
+                || bfs_barriers.contains(&far)
+                || !upstream_of_inputs(far)
+            {
                 pendant_edges.push(eidx);
             }
         }
