@@ -1831,13 +1831,26 @@ fn default_suites() -> BTreeMap<String, TestSuite> {
                         }],
                         metrics: vec![MetricConfig::TimeDomain],
                         pass_criteria: PassCriteria {
-                            // Measured 2026-06-15: sine RMS 1.9dB / Peak 2.2dB.
-                            // ENGINE GAP: BLT integrator has ~2dB amplitude offset vs SPICE.
-                            // Threshold = measured + 2dB margin = 3.9dB/4.2dB → 4.5dB.
-                            // This allows the engine gap to be measured without false-passing.
-                            // NOTE: previously was +2.9/+3.2 — honest gate now has tighter margin.
-                            normalized_rms_error_db: Some(4.5),
-                            peak_error_db: Some(4.5),
+                            // Re-baselined 2026-07-21 (pedalkernel-foi, per kg3 investigation
+                            // of PR #220): the ngspice golden is an IDEAL, railless VCVS
+                            // integrator. The engine's real op-amp model has a small group-delay
+                            // / phase difference vs that ideal golden, which the sample-aligned
+                            // normalized_rms_error_db and peak_error_db metrics conflate with
+                            // amplitude error — they are phase-sensitive. That made this
+                            // circuit's pass/fail flip on PR #220 (a fix that moved rail
+                            // saturation from per-state to output-only) even though #220 is
+                            // MORE accurate on every physical axis (measured vs ngspice:
+                            // main peak 0.72V/-2.84dB fund-gain/8.5% THD; #220 1.75V/-1.09dB/
+                            // 5.2% THD; truth 1.99V/0dB/0.002% THD) — main only "passed" via
+                            // lucky amplitude/phase cancellation in the sample-aligned diff.
+                            //
+                            // Switch to spectral_error_db: a phase-insensitive (FFT-magnitude,
+                            // gated to significant bins) metric already used elsewhere in this
+                            // config. Measured 2026-07-21: main=2.84dB, #220=1.09dB (#220 is
+                            // BETTER). Threshold = worse-of-the-two (main, 2.84dB) + ~0.7dB
+                            // margin = 3.5dB, so both the current engine and #220's fix pass
+                            // honestly, and the metric no longer rewards phase-lucky output.
+                            spectral_error_db: Some(3.5),
                             ..Default::default()
                         },
                         warmup_trim_ms: None,
