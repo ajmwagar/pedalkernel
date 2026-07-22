@@ -955,6 +955,20 @@ fn find_output_extract_node(
     // Op-amp feedback stage with the global `out` in a downstream stage: the
     // stage's true output is the op-amp's nullor output node (U1.out), where the
     // closed-loop signal appears. (pedalkernel-9xu1)
+    //
+    // LATENT RISK (pedalkernel-pmv1): this `.find()` returns the FIRST nullor
+    // in `graph.nullor_pins` declaration order whose component has an edge in
+    // `all_edges`, not necessarily the one actually wired to `graph.out_node`.
+    // The identical shape of this bug in `mna_builder.rs`'s `output_mna`/
+    // `injection_mna` resolution caused BiValve SVF's LPF/HPF taps to collapse
+    // to the same node for a multi-opamp (KHN/state-variable) group — fixed
+    // there by trying the group-boundary-aware `mid_chain_terminals()` first.
+    // This function is currently unreachable for that scenario (multi-opamp
+    // linear groups route to Iir/StateSpace, not General — see
+    // `rigid/mod.rs::classify_rigid`), so it has no failing test and is left
+    // unchanged here per strict-TDD (no red test, no change). Tracked as a
+    // follow-up: harden this fallback the same way if/when a reachable
+    // multi-nullor General-MNA case appears (e.g. a multi-opamp NL group).
     graph
         .nullor_pins
         .iter()
@@ -3337,4 +3351,181 @@ fn dominant_bias_tau(
         }
     }
     tau_max
+}
+
+// pedalkernel-pmv1 note: `find_output_extract_node`'s final fallback (below,
+// "Op-amp feedback stage with the global `out` in a downstream stage") has the
+// same "first nullor in declaration order, not the one actually wired to
+// `out`" shape as the bug fixed in `mna_builder.rs`'s `output_mna`/
+// `injection_mna` resolution (pedalkernel-pmv1: BiValve SVF's LPF/HPF taps
+// collapsed to the same node because a multi-opamp group's output extraction
+// grabbed the first-declared nullor instead of the true downstream boundary).
+//
+// This function is NOT reachable by that scenario today: multi-opamp linear
+// groups (no NL elements) are routed to Iir/StateSpace by
+// `rigid/mod.rs::classify_rigid`, never to the General/MNA+NR path this
+// function serves (its only caller is `build_general_mna_from_edges_inner`,
+// used when `stats.nl_count > 0`). The tests below document and guard the
+// CURRENT behavior for a multi-nullor General-MNA group (safe today, by
+// construction of the fixture below, but only because the earlier
+// `node_set`/direct-neighbor branches happen to resolve it correctly first —
+// see `multi_nullor_general_group_correct_by_direct_neighbor` for the
+// reachable-today shape, and
+// `multi_nullor_general_group_would_hit_first_nullor_fallback` for
+// confirmation that the *fallback itself* has not been hardened, so a future
+// General-MNA circuit that reaches it via a different topology could still
+// trip this bug. Do not harden the fallback here — strict TDD: no failing
+// test on unmodified source, no change (see PR review discussion on
+// pedalkernel-pmv1; follow-up tracked separately).
+#[cfg(test)]
+mod find_output_extract_node_tests {
+    use super::*;
+
+    /// Three op-amps (U_hp, U_bp, U_lp) form one signal-flow group (a
+    /// KHN/state-variable feedback loop) with an NL element added so the
+    /// group actually reaches the General/MNA+NR path (`stats.nl_count > 0`,
+    /// per `classify_rigid`) — this is what it would take for
+    /// `find_output_extract_node` to be reachable for a multi-opamp group.
+    /// `all_edges`/`node_set` is the group's own internal loop edges — it
+    /// does NOT include the final `R_out` edge that actually connects `out`
+    /// to one specific op-amp's `.out` node. `out_node` is wired (via R_out,
+    /// outside `all_edges`) to U_lp.out — the LAST-declared op-amp, not the
+    /// first.
+    fn khn_loop_graph() -> (CircuitGraph, Vec<usize>) {
+        let pedal = crate::dsl::parse_pedal_file(
+            r#"
+            pedal "test" { supply 9V
+                components {
+                    U_hp: opamp(tl072)
+                    U_bp: opamp(tl072)
+                    U_lp: opamp(tl072)
+                    R_in: resistor(47k)
+                    R_hp_fb: resistor(47k)
+                    R_q: resistor(150k)
+                    C_bp: cap(4.7n)
+                    C_lp: cap(4.7n)
+                    R_out: resistor(10k)
+                }
+                nets {
+                    in -> R_in.a
+                    R_in.b -> U_hp.neg
+                    U_hp.neg -> R_hp_fb.a
+                    R_hp_fb.b -> U_hp.out
+                    U_bp.out -> R_q.a
+                    R_q.b -> U_hp.neg
+                    U_hp.pos -> gnd
+
+                    U_hp.out -> U_bp.neg
+                    U_bp.neg -> C_bp.a
+                    C_bp.b -> U_bp.out
+                    U_bp.pos -> gnd
+
+                    U_bp.out -> U_lp.neg
+                    U_lp.neg -> C_lp.a
+                    C_lp.b -> U_lp.out
+                    U_lp.pos -> gnd
+
+                    U_lp.out -> R_out.a
+                    R_out.b -> out
+                }
+                controls {}
+            }"#,
+        )
+        .expect("parse failed");
+        let graph = CircuitGraph::from_pedal(&pedal);
+
+        // The group under test is the internal feedback loop: every edge
+        // EXCEPT the R_out edge that connects the loop to `out`. This
+        // mirrors the real caller (build_general_mna_from_edges_inner),
+        // where `all_edges` is the rigid/SPQR group's edge set and `out`
+        // is reached only by tracing beyond it.
+        let r_out_comp = graph
+            .components
+            .iter()
+            .position(|c| c.id == "R_out")
+            .expect("R_out component");
+        let all_edges: Vec<usize> = (0..graph.edges.len())
+            .filter(|&i| graph.edges[i].comp_idx != r_out_comp)
+            .collect();
+        (graph, all_edges)
+    }
+
+    #[test]
+    fn khn_loop_out_node_reached_via_direct_neighbor_not_fallback() {
+        // Documents WHICH branch resolves this fixture. out_node is not
+        // directly in the loop's node_set (R_out is excluded from
+        // all_edges)...
+        let (graph, all_edges) = khn_loop_graph();
+        let node_set = collect_mna_nodes(&all_edges, &graph);
+        assert!(
+            !node_set.contains(&graph.out_node),
+            "fixture invalid: out_node should NOT be directly in the loop's node_set"
+        );
+
+        // ...but R_out's own edge (node_a=U_lp.out, excluded from all_edges
+        // since R_out isn't part of the loop group, node_b=out_node) IS
+        // exactly the "direct neighbor" branch's match: an edge outside
+        // all_edges connecting out_node to a node_set member. So this
+        // fixture resolves correctly via the SECOND branch (direct neighbor
+        // trace), never reaching the first-nullor fallback at all. That
+        // fallback remains untested for a genuinely-reachable multi-nullor
+        // case — see the module doc comment above.
+        let edge_set: HashSet<usize> = all_edges.iter().copied().collect();
+        let has_direct_neighbor = graph.edges.iter().enumerate().any(|(eidx, edge)| {
+            !edge_set.contains(&eidx)
+                && ((edge.node_a == graph.out_node && node_set.contains(&edge.node_b))
+                    || (edge.node_b == graph.out_node && node_set.contains(&edge.node_a)))
+        });
+        assert!(
+            has_direct_neighbor,
+            "expected R_out's edge (excluded from all_edges) to be the direct-neighbor \
+             match for out_node; if this fails, the fixture's resolution path changed \
+             and the module doc comment above needs re-checking"
+        );
+    }
+
+    #[test]
+    fn multi_nullor_general_group_extracts_correct_tap_today() {
+        // Regression guard: for THIS multi-nullor shape (resolved via the
+        // direct-neighbor branch, not the first-nullor fallback — see the
+        // test above), find_output_extract_node correctly returns U_lp's
+        // out_node (the nullor actually wired to `out` via R_out), not
+        // U_hp's (first-declared). If this ever starts returning U_hp's
+        // node, either the direct-neighbor branch broke, or the fallback
+        // shape changed underneath it — investigate before assuming this
+        // is the pmv1 bug resurfacing (this exact path is safe by
+        // construction, not by a hardened fallback).
+        let (graph, all_edges) = khn_loop_graph();
+        let node_set = collect_mna_nodes(&all_edges, &graph);
+
+        let u_hp_idx = graph.components.iter().position(|c| c.id == "U_hp").unwrap();
+        let u_lp_idx = graph.components.iter().position(|c| c.id == "U_lp").unwrap();
+        let u_hp_out = graph
+            .nullor_pins
+            .iter()
+            .find(|p| p.comp_idx == u_hp_idx)
+            .expect("U_hp nullor pins")
+            .out_node;
+        let u_lp_out = graph
+            .nullor_pins
+            .iter()
+            .find(|p| p.comp_idx == u_lp_idx)
+            .expect("U_lp nullor pins")
+            .out_node;
+
+        let extracted = find_output_extract_node(&all_edges, &node_set, &graph);
+
+        eprintln!(
+            "[khn_loop] U_hp.out={u_hp_out} (first declared) U_lp.out={u_lp_out} \
+             (wired to out via R_out) extracted={extracted:?}"
+        );
+
+        assert_eq!(
+            extracted,
+            Some(u_lp_out),
+            "find_output_extract_node should extract U_lp's out_node \
+             (U_lp.out={u_lp_out}, actually wired to `out`), not U_hp's \
+             (first-declared, out_node={u_hp_out}). Got {extracted:?}."
+        );
+    }
 }

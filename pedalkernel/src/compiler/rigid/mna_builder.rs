@@ -257,12 +257,68 @@ pub(super) fn build_mna(
             graph,
             &[graph.in_node, graph.out_node],
         );
-        // Pick output: prefer the global out, else the first non-ref boundary
+        // pedalkernel-pmv1: when the group has 3+ non-ref, non-`in` candidate
+        // terminals (a genuine MULTI-EXIT group — e.g. a KHN/state-variable
+        // loop where a resonance feedback tap gives the group a 3rd boundary
+        // besides its "real" in/out), the plain "first in NodeId order" pick
+        // below is wrong whenever that first candidate isn't the one that
+        // actually continues toward `graph.out_node`. Break the tie by
+        // rail-blocked hop distance FROM `graph.out_node` (symmetric to the
+        // existing from-`in` orientation check just below): the candidate
+        // closest to `out` is the one that leads there.
+        //
+        // IMPORTANT: this must NOT engage for the ordinary 2-candidate
+        // mid-chain case (one "in-ish" terminal, one "out-ish" terminal) —
+        // that shape already has its own correct, working orientation
+        // mechanism (the from-`in` distance swap just below). Pre-empting it
+        // with a from-`out` pick for exactly 2 candidates double-orients
+        // using two different reference points and can invert the pairing
+        // (regression found: pedalkernel-pmv1 review, 808 kick BJT stage
+        // v2_808_kick_bjt_compiles_and_produces_output went silent because a
+        // normal 2-terminal group's output got picked by from-`out` distance
+        // instead of the existing from-`in` swap). Only 3+ candidates are
+        // genuinely ambiguous under the existing 2-candidate logic.
+        let non_ref_non_in: Vec<NodeId> = terminals
+            .iter()
+            .copied()
+            .filter(|&t| !is_signal_ref(t) && t != graph.in_node)
+            .collect();
+        let closest_to_out = if non_ref_non_in.len() > 2 {
+            let d_out = crate::compiler::signal_flow::bfs_distances_from_node(graph, graph.out_node);
+            let mut ranked: Vec<(NodeId, usize)> = non_ref_non_in
+                .iter()
+                .filter_map(|&t| d_out.get(&t).map(|&d| (t, d)))
+                .collect();
+            ranked.sort_by_key(|&(_, d)| d);
+            match ranked.as_slice() {
+                [] => None,
+                [(only, _)] => Some(*only),
+                [(best, best_d), (_, second_d), ..] if best_d < second_d => Some(*best),
+                _ => {
+                    // Two or more candidates tie for closest to `out` — this
+                    // heuristic can't disambiguate. Don't guess: fall through
+                    // to the pre-existing first-candidate behavior below
+                    // rather than silently picking one.
+                    #[cfg(debug_assertions)]
+                    eprintln!(
+                        "[mid_chain_terminals] pmv1: ambiguous multi-exit group — {} \
+                         candidates tie for closest-to-out, falling back to first-in-order",
+                        ranked.iter().filter(|&&(_, d)| d == ranked[0].1).count()
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // Pick output: prefer the global out, else the closest-to-out
+        // candidate (multi-exit groups), else the first non-ref boundary
         // that isn't the chosen input; pick input symmetrically.
         let mut output_node = terminals
             .iter()
             .copied()
             .find(|&t| t == graph.out_node)
+            .or(closest_to_out)
             .or_else(|| {
                 terminals
                     .iter()
@@ -405,13 +461,52 @@ pub(super) fn build_mna(
             .map(|(_, idx)| idx)
     };
 
+    // pedalkernel-pmv1: the group's first-matching-nullor fallback (below, in
+    // both injection_mna and output_mna) is only unambiguous when the group
+    // contains exactly one nullor — that's the common case this fallback was
+    // written for (a single op-amp feedback stage whose `out`/`in` boundary
+    // lands outside the group). For a MULTI-nullor group (e.g. a
+    // KHN/state-variable loop where two op-amps share one rigid/state-space
+    // group), "first nullor in `graph.nullor_pins` declaration order" is
+    // often the WRONG one — it has no way to know which nullor's pins are
+    // actually the group's true boundary. `mid_chain_terminals()` (the
+    // group-boundary-aware resolver) must run BEFORE the nullor fallback in
+    // that case. For a single-nullor group, keep the ORIGINAL order (nullor
+    // fallback first) — it's already correct there, and pre-empting it with
+    // `mid_chain_terminals()` regressed a real circuit (808 kick BJT stage:
+    // v2_808_kick_bjt_compiles_and_produces_output went silent, because
+    // mid_chain_terminals' generic boundary-terminal choice doesn't match
+    // the nullor's own neg/out pins for that topology).
+    let stage_nullor_count = graph
+        .nullor_pins
+        .iter()
+        .filter(|rec| {
+            edge_indices
+                .iter()
+                .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+        })
+        .count();
+    let multi_nullor_group = stage_nullor_count > 1;
+
     // Input voltage source at injection node.
     // Prefer graph.in_node if it's in this stage's MNA AND conductively reaches
     // this stage's op-amp (a stage without a nullor passes this unconditionally).
     // Otherwise fall back to the nearest reachable stage input, the reachable
     // upstream boundary terminal (rescues a mid-chain active stage whose only
     // claim to the global `in` is a dead-end island — uberdrive's IC2 tone
-    // stage), the VCVS neg node, then the raw mid-chain input as a last resort.
+    // stage), the VCVS neg node, then the raw mid-chain input as a last resort
+    // (order of the last two swapped for multi-nullor groups — see above).
+    let nullor_neg_fallback = || {
+        graph
+            .nullor_pins
+            .iter()
+            .find(|rec| {
+                edge_indices
+                    .iter()
+                    .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+            })
+            .and_then(|rec| node_to_mna(rec.neg_node))
+    };
     let injection_mna = node_to_mna(graph.in_node)
         .filter(|&idx| g_reachable_from_nullor(idx))
         .or_else(|| {
@@ -421,39 +516,44 @@ pub(super) fn build_mna(
         })
         .or_else(mid_chain_reachable_input)
         .or_else(|| {
-            graph
-                .nullor_pins
-                .iter()
-                .find(|rec| {
-                    edge_indices
-                        .iter()
-                        .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
-                })
-                .and_then(|rec| node_to_mna(rec.neg_node))
-        })
-        .or_else(|| mid_chain_terminals().and_then(|(inj, _)| inj));
+            if multi_nullor_group {
+                mid_chain_terminals()
+                    .and_then(|(inj, _)| inj)
+                    .or_else(nullor_neg_fallback)
+            } else {
+                nullor_neg_fallback().or_else(|| mid_chain_terminals().and_then(|(inj, _)| inj))
+            }
+        });
     mna.stamp_voltage_source(injection_mna, None, vs_idx);
 
     // Output node: if this rigid group contains the circuit's named `out`
-    // terminal, sample that node. Otherwise fall back to the active device's
-    // output node, then to the mid-chain downstream terminal.
+    // terminal, sample that node. Otherwise fall back to the mid-chain
+    // downstream boundary terminal or the active device's output node — order
+    // depends on nullor count, see above.
     //
     // This matters for module/pedal output pads: `U1.out -> R -> out -> R -> gnd`
     // must extract at `out`, not at `U1.out`, or the pad only loads the circuit
     // and never attenuates the returned signal.
-    let output_mna = node_to_mna(graph.out_node)
-        .or_else(|| {
-            graph
-                .nullor_pins
-                .iter()
-                .find(|rec| {
-                    edge_indices
-                        .iter()
-                        .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
-                })
-                .and_then(|rec| node_to_mna(rec.out_node))
-        })
-        .or_else(|| mid_chain_terminals().and_then(|(_, out)| out));
+    let nullor_out_fallback = || {
+        graph
+            .nullor_pins
+            .iter()
+            .find(|rec| {
+                edge_indices
+                    .iter()
+                    .any(|&eidx| graph.edges[eidx].comp_idx == rec.comp_idx)
+            })
+            .and_then(|rec| node_to_mna(rec.out_node))
+    };
+    let output_mna = node_to_mna(graph.out_node).or_else(|| {
+        if multi_nullor_group {
+            mid_chain_terminals()
+                .and_then(|(_, out)| out)
+                .or_else(nullor_out_fallback)
+        } else {
+            nullor_out_fallback().or_else(|| mid_chain_terminals().and_then(|(_, out)| out))
+        }
+    });
 
     Ok(BuiltMna {
         mna,
