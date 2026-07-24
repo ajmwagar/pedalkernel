@@ -1,0 +1,87 @@
+name: Release binaries
+
+# Build distributable mac + linux binaries for each tagged commit and attach
+# them to a GitHub Release. Tags are not branch-scoped in git, so this fires on
+# any `v*` tag; in practice releases are cut from the default branch (main).
+#
+# macOS is built on native runners (macos-14 = Apple Silicon/arm64,
+# macos-13 = Intel/x86_64) so JACK links natively and no cross-compilation is
+# needed. The shipped binary is the `pedalkernel` CLI built with default
+# features (cli + tui + jack-rt), so JACK is installed on every runner.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  # Required for softprops/action-gh-release to create/attach the Release.
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install JACK + ALSA (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libjack-dev libasound2-dev
+
+      - name: Install JACK (macOS)
+        if: runner.os == 'macOS'
+        run: brew install jack
+
+      - name: Build release binary
+        run: >
+          cargo build --release
+          --target ${{ matrix.target }}
+          -p pedalkernel --bin pedalkernel
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="pedalkernel-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "$dist"
+          cp "target/${{ matrix.target }}/release/pedalkernel" "$dist/"
+          cp README.md LICENSE "$dist/" 2>/dev/null || true
+          tar czf "$dist.tar.gz" "$dist"
+          echo "asset=$dist.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # Keep the tarball as a workflow artifact too (downloadable from the run
+      # page even if the Release step is skipped or the tag is later deleted).
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: ${{ steps.package.outputs.asset }}
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.asset }}
+          fail_on_unmatched_files: true
