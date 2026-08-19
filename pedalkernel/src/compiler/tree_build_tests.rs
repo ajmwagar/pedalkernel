@@ -7,6 +7,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -206,11 +207,8 @@ fn measure_small_signal_gain(src: &str) -> f64 {
 }
 
 fn load_legend(name: &str) -> crate::dsl::PedalDef {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/{name}.pedal",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let src = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Can't read {path}"));
+    let src = load_legend_source(name)
+        .unwrap_or_else(|| panic!("Can't read pedals/legends/{name}.pedal"));
     crate::dsl::parse_pedal_file(&src).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 

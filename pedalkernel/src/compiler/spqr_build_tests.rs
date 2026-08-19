@@ -8,6 +8,7 @@ use super::compiled::Stage;
 use super::graph::CircuitGraph;
 use super::spqr::{spqr_decompose, spqr_to_stages, SpqrStage};
 use super::spqr_build::*;
+use super::test_support::{load_legend_source, pro_repo_path};
 use crate::PedalProcessor;
 
 fn make_graph_all_edges(pedal_src: &str) -> (CircuitGraph, Vec<usize>) {
@@ -617,14 +618,10 @@ fn compile_via_spqr_808_kick_v2_bjt_sweep_compiles() {
 
 #[test]
 fn try_all_legends_pedals() {
-    let pedal_dir = std::path::Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../pedalkernel-pro/pedals/legends"
-    ));
-    if !pedal_dir.exists() {
+    let Some(pedal_dir) = pro_repo_path("pedals/legends") else {
         eprintln!("Skipping: legends directory not found");
         return;
-    }
+    };
     let mut pass = 0;
     let mut fail = 0;
     for entry in std::fs::read_dir(pedal_dir).unwrap() {
@@ -662,12 +659,8 @@ fn try_all_legends_pedals() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn load_legend(name: &str) -> crate::dsl::PedalDef {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/{}.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-        name
-    );
-    let source = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Can't read {path}"));
+    let source = load_legend_source(name)
+        .unwrap_or_else(|| panic!("Can't read pedals/legends/{name}.pedal"));
     crate::dsl::parse_pedal_file(&source).unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
 }
 
@@ -1044,11 +1037,7 @@ fn spqr_noninverting_opamp_gain() {
 
 #[test]
 fn diagnose_ratking() {
-    let source = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../pedalkernel-pro/pedals/legends/ratking.pedal"
-    ))
-    .expect("read ratking.pedal");
+    let source = load_legend_source("ratking").expect("read ratking.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
 
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);

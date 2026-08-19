@@ -13,6 +13,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -146,11 +147,7 @@ fn level_pot_after_gain_full_sweep() {
 
 #[test]
 fn screamer_level_full_sweep() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     // Remove calibrate to prevent output_gain normalization
     let source = source.replace("calibrate", "# calibrate");
     eprintln!(

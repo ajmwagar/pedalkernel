@@ -22,17 +22,14 @@
 
 use super::compiled::CompiledPedal;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
 const FREQ: f64 = 440.0;
 
 fn load_goldenrod() -> CompiledPedal {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read goldenrod.pedal");
+    let source = load_legend_source("goldenrod").expect("read goldenrod.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     compile_via_spqr(&pedal, SR).expect("compile")
 }

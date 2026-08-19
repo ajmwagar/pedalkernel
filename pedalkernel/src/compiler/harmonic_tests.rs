@@ -7,6 +7,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -61,11 +62,7 @@ fn measure_harmonics(compiled: &mut impl PedalProcessor, amp: f64, freq: f64) ->
 }
 
 fn load_legend(name: &str) -> super::compiled::CompiledPedal {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/{name}.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect(&format!("read {name}.pedal"));
+    let source = load_legend_source(name).expect(&format!("read {name}.pedal"));
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     compile_via_spqr(&pedal, SR).expect("compile")
 }
@@ -470,11 +467,7 @@ fn input_coupling_isolation_vs_full_pedal() {
     let iso_edges: Vec<usize> = (0..iso_graph.edges.len()).collect();
     let iso_groups = super::signal_flow::find_flow_groups(&iso_edges, &iso_graph);
 
-    let full_source = std::fs::read_to_string(format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    ))
-    .expect("read");
+    let full_source = load_legend_source("screamer").expect("read");
     let full_pedal = crate::dsl::parse_pedal_file(&full_source).expect("parse");
     let full_graph = super::graph::CircuitGraph::from_pedal(&full_pedal);
     let full_edges: Vec<usize> = (0..full_graph.edges.len()).collect();

@@ -13,6 +13,7 @@
 use super::compiled::Stage;
 use super::component::{Component, OutputImpedance};
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -109,11 +110,7 @@ fn bjt_is_finite() {
 fn rat_has_few_stages_not_many() {
     // The RAT should compile to ~3-5 stages, not 16+.
     // Without proper passive grouping, each cap/resistor becomes its own stage.
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/ratking_non_invert_v1a.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read ratking");
+    let source = load_legend_source("ratking_non_invert_v1a").expect("read ratking");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
@@ -152,11 +149,7 @@ fn rat_has_few_stages_not_many() {
 
 #[test]
 fn screamer_has_few_stages() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read screamer");
+    let source = load_legend_source("screamer").expect("read screamer");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
@@ -177,11 +170,7 @@ fn screamer_has_few_stages() {
 fn rat_no_hpf_regression() {
     // A distortion pedal should not have massively more output at 5kHz vs 200Hz.
     // The HPF regression occurs when standalone caps act as high-pass filters.
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/ratking_non_invert_v1a.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read ratking");
+    let source = load_legend_source("ratking_non_invert_v1a").expect("read ratking");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
 
     // 200Hz
@@ -225,11 +214,7 @@ fn rat_no_hpf_regression() {
 
 #[test]
 fn screamer_no_hpf_regression() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read screamer");
+    let source = load_legend_source("screamer").expect("read screamer");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
 
     let mut lo = compile_via_spqr(&pedal, 48000.0).expect("compile");

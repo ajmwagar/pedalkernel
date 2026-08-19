@@ -12,6 +12,7 @@
 
 use super::compiled::CompiledPedal;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -257,11 +258,7 @@ fn diode_to_ground_stage_exists_in_pipeline() {
 
 #[test]
 fn ratking_legend_produces_clipped_audio() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/ratking.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read ratking.pedal");
+    let source = load_legend_source("ratking").expect("read ratking.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
@@ -286,11 +283,7 @@ fn ratking_legend_produces_clipped_audio() {
 
 #[test]
 fn goldenrod_legend_produces_clipped_audio() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read goldenrod.pedal");
+    let source = load_legend_source("goldenrod").expect("read goldenrod.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
@@ -371,11 +364,7 @@ fn germanium_clips_lower_than_silicon() {
 
 #[test]
 fn ratking_stage_diagnostic() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/ratking.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read ratking.pedal");
+    let source = load_legend_source("ratking").expect("read ratking.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
     compiled.enable_metering(128);

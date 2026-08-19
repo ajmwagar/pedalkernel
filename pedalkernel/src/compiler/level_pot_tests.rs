@@ -8,6 +8,7 @@
 
 use super::compiled::Stage;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::dsl::parse_pedal_file;
 use crate::PedalProcessor;
 
@@ -15,13 +16,9 @@ const SR: f64 = 48_000.0;
 
 #[test]
 fn screamer_legend_level_debug_trace() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => {
+    let source = match load_legend_source("screamer") {
+        Some(s) => s,
+        None => {
             eprintln!("SKIP: screamer.pedal not found");
             return;
         }

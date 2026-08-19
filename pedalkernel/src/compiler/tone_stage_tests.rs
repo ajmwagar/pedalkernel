@@ -8,6 +8,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -72,11 +73,7 @@ fn simple_tone_network_passes_signal() {
 fn screamer_tone_output_probe_correct() {
     // The Screamer's tone+output group should probe at the output boundary,
     // not at an interior leaf like R_t2.
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
@@ -105,11 +102,7 @@ fn screamer_tone_output_probe_correct() {
 
 #[test]
 fn screamer_passive_rtype_tone_recomputes_matrix() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
@@ -197,11 +190,7 @@ fn screamer_passive_rtype_tone_recomputes_matrix() {
 
 #[test]
 fn screamer_passive_rtype_tone_changes_stage_response() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
 
     fn measure(pedal: &crate::dsl::PedalDef, tone: f64, freq: f64) -> f64 {
@@ -257,11 +246,7 @@ fn screamer_passive_rtype_tone_changes_stage_response() {
 
 #[test]
 fn screamer_tone_stage_not_dead() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
     compiled.enable_metering(128);
@@ -322,11 +307,7 @@ fn output_probe_uses_output_terminal() {
     // passive group, node 56=out_node should be the output boundary.
     // The probe should find R_out_g/R_out_s at the output boundary, not an
     // interior tone branch.
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let graph = super::graph::CircuitGraph::from_pedal(&pedal);
     let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
