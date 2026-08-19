@@ -1533,11 +1533,38 @@ impl<'a> BjtSeed<'a> {
                 })
             })
             .ok_or_else(|| undet(TopologyTerm::BaseDivider))?;
-        let r2 = find_load_resistor_direct(base_node, graph.gnd_node, edge_indices, graph)
-            .ok_or_else(|| undet(TopologyTerm::BaseDivider))?;
-        if r1 + r2 <= 0.0 {
-            return Err(undet(TopologyTerm::BaseDivider));
-        }
+        // The base→GND return leg is OPTIONAL (pedalkernel-6dof).  Single-
+        // resistor base bias — base tied to the rail through R1 alone, with the
+        // operating point set by emitter degeneration — is a legitimate, common
+        // topology, and requiring R2 left every such BJT undeterminable (hence
+        // stuck at the `vbe_bias = 0` cutoff default, i.e. no gain at all).
+        // An absent R2 is simply R2 = ∞, whose Thévenin limit is
+        //     vth → base_rail_v   and   rth → r1
+        // instead of `base_rail_v * r2/(r1+r2)` and `r1*r2/(r1+r2)`.  That is
+        // the correct Thévenin equivalent of a base tied to the rail through
+        // R1, and the shared load-line residual already carries base current
+        // through rth (`Vth - Ib·Rth - Vbe - Ie·Re = 0`), so no solver change
+        // is needed.
+        //
+        // The `r1 + r2 <= 0` guard's intent — reject a degenerate/shorted base
+        // network — carries over to the R2-absent case as `r1 <= 0`, which
+        // would hard-tie the base to the rail (rth = 0).  A base with NO DC
+        // path to any rail still fails above on R1 and stays undeterminable.
+        let r2 = find_load_resistor_direct(base_node, graph.gnd_node, edge_indices, graph);
+        let (vth_divider, rth) = match r2 {
+            Some(r2) => {
+                if r1 + r2 <= 0.0 {
+                    return Err(undet(TopologyTerm::BaseDivider));
+                }
+                (base_rail_v * r2 / (r1 + r2), r1 * r2 / (r1 + r2))
+            }
+            None => {
+                if r1 <= 0.0 {
+                    return Err(undet(TopologyTerm::BaseDivider));
+                }
+                (base_rail_v, r1)
+            }
+        };
 
         // Prefer the StaticBias-map base voltage (matches blockwise's source) for
         // the open-circuit divider voltage; fall back to the resistor divider.
@@ -1546,8 +1573,7 @@ impl<'a> BjtSeed<'a> {
         let bias_map = self.wdf_bias_node_voltages.unwrap_or(&EMPTY_BIAS_MAP);
         let vth = node_dc_voltage(base_node, bias_map, graph)
             .filter(|v| v.is_finite())
-            .unwrap_or(base_rail_v * r2 / (r1 + r2));
-        let rth = r1 * r2 / (r1 + r2);
+            .unwrap_or(vth_divider);
 
         // Emitter resistor RE.  Required for the load-line solve; a
         // degeneration resistor is what makes the raw divider voltage an

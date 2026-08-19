@@ -4053,13 +4053,16 @@ pub(super) fn build_spqr_stage_with_options(
             // semantics the blockwise multi-NL path already uses.
             //
             // We only seed when a Q-point is actually solvable (a determinable
-            // base divider + emitter resistor).  When it is not — e.g. a
-            // single-resistor self-bias circuit, or a topology we cannot resolve —
-            // we deliberately LEAVE the existing vbe_bias untouched rather than
-            // forcing a nominal default.  Forcing a default there would push such
-            // a stage into conduction whose DC operating point cannot be
-            // characterized (and may not be DC-blocked downstream), a strictly
-            // larger blast radius than the cutoff-amplifier bug this fix targets.
+            // base-bias network + emitter resistor).  Since pedalkernel-6dof the
+            // base→GND leg is OPTIONAL, so single-resistor base bias (base tied
+            // to the rail through R_b alone) IS solvable; what stays unsolvable
+            // is a base with no DC path to any rail, or a topology we cannot
+            // resolve.  There we deliberately LEAVE the existing vbe_bias
+            // untouched rather than forcing a nominal default.  Forcing a
+            // default there would push such a stage into conduction whose DC
+            // operating point cannot be characterized (and may not be DC-blocked
+            // downstream), a strictly larger blast radius than the
+            // cutoff-amplifier bug this fix targets.
             //
             // bias::solve_wdf_bjt_dc_qpoint (ko5g.4 — the unified solver that
             // replaced this file's duplicate `compute_wdf_bjt_dc_qpoint`) runs
