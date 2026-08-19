@@ -16,13 +16,33 @@ use pedalkernel_rt::stage::NlDeviceGroupKind;
 #[test]
 fn general_mna_bjt_produces_gain() {
     // Common-emitter NPN: input at base, output at collector.
-    // Should amplify small signal by Rc/Re ≈ 10.
+    //
+    // R_b sets the operating point, and it has to be sized for the device's
+    // beta or the stage is not an amplifier at all.  The fixture used to say
+    // 100 k and claim "gain ≈ Rc/Re ≈ 10"; with the 2N3904's BF = 416.4 that
+    // is arithmetically impossible (pedalkernel-tvhh):
+    //
+    //     Ib = (9 - 0.7) / (100k + 417·1k) = 16 uA
+    //     Ic = 416 · 16 uA = 6.7 mA   ->   Ic·Rc = 67 V  >>  9 V rail
+    //
+    // i.e. the REAL circuit is a saturated switch, and the test only passed
+    // because it took max|output| of a railed DC level and called it gain.
+    // (The DC solve confirms it: Vbe 0.664 V, Vce 0.077 V, Ic 0.80 mA — a
+    // closed switch, not an amplifier.)
+    //
+    // 4.7 M puts it in the active region for real.  The solved Q-point is
+    //     Vbe = 0.621 V,  Ie = 0.195 mA,  Vce = 6.87 V
+    // — note the effective beta there is ~110, not BF = 416, because at a
+    // fifth of a milliamp the 2N3904's non-ideal ISE base leakage dominates
+    // the ideal Ib term.  The small-signal gain is Rc/(Re + re') with
+    // re' = Vt/Ie = 25.9mV/0.195mA = 133R, i.e. 10k/1133 ≈ 8.8x — the
+    // "≈ Rc/Re" the test always meant to check.  Measured: 9.08x.
     let pedal = crate::dsl::parse_pedal_file(
         r#"
         pedal "test" { supply 9V
             components {
                 C_in: cap(1u)
-                R_b: resistor(100k)
+                R_b: resistor(4.7M)
                 Q1: npn(2n3904)
                 R_c: resistor(10k)
                 R_e: resistor(1k)
@@ -51,19 +71,42 @@ fn general_mna_bjt_produces_gain() {
         compiled.process(0.0);
     }
 
-    // Small signal: 10mV input
-    let mut peak_out = 0.0f64;
+    // Small signal: 10mV input.  Track BOTH extremes so the gain can be read
+    // off the AC swing rather than off |output|.
+    //
+    // pedalkernel-tvhh: this used to be `peak_out = max|output|`, which is the
+    // signal amplitude PLUS whatever DC sits at the output — so a stage
+    // clamped at the supply rail scored a "gain" of exactly rail/input and the
+    // test passed on an artifact with no amplification in it at all.  Half the
+    // peak-to-peak swing is immune to any output offset, so what is asserted
+    // below is now genuinely the AC voltage gain.
+    let mut out_max = f64::NEG_INFINITY;
+    let mut out_min = f64::INFINITY;
     for i in 0..480 {
         let input = 0.01 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin();
         let output = compiled.process(input);
-        peak_out = peak_out.max(output.abs());
+        out_max = out_max.max(output);
+        out_min = out_min.min(output);
     }
+    let ac_amplitude = 0.5 * (out_max - out_min);
 
     // Should produce amplified output (gain > 1)
-    let gain = peak_out / 0.01;
-    eprintln!("BJT gain: {gain:.2}x (peak_out={peak_out:.6})");
+    let gain = ac_amplitude / 0.01;
+    eprintln!(
+        "BJT gain: {gain:.2}x (ac_amplitude={ac_amplitude:.6}, \
+         out_max={out_max:.6}, out_min={out_min:.6})"
+    );
+    assert!(ac_amplitude.is_finite(), "Output should be finite");
     assert!(gain > 1.0, "BJT should amplify: gain={gain:.2}");
-    assert!(peak_out.is_finite(), "Output should be finite");
+    // ...and by the amount the circuit actually specifies.  A common-emitter
+    // stage with an unbypassed emitter has Av = Rc/(Re + re'), re' = Vt/Ie.
+    // At the Q-point this fixture biases to (Ie ≈ 0.2 mA, re' ≈ 130R) that is
+    // 10k/1.13k ≈ 8.8x; the band is kept wide enough to absorb Q-point drift
+    // but tight enough that a railed-DC or unity-passthrough result fails.
+    assert!(
+        (4.0..=20.0).contains(&gain),
+        "BJT gain should be of order Rc/Re (~9x), not a DC/rail artifact: gain={gain:.2}"
+    );
 }
 
 #[test]
@@ -74,7 +117,7 @@ fn general_mna_bjt_stable_on_large_signal() {
         pedal "test" { supply 9V
             components {
                 C_in: cap(1u)
-                R_b: resistor(100k)
+                R_b: resistor(4.7M)
                 Q1: npn(2n3904)
                 R_c: resistor(10k)
                 R_e: resistor(1k)
@@ -317,7 +360,7 @@ fn general_mna_silence_in_silence_out() {
         pedal "test" { supply 9V
             components {
                 C_in: cap(1u)
-                R_b: resistor(100k)
+                R_b: resistor(4.7M)
                 Q1: npn(2n3904)
                 R_c: resistor(10k)
                 R_e: resistor(1k)
