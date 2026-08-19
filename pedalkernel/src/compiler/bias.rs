@@ -966,27 +966,39 @@ fn control_newton_solve<S: BiasSeed>(
 ) -> (f64, f64, f64) {
     let mut v_ctrl = seed.initial_v_control();
 
+    // Bracket safeguard (pedalkernel-tvhh).  `F` is STRICTLY DECREASING in
+    // `v_ctrl` — every term (`-Ib·Rth`, `-v_ctrl`, `-I_total·R_degen`) falls as
+    // the control terminal is driven harder — so the sign of `F` at any visited
+    // point tells us which side of the root it is on, and the visited points
+    // accumulate into a bracket that must contain the root.
+    //
+    // The safeguard exists because a REAL load line puts a saturation knee in
+    // the residual: crossing it, `F` swings by three orders of magnitude within
+    // a step-clamp width (+7 V to -1300 V across 0.1 V on a 100 k single-
+    // resistor base bias).  Plain Newton limit-cycles across such a knee
+    // forever — it alternately takes a full clamped step INTO saturation and
+    // then creeps back out at one thermal voltage per iteration, never landing.
+    // When the Newton step would leave the established bracket we bisect it
+    // instead, which cannot cycle and always halves the interval.
+    //
+    // The safeguard arms only once BOTH signs have actually been observed, so
+    // on a smooth (active-region) residual — where Newton approaches the root
+    // from one side and never crosses it — it never fires at all and the
+    // iterates are bit-for-bit what plain Newton produced.
+    let mut bracket_lo: Option<f64> = None;
+    let mut bracket_hi: Option<f64> = None;
+
     for _ in 0..max_iter {
-        // Compute v_output from the load line using the current v_ctrl estimate.
+        // Output voltage on the device's OWN load line at this v_ctrl
+        // (pedalkernel-tvhh — see `load_line_v_output`).
         //
-        // For auto-bias (triode): Ia = -Vgk / Rk (KVL at cathode), so
-        //   Vpk = VCC - Ia * Rp = VCC - (-v_ctrl / r_degen) * r_load
-        //       = v_load_rail + v_ctrl * (r_load / r_degeneration)
-        //
-        // For BJT with divider (v_ctrl_thevenin ≠ 0): the base mesh gives
-        //   Ie ≈ (Vth - v_ctrl) / r_degen  (ignoring base current in the
-        //   degeneration as a 1st-order approximation), so
-        //   Vce ≈ v_load_rail - Ic * r_load.
-        //
-        // In both cases we approximate i_load by (v_ctrl_thevenin - v_ctrl) / r_degen
-        // (degeneration current) to stay self-consistent within the iteration:
-        let i_load_est = if topo.r_degeneration > 0.0 {
-            let v_degen = topo.v_control_thevenin - v_ctrl; // voltage across degen + Vbe
-            (v_degen / topo.r_degeneration).max(0.0)
-        } else {
-            0.0
-        };
-        let v_output_est = (topo.v_load_rail - i_load_est * topo.r_load).max(0.0);
+        // The previous estimate approximated the load current by the
+        // DEGENERATION current `(v_ctrl_thevenin - v_ctrl) / r_degeneration`.
+        // That ignores the `Ib·Rth` drop, which dominates whenever the base
+        // network is high-impedance (a 100 k single-resistor bias: 100 k of
+        // Rth against 1 k of Re), so the resulting `v_output` was not on any
+        // load line the device could actually sit on.
+        let v_output_est = load_line_v_output(seed, topo, v_ctrl);
 
         let trial = TrialPoint {
             v_control: v_ctrl,
@@ -1011,7 +1023,23 @@ fn control_newton_solve<S: BiasSeed>(
             break;
         }
 
-        let step = (f / df).clamp(-step_clamp, step_clamp);
+        // F > 0 → the root is ABOVE v_ctrl; F < 0 → below.
+        if f > 0.0 {
+            bracket_lo = Some(bracket_lo.map_or(v_ctrl, |lo: f64| lo.max(v_ctrl)));
+        } else {
+            bracket_hi = Some(bracket_hi.map_or(v_ctrl, |hi: f64| hi.min(v_ctrl)));
+        }
+
+        let newton_step = (f / df).clamp(-step_clamp, step_clamp);
+        let newton_next = v_ctrl - newton_step;
+        let step = match (bracket_lo, bracket_hi) {
+            // Newton wants to leave an established bracket: bisect instead.
+            (Some(lo), Some(hi)) if lo < hi && (newton_next <= lo || newton_next >= hi) => {
+                v_ctrl - 0.5 * (lo + hi)
+            }
+            _ => newton_step,
+        };
+
         v_ctrl -= step;
         if let Some((lo, hi)) = v_control_clamp {
             v_ctrl = v_ctrl.clamp(lo, hi);
@@ -1022,22 +1050,75 @@ fn control_newton_solve<S: BiasSeed>(
         }
     }
 
-    // Final self-consistent evaluation at the converged v_ctrl.
-    let i_load_final = if topo.r_degeneration > 0.0 {
-        let v_degen = topo.v_control_thevenin - v_ctrl;
-        (v_degen / topo.r_degeneration).max(0.0)
-    } else {
-        0.0
-    };
+    // Final self-consistent evaluation at the converged v_ctrl.  `v_output`
+    // comes from the same load-line solve the iteration used, so the returned
+    // triple is consistent by construction (it used to be re-derived from
+    // `i_total_final`, which double-counted the control current through
+    // `r_load` and could not represent a saturated output).
+    let v_output_final = load_line_v_output(seed, topo, v_ctrl);
     let trial_final = TrialPoint {
         v_control: v_ctrl,
-        v_output: (topo.v_load_rail - i_load_final * topo.r_load).max(0.0),
+        v_output: v_output_final,
     };
     let iv_final = seed.device_iv(trial_final);
     let i_total_final = (iv_final.i_main + iv_final.i_control).max(0.0);
-    let v_output_final = (topo.v_load_rail - i_total_final * topo.r_load).max(0.0);
 
     (v_ctrl, i_total_final, v_output_final)
+}
+
+/// Solve the OUTPUT loop (collector/plate) load line for `v_output` at a fixed
+/// `v_control`, by bisection.
+///
+/// The device's own output current sets the drop across `r_load`, so
+/// `v_output` and that current are mutually dependent — you cannot read one off
+/// without the other.  Writing the load line as
+///
+/// ```text
+///   g(v) = v_load_rail - i_main(v)·r_load - i_total(v)·r_degeneration - v
+/// ```
+///
+/// makes `g` STRICTLY DECREASING on `[0, v_load_rail]`: raising the output
+/// voltage lifts the device out of saturation, which only ever increases both
+/// currents (the Gummel-Poon reverse-transport term shrinks as `Vbc = v_control
+/// - v` falls).  Bisection on a strictly monotone residual over a bounded
+/// bracket therefore ALWAYS converges — including at the two degenerate ends,
+/// where it walks cleanly to a hard-saturated `0` or a cut-off `v_load_rail`.
+///
+/// That robustness is why this is bisection and not another Newton: the
+/// output-loop residual is exponentially stiff, and a lagged/relaxed update
+/// oscillates between the saturated and active branches on a steep load line.
+///
+/// With no located load resistor (`r_load <= 0`) there is no load line to
+/// solve and the output terminal sits at its rail — the pre-existing
+/// open-circuit assumption.
+fn load_line_v_output<S: BiasSeed>(seed: &S, topo: &BiasTopology, v_control: f64) -> f64 {
+    // NaN-safe: a non-finite load or rail is treated as "no load line".
+    let has_load_line = topo.r_load.is_finite()
+        && topo.r_load > 0.0
+        && topo.v_load_rail.is_finite()
+        && topo.v_load_rail > 0.0;
+    if !has_load_line {
+        return topo.v_load_rail;
+    }
+    let (mut lo, mut hi) = (0.0_f64, topo.v_load_rail);
+    // 40 halvings take a 400 V bracket below 1 nV — far past what the outer
+    // Newton can resolve.  This runs at COMPILE time only.
+    for _ in 0..40 {
+        let mid = 0.5 * (lo + hi);
+        let iv = seed.device_iv(TrialPoint {
+            v_control,
+            v_output: mid,
+        });
+        let v_load_line = topo.v_load_rail
+            - iv.i_main * topo.r_load
+            - (iv.i_main + iv.i_control) * topo.r_degeneration;
+        if v_load_line > mid {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
 }
 
 /// Damped relaxation on the device main current.  Returns `(v_control, i_total,
@@ -1516,7 +1597,7 @@ impl<'a> BjtSeed<'a> {
             label: self.label.clone(),
             missing,
         };
-        let (_model_name, base_node, _collector_node, emitter_node, is_pnp) = self
+        let (_model_name, base_node, collector_node, emitter_node, is_pnp) = self
             .nl_terminals()
             .ok_or_else(|| undet(TopologyTerm::BaseDivider))?;
 
@@ -1609,13 +1690,38 @@ impl<'a> BjtSeed<'a> {
             vth
         };
 
+        // Collector load resistor RC (pedalkernel-tvhh).  This used to be a
+        // hardcoded `r_load = 0.0` placeholder, justified as "the WDF entry
+        // computes its own Vce warm-start" — but the effect was that the
+        // shared load-line solve had NO LOAD LINE: `v_output` was pinned at
+        // the rail, and `BjtSeed::device_iv` compensated with an equally
+        // hardcoded active-region `Vbc = -1 V`.  Together those made the solve
+        // structurally blind to saturation: it would converge on a collector
+        // current RC cannot possibly sustain on the available rail (e.g. a
+        // single-resistor 100 k base bias on a 9 V rail solving Ic·RC = 67 V)
+        // and hand the runtime root that active-region Vbe.
+        //
+        // The lookup is the SAME polarity-keyed direct-edge one the Vce
+        // warm-start already does downstream in
+        // `solve_wdf_bjt_dc_qpoint_inner`, so the two can never disagree: NPN
+        // vcc-literal, PNP collector→GND first with a vcc fallback for
+        // positive-ground decks.
+        //
+        // When RC cannot be located we keep a load-line STAND-IN rather than
+        // 0 — half the rail dropped at 1 mA, the same idiom `locate_divider_bfs`
+        // uses — so `v_output` stays a plausible Vce instead of the
+        // open-circuit rail.  The warm-start's own `None => vcc/2` fallback for
+        // that case is unchanged.
+        let rc = if is_pnp {
+            find_load_resistor_direct(collector_node, graph.gnd_node, edge_indices, graph).or_else(
+                || find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph),
+            )
+        } else {
+            find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph)
+        };
+
         Ok(BiasTopology {
-            // The WDF entry computes its own legacy Vce warm-start (RC lookup
-            // is vcc-literal AND optional there — see
-            // `solve_wdf_bjt_dc_qpoint`), so the load-line fields are inert
-            // placeholders: r_load = 0 makes the shared final-eval
-            // v_output = v_load_rail, finite by construction.
-            r_load: 0.0,
+            r_load: rc.unwrap_or(supply_voltage.abs() * 0.5 / 1e-3),
             v_load_rail: supply_voltage.abs(),
             r_degeneration: re,
             v_control_thevenin: v_drive,
@@ -1754,25 +1860,49 @@ impl<'a> BiasSeed for BjtSeed<'a> {
             _ => "2N3904",
         };
         let model = super::helpers::gummel_poon_model(model_name);
-        // Active-region collector reverse bias: vbc < 0 → exp term negligible.
-        // A small fixed reverse bias keeps base_charge / transport in the
-        // active region.  PNP runs in the device's own positive-forward
-        // convention (the topology's `v_drive` mirror), so the model call is
-        // polarity-agnostic here — exactly the deleted copy's convention.
-        let vbc_active = -1.0_f64;
+        // Collector reverse bias, from the trial point's OUTPUT voltage:
+        //
+        //     Vbc = Vb - Vc = Vbe - Vce = v_control - v_output
+        //
+        // (`TrialPoint::v_output` IS Vce — see its doc.)
+        //
+        // pedalkernel-tvhh: this used to be a hardcoded `vbc = -1.0 V`, and
+        // `trial.v_output` was never read at all.  In the active region that is
+        // a decent stand-in — Vbc is comfortably negative and the reverse
+        // exponential is negligible either way — but it is not a harmless one.
+        // In SATURATION Vce collapses toward zero, Vbc goes POSITIVE, the
+        // collector junction forward-biases, and the Gummel-Poon transport
+        // current `Is·(exp(Vbe/Vt) - exp(Vbc/Vt))/Qb` collapses with it.
+        // Pinning Vbc to a fixed reverse bias forced active-region transport
+        // UNCONDITIONALLY, which made the load-line iteration structurally
+        // unable to detect that R_load cannot sustain the solved current on the
+        // available rail: it would return an active-region Q-point for a stage
+        // that is really a closed switch.
+        //
+        // PNP runs in the device's own positive-forward convention (the
+        // topology's `v_drive` / `v_load_rail` magnitude mirror), so both terms
+        // are magnitudes here and the model call stays polarity-agnostic.
+        let vbc = trial.v_control - trial.v_output;
         let (ic, ib) = model.currents(
             trial.v_control as pedalkernel_rt::Wave,
-            vbc_active as pedalkernel_rt::Wave,
+            vbc as pedalkernel_rt::Wave,
         );
         let ie = ic + ib;
 
         // Numerical derivatives, in the deleted loop's exact grouping (the
         // total-current derivative sums the perturbed currents BEFORE the
         // finite-difference division — see `DeviceIv::di_total_dv_control`).
+        //
+        // Vbc is perturbed ALONGSIDE Vbe: the outer Newton holds `v_output`
+        // (Vce) fixed for the step, and `Vbc = Vbe - Vce` therefore moves 1:1
+        // with Vbe.  Differentiating through both arguments is what makes this
+        // the Jacobian of the residual actually being solved — and it is what
+        // supplies the saturation feedback, since in saturation both
+        // exponentials grow together and the transport difference barely moves.
         let h = 1e-4_f64;
         let (ic2, ib2) = model.currents(
             (trial.v_control + h) as pedalkernel_rt::Wave,
-            vbc_active as pedalkernel_rt::Wave,
+            (vbc + h) as pedalkernel_rt::Wave,
         );
         let dib_dvbe = (ib2 - ib) as f64 / h;
         let die_dvbe = (ic2 + ib2 - ie) as f64 / h;
@@ -3325,21 +3455,25 @@ fn solve_wdf_bjt_dc_qpoint_inner(
     let vbe = vbe.clamp(clamp_lo, clamp_hi);
 
     // Collector-emitter operating-point voltage, for the BjtRoot warm-start.
-    // RC = collector→rail.  Vce = |VCC - Ic·RC - Ie·RE| (active region).  Used
-    // to pre-seed `prev_v` so the WDF/NR solve cold-starts AT the Q-point
+    // Used to pre-seed `prev_v` so the WDF/NR solve cold-starts AT the Q-point
     // instead of 0 V, eliminating the bias-settling startup transient (ngspice
     // runs a `.op` before `.tran`).  Falls back to half-rail when RC is absent.
-    let vbc_active = -1.0_f64;
-    let (ic, ib) = model.currents(
-        vbe as pedalkernel_rt::Wave,
-        vbc_active as pedalkernel_rt::Wave,
-    );
-    let ie = ic + ib;
+    //
+    // pedalkernel-tvhh: this is now READ OFF THE SOLVED LOAD LINE
+    // (`op.output_warm_start`) instead of being re-derived here from a second,
+    // independent `Vbc = -1 V` active-region current evaluation.  The old
+    // formula's own comment conceded the assumption — "Vce = |VCC - Ic·RC -
+    // Ie·RE| (active region)" — and it inherited exactly the blindness the
+    // seed had: a saturating stage produced an Ic·RC far past the rail, which
+    // the `.clamp(0, vcc)` then quietly flattened to 0 V.  The load-line solve
+    // now lands the real (possibly saturated) Vce, so this just reports it.
     let re = topo.r_degeneration;
     // pedalkernel-6ou7 FIX (second half): the RC rail is polarity-keyed too —
     // NPN keeps the legacy vcc-LITERAL lookup bit-for-bit; the PNP mirror's
     // load returns to GND (collector pulls toward ground), with the vcc arm
-    // kept as a fallback for flipped positive-ground decks.
+    // kept as a fallback for flipped positive-ground decks.  Kept here (rather
+    // than read off `topo.r_load`) because an ABSENT RC must still report
+    // `BjtDcQpoint::r_load = 0`, not the topology's load-line stand-in.
     let rc = if is_pnp {
         find_load_resistor_direct(collector_node, graph.gnd_node, edge_indices, graph).or_else(
             || find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph),
@@ -3348,11 +3482,17 @@ fn solve_wdf_bjt_dc_qpoint_inner(
         find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph)
     };
     let vcc = supply_voltage.abs();
-    let vce = match rc {
-        Some(rc) => (vcc - ic as f64 * rc - ie as f64 * re).clamp(0.0, vcc),
+    let vce_mag = match rc {
+        Some(_) => op.output_warm_start.clamp(0.0, vcc),
         None => vcc * 0.5,
     };
-    let vce = if is_pnp { -vce } else { vce };
+    // Q-point currents at the SOLVED (Vbe, Vce): Vbc = Vbe - Vce.  These feed
+    // the emitter pre-charge and gm below, so they must be evaluated at the
+    // same point the Vce above came from.
+    let vbc_q = vbe - vce_mag;
+    let (ic, ib) = model.currents(vbe as pedalkernel_rt::Wave, vbc_q as pedalkernel_rt::Wave);
+    let ie = ic + ib;
+    let vce = if is_pnp { -vce_mag } else { vce_mag };
 
     // Emitter DC voltage = Ie·RE (NPN: positive above gnd).  Used to pre-charge
     // the emitter bypass cap so its RE·CE time-constant transient does not
@@ -3360,19 +3500,24 @@ fn solve_wdf_bjt_dc_qpoint_inner(
     // still charges to the |Ie·RE| drop, so we report the magnitude.
     let v_emitter = (ie as f64 * re).abs();
 
-    // Small-signal transconductance gm = dIc/dVbe at the Q-point, by central
+    // Small-signal transconductance gm = dIc/dVbe AT CONSTANT Vce, by central
     // difference on the same model evaluation used for Ic above (mirrors the
     // solver's own finite-difference style).  Feeds the unbypassed-emitter
     // degeneration control divider (pedalkernel-2alk); NOT used by the DC
-    // seed itself, so the solved vbe/vce stay bit-for-bit.
+    // seed itself.
+    //
+    // Vbc is stepped with Vbe (pedalkernel-tvhh) because Vbc = Vbe - Vce and
+    // Vce is what is being held constant — the same chain rule `device_iv`
+    // applies.  Holding Vbc fixed instead reports the active-region gm even for
+    // a stage sitting in saturation, where the real gm is far lower.
     let gm_h = 1e-4;
     let (ic_hi, _) = model.currents(
         (vbe + gm_h) as pedalkernel_rt::Wave,
-        vbc_active as pedalkernel_rt::Wave,
+        (vbc_q + gm_h) as pedalkernel_rt::Wave,
     );
     let (ic_lo, _) = model.currents(
         (vbe - gm_h) as pedalkernel_rt::Wave,
-        vbc_active as pedalkernel_rt::Wave,
+        (vbc_q - gm_h) as pedalkernel_rt::Wave,
     );
     let gm = ((ic_hi - ic_lo) as f64 / (2.0 * gm_h)).max(0.0);
 
