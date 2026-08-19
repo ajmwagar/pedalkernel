@@ -10,27 +10,21 @@
 use super::graph::CircuitGraph;
 use super::signal_flow::find_flow_groups;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
 
 fn load_ratking() -> (crate::dsl::PedalDef, CircuitGraph) {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/ratking.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read ratking.pedal");
+    let source = load_legend_source("ratking").expect("read ratking.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let graph = CircuitGraph::from_pedal(&pedal);
     (pedal, graph)
 }
 
 fn load_ratking_v1a() -> crate::dsl::PedalDef {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/ratking_non_invert_v1a.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read ratking_non_invert_v1a.pedal");
+    let source =
+        load_legend_source("ratking_non_invert_v1a").expect("read ratking_non_invert_v1a.pedal");
     crate::dsl::parse_pedal_file(&source).expect("parse")
 }
 

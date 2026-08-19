@@ -16,6 +16,7 @@
 use super::graph::CircuitGraph;
 use super::signal_flow::find_flow_groups;
 use super::spqr_build::compute_group_terminals;
+use super::test_support::load_legend_source;
 
 const SR: f64 = 48000.0;
 
@@ -278,11 +279,7 @@ fn static_bias_junction_not_terminal() {
 fn ac_ground_node_excluded_from_terminals() {
     // VB+ (virtual ground from bias divider) is in ac_ground_nodes.
     // A group edge connecting to VB+ should NOT make VB+ a terminal.
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("goldenrod").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let graph = CircuitGraph::from_pedal(&pedal);
     let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
@@ -318,11 +315,7 @@ fn global_in_node_not_terminal_for_mid_chain_group() {
     // A group that touches in_node via one edge (R1) shouldn't get in_node
     // as a terminal if in_node is just a shared node, not this group's
     // signal entry point.
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("goldenrod").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let graph = CircuitGraph::from_pedal(&pedal);
     let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
@@ -354,11 +347,7 @@ fn goldenrod_gain_b_has_two_terminals() {
     // Gain_B is a mid-chain feedforward group. It may expose separate
     // branch terminals around the clean blend and clip feed, but it should
     // stay a small bounded group rather than pulling in global terminals.
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("goldenrod").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let graph = CircuitGraph::from_pedal(&pedal);
     let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
@@ -390,11 +379,7 @@ fn goldenrod_gain_b_has_two_terminals() {
 
 #[test]
 fn goldenrod_gain_b_produces_stages() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read goldenrod.pedal");
+    let source = load_legend_source("goldenrod").expect("read goldenrod.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = super::spqr_build::compile_via_spqr(&pedal, SR).expect("compile");
 
@@ -510,11 +495,7 @@ fn converging_outputs_count_as_one_terminal() {
     // Both connect to U3.neg (node 56) via external edges (R_ff1b and R_ff2).
     // Since they converge at the same destination, they should count as
     // ONE output terminal, giving the group 2 terminals total (in + out).
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("goldenrod").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let graph = CircuitGraph::from_pedal(&pedal);
     let all_edges: Vec<usize> = (0..graph.edges.len()).collect();

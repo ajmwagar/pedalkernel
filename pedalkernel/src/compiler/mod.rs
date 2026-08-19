@@ -157,3 +157,5 @@ mod mfb_debug_test;
 mod opamp_gain_tests;
 #[cfg(test)]
 mod tb303_decomposition_tests;
+#[cfg(test)]
+mod test_support;

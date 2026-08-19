@@ -10,6 +10,7 @@
 
 use super::compiled::CompiledPedal;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -879,11 +880,7 @@ fn mid_chain_passive_stage_passes_signal() {
 
 #[test]
 fn ratking_tone_volume_stage_not_dead() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/ratking.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("ratking").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = super::spqr_build::compile_via_spqr(&pedal, SR).expect("compile");
     compiled.enable_metering(128);
@@ -1052,11 +1049,7 @@ fn seven_edge_feedforward_group_passes_signal() {
 
 #[test]
 fn goldenrod_gain_b_stage_not_dead() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("goldenrod").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = super::spqr_build::compile_via_spqr(&pedal, SR).expect("compile");
     compiled.enable_metering(128);

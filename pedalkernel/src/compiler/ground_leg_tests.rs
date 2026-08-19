@@ -10,6 +10,7 @@
 
 use super::compiled::Stage;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::dsl::parse_pedal_file;
 use crate::PedalProcessor;
 
@@ -254,13 +255,9 @@ fn summing_amp_gain_from_feedback_only() {
 
 #[test]
 fn goldenrod_gain_pot_modulates_bf_gain() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/goldenrod.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => {
+    let source = match load_legend_source("goldenrod") {
+        Some(s) => s,
+        None => {
             eprintln!("SKIP: goldenrod.pedal not found");
             return;
         }

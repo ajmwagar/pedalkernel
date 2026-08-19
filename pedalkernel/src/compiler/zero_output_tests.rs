@@ -7,15 +7,12 @@ use super::compiled::Stage;
 use super::graph::CircuitGraph;
 use super::spqr::*;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 fn load_legend(name: &str) -> crate::dsl::PedalDef {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/{}.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-        name
-    );
-    let source = std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("Can't read {path}"));
+    let source = load_legend_source(name)
+        .unwrap_or_else(|| panic!("Can't read pedals/legends/{name}.pedal"));
     crate::dsl::parse_pedal_file(&source).unwrap_or_else(|e| panic!("{name}: parse error: {e}"))
 }
 

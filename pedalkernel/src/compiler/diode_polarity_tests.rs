@@ -10,6 +10,7 @@
 
 use super::compiled::CompiledPedal;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -471,11 +472,7 @@ fn feedback_opamp_output_has_harmonics() {
 
 #[test]
 fn sd1_legend_produces_clipped_output() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/sd1.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read sd1.pedal");
+    let source = load_legend_source("sd1").expect("read sd1.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
@@ -645,11 +642,7 @@ fn bias_network_does_not_kill_signal() {
 
 #[test]
 fn screamer_legend_with_bias_produces_audio() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read screamer.pedal");
+    let source = load_legend_source("screamer").expect("read screamer.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 

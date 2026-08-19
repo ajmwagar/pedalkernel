@@ -7,6 +7,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -178,11 +179,7 @@ fn pot_after_gain_stage_binding_works() {
 
 #[test]
 fn screamer_level_pot_is_bound() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
@@ -270,11 +267,7 @@ fn pot_sweep_monotonic() {
 
 #[test]
 fn screamer_level_0_quiet_1_loud() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
 
     let pedal_quiet = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut quiet = compile_via_spqr(&pedal_quiet, SR).expect("compile");
@@ -298,11 +291,7 @@ fn screamer_level_0_quiet_1_loud() {
 
 #[test]
 fn sd1_level_0_quiet_1_loud() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/sd1.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("sd1").expect("read");
 
     let pedal_quiet = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut quiet = compile_via_spqr(&pedal_quiet, SR).expect("compile");
@@ -331,11 +320,7 @@ fn sd1_level_0_quiet_1_loud() {
 #[test]
 fn screamer_level_pot_changes_output_trace() {
     // Trace: check pot rp before and after set_control
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 
@@ -372,11 +357,7 @@ fn screamer_level_pot_changes_output_trace() {
 
 #[test]
 fn screamer_level_pot_changes_output() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
 
     let pedal_low = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut low = compile_via_spqr(&pedal_low, SR).expect("compile");
@@ -402,11 +383,7 @@ fn screamer_level_pot_changes_output() {
 
 #[test]
 fn screamer_level_pot_leaf_in_tree() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, SR).expect("compile");
 

@@ -25,6 +25,7 @@ use super::bias::{classify_group_bias, GroupBiasKind};
 use super::graph::CircuitGraph;
 use super::signal_flow::find_flow_groups;
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 const SR: f64 = 48000.0;
@@ -458,11 +459,7 @@ fn bypassing_bias_stage_produces_audio() {
 
 #[test]
 fn sd1_legend_audio_with_bias_bypass() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/sd1.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read sd1.pedal");
+    let source = load_legend_source("sd1").expect("read sd1.pedal");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let mut compiled = compile_via_spqr(&pedal, SR).expect("compile");
 

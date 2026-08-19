@@ -2,6 +2,7 @@
 // so that set_control actually changes something.
 
 use super::spqr_build::compile_via_spqr;
+use super::test_support::load_legend_source;
 use crate::PedalProcessor;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -10,11 +11,7 @@ use crate::PedalProcessor;
 
 #[test]
 fn screamer_drive_pot_is_bound() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
@@ -34,11 +31,7 @@ fn screamer_drive_pot_is_bound() {
 
 #[test]
 fn ratking_v1a_distortion_pot_is_bound() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/ratking_non_invert_v1a.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("ratking_non_invert_v1a").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 
@@ -949,11 +942,7 @@ fn wdf_stage_gain_updates_from_pot_resistance() {
 
 #[test]
 fn screamer_pot_stage_diagnostic() {
-    let path = format!(
-        "{}/../../pedalkernel-pro/pedals/legends/screamer.pedal",
-        env!("CARGO_MANIFEST_DIR"),
-    );
-    let source = std::fs::read_to_string(&path).expect("read");
+    let source = load_legend_source("screamer").expect("read");
     let pedal = crate::dsl::parse_pedal_file(&source).expect("parse");
     let compiled = compile_via_spqr(&pedal, 48000.0).expect("compile");
 

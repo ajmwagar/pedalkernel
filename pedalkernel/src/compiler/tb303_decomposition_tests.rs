@@ -28,6 +28,7 @@
 use super::blockwise;
 use super::graph::CircuitGraph;
 use super::spqr::*;
+use super::test_support::load_pro_pedal_sub;
 use crate::PedalProcessor;
 
 const SR: f64 = 48_000.0;
@@ -623,35 +624,6 @@ pedal "Q12 To Two Rung Differential Diode Ladder" { supply 9V
   controls {}
 }
 "#;
-
-/// Try to load a file at `pro_sub_path` (relative to the pedalkernel-pro repo
-/// root, e.g. `"crates/acidattack/acidattack-core/tb303_filter.pedal"` or
-/// `"pedals/legends/screamer.pedal"`).
-///
-/// Tries several candidate `../` depths from `CARGO_MANIFEST_DIR` so that tests
-/// work in both normal checkout and git-worktree layouts.
-///
-/// This is the canonical shared helper for all pro-repo file loading in the
-/// engine test suite.  `pedalkernel_validate::pro_pedal::load_pro_pedal_sub`
-/// mirrors this logic for tests in the validate crate (circular dep prevents
-/// sharing a single crate).
-pub(crate) fn load_pro_pedal_sub(pro_sub_path: &str) -> Option<String> {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    // Try 2..=6 levels of `../` to find the correct parent depending on checkout layout.
-    for levels in 2..=6 {
-        let prefix: String = "../".repeat(levels);
-        let candidate = format!("{manifest_dir}/{prefix}pedalkernel-pro/{pro_sub_path}");
-        if let Ok(s) = std::fs::read_to_string(&candidate) {
-            eprintln!(
-                "  loaded {} ({} bytes) from {candidate}",
-                pro_sub_path,
-                s.len()
-            );
-            return Some(s);
-        }
-    }
-    None
-}
 
 /// Convenience wrapper: loads `filename` from the acidattack-core directory.
 /// All existing TB-303 tests call this form.
