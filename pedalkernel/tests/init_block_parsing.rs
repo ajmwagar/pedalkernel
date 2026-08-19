@@ -37,7 +37,12 @@ pedal "Init Test" {
     let pedal = parse_pedal_file(src).expect("should parse successfully");
     assert_eq!(pedal.init_hints.len(), 1, "expected 1 init hint");
     assert_eq!(pedal.init_hints[0].device_label, "Q1");
-    let pedalkernel::dsl::InitState::Named(name) = &pedal.init_hints[0].state;
+    let pedalkernel::dsl::InitState::Named(name) = &pedal.init_hints[0].state else {
+        panic!(
+            "expected a Named init state, got: {:?}",
+            pedal.init_hints[0].state
+        );
+    };
     assert_eq!(name, "saturated", "expected 'saturated' named state");
 }
 
