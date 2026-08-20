@@ -1511,16 +1511,39 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
 ///   prefers the spqr `StaticBias` node-voltage map (legacy
 ///   `node_dc_voltage` arm order); PNP is handled by the magnitude mirror
 ///   `v_drive = |supply| - Vth|`.
+/// - [`WdfStageBfs`](Self::WdfStageBfs) — `WdfStageDirect` in every respect
+///   EXCEPT that the cap-aware [`find_load_resistor_bfs`] runs as a fallback
+///   behind each direct-edge probe.  pedalkernel-3gv6 added this as the
+///   CANDIDATE production breadth for shunt-feedback-biased bases and then
+///   REJECTED it; it has no production call-site, and two tests say why:
+///   - `shunt_feedback_base_undeterminable_under_every_finder_flavor` — the
+///     breadth does not help the motivating circuits at all.  A shunt-feedback
+///     base has no resistor-only path to ANY rail (the feedback bus dead-ends
+///     on transistor terminals), so R1 is missing under every flavor.  That
+///     needs a closed-loop DC solve, not a wider local search.
+///   - `bfs_base_divider_reports_first_series_resistor_not_the_arm` — where
+///     the breadth DOES fire it is actively harmful: `find_load_resistor_bfs`
+///     returns the FIRST resistor on the path, not the series total, so a
+///     divider behind a grid-stopper yields a Thévenin that is qualitatively
+///     wrong (1 kΩ / 8.18 V instead of 48 kΩ / 1.55 V) and saturates the
+///     stage.  Enabling it in production would trade a known-absent bias for
+///     a confidently-wrong one.  Flip the production call-site only once the
+///     BFS returns a SERIES TOTAL for divider arms.
 /// - [`DividerBfs`](Self::DividerBfs) — the ko5g.1 `BjtNpnSeed` breadth
 ///   (currently exercised by characterization tests only, NO production
 ///   call-site): GRAPH-WIDE R1/R2/RC search, direct-edge first then cap-aware
 ///   BFS at every arm, RC across all rails with an estimate fallback, Thévenin
 ///   base voltage from [`NetworkBias::voltage_at`]. NPN only.
 ///
+/// pedalkernel-3gv6: the flavors are no longer separate hand-copied functions.
+/// They are presets over [`BjtLocateParams`], consumed by the single
+/// [`BjtSeed::locate_bias_topology_inner`] — the duplication had already cost
+/// one bug (the pedalkernel-6dof optional-R2 fix landed in the WDF copy only).
+///
 /// LEGACY GAPS — FIXED here in the pedalkernel-y9hz batch:
 /// - **pedalkernel-6ou7** (FIXED): the RE/RC finder rails are keyed on device
-///   polarity in `locate_wdf_stage_direct` — NPN keeps the legacy GND/vcc
-///   arms bit-for-bit; the PNP mirror searches RE→positive-rails (then GND)
+///   polarity on the WDF flavors — NPN keeps the legacy GND/vcc arms
+///   bit-for-bit; the PNP mirror searches RE→positive-rails (then GND)
 ///   and RC→GND (then vcc).
 /// - **pedalkernel-129p** (FIXED, both halves): the WDF post-clamp floor
 ///   ([`WDF_BJT_VBE_CLAMP`]) and the group solver's `any_active` window are
@@ -1530,7 +1553,76 @@ impl<'a> BiasSeed for TriodeSeed<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BjtFinderFlavor {
     WdfStageDirect,
+    WdfStageBfs,
     DividerBfs,
+}
+
+/// Where the unified locate prefers to read the Thévenin base voltage from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VthSource {
+    /// The spqr `StaticBias` node-voltage map via [`node_dc_voltage`] (legacy
+    /// arm order: declared supplies BEFORE ac-ground).
+    StaticBiasMap,
+    /// [`NetworkBias::voltage_at`] (ac-ground BEFORE any supply arm).
+    NetworkBias,
+}
+
+/// Which rails the collector load resistor may return to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RcSearch {
+    /// The legacy WDF lookup, keyed on device polarity and pinned to the
+    /// LITERAL `graph.vcc_node`; `v_load_rail` is always `|supply|`.  Matches
+    /// the downstream Vce warm-start exactly.
+    WdfPolarityKeyed,
+    /// Every positive rail (vcc first, then named), with `v_load_rail` read off
+    /// whichever rail matched.
+    AllPositiveRails,
+}
+
+/// The per-flavor knobs of the ONE BJT bias locate
+/// ([`BjtSeed::locate_bias_topology_inner`], pedalkernel-3gv6).
+///
+/// Every field is a behavioural difference that existed between the two
+/// hand-copied locates this replaced; none of them is a free choice.
+#[derive(Debug, Clone, Copy)]
+struct BjtLocateParams {
+    /// Run [`find_load_resistor_bfs`] as a fallback alongside every
+    /// [`find_load_resistor_direct`] probe — the cap-aware transitive search
+    /// that sees a bias resistor through an intervening resistor.
+    bfs_fallback: bool,
+    /// Search the WHOLE graph (not just the handed-in stage edge set) for the
+    /// base divider and the collector load.
+    graph_wide_divider: bool,
+    /// Accept a PNP (via the magnitude mirror) instead of rejecting it as
+    /// undeterminable.
+    allow_pnp: bool,
+    vth_source: VthSource,
+    rc_search: RcSearch,
+}
+
+impl BjtFinderFlavor {
+    fn locate_params(self) -> BjtLocateParams {
+        match self {
+            BjtFinderFlavor::WdfStageDirect => BjtLocateParams {
+                bfs_fallback: false,
+                graph_wide_divider: false,
+                allow_pnp: true,
+                vth_source: VthSource::StaticBiasMap,
+                rc_search: RcSearch::WdfPolarityKeyed,
+            },
+            BjtFinderFlavor::WdfStageBfs => BjtLocateParams {
+                bfs_fallback: true,
+                ..BjtFinderFlavor::WdfStageDirect.locate_params()
+            },
+            BjtFinderFlavor::DividerBfs => BjtLocateParams {
+                bfs_fallback: true,
+                graph_wide_divider: true,
+                allow_pnp: false,
+                vth_source: VthSource::NetworkBias,
+                rc_search: RcSearch::AllPositiveRails,
+            },
+        }
+    }
 }
 
 /// Post-solve Vbe clamp of the deleted `compute_wdf_bjt_dc_qpoint` (ko5g.4):
@@ -1586,11 +1678,22 @@ impl<'a> BjtSeed<'a> {
         }
     }
 
-    /// The deleted WDF copy's locate: STAGE edge set, direct-edge matches only.
-    fn locate_wdf_stage_direct(
+    /// The ONE BJT bias locate (pedalkernel-3gv6).
+    ///
+    /// `locate_wdf_stage_direct` and `locate_divider_bfs` used to be two
+    /// near-identical copies of the SAME job — base divider R1/R2 → Thévenin,
+    /// plus the RE and RC lookups — differing only in the per-flavor breadths
+    /// and preferences now carried by [`BjtLocateParams`].  The duplication had
+    /// already cost one bug: the pedalkernel-6dof "the base→GND leg is
+    /// OPTIONAL" fix landed in the WDF copy ONLY, so the BFS copy kept the
+    /// original hard `.ok_or_else(...)` on R2 and carried the identical defect.
+    /// There is now exactly one place that logic can live.
+    fn locate_bias_topology_inner(
         &self,
+        params: BjtLocateParams,
         edge_indices: &[usize],
         graph: &CircuitGraph,
+        network_bias: &NetworkBias,
         supply_voltage: f64,
     ) -> Result<BiasTopology, BiasError> {
         let undet = |missing: TopologyTerm| BiasError::UndeterminableBjt {
@@ -1600,20 +1703,63 @@ impl<'a> BjtSeed<'a> {
         let (_model_name, base_node, collector_node, emitter_node, is_pnp) = self
             .nl_terminals()
             .ok_or_else(|| undet(TopologyTerm::BaseDivider))?;
+        // PRESERVED DIFFERENCE: the ko5g.1 `DividerBfs` breadth is NPN-only —
+        // it rejected a PNP through the very same "not a BJT" arm, i.e. with a
+        // `BaseDivider` error.  Only the WDF flavors run the PNP magnitude
+        // mirror below.
+        if is_pnp && !params.allow_pnp {
+            return Err(undet(TopologyTerm::BaseDivider));
+        }
+
+        // The two breadth knobs, as closures, so every term below composes
+        // them in its own historical ORDER (the divider searches all rails
+        // directly BEFORE trying BFS on any of them — not direct-then-BFS
+        // per rail).
+        let direct = |from: NodeId, to: NodeId, edges: &[usize]| -> Option<f64> {
+            find_load_resistor_direct(from, to, edges, graph)
+        };
+        let bfs = |from: NodeId, to: NodeId, edges: &[usize]| -> Option<f64> {
+            if params.bfs_fallback {
+                find_load_resistor_bfs(from, to, edges, graph)
+            } else {
+                None
+            }
+        };
+
+        // PRESERVED DIFFERENCE: `WdfStageDirect` searches the STAGE edge set it
+        // was handed; `DividerBfs` searches the whole graph.  This applies to
+        // the base divider and (for the all-rails flavor) the collector load —
+        // RE is searched on the STAGE edge set by BOTH originals, which looks
+        // like an oversight in the BFS copy but is preserved verbatim here.
+        let graph_edges: Vec<usize> = if params.graph_wide_divider {
+            (0..graph.edges.len()).collect()
+        } else {
+            Vec::new()
+        };
+        let divider_edges: &[usize] = if params.graph_wide_divider {
+            &graph_edges
+        } else {
+            edge_indices
+        };
 
         // Base divider: R1 = base→rail, R2 = base→gnd. Rails vcc-first, then
         // named rails with their actual voltages (pedalkernel-0stg).
-        let (r1, base_rail_v) = positive_supply_rails(graph)
-            .iter()
-            .find_map(|&rail| {
-                find_load_resistor_direct(base_node, rail, edge_indices, graph).map(|r| {
-                    (
-                        r,
-                        rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage),
-                    )
+        let rails = positive_supply_rails(graph);
+        let find_rail_resistor = |node: NodeId, edges: &[usize]| -> Option<(f64, NodeId)> {
+            rails
+                .iter()
+                .find_map(|&rail| direct(node, rail, edges).map(|r| (r, rail)))
+                .or_else(|| {
+                    rails
+                        .iter()
+                        .find_map(|&rail| bfs(node, rail, edges).map(|r| (r, rail)))
                 })
-            })
+        };
+        let (r1, base_rail) = find_rail_resistor(base_node, divider_edges)
             .ok_or_else(|| undet(TopologyTerm::BaseDivider))?;
+        let base_rail_v =
+            rail_dc_voltage(base_rail, graph, supply_voltage).unwrap_or(supply_voltage);
+
         // The base→GND return leg is OPTIONAL (pedalkernel-6dof).  Single-
         // resistor base bias — base tied to the rail through R1 alone, with the
         // operating point set by emitter degeneration — is a legitimate, common
@@ -1631,7 +1777,12 @@ impl<'a> BjtSeed<'a> {
         // network — carries over to the R2-absent case as `r1 <= 0`, which
         // would hard-tie the base to the rail (rth = 0).  A base with NO DC
         // path to any rail still fails above on R1 and stays undeterminable.
-        let r2 = find_load_resistor_direct(base_node, graph.gnd_node, edge_indices, graph);
+        //
+        // pedalkernel-3gv6: this block used to exist ONLY on the WDF copy —
+        // `locate_divider_bfs` still hard-required R2.  Unifying the two
+        // locates is what makes that impossible to regress again.
+        let r2 = direct(base_node, graph.gnd_node, divider_edges)
+            .or_else(|| bfs(base_node, graph.gnd_node, divider_edges));
         let (vth_divider, rth) = match r2 {
             Some(r2) => {
                 if r1 + r2 <= 0.0 {
@@ -1647,14 +1798,27 @@ impl<'a> BjtSeed<'a> {
             }
         };
 
-        // Prefer the StaticBias-map base voltage (matches blockwise's source) for
-        // the open-circuit divider voltage; fall back to the resistor divider.
+        // Thévenin base voltage: prefer a solved node voltage, fall back to the
+        // resistor divider.
+        //
+        // PRESERVED DIFFERENCE: which solved map is preferred, and with which
+        // rail arm order.  `WdfStageDirect` reads the spqr `StaticBias`
+        // node-voltage map through [`node_dc_voltage`] (declared supplies
+        // BEFORE the ac-ground arm — matching blockwise's source);
+        // `DividerBfs` reads [`NetworkBias::voltage_at`] (ac-ground BEFORE any
+        // supply arm).  See `node_dc_voltage`'s doc: unifying the two arm
+        // orders is pedalkernel-mgsd's business, not this refactor's.
         static EMPTY_BIAS_MAP: std::collections::BTreeMap<NodeId, f64> =
             std::collections::BTreeMap::new();
-        let bias_map = self.wdf_bias_node_voltages.unwrap_or(&EMPTY_BIAS_MAP);
-        let vth = node_dc_voltage(base_node, bias_map, graph)
-            .filter(|v| v.is_finite())
-            .unwrap_or(vth_divider);
+        let vth = match params.vth_source {
+            VthSource::StaticBiasMap => {
+                let bias_map = self.wdf_bias_node_voltages.unwrap_or(&EMPTY_BIAS_MAP);
+                node_dc_voltage(base_node, bias_map, graph)
+            }
+            VthSource::NetworkBias => network_bias.voltage_at(base_node, graph, supply_voltage),
+        }
+        .filter(|v| v.is_finite())
+        .unwrap_or(vth_divider);
 
         // Emitter resistor RE.  Required for the load-line solve; a
         // degeneration resistor is what makes the raw divider voltage an
@@ -1665,16 +1829,19 @@ impl<'a> BjtSeed<'a> {
         // GND arm kept as a fallback for flipped "positive-ground" PNP decks
         // whose emitters sit near ground).
         let re = if is_pnp {
-            positive_supply_rails(graph)
+            rails
                 .iter()
-                .find_map(|&rail| {
-                    find_load_resistor_direct(emitter_node, rail, edge_indices, graph)
-                })
+                .find_map(|&rail| direct(emitter_node, rail, edge_indices))
+                .or_else(|| direct(emitter_node, graph.gnd_node, edge_indices))
                 .or_else(|| {
-                    find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
+                    rails
+                        .iter()
+                        .find_map(|&rail| bfs(emitter_node, rail, edge_indices))
                 })
+                .or_else(|| bfs(emitter_node, graph.gnd_node, edge_indices))
         } else {
-            find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
+            direct(emitter_node, graph.gnd_node, edge_indices)
+                .or_else(|| bfs(emitter_node, graph.gnd_node, edge_indices))
         }
         .ok_or_else(|| undet(TopologyTerm::EmitterResistor))?;
 
@@ -1683,7 +1850,7 @@ impl<'a> BjtSeed<'a> {
         // forward-biases the (emitter-base) junction is (VCC - Vth) and RE
         // returns to VCC.  Working in the device's own (positive-forward) sign
         // convention, the magnitude equations are identical with
-        // `v_drive = |rail - Vth|`.
+        // `v_drive = |rail - Vth|`.  (NPN-only flavors never reach the mirror.)
         let v_drive = if is_pnp {
             (supply_voltage.abs() - vth).abs()
         } else {
@@ -1691,143 +1858,77 @@ impl<'a> BjtSeed<'a> {
         };
 
         // Collector load resistor RC (pedalkernel-tvhh).  This used to be a
-        // hardcoded `r_load = 0.0` placeholder, justified as "the WDF entry
-        // computes its own Vce warm-start" — but the effect was that the
-        // shared load-line solve had NO LOAD LINE: `v_output` was pinned at
-        // the rail, and `BjtSeed::device_iv` compensated with an equally
-        // hardcoded active-region `Vbc = -1 V`.  Together those made the solve
-        // structurally blind to saturation: it would converge on a collector
-        // current RC cannot possibly sustain on the available rail (e.g. a
-        // single-resistor 100 k base bias on a 9 V rail solving Ic·RC = 67 V)
-        // and hand the runtime root that active-region Vbe.
+        // hardcoded `r_load = 0.0` placeholder on the WDF path, justified as
+        // "the WDF entry computes its own Vce warm-start" — but the effect was
+        // that the shared load-line solve had NO LOAD LINE: `v_output` was
+        // pinned at the rail, and `BjtSeed::device_iv` compensated with an
+        // equally hardcoded active-region `Vbc = -1 V`.  Together those made
+        // the solve structurally blind to saturation: it would converge on a
+        // collector current RC cannot possibly sustain on the available rail
+        // (e.g. a single-resistor 100 k base bias on a 9 V rail solving
+        // Ic·RC = 67 V) and hand the runtime root that active-region Vbe.
         //
-        // The lookup is the SAME polarity-keyed direct-edge one the Vce
-        // warm-start already does downstream in
+        // PRESERVED DIFFERENCE: `RcSearch::WdfPolarityKeyed` is the SAME
+        // polarity-keyed lookup the Vce warm-start does downstream in
         // `solve_wdf_bjt_dc_qpoint_inner`, so the two can never disagree: NPN
-        // vcc-literal, PNP collector→GND first with a vcc fallback for
-        // positive-ground decks.
+        // vcc-LITERAL, PNP collector→GND first with a vcc fallback for
+        // positive-ground decks, and `v_load_rail = |supply|` regardless of
+        // which node matched.  `RcSearch::AllPositiveRails` is the ko5g.1
+        // breadth: every positive rail, with `v_load_rail` read off whichever
+        // rail actually matched.
         //
         // When RC cannot be located we keep a load-line STAND-IN rather than
-        // 0 — half the rail dropped at 1 mA, the same idiom `locate_divider_bfs`
-        // uses — so `v_output` stays a plausible Vce instead of the
-        // open-circuit rail.  The warm-start's own `None => vcc/2` fallback for
-        // that case is unchanged.
-        let rc = if is_pnp {
-            find_load_resistor_direct(collector_node, graph.gnd_node, edge_indices, graph).or_else(
-                || find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph),
-            )
-        } else {
-            find_load_resistor_direct(collector_node, graph.vcc_node, edge_indices, graph)
-        };
-
-        Ok(BiasTopology {
-            r_load: rc.unwrap_or(supply_voltage.abs() * 0.5 / 1e-3),
-            v_load_rail: supply_voltage.abs(),
-            r_degeneration: re,
-            v_control_thevenin: v_drive,
-            r_control_thevenin: rth,
-            supply_voltage,
-            degeneration_node: Some(emitter_node),
-        })
-    }
-
-    /// The ko5g.1 graph-wide direct-then-BFS locate (NPN only; no production
-    /// call-site — kept per-flavor for the characterization suite and as the
-    /// candidate breadth for the ko5g.8-era unification).
-    fn locate_divider_bfs(
-        &self,
-        edge_indices: &[usize],
-        graph: &CircuitGraph,
-        network_bias: &NetworkBias,
-        supply_voltage: f64,
-    ) -> Result<BiasTopology, BiasError> {
-        let (model_name, base_node, collector_node, emitter_node) = match self.nl_kind {
-            NonlinearKind::BjtNpn {
-                model_name,
-                base_node,
-                collector_node,
-                emitter_node,
-            } => (
-                model_name.as_str(),
-                *base_node,
-                *collector_node,
-                *emitter_node,
-            ),
-            _ => {
-                return Err(BiasError::UndeterminableBjt {
-                    label: self.label.clone(),
-                    missing: TopologyTerm::BaseDivider,
-                });
+        // 0 — half the rail dropped at 1 mA — so `v_output` stays a plausible
+        // Vce instead of the open-circuit rail.  The warm-start's own
+        // `None => vcc/2` fallback for that case is unchanged.  (NORMALISED:
+        // the WDF copy's stand-in used `|supply|` and the BFS copy's used the
+        // raw `supply`; they differ only on a negative rail, which the NPN-only
+        // BFS flavor never had.  `|supply|` — the one that stays a magnitude in
+        // the device's own convention — wins.)
+        let rc_found: Option<(f64, NodeId)> = match params.rc_search {
+            RcSearch::WdfPolarityKeyed => {
+                if is_pnp {
+                    direct(collector_node, graph.gnd_node, edge_indices)
+                        .map(|r| (r, graph.gnd_node))
+                        .or_else(|| {
+                            direct(collector_node, graph.vcc_node, edge_indices)
+                                .map(|r| (r, graph.vcc_node))
+                        })
+                        .or_else(|| {
+                            bfs(collector_node, graph.gnd_node, edge_indices)
+                                .map(|r| (r, graph.gnd_node))
+                        })
+                        .or_else(|| {
+                            bfs(collector_node, graph.vcc_node, edge_indices)
+                                .map(|r| (r, graph.vcc_node))
+                        })
+                } else {
+                    direct(collector_node, graph.vcc_node, edge_indices)
+                        .map(|r| (r, graph.vcc_node))
+                        .or_else(|| {
+                            bfs(collector_node, graph.vcc_node, edge_indices)
+                                .map(|r| (r, graph.vcc_node))
+                        })
+                }
             }
+            RcSearch::AllPositiveRails => find_rail_resistor(collector_node, divider_edges),
         };
-        let _ = model_name;
-        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
-
-        // Base divider: R1 = base→rail, R2 = base→gnd. Rails vcc-first, then
-        // named rails (pedalkernel-0stg — see `positive_supply_rails`).
-        let rails = positive_supply_rails(graph);
-        let (r1, base_rail) = rails
-            .iter()
-            .find_map(|&rail| {
-                find_load_resistor_direct(base_node, rail, &all_edges, graph).map(|r| (r, rail))
-            })
-            .or_else(|| {
-                rails.iter().find_map(|&rail| {
-                    find_load_resistor_bfs(base_node, rail, &all_edges, graph).map(|r| (r, rail))
+        let v_load_rail = match params.rc_search {
+            RcSearch::WdfPolarityKeyed => supply_voltage.abs(),
+            RcSearch::AllPositiveRails => rc_found
+                .map(|(_, rail)| {
+                    rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage)
                 })
-            })
-            .ok_or_else(|| BiasError::UndeterminableBjt {
-                label: self.label.clone(),
-                missing: TopologyTerm::BaseDivider,
-            })?;
-        let base_rail_v =
-            rail_dc_voltage(base_rail, graph, supply_voltage).unwrap_or(supply_voltage);
-        let r2 = find_load_resistor_direct(base_node, graph.gnd_node, &all_edges, graph)
-            .or_else(|| find_load_resistor_bfs(base_node, graph.gnd_node, &all_edges, graph))
-            .ok_or_else(|| BiasError::UndeterminableBjt {
-                label: self.label.clone(),
-                missing: TopologyTerm::BaseDivider,
-            })?;
-
-        // Emitter resistor RE: emitter→gnd (pedalkernel-6ou7 applies here too).
-        let re = find_load_resistor_direct(emitter_node, graph.gnd_node, edge_indices, graph)
-            .or_else(|| find_load_resistor_bfs(emitter_node, graph.gnd_node, edge_indices, graph))
-            .ok_or_else(|| BiasError::UndeterminableBjt {
-                label: self.label.clone(),
-                missing: TopologyTerm::EmitterResistor,
-            })?;
-
-        // Collector resistor RC: collector→rail (vcc-first, then named).
-        let rc_found = rails
-            .iter()
-            .find_map(|&rail| {
-                find_load_resistor_direct(collector_node, rail, &all_edges, graph)
-                    .map(|r| (r, rail))
-            })
-            .or_else(|| {
-                rails.iter().find_map(|&rail| {
-                    find_load_resistor_bfs(collector_node, rail, &all_edges, graph)
-                        .map(|r| (r, rail))
-                })
-            });
-        let v_load_rail = rc_found
-            .map(|(_, rail)| rail_dc_voltage(rail, graph, supply_voltage).unwrap_or(supply_voltage))
-            .unwrap_or(supply_voltage);
-
-        // Thévenin base voltage: prefer StaticBias map, fall back to resistor divider.
-        let vth = network_bias
-            .voltage_at(base_node, graph, supply_voltage)
-            .filter(|v| v.is_finite())
-            .unwrap_or_else(|| base_rail_v * r2 / (r1 + r2));
-        let rth = r1 * r2 / (r1 + r2);
+                .unwrap_or(supply_voltage),
+        };
 
         Ok(BiasTopology {
             r_load: rc_found
                 .map(|(r, _)| r)
-                .unwrap_or(supply_voltage * 0.5 / 1e-3), // estimate if missing
+                .unwrap_or(supply_voltage.abs() * 0.5 / 1e-3),
             v_load_rail,
             r_degeneration: re,
-            v_control_thevenin: vth,
+            v_control_thevenin: v_drive,
             r_control_thevenin: rth,
             supply_voltage,
             degeneration_node: Some(emitter_node),
@@ -1843,14 +1944,13 @@ impl<'a> BiasSeed for BjtSeed<'a> {
         network_bias: &NetworkBias,
         supply_voltage: f64,
     ) -> Result<BiasTopology, BiasError> {
-        match self.flavor {
-            BjtFinderFlavor::WdfStageDirect => {
-                self.locate_wdf_stage_direct(edge_indices, graph, supply_voltage)
-            }
-            BjtFinderFlavor::DividerBfs => {
-                self.locate_divider_bfs(edge_indices, graph, network_bias, supply_voltage)
-            }
-        }
+        self.locate_bias_topology_inner(
+            self.flavor.locate_params(),
+            edge_indices,
+            graph,
+            network_bias,
+            supply_voltage,
+        )
     }
 
     fn device_iv(&self, trial: TrialPoint) -> DeviceIv {
@@ -6594,6 +6694,193 @@ mod tests {
         assert!(
             mean.abs() < 0.5,
             "AC-coupled output should carry no large DC offset (mean {mean:.6})"
+        );
+    }
+    // ── pedalkernel-3gv6: shunt-feedback base bias — the BFS-breadth verdict ──
+
+    /// A shunt-feedback-biased base stays UNDETERMINABLE under EVERY finder
+    /// flavor, including the graph-wide cap-aware BFS.
+    ///
+    /// pedalkernel-3gv6 set out to test the hypothesis that the (previously
+    /// production-dead) [`find_load_resistor_bfs`] breadth is what a
+    /// shunt-feedback base needs — the BA283's TR1 and this `si_fb_amp`
+    /// reproducer both have NO base→rail and NO base→GND resistor; their DC
+    /// bias arrives through the feedback network.  It is NOT.
+    ///
+    /// The locate needs R1 = base→POSITIVE RAIL, and for a shunt-feedback base
+    /// there is no resistor-only path from the base to any rail at all: the
+    /// feedback bus terminates on TRANSISTOR terminals (Q2's emitter here;
+    /// TR2's emitter and TR3's emitter on the BA283), which are Nonlinear
+    /// edges the resistor-only BFS cannot traverse.  Widening the search
+    /// therefore changes nothing — every flavor returns the same
+    /// [`TopologyTerm::BaseDivider`].
+    ///
+    /// The real fix is a CLOSED-LOOP DC solve (the base voltage is a fixed
+    /// point of the whole amplifier, not a local divider), which is a
+    /// different layer entirely.  If you are here because you taught the
+    /// locate to solve shunt-feedback bias, this pin is the record of why the
+    /// cheap local search was rejected — update it, don't delete it.
+    #[test]
+    fn shunt_feedback_base_undeterminable_under_every_finder_flavor() {
+        // si_fb_amp (pedalkernel-validate/circuits/active/si_fb_amp.pedal):
+        // Q1's base is DC-biased ONLY through Rf from Q2's emitter.
+        let graph = parse_graph(
+            r#"pedal "si_fb_amp" { supply 9V
+                components {
+                    Cin: cap(10u, electrolytic)
+                    Rpd: resistor(1M)
+                    Rc1: resistor(33k)
+                    Q1: npn(2n3904)
+                    Rc2: resistor(5k6)
+                    Q2: npn(2n3904)
+                    Re2: resistor(1k)
+                    Rf: resistor(100k)
+                    Cout: cap(10u, electrolytic)
+                    RL: resistor(10k)
+                }
+                nets {
+                    in -> Cin.a, Rpd.a
+                    Rpd.b -> gnd
+                    Cin.b -> Q1.base, Rf.b
+                    vcc -> Rc1.a
+                    Rc1.b -> Q1.collector, Q2.base
+                    Q1.emitter -> gnd
+                    vcc -> Rc2.a
+                    Rc2.b -> Q2.collector, Cout.a
+                    Q2.emitter -> Re2.a, Rf.a
+                    Re2.b -> gnd
+                    Cout.b -> RL.a, out
+                    RL.b -> gnd
+                }
+                controls {}
+            }"#,
+        );
+        let nl = bjt_nl_kind(&graph, "Q1", false);
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let network_bias = NetworkBias::default();
+
+        for flavor in [
+            BjtFinderFlavor::WdfStageDirect,
+            BjtFinderFlavor::WdfStageBfs,
+            BjtFinderFlavor::DividerBfs,
+        ] {
+            let seed = BjtSeed {
+                nl_kind: &nl,
+                label: "Q1".to_owned(),
+                flavor,
+                wdf_bias_node_voltages: None,
+            };
+            // NOTE the edge set handed in is the WHOLE graph — so even the
+            // stage-scoped flavors get the widest possible view here, and it
+            // still is not enough.
+            let located = seed.locate_bias_topology(&all_edges, &graph, &network_bias, 9.0);
+            match located {
+                Err(BiasError::UndeterminableBjt {
+                    missing: TopologyTerm::BaseDivider,
+                    ..
+                }) => {}
+                other => panic!(
+                    "si_fb_amp Q1 is shunt-feedback biased: {flavor:?} must still report a \
+                     missing base divider (BFS cannot cross Q2's emitter), got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// WHY the production WDF call-site stays on [`BjtFinderFlavor::
+    /// WdfStageDirect`] rather than the BFS-enabled preset (pedalkernel-3gv6).
+    ///
+    /// [`find_load_resistor_bfs`] returns the FIRST resistor stepped through on
+    /// the shortest resistor-only path — which is the right answer for a "load
+    /// resistor hiding behind a coupling cap" (its original job) and the WRONG
+    /// answer for a DIVIDER ARM, where the Thévenin needs the SERIES TOTAL.
+    ///
+    /// On the `R_stop` fixture (base ← 1 k grid-stopper ← 47 k ← VCC, 10 k to
+    /// GND) the true divider is R1 = 48 k, giving
+    ///     vth = 9 · 10k/58k = 1.552 V,  rth = 48k‖10k = 8.276 kΩ
+    /// but BFS reports R1 = 1 kΩ (the stopper alone), giving
+    ///     vth = 9 · 10k/11k = 8.182 V,  rth = 1k‖10k = 909 Ω
+    /// — a base driven 6.6 V too hard through a 9× too-stiff source, which the
+    /// load-line then solves into hard SATURATION (Vce ≈ 0.03 V) instead of the
+    /// active-region Q-point the stage really has.
+    ///
+    /// A confidently-wrong bias is worse than a known-absent one, so the
+    /// breadth stays off in production until the BFS returns a series total.
+    #[test]
+    fn bfs_base_divider_reports_first_series_resistor_not_the_arm() {
+        let graph = parse_graph(
+            r#"pedal "test" { supply 9V
+                components {
+                    Q1: npn(2n3904)
+                    R_stop: resistor(1k)
+                    R1: resistor(47k)
+                    R2: resistor(10k)
+                    RC: resistor(4k7)
+                    RE: resistor(1k)
+                }
+                nets {
+                    vcc -> R1.a
+                    R1.b -> R_stop.a
+                    R_stop.b -> Q1.base
+                    Q1.base -> R2.a
+                    R2.b -> gnd
+                    vcc -> RC.a
+                    RC.b -> Q1.collector
+                    Q1.emitter -> RE.a
+                    RE.b -> gnd
+                    in -> Q1.base
+                    Q1.collector -> out
+                }
+                controls {}
+            }"#,
+        );
+        let nl = bjt_nl_kind(&graph, "Q1", false);
+        let all_edges: Vec<usize> = (0..graph.edges.len()).collect();
+        let network_bias = NetworkBias::default();
+
+        // The physically correct Thévenin of this divider.
+        let true_vth = 9.0 * 10_000.0 / (48_000.0 + 10_000.0);
+        let true_rth = 48_000.0 * 10_000.0 / (48_000.0 + 10_000.0);
+
+        let seed = BjtSeed {
+            nl_kind: &nl,
+            label: "Q1".to_owned(),
+            flavor: BjtFinderFlavor::WdfStageBfs,
+            wdf_bias_node_voltages: None,
+        };
+        let topo = seed
+            .locate_bias_topology(&all_edges, &graph, &network_bias, 9.0)
+            .expect("the BFS preset DOES locate a (wrong) divider through R_stop");
+
+        assert!(
+            (topo.r_control_thevenin - 909.09).abs() < 1.0,
+            "BFS reports the STOPPER as R1: rth={:.1} Ω (expected the first-resistor \
+             artifact 909 Ω, true divider rth={true_rth:.1} Ω)",
+            topo.r_control_thevenin
+        );
+        assert!(
+            (topo.v_control_thevenin - 8.1818).abs() < 1e-3,
+            "BFS over-drives the base: vth={:.4} V (expected the first-resistor artifact \
+             8.1818 V, true divider vth={true_vth:.4} V)",
+            topo.v_control_thevenin
+        );
+        assert!(
+            topo.r_control_thevenin < true_rth / 5.0 && topo.v_control_thevenin > true_vth * 4.0,
+            "the whole point of this pin is that the BFS Thévenin is not merely \
+             approximate but qualitatively wrong (rth {:.1} vs {true_rth:.1}, \
+             vth {:.4} vs {true_vth:.4})",
+            topo.r_control_thevenin,
+            topo.v_control_thevenin
+        );
+
+        // …and the load line then lands in hard saturation.
+        let op = solve_located_operating_point(&seed, &topo)
+            .expect("the wrong topology still solves — that is exactly the hazard");
+        assert!(
+            op.output_warm_start < 0.2,
+            "the BFS Thévenin saturates the stage (Vce warm-start {:.4} V); a real \
+             47k/10k CE stage sits mid-rail",
+            op.output_warm_start
         );
     }
 }
