@@ -158,7 +158,35 @@ jobs:
           echo "------------------------------------------------------------"
           echo "Aggregate this row: ${passed} passed, ${failed} failed (${total} run)"
           if [ "$total" -eq 0 ]; then
-            echo "::warning::No tests executed (compile error in this feature row) — not blocking per policy"
+            # Zero tests has two very different causes and only ONE is policy-tolerated:
+            #   (a) this feature row legitimately has no applicable test targets -> warn, pass
+            #   (b) the test binaries failed to BUILD -> that is a build break wearing a
+            #       zero-tests costume, and it must fail loudly.
+            # Conflating them is what let an E0005 in ONE test file (tests/init_block_parsing.rs,
+            # fixed in f8d030d) read as "no tests, per policy" across all five rows.
+            #
+            # This discrimination deliberately lives INSIDE the total==0 branch. When tests did
+            # run, libtest replays failing tests' captured stdout, and this repo *compiles pedal
+            # DSL files* — a test log can legitimately contain "could not compile". Scanning only
+            # when nothing ran means there is no test stdout to false-positive on, and it keeps
+            # the >0 path byte-identical to before.
+            #
+            # Patterns are UNANCHORED on purpose: CARGO_TERM_COLOR=always (top of this file) wraps
+            # the leading `error:` in ANSI escapes, so a `^error` anchor would never match in CI.
+            # `could not compile` and `aborting due to` are plain text; rustc emits `error[E0005]`
+            # as one contiguous colour span. `grep -m` caps the excerpt at the source so nothing
+            # has to be piped through `head` (a `printf | head` would risk SIGPIPE under pipefail
+            # — the exact trap this whole step is being repaired for).
+            build_errors=$({ grep -am20 -E 'could not compile|error\[E[0-9]+\]|aborting due to|linking with .* failed' test-output.txt || true; } | sed $'s/\033\\[[0-9;]*[a-zA-Z]//g')
+            if [ -n "$build_errors" ]; then
+              first_error=${build_errors%%$'\n'*}
+              echo "::error::[${{ matrix.label }}] Test binaries FAILED TO COMPILE — 0 tests ran, so the pass-rate gate proved nothing. First error: ${first_error}"
+              echo "------------------------------------------------------------"
+              echo "Build failure detail (first 20 matching lines):"
+              echo "$build_errors"
+              exit 1
+            fi
+            echo "::warning::No tests executed for this feature row and no build error detected — not blocking per policy"
             exit 0
           fi
           gate=${TEST_MIN_PASS_PCT:-70}

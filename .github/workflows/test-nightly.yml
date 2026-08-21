@@ -43,9 +43,14 @@ jobs:
       - name: Run characterization suite (--include-ignored)
         run: |
           cargo test ${{ matrix.args }} --no-fail-fast -- --include-ignored 2>&1 | tee nightly-output.txt || true
-          passed=$(grep -hoE '[0-9]+ passed' nightly-output.txt | awk '{s+=$1} END{print s+0}')
-          failed=$(grep -hoE '[0-9]+ failed' nightly-output.txt | awk '{s+=$1} END{print s+0}')
-          ignored=$(grep -hoE '[0-9]+ ignored' nightly-output.txt | awk '{s+=$1} END{print s+0}')
+          # These three are not currently broken — this step has no `set -o pipefail`, so a
+          # non-matching grep leaves the pipeline status as awk's (0) and `set -e` never fires.
+          # Guarded anyway: it is the identical pattern to ci.yml's test gate, where the same
+          # lines under pipefail silently killed the step and hid a compile error for 132
+          # commits. Removing the trap beats relying on nobody ever adding pipefail here.
+          passed=$({ grep -hoE '[0-9]+ passed' nightly-output.txt || true; } | awk '{s+=$1} END{print s+0}')
+          failed=$({ grep -hoE '[0-9]+ failed' nightly-output.txt || true; } | awk '{s+=$1} END{print s+0}')
+          ignored=$({ grep -hoE '[0-9]+ ignored' nightly-output.txt || true; } | awk '{s+=$1} END{print s+0}')
           echo "Nightly (${{ matrix.label }}): ${passed} passed, ${failed} failed, ${ignored} ignored"
           if [ "$failed" -gt 0 ]; then
             echo "::warning::${failed} characterization test(s) failed — see nightly-output.txt artifact"
