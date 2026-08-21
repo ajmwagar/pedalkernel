@@ -60,7 +60,12 @@ jobs:
           cargo run -p pedalkernel-validate -- --skip-k-tables --report spice-report.json run 2>&1 \
             | tee spice-output.txt || true
           test -f spice-report.json || { echo "::error::SPICE runner produced no report (build/run failure)"; exit 1; }
-          summary=$(grep -oE '[0-9]+/[0-9]+ passed' spice-output.txt | tail -1)
+          # Same grep-under-pipefail trap as the test gate below: without the
+          # `|| true` a missing/reformatted summary line makes this informational
+          # echo abort the step under `set -e`, and the `${summary:-unknown}`
+          # fallback on the next line is unreachable. The real gate is the
+          # regression check further down, which is unaffected either way.
+          summary=$({ grep -oE '[0-9]+/[0-9]+ passed' spice-output.txt || true; } | tail -1)
           echo "SPICE accuracy: ${summary:-unknown} (informational — the gate below is regression-based)"
 
       # ---- main: publish this run as the baseline future PRs diff against ----
@@ -139,8 +144,16 @@ jobs:
         run: |
           set -o pipefail
           cargo test ${{ matrix.args }} --no-fail-fast 2>&1 | tee test-output.txt || true
-          passed=$(grep -hoE '[0-9]+ passed' test-output.txt | awk '{s+=$1} END{print s+0}')
-          failed=$(grep -hoE '[0-9]+ failed' test-output.txt | awk '{s+=$1} END{print s+0}')
+          # `grep` exits 1 when the row never got as far as running tests (compile
+          # error => no "N passed" line). Under `set -o pipefail` + the `bash -e`
+          # GitHub runs steps with, that non-zero status killed the step HERE —
+          # before the `total -eq 0` warn-and-continue branch below could fire, so
+          # the job hard-failed with no diagnostic. (This is how one broken test
+          # file silenced all five gates for 132 commits.) Neutralize grep's status
+          # at the source: awk still prints 0 for empty input, and awk's own status
+          # stays honored by pipefail. Both extractions need this, not just the first.
+          passed=$({ grep -hoE '[0-9]+ passed' test-output.txt || true; } | awk '{s+=$1} END{print s+0}')
+          failed=$({ grep -hoE '[0-9]+ failed' test-output.txt || true; } | awk '{s+=$1} END{print s+0}')
           total=$((passed + failed))
           echo "------------------------------------------------------------"
           echo "Aggregate this row: ${passed} passed, ${failed} failed (${total} run)"
