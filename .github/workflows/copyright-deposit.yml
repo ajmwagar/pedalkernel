@@ -1,0 +1,57 @@
+name: copyright-deposit
+
+# Generate a U.S. Copyright Office source-code deposit PDF on every tagged
+# release. Runs scripts/generate-copyright-pdf.py which walks the priority-
+# ordered core source files, produces a single PDF with headers/footers
+# per Copyright Office conventions, and truncates to first 25 + last 25
+# pages if the full listing exceeds 50 pages.
+#
+# The resulting PDF is uploaded as a workflow artifact (retained for a year
+# since this is a legal filing artifact) AND attached to the GitHub Release
+# as a draft asset, so the maintainer can download and file it with minimal
+# ceremony.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # required to attach the PDF to a GitHub Release
+
+jobs:
+  generate:
+    name: render deposit PDF
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PDF deps
+        run: python -m pip install --upgrade pip fpdf2 pypdf
+
+      - name: Generate deposit PDF
+        run: |
+          python scripts/generate-copyright-pdf.py \
+            -o "pedalkernel-${{ github.ref_name }}-copyright-deposit.pdf"
+
+      - name: Upload artifact (1-year retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: copyright-deposit-${{ github.ref_name }}
+          path: pedalkernel-*-copyright-deposit.pdf
+          retention-days: 365
+
+      # Attach to the Release as a draft asset. A release for the tag must
+      # exist (or be created by another workflow) for this to take effect.
+      # Using softprops/action-gh-release because it handles "release not
+      # yet created" gracefully.
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pedalkernel-*-copyright-deposit.pdf
+          draft: true
+          fail_on_unmatched_files: true
