@@ -194,7 +194,7 @@ fn list_devices() -> Result<()> {
         let host = cpal::host_from_id(host_id)?;
         println!("host: {}", host_id.name());
         for device in host.devices()? {
-            let name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+            let name = device.to_string();
             let input = device
                 .default_input_config()
                 .map(|c| {
@@ -202,7 +202,7 @@ fn list_devices() -> Result<()> {
                         "in {}ch {:?} {}Hz",
                         c.channels(),
                         c.sample_format(),
-                        c.sample_rate().0
+                        c.sample_rate()
                     )
                 })
                 .unwrap_or_else(|_| "no input".to_string());
@@ -213,7 +213,7 @@ fn list_devices() -> Result<()> {
                         "out {}ch {:?} {}Hz",
                         c.channels(),
                         c.sample_format(),
-                        c.sample_rate().0
+                        c.sample_rate()
                     )
                 })
                 .unwrap_or_else(|_| "no output".to_string());
@@ -364,12 +364,8 @@ fn open_audio(args: &DeviceArgs) -> Result<AudioDevices> {
     let output_query = args.output_device.as_deref().unwrap_or(&args.device);
     let input = find_device(&host, input_query, Direction::Input)?;
     let output = find_device(&host, output_query, Direction::Output)?;
-    let input_name = input
-        .name()
-        .unwrap_or_else(|_| "<unknown input>".to_string());
-    let output_name = output
-        .name()
-        .unwrap_or_else(|_| "<unknown output>".to_string());
+    let input_name = input.to_string();
+    let output_name = output.to_string();
     let input_config = input.default_input_config()?;
     let output_config = output.default_output_config()?;
 
@@ -395,7 +391,7 @@ fn find_device(host: &cpal::Host, query: &str, direction: Direction) -> Result<D
     let query = query.to_ascii_lowercase();
     let mut matches = Vec::new();
     for device in host.devices()? {
-        let name = device.name().unwrap_or_else(|_| "<unknown>".to_string());
+        let name = device.to_string();
         let has_direction = match direction {
             Direction::Input => device.default_input_config().is_ok(),
             Direction::Output => device.default_output_config().is_ok(),
@@ -464,12 +460,12 @@ fn run_duplex(
 ) -> Result<Vec<f32>> {
     let input_config = StreamConfig {
         channels: audio.input_channels as u16,
-        sample_rate: cpal::SampleRate(sample_rate),
+        sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
     let output_config = StreamConfig {
         channels: audio.output_channels as u16,
-        sample_rate: cpal::SampleRate(sample_rate),
+        sample_rate,
         buffer_size: cpal::BufferSize::Default,
     };
     let captured = Arc::new(Mutex::new(Vec::<f32>::new()));
@@ -551,7 +547,7 @@ fn build_input_stream(
     let channels = config.channels as usize;
     match audio.input_format {
         SampleFormat::F32 => audio.input.build_input_stream(
-            config,
+            *config,
             move |data: &[f32], _| {
                 capture_input_frames(
                     data,
@@ -565,7 +561,7 @@ fn build_input_stream(
                     &level,
                 )
             },
-            stream_error,
+            |err| eprintln!("audio stream error: {err}"),
             None,
         ),
         other => bail!("unsupported input sample format {other:?}; expected F32"),
@@ -588,7 +584,7 @@ fn build_output_stream(
     let channels = config.channels as usize;
     match audio.output_format {
         SampleFormat::F32 => audio.output.build_output_stream(
-            config,
+            *config,
             move |data: &mut [f32], _| {
                 fill_output_frames(
                     data,
@@ -603,7 +599,7 @@ fn build_output_stream(
                     &output_frames,
                 )
             },
-            stream_error,
+            |err| eprintln!("audio stream error: {err}"),
             None,
         ),
         other => bail!("unsupported output sample format {other:?}; expected F32"),
@@ -682,10 +678,6 @@ fn fill_output_frames(
             *sample = 0.0;
         }
     }
-}
-
-fn stream_error(err: cpal::StreamError) {
-    eprintln!("audio stream error: {err}");
 }
 
 fn build_signal(args: &SignalArgs, sample_rate: u32) -> Result<Vec<f32>> {

@@ -10,6 +10,73 @@ use thiserror::Error;
 pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ControlRequest {
+    pub request_id: String,
+    #[serde(flatten)]
+    pub command: HostCommand,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ControlResponse {
+    pub request_id: String,
+    #[serde(flatten)]
+    pub result: HostResult,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostResult {
+    Ok,
+    Error {
+        message: String,
+    },
+    Plugins {
+        plugins: Vec<PluginDescriptor>,
+    },
+    Parameters {
+        instance: String,
+        parameters: Vec<ParameterInfo>,
+    },
+    AudioDevices {
+        outputs: Vec<String>,
+    },
+    Status {
+        configured: bool,
+        instance: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginDescriptor {
+    pub bundle_path: String,
+    pub name: String,
+    pub vendor: String,
+    pub version: String,
+    pub category: String,
+    pub class_id: String,
+    pub audio_inputs: u32,
+    pub audio_outputs: u32,
+    pub has_midi_input: bool,
+    pub has_midi_output: bool,
+    pub has_gui: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterInfo {
+    pub id: u32,
+    pub name: String,
+    pub normalized: f64,
+    pub default_normalized: f64,
+    pub unit: String,
+    pub step_count: i32,
+    pub can_automate: bool,
+    pub read_only: bool,
+    pub bypass: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSpec {
     pub id: String,
@@ -43,6 +110,12 @@ pub enum PluginRole {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostCommand {
+    Discover,
+    ListAudioDevices,
+    Status,
+    GetParameters {
+        instance: String,
+    },
     Configure {
         protocol: u16,
         session: SessionSpec,
@@ -213,5 +286,31 @@ mod tests {
         };
         let json = serde_json::to_string(&command).unwrap();
         assert_eq!(serde_json::from_str::<HostCommand>(&json).unwrap(), command);
+    }
+
+    #[test]
+    fn request_and_response_are_correlated() {
+        let request = ControlRequest {
+            request_id: "agent-42".into(),
+            command: HostCommand::Status,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ControlRequest>(&json).unwrap(),
+            request
+        );
+
+        let response = ControlResponse {
+            request_id: request.request_id,
+            result: HostResult::Status {
+                configured: false,
+                instance: None,
+            },
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ControlResponse>(&json).unwrap(),
+            response
+        );
     }
 }

@@ -8,5 +8,5 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
-cpal = "0.15"
+cpal = "0.18"
 hound = "3.5"

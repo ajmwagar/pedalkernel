@@ -60,3 +60,23 @@ failure is a visible error, not a silent bypass.
 5. Register the measured frames and verify dry/wet alignment with a null test.
 6. Enable the route in Synesthesia. Stop the route in reverse order.
 
+## Control shim
+
+`pedalkernel-studio-host` is the headless VST3 control shim. It listens on
+`127.0.0.1:9473` by default and accepts one JSON request per line. Keep it on
+loopback and use an SSH tunnel from Synesthesia; the daemon rejects LAN peers.
+The active CoreAudio output is the local PCM boundary. Select BlackHole on the
+Studio and run an Isochrone sender from BlackHole to the Pi; the shim does not
+reimplement network audio or clock recovery.
+
+Configure before discovery or loading. Every request has a caller-selected
+`request_id`, echoed in its response. The initial runtime intentionally permits
+one active VST3 instance per process; run another process/port for isolation.
+
+```sh
+cargo run -p pedalkernel-studio-host
+printf '%s\n' \
+  '{"request_id":"1","command":"configure","protocol":1,"session":{"id":"surge","sample_rate_hz":48000,"block_frames":128,"input_channels":0,"output_channels":2}}' \
+  '{"request_id":"2","command":"discover"}' \
+  | nc 127.0.0.1 9473
+```

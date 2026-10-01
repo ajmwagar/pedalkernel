@@ -7,6 +7,7 @@ members = [
     "pedalkernel-validate",
     "pedalkernel-fx-loop",
     "pedalkernel-host-protocol",
+    "pedalkernel-studio-host",
     "xtask",
 ]
 
