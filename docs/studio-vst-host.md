@@ -65,9 +65,10 @@ failure is a visible error, not a silent bypass.
 `pedalkernel-studio-host` is the headless VST3 control shim. It listens on
 `127.0.0.1:9473` by default and accepts one JSON request per line. Keep it on
 loopback and use an SSH tunnel from Synesthesia; the daemon rejects LAN peers.
-The active CoreAudio output is the local PCM boundary. Select BlackHole on the
-Studio and run an Isochrone sender from BlackHole to the Pi; the shim does not
-reimplement network audio or clock recovery.
+Pass an Isochrone destination as the second argument to render directly into
+Isochrone's own RTP packet sender, avoiding a virtual CoreAudio loopback. Omit
+it to use the default CoreAudio output. The shim calls Isochrone as a library;
+it does not duplicate its wire format, sequencing, or receiver policy.
 
 Configure before discovery or loading. Every request has a caller-selected
 `request_id`, echoed in its response. The initial runtime intentionally permits
@@ -79,4 +80,10 @@ printf '%s\n' \
   '{"request_id":"1","command":"configure","protocol":1,"session":{"id":"surge","sample_rate_hz":48000,"block_frames":128,"input_channels":0,"output_channels":2}}' \
   '{"request_id":"2","command":"discover"}' \
   | nc 127.0.0.1 9473
+```
+
+For the home-studio Pi:
+
+```sh
+pedalkernel-studio-host 127.0.0.1:9473 192.168.2.74:50040
 ```

@@ -1,28 +1,177 @@
 use std::{
     env,
     io::{BufRead, BufReader, Write},
-    net::{TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, Context, Result};
 use pedalkernel_host_protocol::{
     ControlRequest, ControlResponse, HostCommand, HostResult, ParameterInfo, PluginDescriptor,
 };
-use vst3_host::{backends::CpalBackend, midi::MidiEvent, AudioHandle, Vst3Host};
+use vst3_host::{
+    backends::CpalBackend, midi::MidiEvent, play_with_backend, AudioBackend, AudioConfig,
+    AudioHandle, AudioStream, Vst3Host,
+};
+
+#[derive(Clone, Copy)]
+struct IsochroneDevice;
+
+struct IsochroneBackend {
+    destination: SocketAddr,
+}
+
+struct IsochroneStream {
+    running: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for IsochroneStream {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.lock().expect("stream thread lock").take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl AudioStream for IsochroneStream {
+    fn play(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.running.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn pause(&self) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.running.store(false, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl AudioBackend for IsochroneBackend {
+    type Stream = IsochroneStream;
+    type Device = IsochroneDevice;
+    type Error = std::io::Error;
+
+    fn enumerate_output_devices(&self) -> std::io::Result<Vec<Self::Device>> {
+        Ok(vec![IsochroneDevice])
+    }
+
+    fn enumerate_input_devices(&self) -> std::io::Result<Vec<Self::Device>> {
+        Ok(Vec::new())
+    }
+
+    fn default_output_device(&self) -> Option<Self::Device> {
+        Some(IsochroneDevice)
+    }
+
+    fn default_input_device(&self) -> Option<Self::Device> {
+        None
+    }
+
+    fn create_output_stream(
+        &self,
+        _device: &Self::Device,
+        config: AudioConfig,
+        mut data_callback: Box<dyn FnMut(&mut [f32]) + Send>,
+        mut error_callback: Box<dyn FnMut(Self::Error) + Send>,
+    ) -> std::io::Result<Self::Stream> {
+        if config.sample_rate as u32 != 48_000 || config.output_channels != 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Isochrone output requires 48 kHz stereo",
+            ));
+        }
+        let format = isochrone_core::StreamFormat::aes67_48k_stereo();
+        let ssrc = u32::from_be_bytes([0x50, 0x4b, 0x56, 0x31]);
+        let mut sender = isochrone::UdpSender::connect(
+            "0.0.0.0:0".parse().expect("constant socket address"),
+            self.destination,
+            format,
+            ssrc,
+        )?;
+        let running = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_running = Arc::clone(&running);
+        let thread_stop = Arc::clone(&stop);
+        // VST3 call overhead dominates at a 48-frame quantum (notably in Surge).
+        // Render ten RTP packets at once; the receiver's 20 ms playout buffer
+        // smooths this 10 ms burst while the media timestamps remain 1 ms apart.
+        let block_frames = config.block_size.max(480);
+        let period = Duration::from_secs_f64(block_frames as f64 / config.sample_rate);
+        let thread = thread::Builder::new()
+            .name("pedalkernel-isochrone".into())
+            .spawn(move || {
+                let mut block = vec![0.0_f32; block_frames * 2];
+                let mut packet = [0.0_f32; 96];
+                let mut packet_len = 0;
+                let mut deadline = Instant::now();
+                while !thread_stop.load(Ordering::Acquire) {
+                    if !thread_running.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(1));
+                        deadline = Instant::now();
+                        continue;
+                    }
+                    data_callback(&mut block);
+                    for &sample in &block {
+                        packet[packet_len] = sample * 0.501_187_2; // -6 dB headroom
+                        packet_len += 1;
+                        if packet_len == packet.len() {
+                            if let Err(error) = sender.send(&packet) {
+                                error_callback(error);
+                            }
+                            packet_len = 0;
+                        }
+                    }
+                    deadline += period;
+                    if let Some(wait) = deadline.checked_duration_since(Instant::now()) {
+                        thread::sleep(wait);
+                    } else {
+                        deadline = Instant::now();
+                    }
+                }
+            })?;
+        Ok(IsochroneStream {
+            running,
+            stop,
+            thread: Mutex::new(Some(thread)),
+        })
+    }
+
+    fn create_input_stream(
+        &self,
+        _device: &Self::Device,
+        _config: AudioConfig,
+        _data_callback: Box<dyn FnMut(&[f32]) + Send>,
+        _error_callback: Box<dyn FnMut(Self::Error) + Send>,
+    ) -> std::io::Result<Self::Stream> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Isochrone instrument backend is output-only",
+        ))
+    }
+}
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:9473";
 struct Runtime {
     host: Option<Vst3Host>,
     audio: Option<AudioHandle>,
     instance: Option<String>,
+    isochrone_destination: Option<SocketAddr>,
 }
 
 impl Runtime {
-    fn new() -> Self {
+    fn new(isochrone_destination: Option<SocketAddr>) -> Self {
         Self {
             host: None,
             audio: None,
             instance: None,
+            isochrone_destination,
         }
     }
 
@@ -80,7 +229,15 @@ impl Runtime {
                     return Err(anyhow!("one plugin instance is supported; unload it first"));
                 }
                 let plugin = self.host_mut()?.load_plugin_class(bundle_path, &class_id)?;
-                let audio = self.host_ref()?.play(plugin)?;
+                let audio = if let Some(destination) = self.isochrone_destination {
+                    let backend = IsochroneBackend { destination };
+                    let mut config = self.host_ref()?.config().clone();
+                    config.input_channels = 0;
+                    config.output_channels = 2;
+                    play_with_backend(&backend, plugin, config)?
+                } else {
+                    self.host_ref()?.play(plugin)?
+                };
                 self.audio = Some(audio);
                 self.instance = Some(instance);
                 Ok(HostResult::Ok)
@@ -197,11 +354,16 @@ impl Runtime {
 
 fn main() -> Result<()> {
     let listen = env::args().nth(1).unwrap_or_else(|| DEFAULT_LISTEN.into());
+    let isochrone_destination = env::args()
+        .nth(2)
+        .map(|value| value.parse::<SocketAddr>())
+        .transpose()
+        .context("invalid Isochrone destination")?;
     let listener = TcpListener::bind(&listen)
         .with_context(|| format!("failed to bind control socket {listen}"))?;
     eprintln!("pedalkernel-studio-host listening on {listen}");
 
-    let mut runtime = Runtime::new();
+    let mut runtime = Runtime::new(isochrone_destination);
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
