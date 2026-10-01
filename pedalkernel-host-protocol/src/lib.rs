@@ -141,6 +141,14 @@ pub enum HostCommand {
         instance: String,
         bypassed: bool,
     },
+    SetOutputGain {
+        instance: String,
+        gain: f32,
+    },
+    SetOutputMute {
+        instance: String,
+        muted: bool,
+    },
     Unload {
         instance: String,
     },
@@ -160,6 +168,11 @@ impl HostCommand {
                 if !normalized.is_finite() || !(0.0..=1.0).contains(normalized) =>
             {
                 Err(ContractError::InvalidNormalizedParameter(*normalized))
+            }
+            Self::SetOutputGain { gain, .. }
+                if !gain.is_finite() || !(0.0..=2.0).contains(gain) =>
+            {
+                Err(ContractError::InvalidOutputGain(*gain))
             }
             Self::Midi { bytes, .. } if bytes.is_empty() || bytes.len() > 3 => {
                 Err(ContractError::InvalidMidiLength(bytes.len()))
@@ -217,6 +230,8 @@ pub enum ContractError {
     InvalidBlockSize(u32),
     #[error("normalized parameter must be finite and in 0..=1, got {0}")]
     InvalidNormalizedParameter(f64),
+    #[error("output gain must be finite and in 0..=2, got {0}")]
+    InvalidOutputGain(f32),
     #[error("MIDI message must contain 1 to 3 bytes, got {0}")]
     InvalidMidiLength(usize),
     #[error("plugin instance, class id, and bundle path are required")]
@@ -275,6 +290,18 @@ mod tests {
             command.validate(),
             Err(ContractError::InvalidNormalizedParameter(_))
         ));
+    }
+
+    #[test]
+    fn rejects_out_of_range_output_gain() {
+        let command = HostCommand::SetOutputGain {
+            instance: "piano".into(),
+            gain: 2.1,
+        };
+        assert_eq!(
+            command.validate(),
+            Err(ContractError::InvalidOutputGain(2.1))
+        );
     }
 
     #[test]

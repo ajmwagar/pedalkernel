@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -24,6 +24,38 @@ struct IsochroneDevice;
 
 struct IsochroneBackend {
     destination: SocketAddr,
+    output: OutputControl,
+}
+
+#[derive(Clone)]
+struct OutputControl {
+    gain_bits: Arc<AtomicU32>,
+    muted: Arc<AtomicBool>,
+}
+
+impl OutputControl {
+    fn new(gain: f32) -> Self {
+        Self {
+            gain_bits: Arc::new(AtomicU32::new(gain.to_bits())),
+            muted: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn set_gain(&self, gain: f32) {
+        self.gain_bits.store(gain.to_bits(), Ordering::Release);
+    }
+
+    fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Release);
+    }
+
+    fn target_gain(&self) -> f32 {
+        if self.muted.load(Ordering::Acquire) {
+            0.0
+        } else {
+            f32::from_bits(self.gain_bits.load(Ordering::Acquire))
+        }
+    }
 }
 
 struct IsochroneStream {
@@ -99,6 +131,7 @@ impl AudioBackend for IsochroneBackend {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_running = Arc::clone(&running);
         let thread_stop = Arc::clone(&stop);
+        let output = self.output.clone();
         // VST3 call overhead dominates at a 48-frame quantum (notably in Surge).
         // Render ten RTP packets at once; the receiver's 20 ms playout buffer
         // smooths this 10 ms burst while the media timestamps remain 1 ms apart.
@@ -110,6 +143,9 @@ impl AudioBackend for IsochroneBackend {
                 let mut block = vec![0.0_f32; block_frames * 2];
                 let mut packet = [0.0_f32; 96];
                 let mut packet_len = 0;
+                let mut current_gain = output.target_gain();
+                let max_gain_step =
+                    (2.0 / (config.sample_rate * 0.010 * 2.0).round().max(1.0)) as f32;
                 let mut deadline = Instant::now();
                 while !thread_stop.load(Ordering::Acquire) {
                     if !thread_running.load(Ordering::Acquire) {
@@ -119,7 +155,12 @@ impl AudioBackend for IsochroneBackend {
                     }
                     data_callback(&mut block);
                     for &sample in &block {
-                        packet[packet_len] = sample * 0.501_187_2; // -6 dB headroom
+                        let target_gain = output.target_gain();
+                        let delta = target_gain - current_gain;
+                        if delta.abs() > f32::EPSILON {
+                            current_gain += delta.clamp(-max_gain_step, max_gain_step);
+                        }
+                        packet[packet_len] = sample * current_gain;
                         packet_len += 1;
                         if packet_len == packet.len() {
                             if let Err(error) = sender.send(&packet) {
@@ -163,6 +204,7 @@ struct Runtime {
     audio: Option<AudioHandle>,
     instance: Option<String>,
     isochrone_destination: Option<SocketAddr>,
+    output: OutputControl,
 }
 
 impl Runtime {
@@ -172,6 +214,7 @@ impl Runtime {
             audio: None,
             instance: None,
             isochrone_destination,
+            output: OutputControl::new(0.501_187_2),
         }
     }
 
@@ -230,7 +273,10 @@ impl Runtime {
                 }
                 let plugin = self.host_mut()?.load_plugin_class(bundle_path, &class_id)?;
                 let audio = if let Some(destination) = self.isochrone_destination {
-                    let backend = IsochroneBackend { destination };
+                    let backend = IsochroneBackend {
+                        destination,
+                        output: self.output.clone(),
+                    };
                     let mut config = self.host_ref()?.config().clone();
                     config.input_channels = 0;
                     config.output_channels = 2;
@@ -306,6 +352,26 @@ impl Runtime {
                 {
                     return Err(anyhow!("realtime command queue is full"));
                 }
+                Ok(HostResult::Ok)
+            }
+            HostCommand::SetOutputGain { instance, gain } => {
+                self.require_instance(&instance)?;
+                if self.isochrone_destination.is_none() {
+                    return Err(anyhow!(
+                        "output gain control requires the Isochrone output backend"
+                    ));
+                }
+                self.output.set_gain(gain);
+                Ok(HostResult::Ok)
+            }
+            HostCommand::SetOutputMute { instance, muted } => {
+                self.require_instance(&instance)?;
+                if self.isochrone_destination.is_none() {
+                    return Err(anyhow!(
+                        "output mute control requires the Isochrone output backend"
+                    ));
+                }
+                self.output.set_muted(muted);
                 Ok(HostResult::Ok)
             }
             HostCommand::Unload { instance } => {
