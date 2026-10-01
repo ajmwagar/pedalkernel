@@ -1,17 +1,22 @@
 [workspace]
-members = ["crates/pedalkernel-core", "crates/pedalkernel-cli"]
 resolver = "2"
+members = [
+    "pedalkernel",
+    "pedalkernel-rt",
+    "pedalkernel-layout",
+    "pedalkernel-validate",
+    "pedalkernel-fx-loop",
+    "xtask",
+]
 
-[workspace.package]
-edition = "2024"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/ajmwagar/pedalkernel"
-rust-version = "1.85"
+[profile.release]
+lto = "thin"
+strip = "symbols"
 
-[workspace.dependencies]
-anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-thiserror = "2.0"
+[profile.bench]
+debug = true
 
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = "none"
