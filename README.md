@@ -90,6 +90,10 @@ Real-time-critical code lives in `pedalkernel-rt`, which compiles `no_std + allo
 
 ## Documentation
 
+For the planned Mac Studio VST3/VSTi host, Isochrone audio boundary, and
+latency-compensated hardware insert design, see
+[Studio VST host](docs/studio-vst-host.md).
+
 Full documentation — DSL reference, Rust API, compiler internals, modeling limits, roadmap, validation methodology — lives at **[docs.pedalkernel.com](https://docs.pedalkernel.com)**.
 
 Suggested starting points:

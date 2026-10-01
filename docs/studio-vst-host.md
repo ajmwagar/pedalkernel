@@ -1,0 +1,62 @@
+# Studio VST host
+
+PedalKernel is the Mac Studio realtime host for VST3 instruments/effects and
+its own circuit DSP. Synesthesia owns named routes and deterministic
+orchestration. Isochrone owns bidirectional timestamped PCM transport and clock
+recovery. The host does not duplicate either service.
+
+## Boundaries
+
+The versioned `pedalkernel-host-protocol` messages are the control boundary.
+Synesthesia talks to a PedalKernel control socket rather than linking against
+host internals. An LLM or bounded Lua plugin may produce checked commands on the
+control plane; neither runs in an audio callback.
+
+```
+controller MIDI -> Synesthesia -> PedalKernel -> VSTi
+Pi audio -> Isochrone receive -> PedalKernel VST/circuit chain
+Pi audio <- Isochrone send    <- PedalKernel output
+```
+
+For a physical insert connected to the Pi's 18i20:
+
+```
+Mac source -> Isochrone -> Pi send -> hardware -> Pi return -> Isochrone -> Mac
+```
+
+`pedalkernel-fx-loop` owns calibration capture. A calibration sends a known
+impulse/chirp through the complete route and records the measured round trip.
+The `HardwareInsert` contract stores that measurement in frames together with
+its artifact identity. Any device, sample-rate, channel, or topology change
+invalidates it. The dry/parallel path is delayed by that measured amount; the
+wet return is never “advanced” or guessed from nominal buffer sizes.
+
+## Realtime contract
+
+The callback performs no allocation, locking, filesystem access, network I/O,
+logging, JSON, Lua, or plugin scanning. Commands cross a bounded SPSC queue with
+block-relative sample offsets. Immutable graph snapshots are prepared on the
+control thread and swapped only at block boundaries. Queue overflow or plugin
+failure is a visible error, not a silent bypass.
+
+## Implementation sequence
+
+1. macOS VST3 discovery and class metadata cache with explicit refresh.
+2. One in-process VSTi with CoreAudio output and timestamped MIDI.
+3. One effect using named Isochrone receive/send endpoints.
+4. Plugin state save/restore and deterministic parameter enumeration.
+5. Extend `pedalkernel-fx-loop` to emit a measured latency artifact, then apply
+   dry-path compensation and verify it with a phase/null test.
+6. Add crash isolation as a worker process after the callback contract is
+   proven; do not hide a crashed plugin behind implicit bypass.
+
+## Manual runbook
+
+1. Start Isochrone endpoints and verify sample rate and channel layout.
+2. Start PedalKernel, configure a session, load a VST3 class, and connect the
+   named endpoints.
+3. Send a known MIDI note or test tone and verify local processing.
+4. Patch the declared 18i20 send/return and run `pedalkernel-fx-loop` capture.
+5. Register the measured frames and verify dry/wet alignment with a null test.
+6. Enable the route in Synesthesia. Stop the route in reverse order.
+
