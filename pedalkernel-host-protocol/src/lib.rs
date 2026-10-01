@@ -43,6 +43,8 @@ pub enum HostResult {
     Status {
         configured: bool,
         instance: Option<String>,
+        output_gain: f32,
+        output_muted: bool,
     },
 }
 
@@ -332,6 +334,8 @@ mod tests {
             result: HostResult::Status {
                 configured: false,
                 instance: None,
+                output_gain: 0.5,
+                output_muted: false,
             },
         };
         let json = serde_json::to_string(&response).unwrap();

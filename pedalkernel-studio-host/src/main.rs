@@ -56,6 +56,14 @@ impl OutputControl {
             f32::from_bits(self.gain_bits.load(Ordering::Acquire))
         }
     }
+
+    fn configured_gain(&self) -> f32 {
+        f32::from_bits(self.gain_bits.load(Ordering::Acquire))
+    }
+
+    fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
+    }
 }
 
 struct IsochroneStream {
@@ -261,6 +269,8 @@ impl Runtime {
             HostCommand::Status => Ok(HostResult::Status {
                 configured: self.host.is_some(),
                 instance: self.instance.clone(),
+                output_gain: self.output.configured_gain(),
+                output_muted: self.output.is_muted(),
             }),
             HostCommand::LoadVst3 {
                 instance,
