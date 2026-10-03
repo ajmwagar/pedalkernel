@@ -408,6 +408,7 @@ impl Runtime {
                     .unwrap_or((960, 640));
                 let mut editor = PluginWindow::new(plugin);
                 editor.open()?;
+                activate_platform_ui();
                 self.editor = Some(editor);
                 Ok(HostResult::Editor {
                     instance,
@@ -649,6 +650,19 @@ fn initialize_platform_ui() -> Result<()> {
     application.finishLaunching();
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+fn activate_platform_ui() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    let Some(marker) = MainThreadMarker::new() else {
+        return;
+    };
+    NSApplication::sharedApplication(marker).activate();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn activate_platform_ui() {}
 
 #[cfg(not(target_os = "macos"))]
 fn initialize_platform_ui() -> Result<()> {
