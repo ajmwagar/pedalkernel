@@ -46,6 +46,9 @@ pub enum HostResult {
     AudioDevices {
         outputs: Vec<String>,
     },
+    MidiInputs {
+        inputs: Vec<String>,
+    },
     Status {
         configured: bool,
         instance: Option<String>,
@@ -123,6 +126,7 @@ pub enum HostCommand {
         bundle_path: String,
     },
     ListAudioDevices,
+    ListMidiInputs,
     Status,
     GetParameters {
         instance: String,

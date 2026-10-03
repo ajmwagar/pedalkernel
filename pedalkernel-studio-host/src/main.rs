@@ -270,6 +270,12 @@ impl Runtime {
             HostCommand::ListAudioDevices => Ok(HostResult::AudioDevices {
                 outputs: CpalBackend::new()?.list_output_devices()?,
             }),
+            HostCommand::ListMidiInputs => Ok(HostResult::MidiInputs {
+                inputs: midi_input::list_midi_input_ports()?
+                    .iter()
+                    .map(|port| port.name().to_owned())
+                    .collect(),
+            }),
             HostCommand::Status => Ok(HostResult::Status {
                 configured: self.host.is_some(),
                 instance: self.instance.clone(),
