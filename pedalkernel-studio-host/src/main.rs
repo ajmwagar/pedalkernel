@@ -646,7 +646,7 @@ fn initialize_platform_ui() -> Result<()> {
     let marker = MainThreadMarker::new()
         .ok_or_else(|| anyhow!("PedalKernel must start on the macOS main thread"))?;
     let application = NSApplication::sharedApplication(marker);
-    application.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    application.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     application.finishLaunching();
     Ok(())
 }
@@ -654,11 +654,19 @@ fn initialize_platform_ui() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn activate_platform_ui() {
     use objc2::MainThreadMarker;
-    use objc2_app_kit::NSApplication;
+    use objc2_app_kit::{NSApplication, NSWindowSharingType};
     let Some(marker) = MainThreadMarker::new() else {
         return;
     };
-    NSApplication::sharedApplication(marker).activate();
+    let application = NSApplication::sharedApplication(marker);
+    application.unhide(None);
+    #[allow(deprecated)]
+    application.activateIgnoringOtherApps(true);
+    application.arrangeInFront(None);
+    for window in application.windows().iter() {
+        window.setSharingType(NSWindowSharingType::ReadOnly);
+        window.orderFrontRegardless();
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
