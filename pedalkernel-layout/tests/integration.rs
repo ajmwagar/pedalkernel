@@ -726,5 +726,13 @@ fn all_symbol_types_have_paths() {
             "Symbol {:?} should have path commands",
             sym
         );
+        assert!(
+            paths
+                .iter()
+                .copied()
+                .all(|command| command.validate().is_ok()),
+            "Symbol {:?} should contain valid fpl-gfx path commands",
+            sym
+        );
     }
 }

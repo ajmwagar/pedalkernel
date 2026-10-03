@@ -4,13 +4,21 @@
 //! are consumers of the same immutable frame lease and deliberately live
 //! elsewhere. A consumer must retain the frame until its replacement has been
 //! imported or submitted; dropping the displayed frame first causes flicker.
+//! Frame metadata and lease semantics come from `fpl-gfx`; this crate owns only
+//! editor selection and platform capture implementations.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const EDITOR_SURFACE_VERSION: u16 = 1;
+use fpl_gfx::SurfaceError;
+pub use fpl_gfx::{
+    NativeSurfaceHandle as NativeHandleDescriptor, PixelFormat,
+    SurfaceDescriptor as FrameDescriptor, SurfaceLease as FrameLease,
+};
+
+pub const EDITOR_SURFACE_VERSION: u16 = fpl_gfx::SURFACE_DESCRIPTOR_VERSION;
 const DEFAULT_CAPTURE_FPS: u16 = 30;
 
 fn validate_capture_fps(max_fps: u16) -> Result<(), CaptureError> {
@@ -64,78 +72,6 @@ impl CaptureBackend {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PixelFormat {
-    Bgra8Unorm,
-    Bgrx8Unorm,
-}
-
-impl PixelFormat {
-    pub const fn bytes_per_pixel(self) -> u32 {
-        4
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum NativeHandleDescriptor {
-    IoSurface {
-        id: u32,
-    },
-    DmaBuf {
-        drm_fourcc: u32,
-        /// `None` means the DRI3 v1 server did not report a modifier. It must
-        /// not be silently treated as linear by an importer.
-        modifier: Option<u64>,
-        offset: u32,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FrameDescriptor {
-    pub protocol: u16,
-    pub sequence: u64,
-    pub captured_at_unix_ns: u64,
-    pub width: u32,
-    pub height: u32,
-    pub stride: u32,
-    pub pixel_format: PixelFormat,
-    pub handle: NativeHandleDescriptor,
-}
-
-impl FrameDescriptor {
-    pub fn validate(&self) -> Result<(), CaptureError> {
-        if self.protocol != EDITOR_SURFACE_VERSION {
-            return Err(CaptureError::InvalidFrame(format!(
-                "unsupported editor surface protocol {}",
-                self.protocol
-            )));
-        }
-        if self.width == 0 || self.height == 0 {
-            return Err(CaptureError::InvalidFrame(
-                "frame dimensions must be non-zero".into(),
-            ));
-        }
-        let packed_stride = self
-            .width
-            .checked_mul(self.pixel_format.bytes_per_pixel())
-            .ok_or_else(|| CaptureError::InvalidFrame("frame stride overflow".into()))?;
-        if self.stride < packed_stride {
-            return Err(CaptureError::InvalidFrame(format!(
-                "stride {} is smaller than packed row size {packed_stride}",
-                self.stride
-            )));
-        }
-        Ok(())
-    }
-}
-
-pub trait FrameLease {
-    fn descriptor(&self) -> &FrameDescriptor;
-}
-
 pub trait EditorCapture {
     type Frame: FrameLease;
 
@@ -167,6 +103,12 @@ impl CaptureError {
             backend,
             message: error.to_string(),
         }
+    }
+}
+
+impl From<SurfaceError> for CaptureError {
+    fn from(error: SurfaceError) -> Self {
+        Self::InvalidFrame(error.to_string())
     }
 }
 
@@ -252,12 +194,12 @@ mod tests {
         };
         assert!(matches!(
             frame.validate(),
-            Err(CaptureError::InvalidFrame(_))
+            Err(SurfaceError::ShortStride { .. })
         ));
     }
 
     #[test]
-    fn descriptors_round_trip_without_serializing_native_handles() {
+    fn descriptors_round_trip_without_owning_native_handles() {
         let frame = FrameDescriptor {
             protocol: EDITOR_SURFACE_VERSION,
             sequence: 7,

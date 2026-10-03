@@ -6,6 +6,7 @@ description = "Native, retained VST editor frame capture for PedalKernel"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
+fpl-gfx.workspace = true
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

@@ -3,8 +3,13 @@
 //! All types derive [`serde::Serialize`] and [`serde::Deserialize`] so the
 //! layout can be written to `.pedal_layout` JSON and loaded at runtime by the
 //! signal-flow shader.
+//!
+//! Generic point, rectangle, and extent types are re-exported from `fpl-gfx`
+//! so producers and renderers share one geometry contract.
 
 use serde::{Deserialize, Serialize};
+
+pub use fpl_gfx::{Point, Rect, Size as Bounds};
 
 /// Complete schematic layout — the output of [`crate::generate_layout`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,13 +28,6 @@ pub struct Layout {
     pub supply_rails: Vec<SupplyRail>,
     /// Component indices in signal-path order (input → output).
     pub signal_path_order: Vec<usize>,
-}
-
-/// Canvas dimensions.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct Bounds {
-    pub width: f32,
-    pub height: f32,
 }
 
 /// A component placed on the schematic.
@@ -101,43 +99,4 @@ pub struct SupplyRail {
     pub name: String,
     /// Y position of this rail.
     pub y: f32,
-}
-
-// ---------------------------------------------------------------------------
-// Internal placement helpers
-// ---------------------------------------------------------------------------
-
-/// Point in 2D layout space.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Point {
-    pub x: f32,
-    pub y: f32,
-}
-
-impl Point {
-    pub fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
-    }
-}
-
-/// Axis-aligned rectangle (used for overlap detection).
-#[derive(Debug, Clone, Copy)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    pub fn overlaps(&self, other: &Rect) -> bool {
-        self.x < other.x + other.w
-            && self.x + self.w > other.x
-            && self.y < other.y + other.h
-            && self.y + self.h > other.y
-    }
-
-    pub fn contains_point(&self, p: Point) -> bool {
-        p.x >= self.x && p.x <= self.x + self.w && p.y >= self.y && p.y <= self.y + self.h
-    }
 }

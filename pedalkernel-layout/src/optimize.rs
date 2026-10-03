@@ -170,8 +170,8 @@ fn resolve_wire_component_overlaps(layout: &mut Layout) {
         .map(|c| Rect {
             x: c.x - COMPONENT_HALF_SIZE,
             y: c.y - COMPONENT_HALF_SIZE,
-            w: COMPONENT_HALF_SIZE * 2.0,
-            h: COMPONENT_HALF_SIZE * 2.0,
+            width: COMPONENT_HALF_SIZE * 2.0,
+            height: COMPONENT_HALF_SIZE * 2.0,
         })
         .collect();
 
@@ -211,7 +211,7 @@ fn resolve_wire_component_overlaps(layout: &mut Layout) {
                     let jog_y = if p0.y < cy {
                         bbox.y - 5.0
                     } else {
-                        bbox.y + bbox.h + 5.0
+                        bbox.bottom() + 5.0
                     };
                     new_points.push([cx - jog_offset, p0.y]);
                     new_points.push([cx - jog_offset, jog_y]);
@@ -222,7 +222,7 @@ fn resolve_wire_component_overlaps(layout: &mut Layout) {
                     let jog_x = if p0.x < cx {
                         bbox.x - 5.0
                     } else {
-                        bbox.x + bbox.w + 5.0
+                        bbox.right() + 5.0
                     };
                     new_points.push([p0.x, cy - jog_offset]);
                     new_points.push([jog_x, cy - jog_offset]);
@@ -253,12 +253,12 @@ fn segment_intersects_rect(p0: Point, p1: Point, rect: &Rect) -> bool {
         // Horizontal segment: check if it crosses through the rect vertically
         let min_x = p0.x.min(p1.x);
         let max_x = p0.x.max(p1.x);
-        p0.y > rect.y && p0.y < rect.y + rect.h && max_x > rect.x && min_x < rect.x + rect.w
+        p0.y > rect.y && p0.y < rect.bottom() && max_x > rect.x && min_x < rect.right()
     } else if is_vertical {
         // Vertical segment: check if it crosses through the rect horizontally
         let min_y = p0.y.min(p1.y);
         let max_y = p0.y.max(p1.y);
-        p0.x > rect.x && p0.x < rect.x + rect.w && max_y > rect.y && min_y < rect.y + rect.h
+        p0.x > rect.x && p0.x < rect.right() && max_y > rect.y && min_y < rect.bottom()
     } else {
         false // Non-orthogonal segments shouldn't exist in Manhattan routing
     }

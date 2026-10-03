@@ -65,7 +65,7 @@ pub fn place_components(
 
     Layout {
         version: 1,
-        bounds: Bounds { width, height },
+        bounds: Bounds::new(width, height),
         components: placed,
         wires: Vec::new(), // Filled in Phase 5
         groups: layout_groups,

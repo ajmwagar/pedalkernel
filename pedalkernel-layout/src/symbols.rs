@@ -3,9 +3,13 @@
 //! Each component type maps to a vector symbol defined as a series of path
 //! commands (move_to, line_to, arc_to, close). These render at any resolution
 //! with zero texture memory when drawn with Lyon or a similar path rasterizer.
+//! The renderer-neutral path vocabulary is owned by `fpl-gfx`; this module
+//! retains only PedalKernel's circuit-symbol catalog and component mapping.
 
 use pedalkernel::compiler::Component;
 use serde::{Deserialize, Serialize};
+
+pub use fpl_gfx::PathCommand as PathCmd;
 
 /// A symbol identifier string used in the layout JSON.
 /// At runtime, the shader/renderer maps this to the actual path commands.
@@ -43,19 +47,6 @@ pub enum SymbolType {
     Lfo,
     Neon,
     Switch,
-}
-
-/// A path command for vector symbol rendering.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum PathCmd {
-    /// Move to (x, y) without drawing.
-    MoveTo(f32, f32),
-    /// Draw a line to (x, y).
-    LineTo(f32, f32),
-    /// Draw an arc: center (cx, cy), radius, start_angle, end_angle (radians).
-    ArcTo(f32, f32, f32, f32, f32),
-    /// Close the current sub-path.
-    Close,
 }
 
 /// Get the path commands for a given symbol type.
