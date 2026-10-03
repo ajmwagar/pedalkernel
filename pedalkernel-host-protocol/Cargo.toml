@@ -6,9 +6,9 @@ description = "Control contract for the PedalKernel VST3 and remote DSP host"
 license = "AGPL-3.0-or-later"
 
 [dependencies]
+pedalkernel-editor-surface = { path = "../pedalkernel-editor-surface" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 
 [dev-dependencies]
 serde_json = "1"
-

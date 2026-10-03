@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use pedalkernel_editor_surface::{CaptureBackend, FrameDescriptor};
+
 pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,6 +44,13 @@ pub enum HostResult {
         open: bool,
         width: u32,
         height: u32,
+    },
+    EditorSurface {
+        active: bool,
+        backend: Option<CaptureBackend>,
+        zero_copy: bool,
+        frame: Option<FrameDescriptor>,
+        error: Option<String>,
     },
     AudioDevices {
         outputs: Vec<String>,
@@ -170,6 +179,15 @@ pub enum HostCommand {
     CloseEditor {
         instance: String,
     },
+    StartEditorSurface {
+        instance: String,
+        title_contains: String,
+        max_fps: u16,
+    },
+    StopEditorSurface {
+        instance: String,
+    },
+    EditorSurfaceStatus,
     Unload {
         instance: String,
     },
@@ -212,6 +230,19 @@ impl HostCommand {
             Self::OpenEditor { instance } | Self::CloseEditor { instance }
                 if instance.is_empty() =>
             {
+                Err(ContractError::MissingPluginIdentity)
+            }
+            Self::StartEditorSurface {
+                instance,
+                title_contains,
+                max_fps,
+            } if instance.is_empty()
+                || title_contains.trim().is_empty()
+                || !(1..=120).contains(max_fps) =>
+            {
+                Err(ContractError::InvalidEditorSurface)
+            }
+            Self::StopEditorSurface { instance } if instance.is_empty() => {
                 Err(ContractError::MissingPluginIdentity)
             }
             _ => Ok(()),
@@ -265,6 +296,8 @@ pub enum ContractError {
     InvalidMidiLength(usize),
     #[error("plugin instance, class id, and bundle path are required")]
     MissingPluginIdentity,
+    #[error("editor surface requires an instance, title selector, and max_fps in 1..=120")]
+    InvalidEditorSurface,
 }
 
 /// Fixed-size delay line constructed off the realtime thread. `process` does
@@ -342,6 +375,22 @@ mod tests {
         };
         let json = serde_json::to_string(&command).unwrap();
         assert_eq!(serde_json::from_str::<HostCommand>(&json).unwrap(), command);
+    }
+
+    #[test]
+    fn validates_editor_surface_rate_and_selector() {
+        let valid = HostCommand::StartEditorSurface {
+            instance: "surge".into(),
+            title_contains: "Surge XT".into(),
+            max_fps: 60,
+        };
+        assert_eq!(valid.validate(), Ok(()));
+        let invalid = HostCommand::StartEditorSurface {
+            instance: "surge".into(),
+            title_contains: "Surge XT".into(),
+            max_fps: 0,
+        };
+        assert_eq!(invalid.validate(), Err(ContractError::InvalidEditorSurface));
     }
 
     #[test]

@@ -50,6 +50,34 @@ fn main() -> Result<()> {
 fn parse_command(args: &[String]) -> Result<HostCommand> {
     match args {
         [command] if command == "status" => Ok(HostCommand::Status),
+        [command] if command == "surface-status" => Ok(HostCommand::EditorSurfaceStatus),
+        [command, instance] if command == "editor-open" => Ok(HostCommand::OpenEditor {
+            instance: instance.clone(),
+        }),
+        [command, instance] if command == "editor-close" => Ok(HostCommand::CloseEditor {
+            instance: instance.clone(),
+        }),
+        [command, instance, title] if command == "surface-start" => {
+            Ok(HostCommand::StartEditorSurface {
+                instance: instance.clone(),
+                title_contains: title.clone(),
+                max_fps: 30,
+            })
+        }
+        [command, instance, title, max_fps] if command == "surface-start" => {
+            Ok(HostCommand::StartEditorSurface {
+                instance: instance.clone(),
+                title_contains: title.clone(),
+                max_fps: max_fps
+                    .parse()
+                    .context("max_fps must be an integer in 1..=120")?,
+            })
+        }
+        [command, instance] if command == "surface-stop" => {
+            Ok(HostCommand::StopEditorSurface {
+                instance: instance.clone(),
+            })
+        }
         [command, instance, gain] if command == "gain" => Ok(HostCommand::SetOutputGain {
             instance: instance.clone(),
             gain: gain.parse().context("gain must be a number in 0..=2")?,
@@ -61,7 +89,7 @@ fn parse_command(args: &[String]) -> Result<HostCommand> {
             })
         }
         _ => bail!(
-            "usage: pedalkernel-studio-ctl [--endpoint HOST:PORT] status | gain <instance> <0..2> | mute <instance> | unmute <instance>"
+            "usage: pedalkernel-studio-ctl [--endpoint HOST:PORT] status | editor-open <instance> | editor-close <instance> | surface-start <instance> <title-substring> [max-fps] | surface-stop <instance> | surface-status | gain <instance> <0..2> | mute <instance> | unmute <instance>"
         ),
     }
 }
@@ -85,6 +113,34 @@ mod tests {
                 instance: "surge".into(),
                 muted: true,
             }
+        );
+    }
+
+    #[test]
+    fn parses_editor_surface_lifecycle() {
+        assert_eq!(
+            parse_command(&[
+                "surface-start".into(),
+                "surge".into(),
+                "Surge XT".into(),
+                "60".into(),
+            ])
+            .unwrap(),
+            HostCommand::StartEditorSurface {
+                instance: "surge".into(),
+                title_contains: "Surge XT".into(),
+                max_fps: 60,
+            }
+        );
+        assert_eq!(
+            parse_command(&["surface-stop".into(), "surge".into()]).unwrap(),
+            HostCommand::StopEditorSurface {
+                instance: "surge".into(),
+            }
+        );
+        assert_eq!(
+            parse_command(&["surface-status".into()]).unwrap(),
+            HostCommand::EditorSurfaceStatus
         );
     }
 }

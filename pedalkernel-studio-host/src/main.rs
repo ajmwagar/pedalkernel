@@ -13,6 +13,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use pedalkernel_editor_surface::{
+    EditorCapture, EditorSelector, FrameLease, NativeEditorCapture, NativeEditorFrame,
+};
 use pedalkernel_host_protocol::{
     ControlRequest, ControlResponse, HostCommand, HostResult, ParameterInfo, PluginDescriptor,
 };
@@ -218,6 +221,7 @@ struct Runtime {
     isochrone_destination: Option<SocketAddr>,
     output: OutputControl,
     editor: Option<PluginWindow>,
+    editor_surface: Option<EditorSurfaceRuntime>,
     midi_queries: Vec<String>,
     midi_inputs: Vec<MidiInputConnection>,
 }
@@ -231,6 +235,7 @@ impl Runtime {
             isochrone_destination,
             output: OutputControl::new(0.501_187_2),
             editor: None,
+            editor_surface: None,
             midi_queries,
             midi_inputs: Vec::new(),
         }
@@ -297,7 +302,7 @@ impl Runtime {
                         destination,
                         output: self.output.clone(),
                     };
-                    let mut config = self.host_ref()?.config().clone();
+                    let mut config = *self.host_ref()?.config();
                     config.input_channels = 0;
                     config.output_channels = 2;
                     play_with_backend(&backend, plugin, config)?
@@ -419,6 +424,7 @@ impl Runtime {
             }
             HostCommand::CloseEditor { instance } => {
                 self.require_instance(&instance)?;
+                self.editor_surface = None;
                 if let Some(mut editor) = self.editor.take() {
                     editor.close();
                 }
@@ -429,8 +435,31 @@ impl Runtime {
                     height: 0,
                 })
             }
+            HostCommand::StartEditorSurface {
+                instance,
+                title_contains,
+                max_fps,
+            } => {
+                self.require_instance(&instance)?;
+                if self.editor.is_none() {
+                    return Err(anyhow!(
+                        "open the plugin editor before starting its surface"
+                    ));
+                }
+                let mut surface = EditorSurfaceRuntime::open(title_contains, max_fps)?;
+                surface.capture_now()?;
+                self.editor_surface = Some(surface);
+                Ok(self.editor_surface_result())
+            }
+            HostCommand::StopEditorSurface { instance } => {
+                self.require_instance(&instance)?;
+                self.editor_surface = None;
+                Ok(self.editor_surface_result())
+            }
+            HostCommand::EditorSurfaceStatus => Ok(self.editor_surface_result()),
             HostCommand::Unload { instance } => {
                 self.require_instance(&instance)?;
+                self.editor_surface = None;
                 if let Some(mut editor) = self.editor.take() {
                     editor.close();
                 }
@@ -440,6 +469,7 @@ impl Runtime {
                 Ok(HostResult::Ok)
             }
             HostCommand::Stop => {
+                self.editor_surface = None;
                 if let Some(mut editor) = self.editor.take() {
                     editor.close();
                 }
@@ -457,12 +487,49 @@ impl Runtime {
             return Ok(());
         };
         if editor.closed_by_user() {
+            self.editor_surface = None;
             editor.close();
             self.editor = None;
         } else {
             editor.service_platform_events()?;
         }
         Ok(())
+    }
+
+    fn service_editor_surface(&mut self) {
+        let Some(surface) = self.editor_surface.as_mut() else {
+            return;
+        };
+        if let Err(error) = surface.capture_if_due() {
+            let message = format!("{error:#}");
+            if surface.last_error.as_deref() != Some(&message) {
+                eprintln!("editor surface capture failed: {message}");
+            }
+            surface.last_error = Some(message);
+        }
+    }
+
+    fn editor_surface_result(&self) -> HostResult {
+        let Some(surface) = self.editor_surface.as_ref() else {
+            return HostResult::EditorSurface {
+                active: false,
+                backend: None,
+                zero_copy: false,
+                frame: None,
+                error: None,
+            };
+        };
+        let backend = surface.capture.backend();
+        HostResult::EditorSurface {
+            active: true,
+            backend: Some(backend),
+            zero_copy: backend.zero_copy(),
+            frame: surface
+                .current_frame
+                .as_ref()
+                .map(|frame| frame.descriptor().clone()),
+            error: surface.last_error.clone(),
+        }
     }
 
     fn host_mut(&mut self) -> Result<&mut Vst3Host> {
@@ -491,6 +558,47 @@ impl Runtime {
             )),
             None => Err(anyhow!("no plugin is loaded")),
         }
+    }
+}
+
+struct EditorSurfaceRuntime {
+    capture: NativeEditorCapture,
+    current_frame: Option<NativeEditorFrame>,
+    frame_interval: Duration,
+    next_capture: Instant,
+    last_error: Option<String>,
+}
+
+impl EditorSurfaceRuntime {
+    fn open(title_contains: String, max_fps: u16) -> Result<Self> {
+        let capture = NativeEditorCapture::open(EditorSelector {
+            process_id: std::process::id(),
+            title_contains,
+        })?;
+        Ok(Self {
+            capture,
+            current_frame: None,
+            frame_interval: Duration::from_secs_f64(1.0 / f64::from(max_fps)),
+            next_capture: Instant::now(),
+            last_error: None,
+        })
+    }
+
+    fn capture_now(&mut self) -> Result<()> {
+        // Capture completes before assignment, so the previously published
+        // frame stays alive until its replacement is ready.
+        let replacement = self.capture.capture()?;
+        self.current_frame = Some(replacement);
+        self.next_capture = Instant::now() + self.frame_interval;
+        self.last_error = None;
+        Ok(())
+    }
+
+    fn capture_if_due(&mut self) -> Result<()> {
+        if Instant::now() >= self.next_capture {
+            self.capture_now()?;
+        }
+        Ok(())
     }
 }
 
@@ -635,6 +743,7 @@ fn run_main_loop(mut runtime: Runtime, jobs: Receiver<ControlJob>) -> Result<()>
             }
         }
         runtime.service_editor()?;
+        runtime.service_editor_surface();
         pump_platform_ui();
     }
 }
