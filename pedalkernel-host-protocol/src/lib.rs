@@ -119,6 +119,9 @@ pub enum PluginRole {
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostCommand {
     Discover,
+    InspectVst3 {
+        bundle_path: String,
+    },
     ListAudioDevices,
     Status,
     GetParameters {
@@ -197,6 +200,9 @@ impl HostCommand {
                 bundle_path,
                 ..
             } if instance.is_empty() || class_id.is_empty() || bundle_path.is_empty() => {
+                Err(ContractError::MissingPluginIdentity)
+            }
+            Self::InspectVst3 { bundle_path } if bundle_path.is_empty() => {
                 Err(ContractError::MissingPluginIdentity)
             }
             Self::OpenEditor { instance } | Self::CloseEditor { instance }

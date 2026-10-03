@@ -2,6 +2,7 @@ use std::{
     env,
     io::{BufRead, BufReader, Write},
     net::{SocketAddr, TcpListener, TcpStream},
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Receiver, SyncSender},
@@ -256,21 +257,15 @@ impl Runtime {
                     .host_mut()?
                     .discover_plugins()?
                     .into_iter()
-                    .map(|p| PluginDescriptor {
-                        bundle_path: p.path.to_string_lossy().into_owned(),
-                        name: p.name,
-                        vendor: p.vendor,
-                        version: p.version,
-                        category: p.category,
-                        class_id: p.uid,
-                        audio_inputs: p.audio_inputs,
-                        audio_outputs: p.audio_outputs,
-                        has_midi_input: p.has_midi_input,
-                        has_midi_output: p.has_midi_output,
-                        has_gui: p.has_gui,
-                    })
+                    .map(plugin_descriptor)
                     .collect();
                 Ok(HostResult::Plugins { plugins })
+            }
+            HostCommand::InspectVst3 { bundle_path } => {
+                let plugin = vst3_host::get_detailed_plugin_info(Path::new(&bundle_path))?.info;
+                Ok(HostResult::Plugins {
+                    plugins: vec![plugin_descriptor(plugin)],
+                })
             }
             HostCommand::ListAudioDevices => Ok(HostResult::AudioDevices {
                 outputs: CpalBackend::new()?.list_output_devices()?,
@@ -489,6 +484,22 @@ impl Runtime {
             )),
             None => Err(anyhow!("no plugin is loaded")),
         }
+    }
+}
+
+fn plugin_descriptor(plugin: vst3_host::PluginInfo) -> PluginDescriptor {
+    PluginDescriptor {
+        bundle_path: plugin.path.to_string_lossy().into_owned(),
+        name: plugin.name,
+        vendor: plugin.vendor,
+        version: plugin.version,
+        category: plugin.category,
+        class_id: plugin.uid,
+        audio_inputs: plugin.audio_inputs,
+        audio_outputs: plugin.audio_outputs,
+        has_midi_input: plugin.has_midi_input,
+        has_midi_output: plugin.has_midi_output,
+        has_gui: plugin.has_gui,
     }
 }
 
