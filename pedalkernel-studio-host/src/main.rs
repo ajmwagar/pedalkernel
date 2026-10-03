@@ -4,6 +4,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
+        mpsc::{self, Receiver, SyncSender},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -15,8 +16,10 @@ use pedalkernel_host_protocol::{
     ControlRequest, ControlResponse, HostCommand, HostResult, ParameterInfo, PluginDescriptor,
 };
 use vst3_host::{
-    backends::CpalBackend, midi::MidiEvent, play_with_backend, AudioBackend, AudioConfig,
-    AudioHandle, AudioStream, Vst3Host,
+    backends::CpalBackend,
+    midi::MidiEvent,
+    midi_input::{self, MidiInputConnection},
+    play_with_backend, AudioBackend, AudioConfig, AudioHandle, AudioStream, PluginWindow, Vst3Host,
 };
 
 #[derive(Clone, Copy)]
@@ -213,16 +216,22 @@ struct Runtime {
     instance: Option<String>,
     isochrone_destination: Option<SocketAddr>,
     output: OutputControl,
+    editor: Option<PluginWindow>,
+    midi_queries: Vec<String>,
+    midi_inputs: Vec<MidiInputConnection>,
 }
 
 impl Runtime {
-    fn new(isochrone_destination: Option<SocketAddr>) -> Self {
+    fn new(isochrone_destination: Option<SocketAddr>, midi_queries: Vec<String>) -> Self {
         Self {
             host: None,
             audio: None,
             instance: None,
             isochrone_destination,
             output: OutputControl::new(0.501_187_2),
+            editor: None,
+            midi_queries,
+            midi_inputs: Vec::new(),
         }
     }
 
@@ -294,6 +303,7 @@ impl Runtime {
                 } else {
                     self.host_ref()?.play(plugin)?
                 };
+                self.midi_inputs = bind_midi_inputs(&audio, &self.midi_queries)?;
                 self.audio = Some(audio);
                 self.instance = Some(instance);
                 Ok(HostResult::Ok)
@@ -384,19 +394,73 @@ impl Runtime {
                 self.output.set_muted(muted);
                 Ok(HostResult::Ok)
             }
+            HostCommand::OpenEditor { instance } => {
+                self.require_instance(&instance)?;
+                if self.editor.is_some() {
+                    return Err(anyhow!("the plugin editor is already open"));
+                }
+                let plugin = self.audio_ref()?.plugin();
+                let (width, height) = plugin
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get_editor_size()
+                    .unwrap_or((960, 640));
+                let mut editor = PluginWindow::new(plugin);
+                editor.open()?;
+                self.editor = Some(editor);
+                Ok(HostResult::Editor {
+                    instance,
+                    open: true,
+                    width: u32::try_from(width.max(1))?,
+                    height: u32::try_from(height.max(1))?,
+                })
+            }
+            HostCommand::CloseEditor { instance } => {
+                self.require_instance(&instance)?;
+                if let Some(mut editor) = self.editor.take() {
+                    editor.close();
+                }
+                Ok(HostResult::Editor {
+                    instance,
+                    open: false,
+                    width: 0,
+                    height: 0,
+                })
+            }
             HostCommand::Unload { instance } => {
                 self.require_instance(&instance)?;
+                if let Some(mut editor) = self.editor.take() {
+                    editor.close();
+                }
+                self.midi_inputs.clear();
                 self.audio.take();
                 self.instance.take();
                 Ok(HostResult::Ok)
             }
             HostCommand::Stop => {
+                if let Some(mut editor) = self.editor.take() {
+                    editor.close();
+                }
+                self.midi_inputs.clear();
                 self.audio.take();
                 self.instance.take();
                 self.host.take();
                 Ok(HostResult::Ok)
             }
         }
+    }
+
+    fn service_editor(&mut self) -> Result<()> {
+        let Some(editor) = self.editor.as_mut() else {
+            return Ok(());
+        };
+        if editor.closed_by_user() {
+            editor.close();
+            self.editor = None;
+        } else {
+            editor.service_platform_events()?;
+        }
+        Ok(())
     }
 
     fn host_mut(&mut self) -> Result<&mut Vst3Host> {
@@ -428,6 +492,34 @@ impl Runtime {
     }
 }
 
+fn bind_midi_inputs(audio: &AudioHandle, queries: &[String]) -> Result<Vec<MidiInputConnection>> {
+    if queries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ports = midi_input::list_midi_input_ports()?;
+    let mut connections = Vec::with_capacity(queries.len());
+    for query in queries {
+        let needle = query.to_ascii_lowercase();
+        let matches = ports
+            .iter()
+            .filter(|port| port.name().to_ascii_lowercase().contains(&needle))
+            .collect::<Vec<_>>();
+        let port = match matches.as_slice() {
+            [port] => *port,
+            [] => return Err(anyhow!("MIDI input {query:?} was not found")),
+            _ => return Err(anyhow!("MIDI input {query:?} matched more than one port")),
+        };
+        eprintln!("binding MIDI input {}", port.name());
+        connections.push(midi_input::bind_to_handle(port, audio)?);
+    }
+    Ok(connections)
+}
+
+struct ControlJob {
+    request: ControlRequest,
+    reply: SyncSender<ControlResponse>,
+}
+
 fn main() -> Result<()> {
     let listen = env::args().nth(1).unwrap_or_else(|| DEFAULT_LISTEN.into());
     let isochrone_destination = env::args()
@@ -438,22 +530,39 @@ fn main() -> Result<()> {
     let listener = TcpListener::bind(&listen)
         .with_context(|| format!("failed to bind control socket {listen}"))?;
     eprintln!("pedalkernel-studio-host listening on {listen}");
+    let midi_queries = env::var("PEDALKERNEL_MIDI_INPUTS")
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let (jobs_tx, jobs_rx) = mpsc::sync_channel(64);
+    thread::Builder::new()
+        .name("pedalkernel-control".into())
+        .spawn(move || serve(listener, jobs_tx))?;
+    run_main_loop(Runtime::new(isochrone_destination, midi_queries), jobs_rx)
+}
 
-    let mut runtime = Runtime::new(isochrone_destination);
+fn serve(listener: TcpListener, jobs: SyncSender<ControlJob>) {
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
-                if let Err(error) = serve_connection(stream, &mut runtime) {
+                if let Err(error) = serve_connection(stream, &jobs) {
                     eprintln!("control connection failed: {error:#}");
                 }
             }
             Err(error) => eprintln!("failed to accept control connection: {error}"),
         }
     }
-    Ok(())
 }
 
-fn serve_connection(mut stream: TcpStream, runtime: &mut Runtime) -> Result<()> {
+fn serve_connection(mut stream: TcpStream, jobs: &SyncSender<ControlJob>) -> Result<()> {
     let peer = stream.peer_addr()?;
     if !peer.ip().is_loopback() {
         return Err(anyhow!(
@@ -465,16 +574,12 @@ fn serve_connection(mut stream: TcpStream, runtime: &mut Runtime) -> Result<()> 
     while reader.read_line(&mut line)? != 0 {
         let response = match serde_json::from_str::<ControlRequest>(line.trim_end()) {
             Ok(request) => {
-                let result =
-                    runtime
-                        .execute(request.command)
-                        .unwrap_or_else(|error| HostResult::Error {
-                            message: format!("{error:#}"),
-                        });
-                ControlResponse {
-                    request_id: request.request_id,
-                    result,
-                }
+                let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+                jobs.send(ControlJob {
+                    request,
+                    reply: reply_tx,
+                })?;
+                reply_rx.recv()?
             }
             Err(error) => ControlResponse {
                 request_id: String::new(),
@@ -490,3 +595,70 @@ fn serve_connection(mut stream: TcpStream, runtime: &mut Runtime) -> Result<()> 
     }
     Ok(())
 }
+
+fn run_main_loop(mut runtime: Runtime, jobs: Receiver<ControlJob>) -> Result<()> {
+    initialize_platform_ui()?;
+    loop {
+        match jobs.recv_timeout(Duration::from_millis(10)) {
+            Ok(job) => {
+                let result = runtime
+                    .execute(job.request.command)
+                    .unwrap_or_else(|error| HostResult::Error {
+                        message: format!("{error:#}"),
+                    });
+                let _ = job.reply.send(ControlResponse {
+                    request_id: job.request.request_id,
+                    result,
+                });
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(anyhow!("control listener stopped"));
+            }
+        }
+        runtime.service_editor()?;
+        pump_platform_ui();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn initialize_platform_ui() -> Result<()> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    let marker = MainThreadMarker::new()
+        .ok_or_else(|| anyhow!("PedalKernel must start on the macOS main thread"))?;
+    let application = NSApplication::sharedApplication(marker);
+    application.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    application.finishLaunching();
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn initialize_platform_ui() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn pump_platform_ui() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSEventMask};
+    use objc2_foundation::{NSDate, NSDefaultRunLoopMode};
+    let Some(marker) = MainThreadMarker::new() else {
+        return;
+    };
+    let application = NSApplication::sharedApplication(marker);
+    let until = NSDate::dateWithTimeIntervalSinceNow(0.0);
+    while let Some(event) = unsafe {
+        application.nextEventMatchingMask_untilDate_inMode_dequeue(
+            NSEventMask::Any,
+            Some(&until),
+            NSDefaultRunLoopMode,
+            true,
+        )
+    } {
+        application.sendEvent(&event);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pump_platform_ui() {}

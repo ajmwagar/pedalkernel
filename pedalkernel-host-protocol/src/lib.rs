@@ -37,6 +37,12 @@ pub enum HostResult {
         instance: String,
         parameters: Vec<ParameterInfo>,
     },
+    Editor {
+        instance: String,
+        open: bool,
+        width: u32,
+        height: u32,
+    },
     AudioDevices {
         outputs: Vec<String>,
     },
@@ -151,6 +157,12 @@ pub enum HostCommand {
         instance: String,
         muted: bool,
     },
+    OpenEditor {
+        instance: String,
+    },
+    CloseEditor {
+        instance: String,
+    },
     Unload {
         instance: String,
     },
@@ -185,6 +197,11 @@ impl HostCommand {
                 bundle_path,
                 ..
             } if instance.is_empty() || class_id.is_empty() || bundle_path.is_empty() => {
+                Err(ContractError::MissingPluginIdentity)
+            }
+            Self::OpenEditor { instance } | Self::CloseEditor { instance }
+                if instance.is_empty() =>
+            {
                 Err(ContractError::MissingPluginIdentity)
             }
             _ => Ok(()),
