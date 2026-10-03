@@ -93,10 +93,11 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
 # Known git deps — keep this list short. Each entry is a hidden source of
-# unreviewed code and undermines supply-chain auditability. Both entries
-# below are pinned to specific revs in the consuming Cargo.toml /
+# unreviewed code and undermines supply-chain auditability. Every entry below
+# is pinned to a specific rev in the consuming Cargo.toml /
 # Cargo.lock so they cannot silently drift.
 allow-git = [
+  "https://github.com/ajmwagar/gfx",              # shared graphics contracts
   "https://github.com/robbert-vdh/nih-plug.git",   # xtask: nih_plug_xtask
   "https://github.com/nicokoch/reflink.git",       # transitive via nih_plug_xtask
 ]
