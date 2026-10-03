@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.dependencies]
-fpl-gfx = { git = "https://github.com/ajmwagar/gfx", rev = "7ca43a8b19b8bfb354c4b97f7cbeb82b57d72d08", default-features = false }
+fpl-gfx = { version = "0.1.0", git = "https://github.com/ajmwagar/gfx", rev = "7ca43a8b19b8bfb354c4b97f7cbeb82b57d72d08", default-features = false }
 
 [profile.release]
 lto = "thin"
