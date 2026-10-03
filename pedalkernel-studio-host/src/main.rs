@@ -571,10 +571,13 @@ struct EditorSurfaceRuntime {
 
 impl EditorSurfaceRuntime {
     fn open(title_contains: String, max_fps: u16) -> Result<Self> {
-        let capture = NativeEditorCapture::open(EditorSelector {
-            process_id: std::process::id(),
-            title_contains,
-        })?;
+        let capture = NativeEditorCapture::open_with_fps(
+            EditorSelector {
+                process_id: std::process::id(),
+                title_contains,
+            },
+            max_fps,
+        )?;
         Ok(Self {
             capture,
             current_frame: None,

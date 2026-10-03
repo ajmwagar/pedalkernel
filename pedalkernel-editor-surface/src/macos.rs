@@ -1,18 +1,26 @@
-use std::{ffi::c_void, sync::mpsc};
+use std::{
+    ffi::c_void,
+    sync::mpsc::{self, Receiver, SyncSender},
+    time::Duration,
+};
 
 use apple_cf::iosurface::IOSurface;
 use block2::RcBlock;
-use objc2::{rc::Retained, AnyThread};
+use dispatch2::{DispatchQueue, DispatchRetained};
+use objc2::{
+    define_class, msg_send, rc::Retained, runtime::ProtocolObject, AnyThread, DefinedClass,
+};
 use objc2_core_media::CMSampleBuffer;
-use objc2_foundation::NSError;
+use objc2_foundation::{NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCRunningApplication, SCScreenshotManager, SCShareableContent,
-    SCStreamConfiguration, SCWindow,
+    SCContentFilter, SCRunningApplication, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 use crate::{
-    capture_timestamp_ns, CaptureBackend, CaptureError, EditorCapture, EditorSelector,
-    FrameDescriptor, FrameLease, NativeHandleDescriptor, PixelFormat, EDITOR_SURFACE_VERSION,
+    capture_timestamp_ns, validate_capture_fps, CaptureBackend, CaptureError, EditorCapture,
+    EditorSelector, FrameDescriptor, FrameLease, NativeHandleDescriptor, PixelFormat,
+    DEFAULT_CAPTURE_FPS, EDITOR_SURFACE_VERSION,
 };
 
 const BACKEND_NAME: &str = "ScreenCaptureKit";
@@ -21,6 +29,51 @@ const BGRA_FOURCC: u32 = u32::from_be_bytes(*b"BGRA");
 unsafe extern "C" {
     fn CMSampleBufferGetImageBuffer(sample_buffer: *mut c_void) -> *mut c_void;
     fn CVPixelBufferGetIOSurface(pixel_buffer: *mut c_void) -> *mut c_void;
+}
+
+struct FrameOutputIvars {
+    frames: SyncSender<Result<IOSurface, String>>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements. FrameOutput does not
+    // implement Drop, and its immutable ivars are safe to use on the serial
+    // ScreenCaptureKit callback queue.
+    #[unsafe(super = NSObject)]
+    #[name = "FPLPedalKernelFrameOutput"]
+    #[ivars = FrameOutputIvars]
+    struct FrameOutput;
+
+    // SAFETY: NSObjectProtocol has no additional safety requirements.
+    unsafe impl NSObjectProtocol for FrameOutput {}
+
+    // SAFETY: The callback selector and arguments match SCStreamOutput's
+    // Objective-C protocol declaration.
+    unsafe impl SCStreamOutput for FrameOutput {
+        #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
+        #[allow(non_snake_case)]
+        unsafe fn stream_didOutputSampleBuffer_ofType(
+            &self,
+            _stream: &SCStream,
+            sample_buffer: &CMSampleBuffer,
+            output_type: SCStreamOutputType,
+        ) {
+            if output_type != SCStreamOutputType::Screen {
+                return;
+            }
+            let result = unsafe { surface_from_sample(sample_buffer as *const _ as *mut c_void) };
+            // This is a latest-frame channel. Backpressure must never block the
+            // ScreenCaptureKit callback or grow unbounded.
+            let _ = self.ivars().frames.try_send(result);
+        }
+    }
+);
+
+impl FrameOutput {
+    fn new(frames: SyncSender<Result<IOSurface, String>>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(FrameOutputIvars { frames });
+        unsafe { msg_send![super(this), init] }
+    }
 }
 
 /// A complete ScreenCaptureKit frame backed by a retained IOSurface.
@@ -47,14 +100,21 @@ impl FrameLease for MacEditorFrame {
 pub struct MacEditorCapture {
     selector: EditorSelector,
     window_id: u32,
-    filter: Retained<SCContentFilter>,
-    configuration: Retained<SCStreamConfiguration>,
+    stream: Retained<SCStream>,
+    _output: Retained<FrameOutput>,
+    _queue: DispatchRetained<DispatchQueue>,
+    frames: Receiver<Result<IOSurface, String>>,
     sequence: u64,
 }
 
 impl MacEditorCapture {
     pub fn open(selector: EditorSelector) -> Result<Self, CaptureError> {
+        Self::open_with_fps(selector, DEFAULT_CAPTURE_FPS)
+    }
+
+    pub fn open_with_fps(selector: EditorSelector, max_fps: u16) -> Result<Self, CaptureError> {
         selector.validate()?;
+        validate_capture_fps(max_fps)?;
         let content = shareable_content()?;
         let window = select_window(unsafe { content.windows() }, &selector)?;
         let frame = unsafe { window.frame() };
@@ -70,13 +130,39 @@ impl MacEditorCapture {
             configuration.setHeight(height as usize);
             configuration.setPixelFormat(BGRA_FOURCC);
             configuration.setShowsCursor(false);
+            configuration
+                .setMinimumFrameInterval(objc2_core_media::CMTime::new(1, i32::from(max_fps)));
         }
+
+        let (sender, frames) = mpsc::sync_channel(2);
+        let output = FrameOutput::new(sender);
+        let queue = DispatchQueue::new("dev.fpl.pedalkernel.editor-surface", None);
+        let stream = unsafe {
+            SCStream::initWithFilter_configuration_delegate(
+                SCStream::alloc(),
+                &filter,
+                &configuration,
+                None,
+            )
+        };
+        let protocol_output = ProtocolObject::from_ref(&*output);
+        unsafe {
+            stream.addStreamOutput_type_sampleHandlerQueue_error(
+                protocol_output,
+                SCStreamOutputType::Screen,
+                Some(&queue),
+            )
+        }
+        .map_err(|error| CaptureError::platform(BACKEND_NAME, error.localizedDescription()))?;
+        start_stream(&stream)?;
 
         Ok(Self {
             selector,
             window_id,
-            filter,
-            configuration,
+            stream,
+            _output: output,
+            _queue: queue,
+            frames,
             sequence: 0,
         })
     }
@@ -98,7 +184,14 @@ impl EditorCapture for MacEditorCapture {
     }
 
     fn capture(&mut self) -> Result<Self::Frame, CaptureError> {
-        let surface = capture_surface(&self.filter, &self.configuration)?;
+        let mut result = self
+            .frames
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|error| CaptureError::platform(BACKEND_NAME, error))?;
+        while let Ok(newer) = self.frames.try_recv() {
+            result = newer;
+        }
+        let surface = result.map_err(|error| CaptureError::platform(BACKEND_NAME, error))?;
         if surface.pixel_format() != BGRA_FOURCC {
             return Err(CaptureError::InvalidFrame(format!(
                 "expected BGRA IOSurface, received fourcc {:#010x}",
@@ -127,6 +220,12 @@ impl EditorCapture for MacEditorCapture {
             descriptor,
             surface,
         })
+    }
+}
+
+impl Drop for MacEditorCapture {
+    fn drop(&mut self) {
+        unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
     }
 }
 
@@ -159,42 +258,35 @@ fn shareable_content() -> Result<Retained<SCShareableContent>, CaptureError> {
         .ok_or_else(|| CaptureError::platform(BACKEND_NAME, "shareable content vanished"))
 }
 
-fn capture_surface(
-    filter: &SCContentFilter,
-    configuration: &SCStreamConfiguration,
-) -> Result<IOSurface, CaptureError> {
+fn start_stream(stream: &SCStream) -> Result<(), CaptureError> {
     let (sender, receiver) = mpsc::sync_channel(1);
-    let handler = RcBlock::new(move |sample: *mut CMSampleBuffer, error: *mut NSError| {
-        let result = if !error.is_null() {
-            Err(unsafe { error_message(error) })
-        } else if sample.is_null() {
-            Err("ScreenCaptureKit returned no sample buffer".to_owned())
+    let handler = RcBlock::new(move |error: *mut NSError| {
+        let result = if error.is_null() {
+            Ok(())
         } else {
-            // SAFETY: The sample and its pixel buffer are live for this
-            // callback. IOSurface::from_raw_borrowed performs the retain that
-            // makes the returned frame independent of callback lifetime.
-            let pixel_buffer = unsafe { CMSampleBufferGetImageBuffer(sample.cast()) };
-            let surface = if pixel_buffer.is_null() {
-                std::ptr::null_mut()
-            } else {
-                unsafe { CVPixelBufferGetIOSurface(pixel_buffer) }
-            };
-            unsafe { IOSurface::from_raw_borrowed(surface) }
-                .ok_or_else(|| "sample buffer is not IOSurface-backed".to_owned())
+            Err(unsafe { error_message(error) })
         };
         let _ = sender.send(result);
     });
-    unsafe {
-        SCScreenshotManager::captureSampleBufferWithFilter_configuration_completionHandler(
-            filter,
-            configuration,
-            Some(&handler),
-        )
-    };
+    unsafe { stream.startCaptureWithCompletionHandler(Some(&handler)) };
     receiver
         .recv()
         .map_err(|error| CaptureError::platform(BACKEND_NAME, error))?
         .map_err(|error| CaptureError::platform(BACKEND_NAME, error))
+}
+
+unsafe fn surface_from_sample(sample: *mut c_void) -> Result<IOSurface, String> {
+    let pixel_buffer = unsafe { CMSampleBufferGetImageBuffer(sample) };
+    let surface = if pixel_buffer.is_null() {
+        std::ptr::null_mut()
+    } else {
+        unsafe { CVPixelBufferGetIOSurface(pixel_buffer) }
+    };
+    // SAFETY: ScreenCaptureKit keeps the sample and pixel buffer live for the
+    // callback. This performs the retain that makes the frame independent of
+    // callback lifetime.
+    unsafe { IOSurface::from_raw_borrowed(surface) }
+        .ok_or_else(|| "sample buffer is not IOSurface-backed".to_owned())
 }
 
 fn select_window(

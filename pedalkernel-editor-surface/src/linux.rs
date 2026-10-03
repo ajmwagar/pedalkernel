@@ -14,8 +14,9 @@ use x11rb::{
 };
 
 use crate::{
-    capture_timestamp_ns, CaptureBackend, CaptureError, EditorCapture, EditorSelector,
-    FrameDescriptor, FrameLease, NativeHandleDescriptor, PixelFormat, EDITOR_SURFACE_VERSION,
+    capture_timestamp_ns, validate_capture_fps, CaptureBackend, CaptureError, EditorCapture,
+    EditorSelector, FrameDescriptor, FrameLease, NativeHandleDescriptor, PixelFormat,
+    DEFAULT_CAPTURE_FPS, EDITOR_SURFACE_VERSION,
 };
 
 const BACKEND_NAME: &str = "XComposite/DRI3";
@@ -73,7 +74,12 @@ pub struct LinuxEditorCapture {
 
 impl LinuxEditorCapture {
     pub fn open(selector: EditorSelector) -> Result<Self, CaptureError> {
+        Self::open_with_fps(selector, DEFAULT_CAPTURE_FPS)
+    }
+
+    pub fn open_with_fps(selector: EditorSelector, max_fps: u16) -> Result<Self, CaptureError> {
         selector.validate()?;
+        validate_capture_fps(max_fps)?;
         let (connection, screen_index) =
             x11rb::connect(None).map_err(|error| CaptureError::platform(BACKEND_NAME, error))?;
         let connection = Arc::new(connection);

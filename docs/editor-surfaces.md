@@ -8,9 +8,11 @@ No PNG, JPEG, temporary file, or browser reload sits in this path.
 The stable contract lives in `pedalkernel-editor-surface` and reports only
 portable metadata. Native handles remain process-local objects:
 
-- macOS 14 and newer uses ScreenCaptureKit. A frame retains both the
-  `CMSampleBuffer` and IOSurface, allowing direct Metal/WGPU import or direct
-  VideoToolbox submission.
+- macOS 14 and newer uses a ScreenCaptureKit stream. Its serial callback keeps
+  a bounded latest-frame queue, and every published frame retains its
+  IOSurface for direct Metal/WGPU import or VideoToolbox submission. A slow
+  consumer drops stale frames instead of blocking capture or accumulating
+  latency.
 - Linux under X11 or XWayland uses XComposite to obtain the editor pixmap,
   copies each complete presentation into a snapshot pixmap, then exports that
   snapshot through DRI3 as an owned dma-buf. This avoids sampling a pixmap while
@@ -38,6 +40,18 @@ pedalkernel-studio-ctl editor-close surge
 macOS asks the signed host application for Screen Recording permission once.
 Permission denial is returned by `surface-start`; periodic capture failures are
 visible in `surface-status` and stderr without stopping plugin audio.
+
+Installed macOS hosts must keep a stable signing identity and identifier across
+rebuilds. The linker's ad-hoc signature is tied to the binary hash, so replacing
+an ad-hoc-signed host makes TCC treat it as a new capture client. A deployment
+can sign the final artifact without baking a developer identity into this repo:
+
+```text
+codesign --force --timestamp \
+  --sign "$PEDALKERNEL_CODESIGN_IDENTITY" \
+  --identifier dev.futurepresentlabs.pedalkernel-studio-host \
+  pedalkernel-studio-host
+```
 
 The host retains the previous frame until a complete replacement has arrived.
 This invariant is also required of downstream presenters: import or enqueue the

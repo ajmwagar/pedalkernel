@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const EDITOR_SURFACE_VERSION: u16 = 1;
+const DEFAULT_CAPTURE_FPS: u16 = 30;
+
+fn validate_capture_fps(max_fps: u16) -> Result<(), CaptureError> {
+    if !(1..=120).contains(&max_fps) {
+        return Err(CaptureError::InvalidSelector(format!(
+            "max_fps must be in 1..=120, got {max_fps}"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -218,6 +228,14 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn capture_rate_is_bounded() {
+        assert!(validate_capture_fps(1).is_ok());
+        assert!(validate_capture_fps(120).is_ok());
+        assert!(validate_capture_fps(0).is_err());
+        assert!(validate_capture_fps(121).is_err());
     }
 
     #[test]
