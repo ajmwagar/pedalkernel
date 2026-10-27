@@ -1,0 +1,56 @@
+# Mesa Boogie Rectifier 4x12
+# Closed-back 4x12 with Celestion V30s. Heavy bracing,
+# known for tight aggressive tone.
+
+cab "Mesa Recto 4x12" {
+  driver all {
+    preset: v30
+    copies: 4
+    positions: [[19cm, 57cm], [57cm, 57cm], [19cm, 19cm], [57cm, 19cm]]
+    cone { material: paper, dust_cap: felt }
+    suspension { Xmax: 3.5mm, curve: hardening, bl_symmetry: 0.85 }
+  }
+
+  enclosure {
+    type: sealed
+    volume: 180L
+
+    construction {
+      material: birch_ply(18mm)
+      width: 76cm
+      height: 76cm
+      depth: 37cm
+      bracing {
+        B1: brace(horizontal, 38cm)
+        B2: brace(vertical, 38cm)
+        B3: brace(cross, 38cm, 38cm)
+      }
+      joints: dado
+      covering: tolex
+      corners: metal_bracket
+    }
+
+    damping {
+      material: polyester_fill
+      coverage: 40%
+      thickness: 30mm
+    }
+
+    baffle {
+      edge: square
+      grille: cloth
+    }
+  }
+
+  mic close {
+    model: sm57
+    position: [1cm, 0cm, 2cm]
+    target: upper_left
+    angle: 0deg
+  }
+
+  controls {
+    mic.close.position.x -> "Mic Position" [-8cm, 8cm] = 1cm
+    mic.close.position.z -> "Mic Distance" [1cm, 15cm] = 2cm
+  }
+}
